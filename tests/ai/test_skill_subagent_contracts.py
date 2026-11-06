@@ -14,9 +14,9 @@ from linktools.ai.agent import (
     AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
-    CapabilityPin,
 )
 from linktools.ai.capability import (
+    CapabilityContribution,
     SkillCapability,
     SkillDefinition,
     SkillSourceRegistry,
@@ -29,6 +29,7 @@ from pydantic_ai.messages import BinaryContent
 from pydantic_ai.models.test import TestModel
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import (
+    CapabilityRef,
     AgentSpec,
     AgentSpecCodec,
     SkillSpecAdapter,
@@ -53,7 +54,7 @@ def _compiler(agents: dict[str, AgentSpec]) -> AgentCompiler:
     )
 
 
-def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
+def test_v1_skill_wire_and_capability_reference_round_trip() -> None:
     wire = (
         (_FIXTURES / "skill_spec_v1_golden.json")
         .read_text(encoding="utf-8")
@@ -64,13 +65,14 @@ def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
     assert decoded == SkillSpec("legacy", "legacy instructions")
     assert SkillSpecCodec().encode(decoded) == wire
 
-    fixture = _load_json("skill_capability_pin_v1_golden.json")
-    pin_payload = fixture["pin"]
-    assert isinstance(pin_payload, dict)
-    pin = CapabilityPin.from_payload(pin_payload)
-    assert pin.contract["version"] == 1
-    assert pin.revision == fixture["revision"]
-    assert SkillDefinition.from_contract(pin.contract).contract == {
+    definition = SkillDefinition(decoded)
+    candidate = CapabilityContribution.from_declaration(definition)
+    fixture = _load_json("skill_capability_ref_v1_golden.json")
+    reference = CapabilityRef.from_payload(fixture)
+    assert reference == CapabilityRef(candidate.kind, candidate.id, candidate.revision)
+    assert reference.to_payload() == fixture
+    assert SkillDefinition.from_contract(definition.contract) == definition
+    assert definition.contract == {
         "version": 1,
         "id": "legacy",
         "revision": 1,
@@ -194,11 +196,9 @@ def test_skill_and_agent_use_v1_declaration_contracts() -> None:
     assert AgentSpecCodec().to_wire_payload(described)["description"] == "Worker"
 
 
-def test_future_capability_pin_contract_version_is_unsupported() -> None:
+def test_future_skill_contract_version_is_unsupported() -> None:
     with pytest.raises(AIError) as error:
-        CapabilityPin(
-            "skill",
-            "review",
+        SkillDefinition.from_contract(
             {
                 "version": 2,
                 "id": "review",
@@ -282,16 +282,16 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
     assert "author: Mei" not in definition.model_content
     assert wire_codec.to_contract_payload(spec)["content"] == definition.model_content
     assert (
-        CapabilityPin("skill", definition.id, definition.contract).revision
-        == CapabilityPin("skill", changed_metadata.id, changed_metadata.contract).revision
+        CapabilityContribution.from_declaration(definition).revision
+        == CapabilityContribution.from_declaration(changed_metadata).revision
     )
     assert (
-        CapabilityPin("skill", definition.id, definition.contract).revision
-        == CapabilityPin("skill", without_metadata.id, without_metadata.contract).revision
+        CapabilityContribution.from_declaration(definition).revision
+        == CapabilityContribution.from_declaration(without_metadata).revision
     )
     assert (
-        CapabilityPin("skill", definition.id, definition.contract).revision
-        == CapabilityPin("skill", changed_body.id, changed_body.contract).revision
+        CapabilityContribution.from_declaration(definition).revision
+        == CapabilityContribution.from_declaration(changed_body).revision
     )
     revised_body = SkillDefinition(
         SkillSpec(
@@ -303,8 +303,8 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
         )
     )
     assert (
-        CapabilityPin("skill", definition.id, definition.contract).revision
-        != CapabilityPin("skill", revised_body.id, revised_body.contract).revision
+        CapabilityContribution.from_declaration(definition).revision
+        != CapabilityContribution.from_declaration(revised_body).revision
     )
 
     capability = SkillCapability(
@@ -343,8 +343,8 @@ def test_skill_markdown_maps_reserved_revision_metadata() -> None:
         )
     )
     assert (
-        CapabilityPin("skill", definition.id, definition.contract).revision
-        != CapabilityPin("skill", baseline.id, baseline.contract).revision
+        CapabilityContribution.from_declaration(definition).revision
+        != CapabilityContribution.from_declaration(baseline).revision
     )
 
 
@@ -363,8 +363,8 @@ def test_skill_flow_frontmatter_metadata_does_not_change_identity() -> None:
     )
     assert plain.model_content == annotated.model_content
     assert (
-        CapabilityPin("skill", plain.id, plain.contract).revision
-        == CapabilityPin("skill", annotated.id, annotated.contract).revision
+        CapabilityContribution.from_declaration(plain).revision
+        == CapabilityContribution.from_declaration(annotated).revision
     )
 
 

@@ -111,15 +111,15 @@ def load_assistant():
 features.model("assistant", load_assistant)
 ```
 
-The feature capture freezes route names and sources, not a callable's future
-results. Each agent run resolves its own binding once and uses that same binding
+The live feature source supplies current route names and loaders. Each Agent
+run resolves its own binding once and uses that same binding
 for durable contract capture, input validation, tool rounds and model retries.
 The next run calls the loader again, so updated configuration and credentials
 apply without a second connection-resolver API. Concurrent runs are isolated.
 Unused routes are not loaded; explicit metadata inspection may resolve a binding
 without creating a provider client. A failed load can be retried; asynchronous
 loaders and recursive same-route loads are rejected. A later feature registration
-affects future captures only.
+affects future resolutions only.
 
 The registered route name is model identity. Recovery resolves the current binding
 under that same route; protocol, provider model, request-body and connection changes do

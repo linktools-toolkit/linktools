@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Own the final conversion of LinkTools tool signals to Pydantic controls."""
 
+from collections.abc import Callable
+
 from linktools.core import environ
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -26,13 +28,16 @@ class PydanticToolControlCapability(AbstractCapability[AgentContext[object]]):
     """Convert LinkTools tool feedback at the native SDK's outer boundary.
 
     Add once when composing a standalone Pydantic Agent with LinkTools tools.
-    Runtime installs this capability itself. It owns no resources and neither
-    authorizes tool calls nor changes their external-effect or retry policies.
+    Runtime installs this capability itself and may bind an admission callback
+    before the native validation wrappers run. This capability owns no resources.
     Unrelated exceptions and cancellation retain their original semantics.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, before_validate: Callable[[ToolCallPart, ToolDefinition], None] | None = None,
+    ) -> None:
         self.id = "linktools.ai.pydantic-tool-control"
+        self._before_validate = before_validate
 
     @classmethod
     def build_model_retry(cls, message: str) -> ModelRetry:
@@ -56,8 +61,10 @@ class PydanticToolControlCapability(AbstractCapability[AgentContext[object]]):
         args: RawToolArgs,
         handler: WrapToolValidateHandler,
     ) -> ValidatedToolArgs:
-        del ctx, call, tool_def
+        del ctx
         try:
+            if self._before_validate is not None:
+                self._before_validate(call, tool_def)
             return await handler(args)
         except ToolCallRetry as error:
             raise self.build_model_retry(error.message) from error

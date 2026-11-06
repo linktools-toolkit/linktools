@@ -4,17 +4,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from linktools.core import environ
 from pydantic_ai_harness.step_persistence import StepPersistence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..core import PromptLimits, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
+from ..core import PromptLimits, ToolEffects, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
 from ..persistence.capabilities import CapabilityPersistence
 from ..capability.steps import AtomicStepPersistence
@@ -23,13 +23,15 @@ from ._step_store import RuntimeStepStore
 from ._tool import ToolOperationBridge
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
-from ..capability import ExecutionCapability, MemoryCapability
+from ..capability import ExecutionCapability, MemoryCapability, tool_effect_policy_from_metadata
 from ._harness import HarnessPlanStoreAdapter
 from ..capability.planning import HarnessPlanning
 from ._memory import MemoryStore
+from ._tool_boundary import require_tool_effects
 from ..capability import TraceCapability
 from ._plan import RuntimePlanStore
 from ._run_hooks import AgentRunCapture
+from ..spec import CapabilityRef
 from ._conversation_service import ConversationService
 from ._persistence_services import TraceService
 from ._persistence_configuration import execution_configuration
@@ -37,9 +39,49 @@ from ..persistence.runs import AgentRunStore
 from ..persistence.runs import RuntimeAgentRunStore
 
 if TYPE_CHECKING:
+    from pydantic_ai.agent import AbstractAgent
+    from pydantic_ai.capabilities import CapabilityOrdering
     from ..observe.journal import ModelRequestJournal
 
 _logger = environ.get_logger("ai.runtime.capabilities")
+
+
+class _PersistenceCapability(WrapperCapability[None]):
+    """Keep persistence attached to the effective native lifecycle instance."""
+
+    def __init__(
+        self, capability: CapabilityPersistence, replace_owner: Callable[[CapabilityPersistence], None],
+    ) -> None:
+        if not isinstance(capability, AbstractCapability):
+            raise TypeError("bind_persistence must preserve the SDK capability type")
+        super().__init__(capability)
+        self.replace_owner = replace_owner
+
+    def apply(self, visitor: Callable[[AbstractCapability[None]], None]) -> None:
+        self.wrapped.apply(visitor)
+
+    def visit_and_replace(
+        self, visitor: Callable[[AbstractCapability[None]], AbstractCapability[None] | None],
+    ) -> AbstractCapability[None] | None:
+        replacement = self.wrapped.visit_and_replace(visitor)
+        if replacement is None or replacement is self.wrapped:
+            return None if replacement is None else self
+        effective = cast(CapabilityPersistence, replacement)
+        self.replace_owner(effective)
+        return type(self)(effective, self.replace_owner)
+
+    def get_ordering(self) -> CapabilityOrdering | None:
+        return self.wrapped.get_ordering()
+
+    def for_agent(self, agent: AbstractAgent[None, object]) -> AbstractCapability[None]:
+        rebound = super().for_agent(agent)
+        self.replace_owner(cast(CapabilityPersistence, rebound.wrapped))
+        return rebound
+
+    async def for_run(self, ctx: PydanticRunContext[None]) -> AbstractCapability[None]:
+        rebound = await super().for_run(ctx)
+        self.replace_owner(cast(CapabilityPersistence, rebound.wrapped))
+        return rebound
 
 
 def runtime_feature_leaves(
@@ -66,6 +108,7 @@ async def compose_platform_capabilities(
     run_store: AgentRunStore,
     memory_store: MemoryStore | None,
     tool_policy: tuple[str, ...],
+    tool_effects: ToolEffects = "live",
     compaction_policy: CompactionPolicy,
     limits: PromptLimits,
     planning: bool,
@@ -73,11 +116,13 @@ async def compose_platform_capabilities(
     parent_agent_run_id: str | None,
     plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
+    deferred_capability_refs: dict[str, CapabilityRef] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
     model_request_recorder: "ExternalModelRequestRecorder | None" = None,
     recorder: AgentRunRecorder | None = None,
     budget: RunBudgetContext | None = None,
     runtime_capabilities: Sequence[AbstractCapability[None]] = (),
+    capability_revisions: Mapping[str, int] | None = None,
     transcript_start: int = 0,
     tool_operations: ToolOperationBridge | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
@@ -117,6 +162,7 @@ async def compose_platform_capabilities(
             ),
         },
         deferred_pause_sink=deferred_pause_sink,
+        deferred_capability_refs={} if deferred_capability_refs is None else deferred_capability_refs,
         producer_guard=require_active_producer,
     )
     capabilities.append(persistence)
@@ -137,7 +183,8 @@ async def compose_platform_capabilities(
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             bound = run_store.capability_writes.bind(
                 capability.id, agent_run_id, execution_id, capability,
-                revision=run_store.capability_revisions[capability.id],
+                revision=(run_store.capability_revisions if capability_revisions is None else capability_revisions)[capability.id],
+                adapt=_PersistenceCapability,
             )
             if not isinstance(bound, AbstractCapability):
                 raise TypeError("bind_persistence must preserve the SDK capability type")
@@ -205,8 +252,14 @@ async def compose_platform_capabilities(
     if memory_scope is not None and selected_memory:
         if memory_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        memory_capability = MemoryCapability(scope=memory_scope).bind(selected_memory, store=memory_store)
-        capabilities.append(memory_capability)
+        memory_capability = MemoryCapability(scope=memory_scope)
+        if tool_effects != "live":
+            for tool in memory_capability.tool_definitions():
+                if tool.name in selected_memory:
+                    require_tool_effects(tool_effects, kind="tool", effect_policy=tool_effect_policy_from_metadata(
+                        tool.metadata, require=True,
+                    ))
+        capabilities.append(memory_capability.bind(selected_memory, store=memory_store))
     if planning:
         if plan_store_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

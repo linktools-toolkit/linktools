@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -14,15 +14,12 @@ from ..spec import (
     CapabilityRef,
     SubagentRef,
     binding_digest_payload,
-    capability_ref_payload,
 )
 from ._output import OutputBinding, OutputMode
 
 if TYPE_CHECKING:
     from ._compiled import CompiledAgent
 
-_PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
-_PIN_FIELDS = frozenset({"kind", "id", "contract"})
 _BINDING_VERSION = 1
 _BINDING_FIELDS = frozenset(
     {
@@ -38,68 +35,13 @@ _BINDING_FIELDS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityPin:
-    kind: Literal["tool", "skill", "mcp", "capability"]
-    id: str
-    contract: Mapping[str, JsonValue]
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.kind, str)
-            or self.kind not in _PIN_KINDS
-            or not isinstance(self.id, str)
-            or not self.id.strip()
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            contract = ImmutableJsonMapping(self.contract)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        version = contract.get("version")
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version < 1
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if version != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        object.__setattr__(self, "contract", contract)
-        capability_ref_payload(self.kind, self.id, contract)
-
-    @property
-    def revision(self) -> int:
-        return cast(int, capability_ref_payload(self.kind, self.id, self.contract)["revision"])
-
-    def to_payload(self) -> "dict[str, JsonValue]":
-        return {
-            "kind": self.kind,
-            "id": self.id,
-            "contract": dict(self.contract),
-        }
-
-    @classmethod
-    def from_payload(cls, value: object) -> "CapabilityPin":
-        if not isinstance(value, Mapping) or not _PIN_FIELDS.issubset(value):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        kind = value["kind"]
-        identity = value["id"]
-        contract = value["contract"]
-        return cls(
-            kind,
-            identity,
-            _require_mapping(contract),
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class AgentBindingContract:
-    """Persist identity inputs and locators required to restore one Agent binding."""
+    """Persist Agent semantics and admitted capability identities."""
 
     agent_spec: AgentSpec
     # Captured diagnostic configuration is not registered-model identity.
     model_contract: Mapping[str, JsonValue] = field(compare=False)
-    selected: "tuple[CapabilityPin, ...]"
+    selected: "tuple[CapabilityRef, ...]"
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
     output_schema: Mapping[str, JsonValue]
@@ -138,16 +80,10 @@ class AgentBindingContract:
             "_agent_spec_extensions",
             agent_spec_extensions,
         )
-        selected = tuple(
-            (
-                *sorted(
-                    (item for item in self.selected if item.kind != "capability"),
-                    key=lambda item: (item.kind, item.id),
-                ),
-                *(item for item in self.selected if item.kind == "capability"),
-            )
-        )
-        if selected != self.selected or len({(item.kind, item.id) for item in selected}) != len(selected):
+        if (
+            any(not isinstance(ref, CapabilityRef) or ref.kind != "capability" for ref in self.selected)
+            or len({ref.id for ref in self.selected}) != len(self.selected)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         subagents = tuple(sorted(self.subagents, key=lambda item: item.id))
         if subagents != self.subagents or len({item.id for item in subagents}) != len(subagents):
@@ -170,8 +106,8 @@ class AgentBindingContract:
             != len(child_bindings)
             or (
                 child_bindings
-                and tuple(item.agent_spec.id for item in child_bindings)
-                != self.subagent_ids
+                and tuple((item.agent_spec.id, item.agent_spec.revision) for item in child_bindings)
+                != tuple((item.id, item.revision) for item in self.subagents)
             )
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -183,11 +119,8 @@ class AgentBindingContract:
 
     @property
     def capability_refs(self) -> "tuple[CapabilityRef, ...]":
-        """Selected capabilities and direct child Agents, not evidence of use."""
-        return tuple(
-            CapabilityRef(pin.kind, pin.id, pin.revision)
-            for pin in self.selected
-        ) + tuple(
+        """Admitted run hooks and direct child Agents, not per-call tool use."""
+        return self.selected + tuple(
             CapabilityRef(ref.kind, ref.id, ref.revision)
             for ref in self.subagents
         )
@@ -208,6 +141,22 @@ class AgentBindingContract:
     @property
     def binding_digest(self) -> str:
         return self._binding_digest
+
+    def matches_declaration(self, other: "AgentBindingContract") -> bool:
+        """Compare declared behavior without replacing admitted display metadata."""
+        if not isinstance(other, AgentBindingContract):
+            return False
+        codec = AgentSpecCodec()
+        return (
+            codec.to_contract_payload(self.agent_spec) == codec.to_contract_payload(other.agent_spec)
+            and self.capability_refs == other.capability_refs
+            and self.output_mode == other.output_mode
+            and self.output_schema == other.output_schema
+            and len(self.subagent_bindings) == len(other.subagent_bindings)
+            and all(left.matches_declaration(right) for left, right in zip(
+                self.subagent_bindings, other.subagent_bindings, strict=True,
+            ))
+        )
 
     def to_payload(self) -> "dict[str, JsonValue]":
         agent_spec = AgentSpecCodec().to_wire_payload(self.agent_spec)
@@ -276,7 +225,7 @@ class AgentBindingContract:
             return cls(
                 agent_spec=agent_spec,
                 model_contract=_require_mapping(value["model_contract"]),
-                selected=tuple(CapabilityPin.from_payload(item) for item in selected),
+                selected=tuple(CapabilityRef.from_payload(item) for item in selected),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=mode,
                 output_schema=_require_mapping(value["output_schema"]),
@@ -305,13 +254,7 @@ class AgentBinding:
             or not isinstance(self.binding_contract, AgentBindingContract)
             or AgentSpecCodec().to_contract_payload(self.compiled_agent.spec)
             != AgentSpecCodec().to_contract_payload(self.binding_contract.agent_spec)
-            or tuple(
-                (pin.kind, pin.id, pin.revision)
-                for pin in _compiled_agent_selected_pins(self.compiled_agent)
-            ) != tuple(
-                (pin.kind, pin.id, pin.revision)
-                for pin in self.binding_contract.selected
-            )
+            or _compiled_agent_selected_refs(self.compiled_agent) != self.binding_contract.selected
             or self.compiled_agent.selected_subagents != self.binding_contract.subagent_ids
             or self.output_binding.mode != self.binding_contract.output_mode
             or self.output_binding.schema_definition != dict(self.binding_contract.output_schema)
@@ -327,27 +270,16 @@ class AgentBinding:
         return self.output_binding.runtime_output_type
 
 
-def _compiled_agent_selected_pins(
+def _compiled_agent_selected_refs(
     compiled_agent: "CompiledAgent",
-) -> "tuple[CapabilityPin, ...]":
-    candidates = (
-        *sorted(
-            (
-                *compiled_agent.selected_tools,
-                *compiled_agent.selected_skills,
-                *compiled_agent.selected_mcp,
-            ),
-            key=lambda item: (item.kind, item.id),
-        ),
-        *compiled_agent.selected_capabilities,
-    )
+) -> "tuple[CapabilityRef, ...]":
     return tuple(
-        CapabilityPin(
+        CapabilityRef(
             candidate.kind,
             candidate.id,
-            candidate.contract,
+            candidate.revision,
         )
-        for candidate in candidates
+        for candidate in compiled_agent.selected_capabilities
     )
 
 
@@ -368,4 +300,4 @@ def _require_mapping(value: object) -> "dict[str, object]":
     return dict(value)
 
 
-__all__ = ["AgentBinding", "AgentBindingContract", "CapabilityPin", "SubagentRef"]
+__all__ = ["AgentBinding", "AgentBindingContract", "SubagentRef"]

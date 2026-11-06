@@ -8,11 +8,13 @@ from dataclasses import replace
 
 import pytest
 
-from linktools.ai.core import CommitPolicy, ExecutionLineageKind, ExecutionStatus, Principal
+from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionHandle
 from linktools.ai.runtime._local import LocalExecutionBackend, _OwnedExecutionTurn
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
+from linktools.ai.persistence.coordination import PendingTurnCoordination
+from linktools.ai.storage import InMemoryCacheBackend
 
 from .test_subagent_parent_admission import _reservation
 
@@ -20,7 +22,6 @@ from .test_subagent_parent_admission import _reservation
 class _Backend(LocalExecutionBackend):
     def __init__(self):
         self._tenant_id = "tenant"
-        self._commit = CommitPolicy.sync()
         self._turn_owners = {}
         self._tasks = {}
         self._handoff_scopes = {}
@@ -182,8 +183,13 @@ async def test_failed_admission_unblocks_existing_action_before_owner_drain() ->
 
 
 @pytest.mark.asyncio
-async def test_cancel_signal_waits_for_admission_publication(monkeypatch) -> None:
+@pytest.mark.parametrize("pending_views", (False, True))
+async def test_cancel_signal_waits_for_admission_publication(monkeypatch, pending_views: bool) -> None:
     backend = _Backend()
+    cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
+    backend._pending_turns.bind_coordination(PendingTurnCoordination(
+        cache if pending_views else None, cache, namespace="turn-owner", tenant_id="tenant",
+    ))
     reservation = _reservation()
     signalled, cancel_called = asyncio.Event(), asyncio.Event()
     published = False

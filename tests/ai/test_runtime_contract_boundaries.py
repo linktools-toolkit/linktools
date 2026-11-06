@@ -29,6 +29,7 @@ from pydantic_ai.usage import RunUsage
 from linktools.ai.agent._output import bind_output, canonicalize_output_schema_v1
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.spec import CapabilityRef
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -426,6 +427,8 @@ class _RecordingToolOperations:
         tool_def: ToolDefinition,
         args: dict[str, Any],
         replay_safe: bool,
+        *,
+        capability_ref: CapabilityRef | None = None,
     ) -> ToolOperationDecision:
         del ctx, call, tool_def
         self.arguments.append(dict(args))

@@ -46,7 +46,7 @@ def _conversation_feature(combined: bool) -> AbstractCapability[AgentContext[Non
 async def test_conversation_uses_native_runtime_registration(combined: bool) -> None:
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(_conversation_feature(combined), id="conversation-feature" if combined else None, scope="runtime")
-    capture = await group.capture()
+    capture = await group.resolve()
     assert len(capture.contributions) == 1
     contribution = capture.contributions[0]
     assert contribution.scope == "runtime"

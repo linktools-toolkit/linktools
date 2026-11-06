@@ -119,7 +119,7 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
 async def test_sandbox_group_can_be_composed_without_workspace() -> None:
     sandbox = None
     group = RuntimeFeatures("sandbox", workspace_factory=sandbox)
-    snapshot = await group.capture()
+    snapshot = await group.resolve()
     assert snapshot.workspace is None
     assert snapshot.workspace_factory is sandbox
 

@@ -121,6 +121,7 @@
     "transcript_seek_dimension",
     "transcript_seek",
     "transcript_span_ref",
+    "capability_ref",
     "tool_operation_admission",
     "runtime_domain",
     "task_graph",

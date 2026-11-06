@@ -63,6 +63,15 @@ composition details, not a connectivity or storage health check. SQL connection
 strings and provider credentials are never included. Workspace and model
 configuration remain console display metadata.
 
+A saved browser URL selects identities within the current Runtime. If a session or
+execution is unavailable, the console stops its observation and disables actions
+that require its loaded metadata. Refresh to retry, choose a conversation from the
+current list, or explicitly create a new conversation. Missing and unauthorized
+resources share the same error; it does not establish a cookie or login problem.
+Check the workspace and Runtime namespace/tenant in settings if you started the
+console with a different project or storage. Reading an unavailable identity never
+creates it or changes authorization.
+
 ### Finding details and controls
 
 The default **Conversation** view is the everyday workspace: conversation list,
@@ -248,7 +257,7 @@ credentials present in the exception. Restrict access and retention accordingly.
 | Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | History `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | History `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
-| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one RuntimeFeatures capture |
+| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, current Agent/Tool/Skill/MCP identities | CLI composition and RuntimeFeatures source resolution |
 | `ai-acp` | Equivalent explicit session create/load/continue/fork/close/cancel interactions; ACP itself remains a separate stdio transport | The same public Session and Execution APIs |
 
 Retry, fork, recovery and external-effect resolution are explicit actions in the
@@ -341,11 +350,14 @@ conversation is empty.
 
 ## Observation and ownership
 
-The CLI captures RuntimeFeatures once for both inspection and composition,
-opens one `Runtime.open(namespace, storage=..., features=capture)` context, and
-runs one HTTP server. Runtime closes its owned Persistence after the server
-stops; the CLI then closes its separately owned AssetStore. `create_app` accepts already-open public Runtime/History and
-Metrics objects for embedding and testing; the caller owns their lifespan.
+The CLI declares one live RuntimeFeatures group, opens one
+`Runtime.open(namespace, storage=..., features=features)` context, and runs one
+HTTP server. Inspection uses `await runtime.features.resolve()`; it does not
+freeze later registrations or Asset declarations. After the server stops,
+Runtime stops its producers, closes its owned StepStore adapter and AssetStore,
+then closes its owned Persistence. `create_app` accepts already-open public
+Runtime/History and Metrics objects for embedding and testing; the caller owns
+their lifespan.
 
 Sending a message returns its execution ID independently of the SSE connection.
 A browser disconnect closes its observer, not the execution. Stop requests

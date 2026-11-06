@@ -309,7 +309,8 @@ async def test_two_sources_are_selected_and_restored_after_runtime_reopen(tmp_pa
     assert calls == [("original", "first"), ("original", "second"), ("reopened", "first"), ("reopened", "second")]
     async with Persistence.open('two-source-reopen', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_305, Runtime.attach(persistence=persistence_305, features=features('changed', revision=2)) as runtime, TaskEngine.open(persistence=persistence_305, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         with pytest.raises(AIError) as unavailable:
-            Task.from_agent("unavailable-sources", runtime.agents.restore((await runtime_engine.inputs.read_agent(capture, principal=principal)).binding))
+            restored = runtime.agents.restore((await runtime_engine.inputs.read_agent(capture, principal=principal)).binding)
+            await restored.resolve()
         assert unavailable.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
     stored = _stored_bytes(tmp_path)
     assert _BODY not in stored and base64.b64encode(_BODY) not in stored

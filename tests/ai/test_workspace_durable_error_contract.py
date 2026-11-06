@@ -12,6 +12,7 @@ from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.capability import ToolCallRetry, filesystem_capabilities
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.spec import CapabilityRef
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -38,6 +39,8 @@ class _Bridge:
         tool_def: object,
         args: dict[str, Any],
         replay_safe: bool,
+        *,
+        capability_ref: CapabilityRef | None = None,
     ) -> ToolOperationDecision:
         del ctx, call, tool_def, args
         assert replay_safe is False

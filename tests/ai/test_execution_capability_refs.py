@@ -30,7 +30,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.execution import UsageSummary
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import ExecutionCandidate, ExecutionCandidatePage
-from linktools.ai.spec import AgentSpec, CapabilityRef, SkillSpec, capability_ref_payload
+from linktools.ai.spec import AgentSpec, CapabilityRef, SkillSpec
 from linktools.ai.task import Task, TaskGraph, TaskNode
 
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -90,7 +90,7 @@ def _history(record, *, allowed=True):
 
 
 @pytest.mark.asyncio
-async def test_safe_bound_refs_cover_every_kind_without_extra_reads(contributions):
+async def test_safe_bound_refs_cover_run_hooks_and_children_without_extra_reads(contributions):
     binding = _compiler(contributions).bind(
         _compiler(contributions).compile(AgentSpec("root", instructions=("private prompt",)))
     ).binding_contract
@@ -100,7 +100,7 @@ async def test_safe_bound_refs_cover_every_kind_without_extra_reads(contribution
     expected = tuple((pin.kind, pin.id, pin.revision) for pin in binding.selected) + (("agent", "child", 3),)
     assert info.capability_refs == binding.capability_refs
     assert tuple((ref.kind, ref.id, ref.revision) for ref in info.capability_refs) == expected
-    assert {ref.kind for ref in info.capability_refs} == {"agent", "tool", "skill", "mcp", "capability"}
+    assert {ref.kind for ref in info.capability_refs} == {"agent", "capability"}
     assert info.agent_id == "root"
     assert all(ref.id != "root" for ref in info.capability_refs)
     assert all(set(asdict(ref)) == {"kind", "id", "revision"} for ref in info.capability_refs)
@@ -122,7 +122,7 @@ async def test_safe_bound_refs_cover_every_kind_without_extra_reads(contribution
 
 
 @pytest.mark.asyncio
-async def test_bound_refs_share_public_identity_and_restore_without_current_filter(contributions):
+async def test_bound_refs_restore_identity_while_current_directory_is_filtered(contributions):
     compiler = _compiler(contributions)
     bound = compiler.bind(compiler.compile(AgentSpec("root")))
     contract = bound.binding_contract
@@ -131,14 +131,22 @@ async def test_bound_refs_share_public_identity_and_restore_without_current_filt
     refs = contract.capability_refs
     assert all(type(ref) is CapabilityRef for ref in refs)
     assert tuple(asdict(ref) for ref in refs if ref.kind != "agent") == tuple(
-        capability_ref_payload(pin.kind, pin.id, pin.contract) for pin in contract.selected
+        ref.to_payload() for ref in contract.selected
     )
 
-    def unexpected(agent, item):
-        raise AssertionError("restored identities must not use the current selection filter")
+    seen = []
+
+    def current_filter(agent, item):
+        assert item.kind in {"tool", "skill", "mcp"}
+        seen.append((item.kind, item.id))
+        return False
 
     decoded = AgentBindingContract.from_payload(payload)
-    restored = _compiler(contributions, unexpected).restore(decoded)
+    restored = _compiler(contributions, current_filter).restore(decoded)
+    assert seen
+    assert restored.compiled_agent.selected_tools == ()
+    assert restored.compiled_agent.selected_skills == ()
+    assert restored.compiled_agent.selected_mcp == ()
     assert restored.binding_contract.capability_refs == refs
     assert decoded.to_payload() == payload and decoded.binding_digest == digest
     assert contract.to_payload() == payload and contract.binding_digest == digest
@@ -178,8 +186,7 @@ async def test_capability_refs_remain_behind_execution_read_authorization(entry,
 
 
 @pytest.mark.asyncio
-async def test_empty_old_agent_binding_and_task_metadata_remain_distinct():
-    # Earlier Agent bindings omit captured child contracts; their pins remain authoritative.
+async def test_empty_agent_binding_and_task_metadata_remain_distinct():
     payload = _binding_contract().to_payload()
     payload.pop("subagent_bindings", None)
     restored = AgentBindingContract.from_payload(payload)
@@ -190,7 +197,7 @@ async def test_empty_old_agent_binding_and_task_metadata_remain_distinct():
     assert (await task.inspect_execution("execution", principal=principal)).capability_refs is None
 
 
-def test_execution_info_earlier_constructor_keeps_optional_refs_default():
+def test_execution_info_defaults_to_no_bound_capability_refs():
     now = datetime.now(timezone.utc)
     info = ExecutionInfo("execution", "agent", "root", None, ExecutionStatus.SUCCEEDED,
                          ExecutionLineageKind.RUN, None, "execution", None, None, now, now, None)
@@ -199,8 +206,16 @@ def test_execution_info_earlier_constructor_keeps_optional_refs_default():
 
 
 @pytest.mark.asyncio
-async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_and_reopen(tmp_path):
+async def test_graph_agent_refs_preserve_admitted_hooks_after_catalog_change_and_reopen(tmp_path):
+    from dataclasses import dataclass
+    from pydantic_ai.capabilities import AbstractCapability
+
+    @dataclass
+    class HistoryHook(AbstractCapability[object]):
+        id: str = "history-hook"
+
     group = RuntimeFeatures("bound-ref-test")
+    group.capability(HistoryHook(), revision=2, scope="agent")
     group.agent("root", allow_tools=("business",), allow_skills=("guide",), allow_subagents=())
 
     def business(context: object) -> str:
@@ -208,16 +223,15 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
 
     group.tool(business, revision=3)
     group.model("default", RuntimeUsageModels())
-    capture = await group.capture()
-    capture = replace(capture, contributions=(*capture.contributions,
-        CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Private guide", revision=2)))))
+    group._contributions.append(
+        CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Private guide", revision=2))))
     path = tmp_path / "runtime.db"
 
     async def prepare(context):
         return {"prepared": True}
 
     application_task = Task("bound-ref-prepare", prepare, effect_policy="none")
-    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_206, Runtime.attach(persistence=persistence_206, features=capture) as runtime, TaskEngine.open(persistence=persistence_206) as engine:
+    async with Persistence.open('bound-refs', storage=PersistenceStorage.sqlite(path)) as persistence_206, Runtime.attach(persistence=persistence_206, features=group.borrow()) as runtime, TaskEngine.open(persistence=persistence_206) as engine:
         derived = runtime.agents.get("root").derive(allow_tools=())
         task = Task.from_agent("bound-ref-agent", derived)
         run = await engine.with_definitions(application_task, task).start(
@@ -234,7 +248,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
         task_info = await runtime.history.inspect_execution(nodes["prepare"].execution_id, principal=principal)
         assert task_info.binding_kind == "task" and task_info.capability_refs is None
         info = await runtime.history.inspect_execution(execution_id, principal=principal)
-        assert info.capability_refs == (CapabilityRef("skill", "guide", 2),)
+        assert info.capability_refs == (CapabilityRef("capability", "history-hook", 2),)
         assert info.agent_id == "root"
 
     changed = RuntimeFeatures("bound-ref-test")

@@ -95,10 +95,12 @@ async def test_memory_declaration_rejects_agent_scope_and_duplicates(shape: str,
     with pytest.raises(AIError) as raised:
         features = model_features(_FeatureModels())
         first = wrap(MemoryCapability())
-        features.capability(first, id=first.id or "memory-one", scope="runtime" if duplicate else "agent")
         if duplicate:
+            features.capability(CombinedCapability([first], id="memory-one"))
             second = wrap(MemoryCapability(scope="other"))
-            features.capability(second, id=second.id or "memory-two")
+            features.capability(CombinedCapability([second], id="memory-two"))
+        else:
+            features.capability(first, id=first.id or "memory-one", scope="agent")
         async with Runtime.open("memory-declarations", storage=PersistenceStorage.in_memory(), features=features):
             pytest.fail("invalid declaration was accepted")
     assert raised.value.code is (ErrorCode.CAPABILITY_CONFLICT if duplicate else ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -131,16 +133,19 @@ async def test_local_cli_composition_registers_default_memory(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_memory_configuration_is_captured_once_by_runtime() -> None:
+async def test_memory_configuration_resolves_each_new_run_without_rewriting_admitted_scope() -> None:
     capability = MemoryCapability(scope="admitted-default")
     features = _features(None)
     features.capability(capability)
     async with Runtime.open("memory-capture", storage=PersistenceStorage.in_memory(), features=features) as runtime:
-        capability._scope = "mutated-authoring-object"
-        execution = await runtime.agents.get().start("hello")
-        assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
-        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert record.memory_scope == "admitted-default"
+        first = await runtime.agents.get().start("first")
+        assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED
+        features.capability(MemoryCapability(scope="current-default"))
+        second = await runtime.agents.get().start("second")
+        assert (await second.wait()).result.status is ExecutionStatus.SUCCEEDED
+        for execution, scope in ((first, "admitted-default"), (second, "current-default")):
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert record.memory_scope == scope
 
 
 @pytest.mark.asyncio
@@ -168,7 +173,7 @@ async def test_memory_tools_follow_capability_and_agent_selection(allow_tools: t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("next_scope", [None, "changed", "business"])
-async def test_memory_tools_retry_uses_admitted_store_after_host_change(tmp_path: Path, next_scope: str | None) -> None:
+async def test_memory_tools_retry_resolves_current_tools_but_retains_admitted_scope(tmp_path: Path, next_scope: str | None) -> None:
     observations: list[tuple[str, set[str]]] = []
     reads: list[object] = []
 
@@ -184,7 +189,7 @@ async def test_memory_tools_retry_uses_admitted_store_after_host_change(tmp_path
         observations.append((prompt, {tool.name for tool in info.function_tools}))
         if prompt == "remember":
             return ModelResponse(parts=[ToolCallPart("write_memory", {"content": "admitted memory"}, tool_call_id="write")])
-        if prompt == "recall":
+        if prompt == "recall" and any(tool.name == "read_memory" for tool in info.function_tools):
             return ModelResponse(parts=[ToolCallPart("read_memory", {"file": "MEMORY.md"}, tool_call_id="read")])
         return ModelResponse(parts=[TextPart("fresh")])
 
@@ -192,8 +197,9 @@ async def test_memory_tools_retry_uses_admitted_store_after_host_change(tmp_path
         result = model_features(_FeatureModels(_FeatureFunctionModel(respond)))
         result.capability(ExecutionCapability(retain_history=True))
         if scope == "business":
-            def read_memory(context: AgentContext[object]) -> str:
+            def read_memory(context: AgentContext[object], file: str) -> str:
                 del context
+                assert file == "MEMORY.md"
                 return "unrelated business tool"
             result.tool(read_memory, effect_policy="none")
         elif scope is not None:
@@ -220,18 +226,30 @@ async def test_memory_tools_retry_uses_admitted_store_after_host_change(tmp_path
     elif next_scope == "business":
         fresh_tools = {"read_memory"}
     assert observations[1] == ("fresh", fresh_tools)
-    assert observations[2] == ("recall", {"read_memory", "write_memory"})
-    assert len(reads) == 1 and "admitted memory" in str(reads[0])
+    assert observations[2] == ("recall", fresh_tools.intersection({"read_memory", "write_memory"}))
+    if next_scope == "changed":
+        assert len(reads) == 1 and "admitted memory" in str(reads[0])
+    elif next_scope == "business":
+        assert reads == ["unrelated business tool"]
+    else:
+        assert reads == []
 
 
 @pytest.mark.asyncio
-async def test_memory_tool_selection_requires_current_capability() -> None:
-    features = model_features(_FeatureModels())
+async def test_memory_selector_does_not_enable_an_absent_capability() -> None:
+    observed: list[set[str]] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        observed.append({tool.name for tool in info.function_tools})
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = model_features(_FeatureModels(_FeatureFunctionModel(respond)))
     features.agent("default", allow_tools=("read_memory",))
-    with pytest.raises(AIError) as raised:
-        async with Runtime.open("missing-memory", storage=PersistenceStorage.in_memory(), features=features):
-            pytest.fail("Memory tools must not enable their own capability")
-    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    async with Runtime.open("missing-memory", storage=PersistenceStorage.in_memory(), features=features) as runtime:
+        assert (await runtime.agents.get().run("without memory")).result.status is ExecutionStatus.SUCCEEDED
+        features.capability(MemoryCapability())
+        assert (await runtime.agents.get().run("with memory")).result.status is ExecutionStatus.SUCCEEDED
+    assert observed == [set(), {"read_memory"}]
 
 
 @pytest.mark.asyncio
@@ -325,12 +343,13 @@ async def test_imported_memory_rejects_collision_with_business_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_restore_keeps_other_same_named_business_pins(tmp_path: Path) -> None:
+async def test_memory_removal_preserves_other_same_named_business_tools(tmp_path: Path) -> None:
     class ReadMemoryOnly(MemoryCapability):
         def tool_definitions(self) -> tuple[Tool[object], ...]:
             return tuple(tool for tool in super().tool_definitions() if tool.name == "read_memory")
 
     calls: list[str] = []
+    observed: list[set[str]] = []
 
     def write_memory(context: AgentContext[object]) -> str:
         del context
@@ -338,7 +357,7 @@ async def test_memory_restore_keeps_other_same_named_business_pins(tmp_path: Pat
         return "business result"
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        assert {tool.name for tool in info.function_tools} == {"read_memory", "write_memory"}
+        observed.append({tool.name for tool in info.function_tools})
         request = messages[-1]
         assert isinstance(request, ModelRequest)
         if any(isinstance(part, ToolReturnPart) for part in request.parts):
@@ -362,6 +381,7 @@ async def test_memory_restore_keeps_other_same_named_business_pins(tmp_path: Pat
         retry = await source.retry("retry")
         assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
     assert calls == ["business", "business"]
+    assert observed == [{"read_memory", "write_memory"}] * 2 + [{"write_memory"}] * 2
 
 
 @pytest.mark.asyncio

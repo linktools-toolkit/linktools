@@ -27,7 +27,7 @@ async def test_trace_authoring_policy_resolves_owner_defaults(options, trace_exp
     assert policy.flush_interval == options.get("flush_interval")
     features = RuntimeFeatures("trace-defaults")
     features.capability(trace)
-    capture = await features.capture()
+    capture = await features.resolve()
     declaration = next(item.value for item in capture.contributions if item.id == trace.id)
     assert declaration.commit == trace.commit
     assert declaration.commit.buffer is buffer

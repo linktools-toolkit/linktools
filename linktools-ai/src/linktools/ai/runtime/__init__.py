@@ -4,7 +4,7 @@
 
 from ._agent import Agent, Session
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
-from ._features import RuntimeFeatures, RuntimeFeaturesCapture
+from ._features import RuntimeFeatures, RuntimeFeaturesSource, RuntimeFeaturesResolution
 from ._composition_domains import RuntimeTasks, RuntimeEvaluations
 from ..observe import RuntimeMetricsStatus, RuntimeMetricsFlushResult
 from ._runtime_service import Runtime, RuntimeStatus
@@ -15,7 +15,7 @@ __all__ = [
     "Runtime",
     "RuntimeStatus",
     "RuntimeFeatures",
-    "RuntimeFeaturesCapture",
+    "RuntimeFeaturesSource", "RuntimeFeaturesResolution",
     "RuntimeAgents",
     "RuntimeExecutions",
     "RuntimeMetrics",

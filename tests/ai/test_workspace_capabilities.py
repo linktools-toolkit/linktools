@@ -50,9 +50,9 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 
-def _workspace_tool_contributions(workspace: Workspace):
+async def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        item for item in workspace_features("workspace", workspace=workspace)._contributions
+        item for item in (await workspace_features("workspace", workspace=workspace).resolve()).contributions
         if item.kind == "tool"
     )
 
@@ -158,9 +158,10 @@ def test_workspace_constructor_normalizes_root(
     assert workspace.root == (tmp_path / "project").resolve()
 
 
-def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    contributions = _workspace_tool_contributions(workspace)
+    contributions = await _workspace_tool_contributions(workspace)
 
     assert tuple(sorted(item.id for item in contributions)) == (
         "check_command",
@@ -179,7 +180,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         **{name: "shell" for name in ("check_command", "run_command", "start_command", "stop_command")},
     }
     assert tuple(item.revision for item in contributions) == tuple(
-        item.revision for item in _workspace_tool_contributions(workspace)
+        item.revision for item in await _workspace_tool_contributions(workspace)
     )
 
 
@@ -200,7 +201,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
     tool_classes: set[str],
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    snapshot = await workspace_features("workspace", workspace=workspace).capture()
+    snapshot = await workspace_features("workspace", workspace=workspace).resolve()
     spec = AgentSpec(
         "agent",
         allow_tools=selectors,
@@ -234,7 +235,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     workspace = Workspace.load(tmp_path)
-    snapshot = await workspace_features("workspace", workspace=workspace).capture()
+    snapshot = await workspace_features("workspace", workspace=workspace).resolve()
     for selectors in (("new_tool",), ("*", "new_tool"), ("edit_file",), ("*", "edit_file")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
@@ -242,9 +243,8 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
             candidates=snapshot.contributions,
             agents={"agent": spec},
         )
-        with pytest.raises(AIError) as error:
-            compiler.compile(spec)
-        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        compiled = compiler.compile(spec)
+        assert compiled.spec.allow_tools == selectors
 
     for field in ("allow_skills", "allow_subagents", "allow_capabilities"):
         kwargs = {
@@ -260,9 +260,8 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
             candidates=(),
             agents={"agent": spec},
         )
-        with pytest.raises(AIError) as error:
-            compiler.compile(spec)
-        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        compiled = compiler.compile(spec)
+        assert getattr(compiled.spec, field) == ("*", "missing")
 
     empty = AgentSpec("agent", allow_tools=())
     empty_compiler = AgentCompiler(
@@ -322,7 +321,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
             "workspace",
             workspace=workspace,
             assets=store,
-        ).capture()
+        ).resolve()
     finally:
         await store.close()
 
@@ -346,7 +345,7 @@ async def test_filesystem_tool_declarations_do_not_depend_on_sandbox_selection(
         workspace_features("workspace", workspace=workspace, workspace_factory=sandbox),
         workspace_features("workspace", workspace=workspace, workspace_factory=None),
     )
-    snapshots = [await group.capture() for group in groups]
+    snapshots = [await group.resolve() for group in groups]
     projected = tuple(
         tuple(
             (item.id, item.revision, item.contract)
@@ -383,7 +382,7 @@ def test_workspace_sandbox_capability_id_is_reserved() -> None:
 async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
-    contributions = _workspace_tool_contributions(workspace)
+    contributions = await _workspace_tool_contributions(workspace)
     expected = {item.id: item.contract for item in contributions
                 if item.contract["metadata"]["linktools.ai.tool_class"] != "shell"}
     capability = filesystem_capabilities(
@@ -524,7 +523,7 @@ async def test_workspace_group_does_not_discover_declarations(
     workspace = Workspace.load(tmp_path)
 
     group = workspace_features("workspace", workspace=workspace, workspace_factory=sandbox)
-    snapshot = await group.capture()
+    snapshot = await group.resolve()
 
     assert group.workspace is workspace
     assert snapshot.workspace_factory is sandbox

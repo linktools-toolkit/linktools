@@ -135,7 +135,7 @@ def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
 async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -> None:
     group = RuntimeFeatures[None]("durable")
     group.capability(_RegisteredCapability(), revision=3, scope="agent")
-    candidates = (await group.capture()).contributions
+    candidates = (await group.resolve()).contributions
     compiler = _compiler(candidates=candidates)
     binding = compiler.bind(compiler.compile(_spec()))
 
@@ -150,7 +150,7 @@ async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -
 
     changed_group = RuntimeFeatures[None]("changed")
     changed_group.capability(_RegisteredCapability(), revision=4, scope="agent")
-    changed_candidates = (await changed_group.capture()).contributions
+    changed_candidates = (await changed_group.resolve()).contributions
     with pytest.raises(AIError) as changed:
         _compiler(candidates=changed_candidates).restore(binding.binding_contract)
     assert changed.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE

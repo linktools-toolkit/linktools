@@ -441,7 +441,7 @@ async def test_convenience_wait_arguments_are_validated_before_start(owner, meth
         starts.append((args, kwargs))
         raise AssertionError("invalid wait options must not start an execution")
 
-    runtime = SimpleNamespace(_agent_execution_port=lambda *_args: SimpleNamespace(start=start))
+    runtime = SimpleNamespace(_agent_execution_port=lambda *_args, derivations=(), observed_binding=None: SimpleNamespace(start=start))
     handle = Agent(runtime, "agent", 1) if owner == "agent" else Session(runtime, "agent", 1, "session")
     with pytest.raises(AIError) as raised:
         await getattr(handle, method)("prompt", **invalid)
@@ -466,7 +466,7 @@ async def test_convenience_wait_preserves_container_and_all_options(owner, metho
         starts.append(kwargs)
         return SimpleNamespace(wait=wait)
 
-    runtime = SimpleNamespace(_agent_execution_port=lambda *_args: SimpleNamespace(start=start))
+    runtime = SimpleNamespace(_agent_execution_port=lambda *_args, derivations=(), observed_binding=None: SimpleNamespace(start=start))
     handle = Agent(runtime, "agent", 1) if owner == "agent" else Session(runtime, "agent", 1, "session")
     callback = _ignore if observe else None
     result = await getattr(handle, method)(

@@ -54,7 +54,7 @@ async def _capture_rules(root: Path) -> RepositoryInstructions:
     try:
         asset_features = RuntimeFeatures("assets")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        return (await asset_features.capture()).instructions
+        return (await asset_features.resolve()).instructions
     finally:
         await store.close()
 
@@ -285,20 +285,14 @@ async def test_rule_assets_follow_capability_capture_and_reject_duplicate_source
         await store.put(key, b"---\nscope: src\n---\nfirst")
         asset_features = RuntimeFeatures("rules")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         assert capture.instructions.documents == (
             RepositoryInstructionDocument("rule:nested/review", "src", "first"),
         )
 
         await store.put(key, b"---\nscope: src\n---\nsecond")
         assert capture.instructions.documents[0].content == "first"
-        with pytest.raises(AIError) as stale_error:
-            await capture.verify_source_revision()
-        assert stale_error.value.code is ErrorCode.SNAPSHOT_CONFLICT
-
-        asset_features_2 = RuntimeFeatures("rules")
-        asset_features_2.capability(AssetCapability(store), scope="runtime")
-        fresh = await asset_features_2.capture()
+        fresh = await asset_features.resolve()
         assert fresh.instructions.documents[0].content == "second"
         duplicate = RepositoryInstructionDocument("rule:duplicate", ".", "same")
         with pytest.raises(AIError) as duplicate_error:
@@ -318,7 +312,7 @@ async def test_rule_asset_id_must_be_canonical() -> None:
         with pytest.raises(AIError) as error:
             asset_features = RuntimeFeatures("rules")
             asset_features.capability(AssetCapability(store), scope="runtime")
-            await asset_features.capture()
+            await asset_features.resolve()
         assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
     finally:
         await store.close()

@@ -421,7 +421,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if self._preflight is not None:
             request = TaskGraphRequest(
                 self._preflight.admit_request(request.graph), request.principal,
-                request.idempotency_key, request.limits, request.correlation, request.budget,
+                request.idempotency_key, request.limits, request.correlation, request.budget, request.tool_effects,
             )
         return TaskGraphSubmission(self._persistence.admissions.namespace,
                                    TaskGraphAdmission.from_request(request), request.graph)

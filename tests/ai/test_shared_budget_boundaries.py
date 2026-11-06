@@ -20,6 +20,7 @@ from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RequestUsage
 
 from linktools.ai.core import RunBudget
+from linktools.ai.spec import CapabilityRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._budget import RunBudgetContext, RunBudgetCapability
@@ -48,7 +49,7 @@ class _Bridge:
         self.deferred = []
         self.completed = []
 
-    async def begin(self, *args):
+    async def begin(self, *args, capability_ref: CapabilityRef | None = None):
         return self.decision
 
     async def defer(self, decision):

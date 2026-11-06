@@ -16,9 +16,9 @@ The main ownership rules are:
 - `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.attach(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.
 - `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
-- `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide project Workspace configuration or an execution workspace factory independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
+- `RuntimeFeatures` is the only public registration/discovery composition unit. It supplies a live declaration source for direct registrations and every Asset loader kind, and can provide Workspace configuration or an execution workspace factory independently. Each resolution validates its Asset versions without freezing later discovery.
 - `AgentSpec` is a runtime-independent Agent declaration.
-- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
+- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates. Runtime uses current declarations and the admitted Agent selectors/filter at each model step and call, while a recorded call keeps its original identity and effect receipt.
 - `Runtime` composes Agent, Task and Evaluation execution through one application lifecycle. `features=None` leaves Agent execution disabled; Task-only applications need no model declarations. TaskEngine, History, Snapshot and Evaluations retain independent advanced entry points.
 - `runtime.agents.get(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
@@ -42,7 +42,7 @@ ordinary applications continue using `runtime.tasks.bind` and
 
 `RuntimeFeatures(..., filter=...)` accepts an optional synchronous
 `Callable[[AgentSpec, CapabilityContribution], bool]`. The compiler invokes it on
-captured `agent` (delegation target), `tool`, `skill`, `mcp` and generic `capability`
+current `agent` (delegation target), `tool`, `skill`, `mcp` and generic `capability`
 contributions before resolving existing Agent selectors. The root Agent itself is
 not a delegation candidate. A child is compiled against its own Agent declaration.
 The callback may inspect public declaration metadata; the SDK does not reserve
@@ -65,22 +65,22 @@ async with Runtime.open("application", storage=storage,
     ...
 ```
 
-`AgentCompiler.filter_capabilities(spec, capture.contributions,
+`AgentCompiler.filter_capabilities(spec, resolution.contributions,
 capability_filter=available)` exposes the same candidate filtering for host
-inspection without constructing a model or Runtime. It returns visible declarations,
-not a fully resolved executable toolset; a management catalog need not materialize
-Workspace tools. Keep the unfiltered capture for global asset administration.
+inspection after `resolution = await group.resolve()`. It returns visible
+declarations, not a fully resolved executable toolset; a management catalog
+need not materialize Workspace tools. Keep the unfiltered resolution for
+administrative inspection of that point in time.
 
-A capture retains the current in-process filter policy without serializing it into
-assets or execution bindings. If the policy depends on captured metadata, use
-`dataclasses.replace(capture, filter=build_filter(capture))` and pass that capture
-to `Runtime.open(features=...)`. This keeps the same source revision and
-reader without loading the assets again. `Runtime.open` has no separate filter
-parameter.
+The live source retains its in-process filter without serializing callback code
+into Assets or execution bindings. Configure it on `RuntimeFeatures` or assign `group.filter = callback`; its
+callback sees current candidate metadata at each selection boundary. Replacing
+fields on an inspection result does not change Runtime configuration, and the
+result is not a valid Runtime input. `Runtime.open` has no separate filter parameter.
 
 `RuntimeFeatures` owns Agent prompt limits:
-`RuntimeFeatures("application", limits=PromptLimits(...))`. Capture it once for
-`Runtime.open(features=...)`. The application authorization policy belongs to
+`RuntimeFeatures("application", limits=PromptLimits(...))`. Pass that declaration
+or its borrowed source to `Runtime.open(features=...)`. The application authorization policy belongs to
 `Runtime.open(..., authorization=policy)` and is shared by its bound domains.
 Independently opened History and TaskEngine accept `authorization=policy` too.
 Storage routes and tenant identity come from Persistence. The policy instance
@@ -90,25 +90,30 @@ model context and are separate from TaskGraph and snapshot limits.
 
 For a fixed MCP response fixture, register
 `ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
-`linktools.ai.capability` before capture. The fixture
+`linktools.ai.capability` before the run. The fixture
 keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
 separate prompt-limit or tool-response arguments.
 
 With no callback, existing selection behavior is unchanged. Wildcard selectors
-expand the remaining candidates; explicit unavailable selections fail.
+expand the remaining candidates; explicit selectors remain valid when their named
+resource is currently absent, allowing later additions without expanding permissions.
 Callback exceptions propagate and non-boolean results are rejected. Use a pure,
-deterministic callback over the captured declarations and stable application inputs.
+deterministic callback over declarations and stable application inputs. Business tool, MCP and Skill candidates are current at each model step and call.
 This is applicability filtering, not an authorization or OS isolation boundary.
 MCP filtering is per server; existing tool selectors still restrict its dynamic
 tools. Generic capabilities are filtered as whole contributions. Repository rules,
 Task definitions and DAG nodes are separate domains, not capability candidates.
 
-The final compiled selection feeds instructions, toolsets, Skill loading and
-Subagent delegation. Binding pins and Asset version references retain that exact
-selection. Historical restoration does not execute the current callback; new
-compilations do. An asset-only snapshot freezes declarations, not application
-callback code. Reuse captured execution bindings when historical selection must
-remain fixed. Ordinary metadata and binding digest projections are unchanged.
+The compiled selection feeds instructions, toolsets and Subagent delegation.
+New runs resolve the complete current declarations and native capability hooks.
+Within a run, business tools, MCP servers and Skills resolve from the same live
+source at each model step and call, with the admitted Agent selectors and current
+filter. Loader replacements and newly added declarations do not require a new
+Runtime. An inspection result is not an execution freeze or a Runtime input.
+Previously admitted calls, retained tool results and durable effect receipts keep
+their original identity and content. Recovery does not replace an observed result
+with a newly resolved tool or repeat an unknown external effect. Agent metadata
+is retained for later filtering without entering the semantic binding digest.
 
 ## Shared run budgets
 
@@ -140,7 +145,7 @@ and provider retry boundaries.
 
 Context retention, interrupted-run recovery and detailed trace are independent
 Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
-native `StepPersistence(store=..., capture_frontier=True)`, and `TraceCapability()`. Durable storage alone enables
+`StepPersistenceCapability()`, and `TraceCapability()`. Durable storage alone enables
 none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent observations and supplies the dataset to Runtime-bound Task engines for
 Task and evaluation execution observations. Each producer owns its recorder
@@ -406,7 +411,7 @@ async with Runtime.open("default", storage=storage,
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
 
-Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for restoration and integrity checks. Tool, Skill, MCP and generic Capability identity checks use only their ID and revision within the kind namespace; configuration equality is the caller’s responsibility, not a second identity check. Agent/Task declaration validation and resource access, sandbox policy and output validation remain separate boundaries. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
+Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Admitted native hooks and managed calls retain these references; Runtime resolves the matching current implementation without a second provider registry. Agent contracts, effect records and Asset version references retain their own execution, authorization and byte-integrity facts. Tool, Skill, MCP and generic Capability identity checks use only their ID and revision within the kind namespace; configuration equality is the caller’s responsibility, not a second identity check. Agent/Task declaration validation and resource access, sandbox policy and output validation remain separate boundaries. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
@@ -481,10 +486,10 @@ managed guarantees must use the existing tool, MCP, or Workspace declaration
 paths rather than assuming an arbitrary native toolset is managed automatically.
 
 Capability names do not imply one execution mode. `AssetCapability` is consumed
-during declaration capture, not native execution hooks. Session, Execution,
+during source resolution, not native execution hooks. Session, Execution,
 Checkpoint, Trace, and ToolResponses capabilities configure Runtime services.
 Unbound host declarations do not supply those services to a native Agent: pure
-capture/configuration declarations are rejected rather than silently ignored;
+source/configuration declarations are rejected rather than silently ignored;
 Execution, Checkpoint, and Trace require their public service bindings.
 
 Use each existing `CapabilityContribution` to materialize independent native
@@ -661,35 +666,61 @@ capability discovers Agent, Skill, or
 MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: register
-`AssetCapability` with `features.capability(assets)`. `AssetCapability.open(store)`
-initializes and closes the store; keep its context open through capture and every
-Runtime using that capture. `AssetCapability(store)` instead borrows an already
-initialized store without closing it. A store-backed group
-captures the declaration metadata visible when capture begins. Assets added
-afterward are ignored for that capture; assets actually read by a loader must
-still match their captured metadata through verification. Conflicting
-identities or layouts fail closed. Omitting `AssetCapability` contributes no Asset declarations.
+`AssetCapability(store)` with `features.capability(...)`. Passing the raw
+`RuntimeFeatures` declaration transfers the store's lifecycle to Runtime, which
+initializes it and closes it after all producers stop. A declaration and its
+store belong to one Runtime lifetime; wrapping the same store in another
+declaration does not create an independent resource. An already initialized
+store still transfers ownership when passed this way.
+
+`runtime.features` exposes a `RuntimeFeaturesSource`. Inspect the current
+composition with `await runtime.features.resolve()`. To share a source across
+Runtimes, its external owner initializes the store, passes `features.borrow()`
+to each Runtime, keeps the store open until every borrower finishes, and closes
+it in `finally`. Borrowing does not freeze registrations, loader slots or Assets.
 
 ```python
 from linktools.ai.capability import AssetCapability
-from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 
-async with AssetCapability.open(store) as assets:
-    features = RuntimeFeatures("application")
-    features.capability(assets)
-    capture = await features.capture()
-    # Open and use Runtime with this capture inside the context.
+features = RuntimeFeatures("application")
+features.capability(AssetCapability(store))
+async with Runtime.open("application", storage=storage, features=features) as runtime:
+    current = await runtime.features.resolve()
+    # Inspect current.contributions and use Runtime inside the same lifetime.
 ```
 
+For externally owned Assets:
+
+```python
+try:
+    await store.initialize()
+    features = RuntimeFeatures("application")
+    features.capability(AssetCapability(store))
+    source = features.borrow()
+    async with Runtime.open("application", storage=storage, features=source) as runtime:
+        current = await source.resolve()
+finally:
+    await store.close()
+```
+
+Every new run resolves complete declarations and native hooks. Business tools,
+MCP and Skills also resolve current candidates at each model step and call.
+Selectors and the capability filter apply at those boundaries. `("*",)` permits
+new names, explicit Skill IDs can name Skills added later, and `()` disables
+Skill tools. Replacing any loader slot affects the next resolution. Conflicting
+identities or layouts fail closed. Omitting `AssetCapability` contributes no
+Asset declarations.
+
 Every Asset kind uses `AssetVersionRef` for byte-version reads through
-`AssetStore.resolve_versions()` and `read_versions()`. Agent, Skill, MCP, and
-Rule declarations are read from the versions captured by the group. Writable
-Asset backends retain historical versions; `DirectoryAssetBackend` is a
-read-only view of local files and ignores the requested revision by default.
-For that backend, `AssetStore` verifies the current bytes against the captured
-size and digest, so changed or missing content cannot satisfy a version read.
-Declaration format versions and named revisions are separate from Asset
-byte versions.
+`AssetStore.resolve_versions()` and `read_versions()`. Each resolution retains
+the references it actually reads; a source revision change does not invalidate
+later resolution. Writable backends retain historical versions.
+`DirectoryAssetBackend` is a read-only view of local files and ignores the
+requested revision by default. `AssetStore` still verifies the current bytes
+against each selected size and digest, so changed or missing bytes cannot
+satisfy an old version read. Declaration format versions, named revisions and
+Asset byte versions remain separate.
 
 Persistent versioned assets use SQL metadata, including local SQLite, with
 optional ObjectStore-backed content. See [Asset storage](docs/asset-storage.md)
@@ -699,7 +730,7 @@ backend replacement boundary.
 Repository rules use the `rule` Asset kind and Markdown keys such as
 `AssetKey("rule", "review.md")` or `AssetKey("rule", "python/strict.md")`.
 Rule Markdown is an instruction document at root scope; its content is not
-reinterpreted as Workspace configuration. Captured Rule instructions work with
+reinterpreted as Workspace configuration. Resolved Rule instructions work with
 or without a Workspace. When a Workspace exists, `AGENTS.md` is additionally
 resolved from the Workspace directory. The Workspace's `.linktools/rules`
 directory is not an implicit rule source. A directory-backed AssetStore can
@@ -711,7 +742,7 @@ For downstream declaration formats or custom kinds such as `worker` or
 kind with `assets.loader("audit", loader)`. One kind has exactly one loader;
 registering `agent`, `skill`, `mcp`, or `rule` replaces that built-in
 parser slot instead of chaining with it. Every loader receives the same
-`CapabilityLoadContext`: `read()` / `read_many()` read the captured
+`CapabilityLoadContext`: `read()` / `read_many()` read this resolution's
 immutable versions, while `bind_versions()` returns their `AssetVersionRef`
 values for execution-bound resources. Loaders return normal
 `CapabilityContribution` values, or `RepositoryInstructionDocument` for
@@ -758,18 +789,21 @@ auto-discover a project `.mcp.json` or treat arbitrary flat MCP JSON Assets as
 shared configuration. The host or a custom `CapabilityLoader` explicitly
 chooses the source and revision, then registers each resulting
 `MCPServerSpec` with `RuntimeFeatures.mcp(server)` (or returns it from a
-loader) into the same `RuntimeFeatures.capture()` path.
+loader) into the same `RuntimeFeatures.resolve()` path.
 Supported transports are stdio, Streamable HTTP (`http` and
 `streamable-http` authoring names), and explicit legacy `sse`; LinkTools
 does not fall back from one remote transport to another.
 
-`RuntimeFeatures.capture()` returns a `RuntimeFeaturesCapture`. Pass that
-capture to `Runtime.open()` when the host also needs to inspect the same
-captured contributions; this avoids parsing the source declarations twice.
-The capture contains the group id, contributions, captured Rule instructions,
-source revision, and Workspace association. A changed source revision fails
-Runtime admission. Runtime reads captured resources through `AssetStoreReader`,
-a read-only view that does not expose the mutable `AssetStore`.
+`RuntimeFeatures.resolve()` returns a `RuntimeFeaturesResolution` for one
+inspection: group id, contributions, Rule instructions, source revision,
+Workspace association, model routes and a read-only Asset reader. It is not an
+input to `Runtime.open()` or `Runtime.attach()`. Pass the original declaration
+for Runtime-owned Assets or `features.borrow()` for externally owned Assets.
+A later call reads current registrations, loader slots and Asset declarations.
+Registering the same kind and id replaces that direct registration. Independent
+sources that produce conflicting identities still fail closed.
+The old resolution can still read its retained versions where the backend
+supports them; it cannot freeze or invalidate the live source.
 
 Directory-backed Skill packages retain a native absolute package path when
 all effective Skill assets under the declared resource root map to one
@@ -779,14 +813,12 @@ absolute path without letting a single file symlink redefine the package root.
 If an overlay mixes resource origins, the declaration view is virtual rather
 than claiming a single native package directory. Bubblewrap can still bind
 its local files individually; LocalWorkspaceBackend requires one matching native tree.
-Durable executions pin Asset version
-references for Skill resources and read them through AssetStore when needed.
+New Skill reads resolve current definitions and resource references. A tool result already retained in Conversation/checkpoint history keeps its original content; an uncommitted or new read may observe current content. Skill reads do not introduce a separate durable receipt or promise recovery without the configured persistence guarantees.
 The workspace provider exposes existing local resource files by path after verifying their
 bound Asset versions and executable bits. Resources without native file paths
 remain available through `load_skill` but cannot be executed by file path.
 Skill resource bytes are not copied to a temporary directory or Runtime ObjectStore.
-Because the paths point to original files, external edits after verification
-can be observed by an already running process.
+Because the paths point to original files, external edits after verification can be observed by an already running process. A Skill or resource added during a run does not expand its sandbox mounts: `load_skill` exposes it as virtual when no matching path is available. Files already under the authorized Workspace remain usable through ordinary FileSystem/Shell tools. The next run prepares its resources from the current allowed Skills.
 
 For a stdio MCP package, the package directory supplies the default resource
 root when `resource` is omitted; an explicit resource root takes precedence.
@@ -934,9 +966,11 @@ supported. Missing variables or malformed references fail with
 commands, arguments, keys, and resource paths are never expanded. Python
 Specs and durable wire decoding preserve strings literally.
 
-Capture freezes the resolved connection configuration. Rebuild the capture
-and Runtime to rotate credentials; calls do not reread the environment or
-configuration. Static headers are service credentials, not credentials
+Environment expansion happens whenever the authoring loader resolves the MCP
+configuration. The next current-source resolution can observe changed files or
+credentials without restarting Runtime. Directly registered Python Specs keep
+their literal values until the host replaces their declaration; they do not
+reread environment variables themselves. Static headers are service credentials, not credentials
 inherited from a Principal or incoming request. Wire declarations contain the
 connection configuration, but Runtime binding/history does not copy resolved
 credentials into durable MCP contracts. Source files and backups containing
@@ -977,7 +1011,7 @@ Changing an address or credential under the same ID/revision must still reach
 the same logical service, data domain, and behavior. Callers must use a new ID
 or revision when changing logical behavior; LinkTools does not infer a revision
 change by comparing configuration dictionaries. Tenant access, resource isolation
-and execution policy are enforced independently. Asset capture does not freeze
+and execution policy are enforced independently. Asset version references do not freeze
 a remote server's implementation.
 Resources/prompts APIs, OAuth, dynamic end-user credentials, mTLS, server
 publishing, and arbitrary third-party configuration import are out of scope.
@@ -1074,15 +1108,20 @@ spec = AgentSpec(
 )
 ```
 
-The compiler resolves these selectors once from the captured candidate universe.
-Missing or conflicting required candidates fail closed. MCP selectors use
+Selectors apply to current declarations at their lifecycle boundary: Agent hooks
+and delegation targets at admission, business and MCP tools at each model step,
+and Skills on list/load. Explicit names can become available later without
+widening the allowed selectors. Invalid selectors and conflicting declarations
+are rejected. Already-admitted hooks and calls retain their recorded
+`kind/id/revision`; an unavailable revision is not replaced with a newer one.
+MCP selectors use
 `mcp:<encoded-server>:<encoded-tool>` or `mcp:<encoded-server>:*`; use
 `mcp_server_selector()` and `mcp_tool_selector()` to encode logical ids and
 upstream tool names. For example, `security/audit` and `scan:file` become
 `mcp:security%2Faudit:scan%3Afile`. The `mcp__` prefix is reserved for
 model-visible transport names and is not an authoring selector.
 
-Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
+Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, an initial Skill catalog hint, and Workspace guidance form the most stable prefix. `list_skills` provides the current Skill catalog; updates do not rewrite the standing prompt. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
 
 Sessions remember discovered repository instruction scopes, not instruction text.
 Before a new Execution's first model request, its current cwd and remembered
@@ -1097,7 +1136,7 @@ also retain their captured instruction set. Scope memory is owned by that
 Session; independent Sessions and subagents do not write into it. A child keeps
 its parent's initial pinned sources, adding only rules for its explicitly supplied
 attachments; a child without attachments keeps the original inherited pin.
-Asset-backed Rule documents still use the RuntimeFeatures capture bound to the Runtime.
+Asset-backed Rule documents resolve from the current RuntimeFeatures source for each new Execution; an admitted instruction frontier remains unchanged.
 Discovery scopes are persisted before the execution barrier, including with
 separate conversation storage. A failed barrier can leave a discovered scope
 remembered, but cannot execute its tool or change that Execution's pinned text.
@@ -1119,7 +1158,7 @@ The fixed prefix is not appended as a new conversation message on each model cal
 
 `allow_tools` controls ordinary/external model-visible tools. `mode="plan"` selects plan mode for an execution; `planning` controls whether the Agent has the planning capability. Plan mode implies `planning=True`. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.
 
-Subagents are root Agent definitions selected from the same captured catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
+Subagents are root Agent definitions selected from the current declaration source when their parent is admitted. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
 
 ## 5. Output contracts
 
@@ -1177,7 +1216,7 @@ The exact durable binding stores:
 
 - the v1 `AgentSpec` contract;
 - the resolved model configuration as diagnostic metadata (identity is the registered model ID);
-- the selected capability pins, including bound Skill Asset version references when Execution state is durable;
+- the admitted native hook references (`kind`, `id`, `revision`);
 - selected Subagent ids and their direct execution bindings;
 - `output_mode`;
 - the canonical output JSON Schema;
@@ -1382,16 +1421,20 @@ async with Runtime.open(
 `await runtime.close()` retains its default cancellation semantics. For a planned
 worker restart, use `await runtime.handoff()` before releasing the application's
 owner lease. This is a terminal lifecycle operation, not a pause of the same
-Runtime. It stops admission, joins admitted starts, drains in-flight tool
+Runtime. It stops admission, drains in-flight tool
 settlement, and stops local producers without turning infrastructure shutdown
 into user cancellation. Successful handoff closes owned resources; a later
 `close()` or context-manager exit does not cancel the preserved executions.
 Cancellation of the handoff caller does not abandon its owned cleanup task.
 Retry `handoff()` or `close()` to join that same cleanup after a failure.
 
-Handoff requires native `StepPersistence`, synchronous execution admission, and
-durable execution, recovery and checkpoint storage. Unsupported composition
-raises `CAPABILITY_REQUIRED_MISSING` before closing the Runtime. Runtime coordinates
+Handoff requires durable execution and checkpoint storage, and every active
+producer must have been admitted with native restart checkpoints. Eligibility
+uses those admitted guarantees, not the startup or current feature declarations;
+an idle Runtime does not require a checkpoint capability. An unfinished admission
+raises retryable `RUNTIME_DEPENDENCY_NOT_READY`; retry after admission settles.
+Volatile pending turns and producers without a checkpoint guarantee raise
+`CAPABILITY_REQUIRED_MISSING`. These rejections leave the Runtime usable. Runtime coordinates
 its bound Evaluation and Task domains before releasing Agent execution and owned
 Persistence. For independently opened domains, close or hand off dependent Task
 engines before handing off the Agent Runtime they borrow. A handoff cannot
@@ -1607,31 +1650,31 @@ async with Runtime.open("service-runtime", storage=storage,
     ...
 ```
 
-`PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Advanced callers can open Persistence independently, use `Runtime.attach(persistence=...)`, and pass the same Persistence to TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
-binding metadata; portable PersistenceStorage restore therefore requires the
-corresponding Asset history to remain available through the AssetStore supplied
-when the Runtime is reopened.
+`PersistenceStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Persistence.open()` owns the storage composition. Advanced callers can open Persistence independently, use `Runtime.attach(persistence=...)`, and pass the same Persistence to TaskEngine, `History.open(persistence=...)` and `Snapshot.create(persistence=...)`; readers do not need Agent features or activate executors. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `PersistenceStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `PersistenceStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Snapshots include Persistence-owned objects only. Skill and MCP resource bytes remain Asset-owned and are not copied into Persistence snapshots. Reopened executions resolve current declarations through the supplied AssetStore; retained tool results and effect receipts remain original. Keep the corresponding AssetStore available for resource reads.
 
-For a native checkpoint store in the same SQL resource as Runtime control state,
-open Persistence first and borrow its Execution route through the public factory:
+For native checkpoints in the same SQL resource as Runtime control state,
+register the project capability. Runtime creates and owns the adapter for both
+`open()` and `attach()`; explicit `store=...` values remain caller-owned.
 
 ```python
-from pydantic_ai_harness.step_persistence import StepPersistence
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.capability import StepPersistenceCapability
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 
+features = RuntimeFeatures("checkpointed-runtime")
+features.capability(StepPersistenceCapability())
+# Add the application's model and Agent declarations to these features.
 storage = PersistenceStorage.from_root(runtime_root, exclusive_writer=True)
-async with Persistence.open("service-runtime", storage=storage) as persistence:
-    steps = await persistence.create_step_store()
-    try:
-        features = RuntimeFeatures("checkpointed-runtime")
-        features.capability(StepPersistence(store=steps, capture_frontier=True))
-        # Add the application's model and Agent declarations to these features.
-        async with Runtime.attach(persistence=persistence, features=features) as runtime:
-            ...
-    finally:
-        await steps.close()
+async with Runtime.open("service-runtime", storage=storage, features=features) as runtime:
+    ...
 ```
+
+`StepPersistenceCapability` binds the existing native step hooks and defaults to
+`capture_frontier=True`. Advanced hosts can still call
+`await persistence.create_step_store()` and supply that borrowed adapter through
+`StepPersistenceCapability(store=steps)` or native `StepPersistence(store=steps)`.
+Such hosts close their own adapters after Runtime exits. Native subclasses retain
+their custom hooks.
 
 The adapter uses Persistence's namespace and tenant and borrows the exact
 Execution SQL context, including a local SQLite writer owner when configured.
@@ -1650,6 +1693,10 @@ provisioned explicitly. Missing or incompatible native tables fail at the first
 affected operation; deployment checks can use `validate_sql` with
 `build_step_sql_metadata()` from `linktools.ai.persistence.schema`. Existing
 pre-release checkpoint records and archives are not implicitly migrated.
+The local CLI now stores native steps in `runtime.db`; previous standalone
+`steps.db` records are not imported or read as a fallback. Existing `runtime.db`
+files without the current native schema require explicit provisioning or a new
+local root. Reopening a current database is not a migration of earlier CLI data.
 
 Native `StepPersistence(store=...)` is another caller-owned backup resource.
 Quiesce writers and back up its database consistently with Runtime control state.
@@ -1780,7 +1827,7 @@ from linktools.ai import (
 Package-specific public contracts remain available from their owning packages,
 for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 `linktools.ai.capability`, `linktools.ai.workspace`, and `linktools.ai.runtime`.
-`RuntimeFeatures` and `RuntimeFeaturesCapture` are owned by `linktools.ai.runtime`;
+`RuntimeFeatures`, `RuntimeFeaturesSource` and `RuntimeFeaturesResolution` are owned by `linktools.ai.runtime`;
 `RuntimeFeatures` is also available from the top-level composition API.
 Other package contracts include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
 MCP selector helpers, `WorkspaceToolDeclaration`, and the

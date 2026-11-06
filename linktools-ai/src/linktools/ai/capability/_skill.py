@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Vendor-neutral Skill definition and function-call capability."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -131,6 +131,8 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         sources: SkillSourceRegistry,
         *,
         resource_paths: Mapping[str, "str | None"] | None = None,
+        discover: Callable[[], Awaitable[Sequence[SkillDefinition]]] | None = None,
+        mounted_resources: Mapping[str, SkillSourceRef] | None = None,
     ) -> None:
         self.id = "linktools.ai.skills"
         if not isinstance(sources, SkillSourceRegistry):
@@ -142,9 +144,10 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if len(ids) != len(set(ids)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         self._skills = ordered
-        self._by_id = {item.id: item for item in ordered}
         self._sources = sources
-        self._resource_paths = dict(resource_paths or {})
+        self._resource_paths = None if resource_paths is None else dict(resource_paths)
+        self._mounted_resources = None if mounted_resources is None else dict(mounted_resources)
+        self._discover = discover
 
     def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
         toolset = FunctionToolset[AgentContext[object]](id=self.id)
@@ -220,21 +223,31 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         return None
 
     def get_instructions(self) -> str | None:
-        if not self._skills:
+        if not self._skills and self._discover is None:
             return None
         lines = [
             "The following skills are available for this agent run.",
             "Use `load_skill` to load the instructions for a skill when it is relevant.",
         ]
+        if self._discover is not None:
+            lines.append("Call `list_skills` to discover current skills, including skills added or edited during this run.")
         lines.extend(
             f"- {item.id}: {_skill_description(item.spec)}" for item in self._skills
         )
         return "\n".join(lines)
 
+    async def _current_skills(self) -> tuple[SkillDefinition, ...]:
+        if self._discover is None:
+            return self._skills
+        values = tuple(sorted(await self._discover(), key=lambda item: item.id))
+        if len({item.id for item in values}) != len(values):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        return values
+
     async def list_skills(self) -> "list[dict[str, str]]":
         return [
             {"id": item.id, "description": _skill_description(item.spec)}
-            for item in self._skills
+            for item in await self._current_skills()
         ]
 
     async def load_skill(
@@ -242,7 +255,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         skill_id: str,
         path: "str | None" = None,
     ) -> "dict[str, str | list[str]]":
-        definition = self._by_id.get(skill_id)
+        definition = next((item for item in await self._current_skills() if item.id == skill_id), None)
         if definition is None:
             raise AIError(
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
@@ -287,8 +300,16 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         source = self._sources.resolve(source_ref.source_id)
         view = await source.inspect(source_ref)
         _validate_view(view)
-        if definition.id in self._resource_paths:
-            native_path = self._resource_paths[definition.id]
+        if self._resource_paths is not None:
+            native_path = self._resource_paths.get(definition.id)
+            if self._mounted_resources is not None:
+                mounted = self._mounted_resources.get(definition.id)
+                if mounted is None or (mounted.source_id, mounted.root) != (source_ref.source_id, source_ref.root):
+                    native_path = None
+                else:
+                    mounted_by_path = {item.path: item for item in mounted.resources}
+                    if any(mounted_by_path.get(item.path) != item for item in source_ref.resources):
+                        native_path = None
             location = (
                 SkillLocation(
                     "virtual",

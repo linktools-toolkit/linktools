@@ -35,6 +35,11 @@ class AgentCatalog:
                 safe_details={"agent_id": agent_id},
             ) from error
 
+    def observed_agent(self, agent_id: str) -> CompiledAgent | None:
+        """Return the observed declaration, not a live source lookup."""
+        validate_agent_id(agent_id)
+        return self._roots.get(agent_id)
+
     def register_binding(self, binding: AgentBinding) -> AgentBinding:
         existing = self._bindings.get(binding.binding_digest)
         if existing is not None and _same_runtime_compiled_agent(
@@ -73,16 +78,23 @@ def _same_runtime_compiled_agent(
     left: CompiledAgent,
     right: CompiledAgent,
 ) -> bool:
-    if not _same_compiled_agent(left, right) or left.model is not right.model:
+    if (
+        not _same_compiled_agent(left, right)
+        or left.model is not right.model
+        or left.spec.metadata != right.spec.metadata
+    ):
         return False
     for left_values, right_values in (
         (left.selected_tools, right.selected_tools),
         (left.selected_skills, right.selected_skills),
         (left.selected_mcp, right.selected_mcp),
         (left.selected_capabilities, right.selected_capabilities),
+        (left.runtime_contributions, right.runtime_contributions),
     ):
         if len(left_values) != len(right_values) or any(
-            left_value.value is not right_value.value
+            (left_value.kind, left_value.id, left_value.revision)
+            != (right_value.kind, right_value.id, right_value.revision)
+            or left_value.value is not right_value.value
             for left_value, right_value in zip(
                 left_values,
                 right_values,

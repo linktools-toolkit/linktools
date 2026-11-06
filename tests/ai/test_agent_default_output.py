@@ -135,7 +135,7 @@ async def test_asset_and_features_declarations_share_output_semantics() -> None:
         ).encode())
         asset_features = RuntimeFeatures("assets")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        captured = await asset_features.capture()
+        captured = await asset_features.resolve()
         asset_spec = next(item.value for item in captured.contributions if item.kind == "agent")
         features = RuntimeFeatures("declared")
         explicit = features.agent("reviewer", system_prompt="review\n", output_schema=schema, output_retries=2)

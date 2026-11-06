@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset-backed declarations captured before Agent compilation."""
+"""Resolve current Asset-backed declarations before Agent compilation."""
 
-from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
-from ..asset import AssetStore
+from ..asset import AssetStore, AssetStoreReader
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec, MCPServerSpec, RepositoryInstructionDocument
 from ._context import AgentContext
@@ -16,18 +15,17 @@ from ._declaration import BuiltinDeclarationLoader
 from ._loading import CapabilityLoadContext, CapabilityLoader
 from ._skill import SkillDefinition
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from typing import Self
-
 AppT = TypeVar("AppT")
 
 
 class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
     """Load declarations from one versioned AssetStore.
 
-    The constructor borrows a ready store; open() owns its store's lifetime.
-    RuntimeFeatures consumes this Runtime-scoped capability during capture;
+    Runtime owns the declared store when consuming RuntimeFeatures. An explicit live
+    source view instead borrows an externally managed store.
+    Declare a store for one Runtime lifetime; wrapping that same store again
+    does not create an independent resource. Share a borrowed live source across Runtimes.
+    RuntimeFeatures consumes this Runtime-scoped capability during source resolution;
     it does not participate in native Agent execution hooks.
     """
 
@@ -37,30 +35,33 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         if not isinstance(store, AssetStore):
             raise TypeError("store must be AssetStore")
         self._store = store
+        self._store_claimed = False
         self._loaders: dict[str, CapabilityLoader[AppT]] = {
             kind: BuiltinDeclarationLoader(kind) for kind in ("agent", "skill", "mcp", "rule")
         }
 
-    @classmethod
-    @asynccontextmanager
-    async def open(cls, store: AssetStore) -> "AsyncIterator[Self]":
-        """Initialize and close the store around capture and all Runtime use."""
-        capability = cls(store)
-        try:
-            await store.initialize()
-            yield capability
-        except BaseException as primary_error:
-            try:
-                await store.close()
-            except BaseException as cleanup_error:
-                raise primary_error from cleanup_error
-            raise
-        else:
-            await store.close()
+    @property
+    def reader(self) -> AssetStoreReader:
+        """Return the version-reading source used by Runtime resource adapters."""
+        return self._store
+
+    def claim_store(self) -> AssetStore:
+        """Reserve this declaration for one Runtime before initialization."""
+        if self._store_claimed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                          "Asset declaration already belongs to an active Runtime")
+        self._store_claimed = True
+        return self._store
+
+    async def close_store(self) -> None:
+        """Release a claimed store only after its close completes successfully."""
+        if self._store_claimed:
+            await self._store.close()
+            self._store_claimed = False
 
     def for_agent(self, agent: object) -> "AssetCapability[AppT]":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                      safe_details={"reason": "asset_declaration_requires_capture"})
+                      safe_details={"reason": "asset_declaration_requires_resolution"})
 
     def loader(self, kind: str, loader: CapabilityLoader[AppT]) -> CapabilityLoader[AppT]:
         """Register the sole loader for one Asset kind, replacing its slot."""
@@ -74,12 +75,12 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         self._loaders[kind] = loader
         return loader
 
-    async def capture(
+    async def load(
         self, group_id: str,
     ) -> tuple[CapabilityLoadContext, tuple[CapabilityContribution[AppT] | RepositoryInstructionDocument, ...]]:
-        """Capture all loader outputs against the same source revision."""
+        """Resolve the current loader slots against this call's Asset versions."""
         loaders = tuple(self._loaders.values())
-        context = await CapabilityLoadContext.capture(group_id, self._store)
+        context = await CapabilityLoadContext.read_current(group_id, self._store)
         entries: list[CapabilityContribution[AppT] | RepositoryInstructionDocument] = []
         for loader in loaders:
             for value in await loader.load(context):
@@ -103,8 +104,8 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
                     entries.append(value)
                 else:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        await context.verify_source_revision()
         return context, tuple(entries)
+
 
 
 def _validate_skill_source(

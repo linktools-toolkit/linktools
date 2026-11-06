@@ -3,12 +3,12 @@
 """Runtime-owned one-level subagent dispatch and cancellation."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ..agent import AgentBindingContract, AgentCatalog, AgentCompiler
+from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler
 from ..capability import SubagentDelegate
 from ..core import (
     ExecutionMode,
@@ -39,9 +39,11 @@ class SubagentDispatcher:
         compiler: AgentCompiler,
         execution: DefaultExecutionService,
         child_observer: _ChildExecutionObserver | None = None,
+        restore_binding: Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None = None,
     ) -> None:
         self._catalog = catalog
         self._compiler = compiler
+        self._restore_binding = restore_binding
         self._execution = execution
         self._child_observer = child_observer
         self._detached_tasks: set[asyncio.Task[object]] = set()
@@ -229,7 +231,8 @@ class SubagentDispatcher:
         else:
             if frozen_binding.agent_spec.id != ref.id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            child_binding = self._compiler.restore(frozen_binding)
+            child_binding = (self._compiler.restore(frozen_binding) if self._restore_binding is None
+                             else await self._restore_binding(frozen_binding))
             compiled_agent = child_binding.compiled_agent
         child_planning = (
             True

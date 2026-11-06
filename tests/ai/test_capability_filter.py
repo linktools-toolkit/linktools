@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from linktools.ai.persistence import Persistence
-"""Application capability filters narrow one captured candidate universe."""
+"""Application capability filters narrow each current candidate observation."""
 from ._runtime_test_helpers import model_features
 from linktools.ai.model import create_model
 
@@ -17,6 +17,7 @@ from linktools.ai.agent import AgentBindingContract, AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
     AssetCapability,
+    AssetSkillSource,
     CapabilityContribution,
     SkillCapability,
     SkillDefinition,
@@ -47,7 +48,7 @@ async def contributions():
         return "ready"
 
     group.tool(business, name="business")
-    return (*((await group.capture()).contributions), CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions"))))
+    return (*((await group.resolve()).contributions), CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions"))))
 
 
 def _compiler(contributions, capability_filter=None):
@@ -89,14 +90,12 @@ async def test_filter_narrows_every_supported_kind_without_filtering_root(contri
 @pytest.mark.parametrize("options", [
     {"allow_tools": ("business",)},
     {"allow_tools": ("mcp:server:*",)},
-    {"allow_skills": ("guide",)},
     {"allow_subagents": ("child",)},
     {"allow_capabilities": ("extra",)},
 ])
-async def test_explicit_filtered_selection_is_a_configuration_error(contributions, options):
-    with pytest.raises(AIError) as error:
-        _compiler(contributions, lambda agent, item: False).compile(AgentSpec("root", **options))
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+async def test_explicit_filtered_selection_is_an_empty_allowed_directory(contributions, options):
+    compiled = _compiler(contributions, lambda agent, item: False).compile(AgentSpec("root", **options))
+    assert compiled.selected_tools == compiled.selected_mcp == compiled.selected_subagents == compiled.selected_capabilities == ()
 
 
 @pytest.mark.asyncio
@@ -135,20 +134,23 @@ async def test_filtered_skill_is_absent_from_instructions_list_and_load(contribu
 
 
 @pytest.mark.asyncio
-async def test_restore_keeps_pins_and_does_not_execute_current_filter(contributions):
+async def test_restore_keeps_run_hooks_and_filters_current_callable_directory(contributions):
     compiler = _compiler(contributions)
     binding = compiler.bind(compiler.compile(AgentSpec("root")))
+    seen = []
 
-    def unexpected(agent, item):
-        raise AssertionError("restore must not invoke the application filter")
+    def include(agent, item):
+        seen.append(item.kind)
+        return False
 
-    restored = _compiler(contributions, unexpected).restore(AgentBindingContract.from_payload(binding.binding_contract.to_payload()))
+    restored = _compiler(contributions, include).restore(AgentBindingContract.from_payload(binding.binding_contract.to_payload()))
     assert restored.binding_digest == binding.binding_digest
     assert restored.compiled_agent.selected_subagents == ("child",)
-    assert restored.compiled_agent.skill_definitions == binding.compiled_agent.skill_definitions
-    assert restored.compiled_agent.selected_tools == binding.compiled_agent.selected_tools
-    assert restored.compiled_agent.selected_mcp == binding.compiled_agent.selected_mcp
+    assert restored.compiled_agent.skill_definitions == ()
+    assert restored.compiled_agent.selected_tools == ()
+    assert restored.compiled_agent.selected_mcp == ()
     assert restored.compiled_agent.selected_capabilities == binding.compiled_agent.selected_capabilities
+    assert set(seen) == {"tool", "skill", "mcp"}
 
 
 @pytest.mark.asyncio
@@ -156,18 +158,15 @@ async def test_runtime_wires_filter_into_roots_and_derived_agents(tmp_path):
     group = RuntimeFeatures("application", filter=lambda agent, item: item.kind != "skill")
     group.agent("root")
     group.model("default", create_model(api='openai', model='test'))
-    capture = await group.capture()
-    capture = replace(capture, contributions=(*capture.contributions, CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions")))))
-    async with Persistence.open('capability-filter-test', storage=PersistenceStorage.from_root(tmp_path)) as persistence_153, Runtime.attach(persistence=persistence_153, features=capture) as runtime:
+    group._contributions.append(CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions"))))
+    async with Persistence.open('capability-filter-test', storage=PersistenceStorage.from_root(tmp_path)) as persistence_153, Runtime.attach(persistence=persistence_153, features=group) as runtime:
         root = runtime.agents.get("root")
         assert root.derive(allow_skills=("*",)).compiled.skill_definitions == ()
-        with pytest.raises(AIError) as error:
-            root.derive(allow_skills=("guide",))
-        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        assert root.derive(allow_skills=("guide",)).compiled.skill_definitions == ()
 
 
 @pytest.mark.asyncio
-async def test_custom_asset_capture_filter_and_historical_resources():
+async def test_current_asset_filter_preserves_explicit_historical_resource_refs():
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -177,7 +176,7 @@ async def test_custom_asset_capture_filter_and_historical_resources():
         await store.put(AssetKey("skill", "guide/reference.txt"), b"Old reference")
         asset_features = RuntimeFeatures("custom")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         include = lambda agent, item: item.kind != "skill" or agent.metadata.get("role") in item.contract["metadata"]["audience"]
         compiler = _compiler(capture.contributions, include)
         agent = AgentSpec("custom-investigator", metadata={"role": "analyst"})
@@ -186,10 +185,12 @@ async def test_custom_asset_capture_filter_and_historical_resources():
         await store.put(key, b"---\nname: guide\ndescription: Guide\nmetadata:\n  linktools-revision: 2\n  audience: [reporter]\n---\nNew instructions")
         asset_features_2 = RuntimeFeatures("custom")
         asset_features_2.capability(AssetCapability(store), scope="runtime")
-        newer = await asset_features_2.capture()
+        newer = await asset_features_2.resolve()
         current = _compiler(newer.contributions, include)
         assert current.compile(agent).skill_definitions == ()
-        assert current.restore(binding.binding_contract).compiled_agent.skill_definitions == binding.compiled_agent.skill_definitions
+        assert current.restore(binding.binding_contract).compiled_agent.skill_definitions == ()
+        historical = binding.compiled_agent.skill_definitions[0].source_ref
+        assert await AssetSkillSource(historical.source_id, store).read(historical, "reference.txt") == b"Old reference"
     finally:
         await store.close()
 
@@ -227,7 +228,7 @@ async def test_runtime_scope_is_captured_but_never_agent_selected_or_filtered():
     spec = group.agent("root")
     group.capability(_ExtraCapability("selected"), scope="agent")
     group.capability(_ExtraCapability("host"), scope="runtime", revision=2)
-    capture = await group.capture()
+    capture = await group.resolve()
     seen = []
 
     def include(_agent, item):
@@ -267,7 +268,7 @@ async def test_filter_configuration_is_captured_and_replace_preserves_source():
 
         asset_features = CustomFeatures("filtered",  filter=policy)
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         assert capture.filter is policy
         assert "filter=" not in repr(capture)
         seen_metadata = []
@@ -281,15 +282,14 @@ async def test_filter_configuration_is_captured_and_replace_preserves_source():
         assert filtered.contributions is capture.contributions
         assert filtered.asset_reader is capture.asset_reader
         assert filtered.source_revision == capture.source_revision
-        await filtered.verify_source_revision()
         compiler = _compiler(filtered.contributions, filtered.filter)
         binding = compiler.bind(compiler.compile(AgentSpec("root", metadata={"role": "analyst"})))
         assert seen_metadata == [["analyst"]]
         assert calls == []
         compiler.restore(binding.binding_contract)
-        assert seen_metadata == [["analyst"]]
-        compiler.compile(AgentSpec("new", metadata={"role": "analyst"}))
         assert seen_metadata == [["analyst"], ["analyst"]]
+        compiler.compile(AgentSpec("new", metadata={"role": "analyst"}))
+        assert seen_metadata == [["analyst"], ["analyst"], ["analyst"]]
         assert "filter" not in binding.binding_contract.to_payload()
     finally:
         await store.close()
@@ -300,7 +300,7 @@ async def test_filter_configuration_rejects_invalid_values_and_old_runtime_param
     for invalid in (False, 1, "policy"):
         with pytest.raises(TypeError, match="filter must be callable"):
             RuntimeFeatures("invalid", filter=invalid)
-        capture = await RuntimeFeatures("valid").capture()
+        capture = await RuntimeFeatures("valid").resolve()
         with pytest.raises(TypeError, match="filter must be callable"):
             replace(capture, filter=invalid)
     with pytest.raises(TypeError, match="capability_filter"):

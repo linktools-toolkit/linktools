@@ -25,6 +25,8 @@ from ..core import (
     canonical_sha256,
     idempotency_key_digest,
     normalize_correlation,
+    normalize_tool_effects,
+    ToolEffects,
     principal_identity_payload,
     validate_idempotency_key,
     validate_lease_owner,
@@ -714,8 +716,10 @@ class TaskGraphRequest:
     limits: TaskGraphLimits = field(default_factory=TaskGraphLimits)
     correlation: CorrelationData = field(default_factory=dict)
     budget: RunBudget | None = None
+    tool_effects: ToolEffects = "live"
 
     def __post_init__(self) -> None:
+        normalize_tool_effects(self.tool_effects)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
@@ -728,12 +732,14 @@ def _task_graph_request_digest(
     principal: Principal,
     limits: TaskGraphLimits,
     budget: RunBudget | None = None,
+    tool_effects: ToolEffects = "live",
 ) -> str:
     return canonical_sha256(
         {
             "principal": principal_identity_payload(principal),
             "graph_id": graph.graph_id,
             **({"budget": budget.digest_payload()} if budget is not None else {}),
+            **({"tool_effects": tool_effects} if tool_effects != "live" else {}),
             "nodes": [
                 node.to_mapping()
                 for node in sorted(graph.nodes, key=lambda item: item.node_id)
@@ -775,8 +781,10 @@ class TaskGraphAdmission:
     correlation: CorrelationData = field(default_factory=dict)
     budget: RunBudget | None = None
     budget_scope_id: str | None = None
+    tool_effects: ToolEffects = "live"
 
     def __post_init__(self) -> None:
+        normalize_tool_effects(self.tool_effects)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if (
@@ -803,11 +811,12 @@ class TaskGraphAdmission:
             request.limits,
             idempotency_key_digest(request.idempotency_key),
             _task_graph_request_digest(
-                request.graph, request.principal, request.limits, request.budget
+                request.graph, request.principal, request.limits, request.budget, request.tool_effects
             ),
             request.correlation,
             request.budget,
             None if request.budget is None else "graph:" + request.graph.graph_id,
+            request.tool_effects,
         )
 
     def launch(self) -> TaskGraphLaunch:
@@ -826,7 +835,7 @@ class TaskGraphAdmission:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         graph.validate_limits(self.limits)
         if (
-            _task_graph_request_digest(graph, self.principal, self.limits, self.budget)
+            _task_graph_request_digest(graph, self.principal, self.limits, self.budget, self.tool_effects)
             != self.initial_request_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

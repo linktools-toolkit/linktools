@@ -534,10 +534,10 @@ backend contract, so this reduces same-turn duplicate work rather than promising
 warm historical reads without source I/O. Closing the store drains admitted
 version reads before closing their backends.
 
-A capability capture retains its existing immutable-byte memo for that capture
-only. Concurrent first reads of a captured key coordinate its fill; unrelated
-keys can still load independently. This does not share completed values across
-captures or expand the capture's lifetime.
+A capability resolution retains an immutable-byte memo for that resolution
+only. Concurrent first reads of a selected key coordinate its fill; unrelated
+keys can still load independently. Later resolutions read current declarations
+and do not reuse this memo or require the source revision to remain unchanged.
 
 ## Freshness and cancellation
 

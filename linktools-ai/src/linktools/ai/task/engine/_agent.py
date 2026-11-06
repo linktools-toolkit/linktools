@@ -88,15 +88,16 @@ class AgentTaskRunner(Generic[AppT]):
         self.id = task.id
         self.revision = task.revision
         self._persistence_owner = persistence
-        compiled, binding_contract = port.compiled, port.binding_contract
+        binding_contract = port.binding_contract
+        spec = binding_contract.agent_spec
         self._agent_binding = binding_contract
         self._task_admissions = task_admissions
         self._budgets = budgets
-        self._agent_id = compiled.spec.id
-        self._agent_revision = compiled.spec.revision
+        self._agent_id = spec.id
+        self._agent_revision = spec.revision
         self.input_mode = "projected" if task.build_input is not None else "literal"
-        self._planning_default = compiled.spec.planning
-        self._thinking_default = compiled.spec.thinking
+        self._planning_default = spec.planning
+        self._thinking_default = spec.thinking
         self._binding_contract = ImmutableJsonMapping(binding_contract.to_payload())
         self._binding_digest = AgentBindingContract.from_payload(self._binding_contract).binding_digest
         self._build_input = task.build_input
@@ -215,6 +216,7 @@ class AgentTaskRunner(Generic[AppT]):
             correlation=invocation.correlation,
             dependency_hold_id=dependency_hold_id,
             budget_scope_id=admission.budget_scope_id,
+            tool_effects=admission.tool_effects,
             requires_task_invocation_capture=True,
             input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
         )

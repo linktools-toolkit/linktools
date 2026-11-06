@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime feature declarations and their immutable captured composition."""
+"""Runtime feature registrations and current source resolution."""
 
 import functools
 import inspect
@@ -56,8 +56,8 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeFeaturesCapture(Generic[AppT]):
-    """Declarations and a versioned Asset reader captured from one revision."""
+class RuntimeFeaturesResolution(Generic[AppT]):
+    """Declarations and read-only Asset versions from one resolution."""
 
     group_id: str
     contributions: tuple[CapabilityContribution[AppT], ...]
@@ -77,7 +77,7 @@ class RuntimeFeaturesCapture(Generic[AppT]):
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
-            raise ValueError("capture group_id must be non-empty")
+            raise ValueError("resolution group_id must be non-empty")
         if not isinstance(self.limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
         _validate_filter(self.filter)
@@ -102,21 +102,27 @@ class RuntimeFeaturesCapture(Generic[AppT]):
 
     @property
     def asset_reader(self) -> "AssetStoreReader | None":
-        """Return read-only access to this capture's source resources."""
+        """Return read-only access to this resolution's source resources."""
         return self._asset_reader
 
-    async def verify_source_revision(self) -> None:
-        """Fail if the declaration source changed after this capture was made."""
-        if self._asset_reader is None:
-            return
-        if not isinstance(self.source_revision, StorageRevision):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if await self._asset_reader.current_revision() != self.source_revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeFeaturesSource(Generic[AppT]):
+    """Borrow a live declaration source whose resources the caller manages."""
+
+    declaration: "RuntimeFeatures[AppT]"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.declaration, RuntimeFeatures):
+            raise TypeError("declaration must be RuntimeFeatures")
+
+    async def resolve(self) -> "RuntimeFeaturesResolution[AppT]":
+        return await self.declaration.resolve()
 
 
 class RuntimeFeatures(Generic[AppT]):
-    """Register and capture one named set of runtime candidate definitions."""
+    """Register and resolve one named set of runtime candidate definitions."""
 
     def __init__(
         self,
@@ -136,9 +142,6 @@ class RuntimeFeatures(Generic[AppT]):
             raise TypeError("limits must be PromptLimits")
         self._filter = filter
         self._id = group_id
-        self._asset_capability: AssetCapability[AppT] | None = None
-        self._tool_responses_registered = False
-        self._workspace: Workspace | None = None
         self._workspace_factory = workspace_factory
         self._contributions: list[CapabilityContribution[AppT]] = []
         self._models: dict[str, ModelBinding | Callable[[], ModelBinding]] = {}
@@ -153,12 +156,35 @@ class RuntimeFeatures(Generic[AppT]):
         return self._defaults
 
     @property
+    def filter(self) -> Callable[[AgentSpec, CapabilityContribution[object]], bool] | None:
+        return self._filter
+
+    @filter.setter
+    def filter(self, value: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None) -> None:
+        _validate_filter(value)
+        self._filter = value
+
+    @property
+    def assets(self) -> "AssetCapability[AppT] | None":
+        """Return the declared Asset source for Runtime composition."""
+        return _runtime_declarations(self._contributions)[0]
+
+    @property
     def workspace(self) -> "Workspace | None":
-        return self._workspace
+        filesystem = _runtime_declarations(self._contributions)[1]
+        return None if filesystem is None else filesystem.workspace
 
     @property
     def workspace_factory(self) -> "Callable[..., WorkspaceBackend] | None":
         return self._workspace_factory
+
+    def _register(self, contribution: CapabilityContribution[AppT]) -> None:
+        identity = (contribution.kind, contribution.id)
+        for index, current in enumerate(self._contributions):
+            if (current.kind, current.id) == identity:
+                self._contributions[index] = contribution
+                return
+        self._contributions.append(contribution)
 
     def model(self, name: str, binding: ModelBinding | Callable[[], ModelBinding]) -> None:
         """Declare a route; synchronous loaders resolve one binding for each agent run."""
@@ -188,7 +214,7 @@ class RuntimeFeatures(Generic[AppT]):
             tool_class="business",
             base=adapted.metadata,
         )
-        self._contributions.append(
+        self._register(
             CapabilityContribution.from_opaque(
                 "tool",
                 tool_name,
@@ -219,96 +245,10 @@ class RuntimeFeatures(Generic[AppT]):
             "capability", capability_id, capability, revision=revision,
             config=config, scope=scope,
         )
-        filesystem_capabilities: list[FileSystem] = []
-        shells: list[ShellCapability] = []
-        memories: list[MemoryCapability] = []
-        asset_capabilities: list[AssetCapability[AppT]] = []
-        response_capabilities: list[ToolResponsesCapability[AppT]] = []
-
-        def collect(value: AbstractCapability[object]) -> None:
-            if isinstance(value, WrapperCapability):
-                collect(value.wrapped)
-            elif isinstance(value, CombinedCapability):
-                for child in value.capabilities:
-                    collect(child)
-            elif isinstance(value, ToolResponsesCapability):
-                response_capabilities.append(value)
-            elif isinstance(value, AssetCapability):
-                asset_capabilities.append(value)
-            elif isinstance(value, ShellCapability):
-                shells.append(value)
-            elif isinstance(value, MemoryCapability):
-                memories.append(value)
-            elif isinstance(value, FileSystem):
-                filesystem_capabilities.append(value)
-            else:
-                def collect_leaf(leaf: AbstractCapability[object]) -> None:
-                    if isinstance(leaf, ReferencedInputsCapability) and scope != "agent":
-                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                                      "ReferencedInputsCapability requires Agent scope")
-                    if isinstance(leaf, ToolResponsesCapability):
-                        response_capabilities.append(leaf)
-                    elif isinstance(leaf, ShellCapability):
-                        shells.append(leaf)
-                    elif isinstance(leaf, MemoryCapability):
-                        memories.append(leaf)
-                    elif isinstance(leaf, FileSystem):
-                        filesystem_capabilities.append(leaf)
-                    elif isinstance(leaf, AssetCapability):
-                        asset_capabilities.append(leaf)
-
-                value.apply(collect_leaf)
-
-        collect(capability)
-        if response_capabilities:
-            if scope != "runtime":
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "ToolResponsesCapability requires Runtime scope")
-            if self._tool_responses_registered or len(response_capabilities) != 1:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        if asset_capabilities:
-            if scope != "runtime":
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                              "AssetCapability requires Runtime scope")
-            if self._asset_capability is not None or len(asset_capabilities) != 1:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        runtime_tools: list[CapabilityContribution[AppT]] = []
-        if memories:
-            if scope != "runtime":
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "MemoryCapability requires Runtime scope")
-            for memory in memories:
-                runtime_tools.extend(
-                    CapabilityContribution.from_opaque("tool", tool.name, tool)
-                    for tool in memory.tool_definitions()
-                )
-        if shells:
-            if scope != "runtime":
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "ShellCapability requires Runtime scope")
-            for shell in shells:
-                runtime_tools.extend(
-                    CapabilityContribution.from_opaque("tool", tool.name, tool)
-                    for tool in shell.tool_definitions()
-                )
-        if filesystem_capabilities:
-            if scope != "runtime":
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                              "FileSystem requires Runtime scope")
-            if self._workspace is not None or len(filesystem_capabilities) != 1:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            workspace_capability = filesystem_capabilities[0]
-            declarations = {item.name: item for item in filesystem_tool_declarations()}
-            tools = tuple(
-                CapabilityContribution.from_opaque(
-                    "tool", tool.name, tool, revision=declarations[tool.name].revision,
-                )
-                for tool in workspace_capability.tool_definitions()
-            )
-            self._workspace = workspace_capability.workspace
-            runtime_tools.extend(tools)
-        self._contributions.extend(runtime_tools)
-        if asset_capabilities:
-            self._asset_capability = asset_capabilities[0]
-        self._tool_responses_registered |= bool(response_capabilities)
-        self._contributions.append(contribution)
+        previous = [item for item in self._contributions
+                    if (item.kind, item.id) != (contribution.kind, contribution.id)]
+        _runtime_declarations((*previous, contribution))
+        self._register(contribution)
         return capability
 
     def agent(
@@ -332,7 +272,7 @@ class RuntimeFeatures(Generic[AppT]):
         description: "str | None" = None,
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AgentSpec:
-        """Register one declarative Agent before Runtime.open()."""
+        """Register one declarative Agent for subsequent resolutions."""
         CapabilityContribution.validate_revision(revision)
         values = (instructions,) if isinstance(instructions, str) else tuple(instructions)
         spec = AgentSpec(
@@ -354,27 +294,30 @@ class RuntimeFeatures(Generic[AppT]):
             metadata={} if metadata is None else metadata,
             revision=revision,
         )
-        self._contributions.append(CapabilityContribution.from_declaration(spec))
+        self._register(CapabilityContribution.from_declaration(spec))
         return spec
 
     def mcp(self, server: MCPServerSpec) -> MCPServerSpec:
-        """Register an MCP declaration, binding any resources during capture."""
+        """Register an MCP declaration, binding resources in each resolution."""
         if not isinstance(server, MCPServerSpec):
             raise TypeError("server must be MCPServerSpec")
-        self._contributions.append(CapabilityContribution.from_declaration(server))
+        self._register(CapabilityContribution.from_declaration(server))
         return server
 
-    async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
-        """Capture registrations and declarations at one Asset revision."""
+    async def resolve(self) -> "RuntimeFeaturesResolution[AppT]":
+        """Resolve current registrations, routes and loaders for one caller."""
+        registered = tuple(self._contributions)
+        assets, _, _, _ = _runtime_declarations(registered)
         limits = self._limits
         models = MappingProxyType(dict(self._models))
-        contributions = list(tuple(self._contributions))
+        capability_filter = self._filter
+        contributions = list(registered)
         instruction_documents: list[RepositoryInstructionDocument] = []
         context: CapabilityLoadContext | None = None
         source_revision: StorageRevision | None = None
         asset_reader: AssetStoreReader | None = None
-        if self._asset_capability is not None:
-            context, loaded = await self._asset_capability.capture(self._id)
+        if assets is not None:
+            context, loaded = await assets.load(self._id)
             for value in loaded:
                 if isinstance(value, RepositoryInstructionDocument):
                     instruction_documents.append(value)
@@ -382,22 +325,23 @@ class RuntimeFeatures(Generic[AppT]):
                     contributions.append(value)
             source_revision = context.source_revision
             asset_reader = context.asset_reader
-        captured_items = capture_contributions(contributions, context=context)
-        capture = RuntimeFeaturesCapture(
+        runtime_tools, _, workspace = _project_capabilities(contributions)
+        captured_items = capture_contributions((*contributions, *runtime_tools), context=context)
+        capture = RuntimeFeaturesResolution(
             self._id,
             captured_items,
             source_revision,
-            self._workspace,
+            workspace,
             RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
             models=models,
             workspace_factory=self._workspace_factory,
             limits=limits,
             defaults=self._defaults,
-            filter=self._filter,
+            filter=capability_filter,
         )
         _logger.info(
-            "capability group captured: group=%s contributions=%d instructions=%d "
+            "capability group resolved: group=%s contributions=%d instructions=%d "
             "source_revision=%s",
             self._id,
             len(captured_items),
@@ -405,6 +349,83 @@ class RuntimeFeatures(Generic[AppT]):
             None if source_revision is None else source_revision.value,
         )
         return capture
+
+    def borrow(self) -> "RuntimeFeaturesSource[AppT]":
+        """Expose live declarations without transferring their resource ownership."""
+        return RuntimeFeaturesSource(self)
+
+
+def _runtime_declarations(contributions):
+    """Find host resources without materializing their tool schemas."""
+    filesystem_capabilities: list[FileSystem] = []
+    shells: list[ShellCapability] = []
+    memories: list[MemoryCapability] = []
+    asset_capabilities: list[AssetCapability] = []
+    response_capabilities: list[ToolResponsesCapability] = []
+    def collect(value: AbstractCapability[object]) -> None:
+        if isinstance(value, WrapperCapability):
+            collect(value.wrapped)
+        elif isinstance(value, CombinedCapability):
+            for child in value.capabilities:
+                collect(child)
+        elif isinstance(value, ToolResponsesCapability):
+            response_capabilities.append(value)
+        elif isinstance(value, AssetCapability):
+            asset_capabilities.append(value)
+        elif isinstance(value, ShellCapability):
+            shells.append(value)
+        elif isinstance(value, MemoryCapability):
+            memories.append(value)
+        elif isinstance(value, FileSystem):
+            filesystem_capabilities.append(value)
+        else:
+            def collect_leaf(leaf: AbstractCapability[object]) -> None:
+                if isinstance(leaf, ReferencedInputsCapability) and scope != "agent":
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                                  "ReferencedInputsCapability requires Agent scope")
+                if isinstance(leaf, ToolResponsesCapability):
+                    response_capabilities.append(leaf)
+                elif isinstance(leaf, ShellCapability):
+                    shells.append(leaf)
+                elif isinstance(leaf, MemoryCapability):
+                    memories.append(leaf)
+                elif isinstance(leaf, FileSystem):
+                    filesystem_capabilities.append(leaf)
+                elif isinstance(leaf, AssetCapability):
+                    asset_capabilities.append(leaf)
+
+            value.apply(collect_leaf)
+    for contribution in contributions:
+        if contribution.kind != "capability":
+            continue
+        scope = contribution.scope
+        before = tuple(map(len, (filesystem_capabilities, shells, memories, asset_capabilities, response_capabilities)))
+        collect(contribution.value)
+        after = tuple(map(len, (filesystem_capabilities, shells, memories, asset_capabilities, response_capabilities)))
+        if scope != "runtime" and before != after:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                          "host capabilities require Runtime scope")
+    if any(len(values) > 1 for values in (filesystem_capabilities, asset_capabilities, response_capabilities)):
+        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+    return (asset_capabilities[0] if asset_capabilities else None,
+            filesystem_capabilities[0] if filesystem_capabilities else None,
+            tuple(shells), tuple(memories))
+
+
+def _project_capabilities(contributions):
+    """Materialize current host tools once for this resolution."""
+    assets, filesystem, shells, memories = _runtime_declarations(contributions)
+    tools = []
+    for capability in (*memories, *shells):
+        tools.extend(CapabilityContribution.from_opaque("tool", tool.name, tool)
+                     for tool in capability.tool_definitions())
+    workspace = None
+    if filesystem is not None:
+        workspace = filesystem.workspace
+        declarations = {item.name: item for item in filesystem_tool_declarations()}
+        tools.extend(CapabilityContribution.from_opaque("tool", tool.name, tool,
+                     revision=declarations[tool.name].revision) for tool in filesystem.tool_definitions())
+    return tuple(tools), assets, workspace
 
 
 def _validate_filter(value: object) -> None:
@@ -502,4 +523,4 @@ def _validate_tool_effect_policy(effect_policy: str, plan_safe: bool) -> None:
 
 
 
-__all__ = ["RuntimeFeatures", "RuntimeFeaturesCapture"]
+__all__ = ["RuntimeFeatures", "RuntimeFeaturesSource", "RuntimeFeaturesResolution"]

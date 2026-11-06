@@ -72,7 +72,7 @@ function deferred(path){
 let forkAttempts=0,cancelAttempts=0,endMode=null;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
-  calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
+  calls.push({key,method,body,signal:options.signal,query:Object.fromEntries(url.searchParams)});
   if(networkFailures.has(method+' '+key))throw new Error('Runtime read unavailable');
   if(delays.has(method+' '+key)){const pending=delays.get(method+' '+key);pending.started();return pending.promise;}
   if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
@@ -124,6 +124,10 @@ const moduleURL=source=>'data:text/javascript;base64,'+Buffer.from(source).toStr
 const markdownURL=moduleURL(readFileSync(resolve(root,'markdown-it.js'),'utf8'));
 const messageURL=moduleURL(readFileSync(resolve(root,'message.js'),'utf8').replace("'./markdown-it.js'",JSON.stringify(markdownURL)));
 const source=readFileSync(resolve(root,'app.js'),'utf8').replace("'./console.js'",JSON.stringify(coreURL)).replace("'./message.js'",JSON.stringify(messageURL));
+if(process.argv[3]==='unavailable') {
+  hash='#session=missing&execution=old-run';
+  detailResponses.set('/api/sessions/missing',()=>response({code:'AUTHORIZATION_DENIED'},404));
+}
 await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 // Stale callbacks without a returned action promise have no positive DOM change.
 const settle=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,10));};
@@ -153,6 +157,120 @@ async function detail(name,pattern){
 }
 await until('initial session list',()=>node('list').children.length===2);
 assert.equal(node('list').children.length,2);
+if(process.argv[3]==='unavailable') {
+  const denied=()=>response({error_code:'AUTHORIZATION_DENIED'},404);
+  await until('restored unavailable session',()=>node('conversation-title').textContent==='Conversation unavailable');
+  assert.equal(node('send').disabled,true);assert.equal(node('prompt').disabled,true);
+  assert.equal(node('current-status').textContent,'Conversation unavailable');
+  assert.match(node('conversation').textContent,/current Runtime/);
+  assert.ok(!calls.some(call=>call.method==='POST' || call.key.includes('old-run')),'restoring an unavailable session never creates it or loads its execution');
+  node('prompt').value='Keep this draft';await node('composer').requestSubmit();
+  assert.ok(!calls.some(call=>call.method==='POST'),'programmatic send also requires loaded session metadata');
+  await select('#session=a');
+  assert.equal(node('send').disabled,false);assert.match(node('conversation').textContent,/a answer/);
+  node('prompt').value='Retained draft';
+  sessions.get('a').active_execution_id='live-run';executions.set('live-run',{...info('live-run','a'),status:'STARTED'});streamBlocks.set('live-run',{});
+  await select('#session=a');await until('live observation opened',()=>Boolean(streamBlocks.get('live-run').controller));
+  const stream=calls.findLast(call=>call.key==='/api/executions/live-run/events');
+  detailResponses.set('/api/sessions/a',denied);
+  await select('#session=a');
+  assert.equal(stream.signal.aborted,true,'same-session reopen denial stops its existing observation');
+  assert.equal(node('current-status').textContent,'Conversation unavailable');
+  assert.equal(node('send').disabled,true);assert.equal(node('cancel').hidden,true);
+  assert.doesNotMatch(node('conversation').textContent,/a answer/);assert.equal(node('session-details').textContent,'');
+  assert.equal(node('prompt').value,'Retained draft');
+  const readCount=calls.length;await settle();assert.equal(calls.length,readCount,'unavailable resources do not restart observation');
+  detailResponses.delete('/api/sessions/a');sessions.get('a').active_execution_id=null;
+  await refresh();assert.equal(node('conversation-title').textContent,'Alpha');assert.equal(node('send').disabled,false);
+  assert.equal(node('prompt').value,'Retained draft');assert.match(node('conversation').textContent,/a answer/);
+  detailResponses.set('/api/sessions/a',denied);node('refresh').click();
+  await until('refresh denial clears metadata',()=>node('conversation-title').textContent==='Conversation unavailable');
+  assert.equal(node('send').disabled,true);assert.doesNotMatch(node('conversation').textContent,/a answer/);
+  // A late failure cannot clear a newer navigation or a newer successful read.
+  detailResponses.delete('/api/sessions/a');
+  const late=deferred('GET /api/sessions/a');const oldSelection=select('#session=a');await late.requested;
+  await select('#session=b');late({error_code:'AUTHORIZATION_DENIED'},404);await oldSelection;
+  assert.equal(node('conversation-title').textContent,'Beta');assert.equal(node('send').disabled,false);
+  const oldRead=deferred('GET /api/sessions/a');const pending=select('#session=a');await oldRead.requested;
+  delays.delete('GET /api/sessions/a');await refresh();oldRead({error_code:'AUTHORIZATION_DENIED'},404);await pending;
+  assert.doesNotMatch(node('notice').textContent,/AUTHORIZATION_DENIED/);
+  assert.equal(node('conversation-title').textContent,'Alpha');assert.equal(node('send').disabled,false);
+  const sdk={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},content_included:true,request:{messages:[{kind:'request',parts:[{part_kind:'user-prompt',content:'Retained model input'}]}]},response:{kind:'response',parts:[{part_kind:'text',content:'Retained model output'}]}};
+  detailResponses.set('/api/executions/a-run/models',{items:[sdk],next_cursor:null});
+  await select('#session=a');await node('native-mode').click();assert.match(node('conversation').textContent,/Retained model input/);
+  detailResponses.set('/api/executions/a-run',denied);node('refresh').click();
+  await until('original record unavailable',()=>node('execution-meta').textContent.includes('Execution unavailable'));
+  assert.doesNotMatch(node('conversation').textContent,/Retained model (input|output)/);
+  assert.match(node('conversation').textContent,/Execution unavailable/);
+  detailResponses.delete('/api/executions/a-run');await refresh();assert.match(node('conversation').textContent,/Retained model input/);
+  for(const mode of ['native-mode','activity-mode']) {
+    await select('#session=a');await node(mode).click();
+    assert.equal(node('composer').hidden,true);assert.equal(node('inspector').hidden,mode!=='activity-mode');
+    if(mode==='activity-mode')assert.equal(node('conversation-column').hidden,true);
+    detailResponses.set('/api/sessions/a',denied);node('refresh').click();
+    await until('reading mode session unavailable',()=>node('conversation-title').textContent==='Conversation unavailable');
+    assert.equal(node('composer').hidden,false);assert.equal(node('send').disabled,true);assert.equal(node('inspector').hidden,true);
+    detailResponses.delete('/api/sessions/a');await refresh();
+    assert.equal(node('conversation-title').textContent,'Alpha');assert.equal(node('send').disabled,false);
+    assert.match(node('conversation').textContent,/a answer/);assert.doesNotMatch(node('conversation').textContent,/Loading model records/);
+  }
+  // Metadata reads use the newest request for each execution, in either outcome order.
+  for(const newestFails of [false,true]) {
+    const id=newestFails?'new-denial':'new-success',old=deferred(`GET /api/executions/${id}`);
+    const pending=select(`#view=executions&execution=${id}`);await old.requested;delays.delete(`GET /api/executions/${id}`);
+    if(newestFails)detailResponses.set(`/api/executions/${id}`,denied);
+    const list=newestFails?null:deferred('GET /api/executions');node('refresh').click();
+    if(list)await list.requested;else await until('newest denial',()=>node('execution-meta').textContent.includes('Execution unavailable'));
+    old(newestFails?info(id,null):{error_code:'AUTHORIZATION_DENIED'},newestFails?200:404);await pending;
+    assert.equal(node('export').disabled,newestFails);
+    assert.match(node('execution-meta').textContent,newestFails?/Execution unavailable/:/SUCCEEDED/);
+    if(!newestFails)assert.doesNotMatch(node('notice').textContent,/AUTHORIZATION_DENIED/);
+    if(list){list({items:[...executions.values()],next_cursor:null});await settle();}
+  }
+  networkFailures.add('GET /api/executions/offline');await select('#view=executions&execution=offline');
+  assert.match(node('execution-meta').textContent,/Execution unavailable/);assert.equal(node('export').disabled,true);
+  networkFailures.delete('GET /api/executions/offline');
+  detailResponses.set('/api/executions/gone',denied);await select('#view=executions&execution=gone');
+  assert.match(node('execution-meta').textContent,/Execution unavailable/);assert.equal(node('export').disabled,true);
+  assert.equal(node('current-status').textContent,'Execution unavailable');assert.equal(node('inspector-content').textContent,'');
+  detailResponses.delete('/api/executions/gone');await refresh();assert.match(node('execution-meta').textContent,/SUCCEEDED/);
+  detailResponses.set('/api/executions/gone',denied);node('refresh').click();
+  await until('execution refresh unavailable',()=>node('execution-meta').textContent.includes('Execution unavailable'));
+  assert.equal(node('export').disabled,true);assert.equal(node('inspector-content').textContent,'');
+  // Watch denial is terminal for that observer, including with a loaded metadata record.
+  executions.set('watch-denied',{...info('watch-denied',null),status:'STARTED'});
+  detailResponses.set('/api/executions/watch-denied/events',denied);
+  await select('#view=executions&execution=watch-denied');
+  await until('watch paused',()=>node('connection').textContent.includes('Paused'));
+  assert.match(node('execution-meta').textContent,/Execution unavailable/);
+  const count=calls.filter(call=>call.key.includes('watch-denied')).length;await settle();
+  assert.equal(calls.filter(call=>call.key.includes('watch-denied')).length,count);
+  // Observer readback can update metadata without cancelling the selected turn's detail load.
+  sessions.get('a').active_execution_id='observer-run';executions.set('observer-run',{...info('observer-run','a'),status:'STARTED'});streamBlocks.set('observer-run',{});
+  await select('#session=a&execution=a-run');await node('chat-mode').click();await tab('history').click();
+  await until('observer opened',()=>Boolean(streamBlocks.get('observer-run').controller));
+  const selectionRead=deferred('GET /api/executions/observer-run');node('detail-turn').value='observer-run';const selectionPending=node('detail-turn').onchange();await selectionRead.requested;delays.delete('GET /api/executions/observer-run');
+  executions.set('observer-run',{...info('observer-run','a'),status:'SUCCEEDED'});sessions.get('a').active_execution_id=null;
+  streamBlocks.get('observer-run').controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('observer-run'))+'\n\n'));streamBlocks.get('observer-run').controller.close();
+  await until('observer completed',()=>node('connection').textContent.includes('Complete'));
+  selectionRead(executions.get('observer-run'));await selectionPending;
+  assert.match(node('inspector-content').textContent,/History marker/);
+  assert.ok(calls.some(call=>call.key==='/api/executions/observer-run/history'));
+  // A newer SSE snapshot also outranks an older failed metadata refresh.
+  sessions.get('a').active_execution_id='snapshot-run';executions.set('snapshot-run',{...info('snapshot-run','a'),status:'STARTED'});streamBlocks.set('snapshot-run',{});
+  await select('#session=a&execution=snapshot-run');await until('snapshot observer opened',()=>Boolean(streamBlocks.get('snapshot-run').controller));
+  const staleRefresh=deferred('GET /api/executions/snapshot-run');node('refresh').click();await staleRefresh.requested;delays.delete('GET /api/executions/snapshot-run');
+  streamBlocks.get('snapshot-run').controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info('snapshot-run','a'))+'\n\n'));
+  await until('new snapshot applied',()=>node('execution-meta').textContent.includes('SUCCEEDED'));
+  staleRefresh({error_code:'AUTHORIZATION_DENIED'},404);await settle();
+  assert.match(node('execution-meta').textContent,/SUCCEEDED/);assert.equal(node('export').disabled,false);
+  assert.doesNotMatch(node('notice').textContent,/AUTHORIZATION_DENIED/);
+  assert.equal(calls.findLast(call=>call.key==='/api/executions/snapshot-run/events').signal.aborted,false);
+  assert.ok(!calls.some(call=>call.method==='POST'),'all recovery remains read-only');
+  await select('#');assert.equal(node('new-session').disabled,false);await node('new-session').click();
+  assert.equal(node('new-dialog').open,true,'explicit new conversation remains available');
+  console.log('Unavailable selection contracts passed');process.exit(0);
+}
 await select('#session=a');
 assert.equal(node('conversation-title').textContent,'Alpha');
 assert.match(node('conversation').textContent,/a answer/);

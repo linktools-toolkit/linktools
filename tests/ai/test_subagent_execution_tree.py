@@ -656,7 +656,6 @@ async def test_subagent_execution_cannot_be_retried_or_forked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = object.__new__(DefaultExecutionService)
-    service._conversation = True
     child = _record(subagent=True, parent_invocation_id="delegate-call")
     monkeypatch.setattr(
         service,

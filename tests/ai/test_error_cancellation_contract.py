@@ -19,9 +19,9 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._agent_executor import (
     _cleanup_agent_run_resources,
-    _close_mcp_resources,
 )
 from linktools.ai.core import HandoffGate
+from linktools.ai.runtime._current_toolsets import _MCPToolsetScope
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
@@ -193,8 +193,10 @@ async def test_mcp_cleanup_failure_keeps_the_execution_error() -> None:
     capability = _MCPCapability("mcp", object(), FailedClient())
     execution_error = ValueError("execution failed")
 
+    scope = _MCPToolsetScope(SimpleNamespace(release_resources=lambda scope: None), None, None, None)
+    scope._mcp = (capability,)
     with pytest.raises(ValueError) as error:
-        await _close_mcp_resources((capability,), execution_error)
+        await scope.__aexit__(type(execution_error), execution_error, None)
 
     assert error.value is execution_error
     assert isinstance(error.value.__cause__, AIError)

@@ -283,21 +283,25 @@ def _group(store: AssetStore, workspace_factory) -> RuntimeFeatures[object]:
     return group
 
 
-def _assert_observation(value: object) -> dict[str, JsonValue]:
+def _assert_observation(
+    value: object, *, module: str = "captured-module", data: str = "captured-data",
+) -> dict[str, JsonValue]:
     assert isinstance(value, dict)
     observation = json.loads(value["text"])
-    assert observation["imported"] == "captured-module"
-    assert observation["data"] == "captured-data"
+    assert observation["imported"] == module
+    assert observation["data"] == data
     assert Path(observation["script"]).parent == Path(observation["cwd"])
     return observation
 
 
-def _assert_closed(log: Path, root: Path, *, retained: bool = False) -> None:
+def _assert_closed(
+    log: Path, root: Path, *, retained: bool = False, data: str = "captured-data",
+) -> None:
     values = [json.loads(path.read_text()) for path in log.glob("*.json")]
     assert values
     for value in values:
         assert value["resource_exists"] is True
-        assert value["data"] == "captured-data"
+        assert value["data"] == data
         assert Path(value["cwd"]).exists() is retained
         with pytest.raises(ProcessLookupError):
             os.kill(value["pid"], 0)
@@ -314,7 +318,7 @@ def _assert_closed(log: Path, root: Path, *, retained: bool = False) -> None:
     ("sqlite-filesystem", "local"),
     ("sqlite", "local"),
 ))
-async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
+async def test_plain_filename_uses_current_asset_package_and_preserves_history(
     backend_kind: str,
     sandbox_kind: str,
     tmp_path: Path,
@@ -334,14 +338,15 @@ async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
             await store.put(AssetKey("mcp", "probe/sibling.py"), b'IMPORTED = "new-head-module"\n')
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
-            observation = _assert_observation(result.output)
+            observation = _assert_observation(result.output, module="new-head-module", data="new-head-data")
             assert Path(observation["cwd"]).is_relative_to(temporary_root)
             assert not Path(observation["cwd"]).exists()
             execution = await runtime.executions.get(result.execution_id)
+            await store.put(AssetKey("mcp", "probe/data/value.txt"), b"later-head-data")
             history = await execution.history(include_content=True)
-            assert "captured-data" in str([item.content for item in history.items])
-            assert "new-head-data" not in str([item.content for item in history.items])
-        _assert_closed(log, temporary_root)
+            assert "new-head-data" in str([item.content for item in history.items])
+            assert "later-head-data" not in str([item.content for item in history.items])
+        _assert_closed(log, temporary_root, data="new-head-data")
 
 
 @pytest.mark.asyncio
@@ -496,7 +501,18 @@ async def test_native_directory_package_keeps_original_files(
 
 
 @pytest.mark.asyncio
-async def test_disabled_workspace_never_falls_back_to_host_stdio(tmp_path: Path) -> None:
+async def test_disabled_workspace_never_falls_back_to_host_stdio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    spawn_attempts = []
+
+    def spawn(*args: object, **kwargs: object) -> None:
+        spawn_attempts.append((args, kwargs))
+        pytest.fail("disabled workspace attempted to launch a host process")
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
     log = tmp_path / "processes"
     log.mkdir()
     async with _store("memory", tmp_path) as store:
@@ -505,7 +521,9 @@ async def test_disabled_workspace_never_falls_back_to_host_stdio(tmp_path: Path)
             async with Runtime.attach(
                 persistence=persistence, features=model_features(_ProbeModels(), _group(store, None)),
             ) as runtime:
-                with pytest.raises(AIError) as denied:
-                    await runtime.agents.get("default").start("probe")
-                assert denied.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+                execution = await runtime.agents.get("default").start("probe")
+                result = (await execution.wait(timeout_seconds=10)).result
+                assert result.status is ExecutionStatus.FAILED
+                assert result.error_code == ErrorCode.SANDBOX_UNAVAILABLE.value
         assert not tuple(log.iterdir())
+        assert spawn_attempts == []

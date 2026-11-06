@@ -168,11 +168,16 @@ async def test_native_observation_keeps_admission_argument_and_binding_checks(st
     for candidate, args, replay_safe in (
         (_bridge(state, run_id="resumed", source_run_id="run"), {"count": 4}, False),
         (_bridge(state, run_id="resumed", source_run_id="run", binding_digest="c" * 64), {"count": 3}, False),
-        (_bridge(state, run_id="resumed", source_run_id="run"), {"count": 3}, True),
     ):
         with pytest.raises(AIError) as conflict:
             await candidate.begin(tool_run_context(), call, ToolDefinition(name="create"), args, replay_safe)
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+    replayed = await _bridge(state, run_id="resumed", source_run_id="run").begin(
+        tool_run_context(), call, ToolDefinition(name="create"), {"count": 3}, True,
+    )
+    assert replayed.has_cached_result and replayed.cached_result == "original"
+    assert replayed.replay_safe is False
 
 
 @pytest.mark.asyncio

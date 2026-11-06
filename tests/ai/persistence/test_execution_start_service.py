@@ -10,7 +10,6 @@ import pytest
 from linktools.ai.persistence import Persistence
 from linktools.ai.agent import AgentBinding, AgentCompiler
 from linktools.ai.core import (
-    CommitPolicy,
     ExecutionStatus,
     Page,
     Principal,
@@ -42,8 +41,11 @@ def _binding() -> AgentBinding:
 
 
 class _BindingCatalog:
+    def __init__(self, binding: AgentBinding | None = None) -> None:
+        self._binding = binding
+
     def binding(self, digest: str) -> AgentBinding:
-        binding = _binding()
+        binding = _binding() if self._binding is None else self._binding
         assert digest == binding.binding_digest
         return binding
 
@@ -165,7 +167,7 @@ def _service(
     *,
     backend: _Launcher | None = None,
     operation_ids: object | None = None,
-    commit: CommitPolicy = CommitPolicy.sync(),
+    binding: AgentBinding | None = None,
 ) -> DefaultExecutionService:
     kwargs: dict[str, object] = {}
     if operation_ids is not None:
@@ -178,12 +180,11 @@ def _service(
         state.object_store(PersistenceDomain.EXECUTION),
         TenantAuthorizationPolicy(),
         sessions=state.conversation.sessions,
-        catalog=_BindingCatalog(),
+        catalog=_BindingCatalog(binding),
         compiler=object(),
         runtime_bridge=runtime_bridge,
         live_broker=LiveExecutionEventBroker(),
         history_reader=_History(),
-        commit=commit,
         **kwargs,
     )
 

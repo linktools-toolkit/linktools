@@ -17,7 +17,6 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ._resource_path import require_resource_path
 
-
 @dataclass(frozen=True, slots=True)
 class SkillResource:
     path: str
@@ -94,9 +93,11 @@ class SkillSource(Protocol):
 
 
 class AssetSkillSource:
-    """Read Skill resources through version references captured in SkillSourceRef."""
+    """Read Skill resources using explicit Asset version references."""
 
-    def __init__(self, source_id: str, asset_reader: AssetStoreReader) -> None:
+    def __init__(
+        self, source_id: str, asset_reader: AssetStoreReader,
+    ) -> None:
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError("skill source id must be non-empty")
         if not isinstance(asset_reader, AssetStoreReader):
