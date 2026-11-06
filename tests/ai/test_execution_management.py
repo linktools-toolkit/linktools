@@ -26,11 +26,18 @@ class _ReadPort:
         self.execution = execution
         self.identity = identity
         self.header_owner = header_owner
+        self.reads = []
 
     async def read_execution(self, execution_id, *, tenant_id):
+        self.reads.append(("execution", execution_id, tenant_id))
+        return self.execution
+
+    async def read_source_execution(self, execution_id, *, tenant_id):
+        self.reads.append(("source_execution", execution_id, tenant_id))
         return self.execution
 
     async def read_source_header(self, execution_id, *, tenant_id):
+        self.reads.append(("header", execution_id, tenant_id))
         return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, self.header_owner)
 
     async def read_header(self, execution_id, *, tenant_id):
@@ -67,21 +74,63 @@ async def test_admission_does_not_reinterpret_unknown_commit_as_started() -> Non
     assert caught.value.code is ErrorCode.EXECUTION_START_UNKNOWN
 
 
-async def test_authorization_rechecks_changed_execution_owner() -> None:
+async def test_custom_authorization_refreshes_loaded_record_and_rechecks_each_operation() -> None:
     record = replace(_execution(), principal_id="winner")
-    port = _ReadPort(record, header_owner="observed")
+    refreshed = replace(record, revision=record.revision + 1)
+    port = _ReadPort(record, header_owner="unrelated-header")
     observations = []
+    allowed = True
 
     class Authorization:
         async def authorize(self, principal, action, resource):
             observations.append((action, resource.owner_principal_id))
-            if len(observations) == 1:
-                port.header_owner = "winner"
+            if not allowed:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            port.execution = refreshed
 
     manager = ExecutionManager(port, Authorization())
+    assert await manager.load_authorized("execution", _PRINCIPAL, AuthorizationAction.EXECUTION_READ) is refreshed
+    assert port.reads == [("execution", "execution", "tenant")] * 2
+    allowed = False
+    with pytest.raises(AIError, match="AUTHORIZATION_DENIED"):
+        await manager.load_authorized("execution", _PRINCIPAL, AuthorizationAction.EXECUTION_READ)
+    assert observations == [(AuthorizationAction.EXECUTION_READ, "winner")] * 2
+    assert port.reads == [("execution", "execution", "tenant")] * 3
+
+
+async def test_default_authorization_reuses_source_record_and_rechecks_each_operation() -> None:
+    record = _execution()
+    port = _ReadPort(record, header_owner="unrelated-header")
+    manager = ExecutionManager(port, TenantAuthorizationPolicy())
     assert await manager.load_authorized("execution", _PRINCIPAL, AuthorizationAction.EXECUTION_READ) is record
-    assert observations == [(AuthorizationAction.EXECUTION_READ, "observed"),
-                            (AuthorizationAction.EXECUTION_READ, "winner")]
+    assert port.reads == [("execution", "execution", "tenant")]
+    port.execution = replace(record, principal_id="another-owner")
+    with pytest.raises(AIError, match="AUTHORIZATION_DENIED"):
+        await manager.load_authorized("execution", _PRINCIPAL, AuthorizationAction.EXECUTION_READ)
+    assert port.reads == [("execution", "execution", "tenant")] * 2
+
+
+async def test_changed_loaded_owner_is_authorized_without_unrelated_header_read() -> None:
+    record = replace(_execution(), principal_id="winner")
+    port = _ReadPort(record, header_owner="principal")
+    manager = ExecutionManager(port, TenantAuthorizationPolicy())
+    with pytest.raises(AIError, match="AUTHORIZATION_DENIED"):
+        await manager.authorize_loaded_execution(
+            record, _PRINCIPAL, AuthorizationAction.EXECUTION_READ,
+            owner_principal_id="observed",
+        )
+    assert port.reads == []
+
+
+async def test_admission_authorizes_its_one_source_record() -> None:
+    now = datetime.now(timezone.utc)
+    identity = IdempotencyRecord("execution.run", "key", "request", ResourceKind.EXECUTION,
+        "execution", IdempotencyStatus.STARTED, None, None, now, now)
+    record = _execution()
+    port = _ReadPort(record, identity)
+    manager = ExecutionManager(port, TenantAuthorizationPolicy())
+    assert await manager.resolve_admission("execution.run", "key", "request", _PRINCIPAL) == (identity, record)
+    assert port.reads == [("source_execution", "execution", "tenant")]
 
 
 async def test_remote_cancel_requires_authorization_for_changed_pending_owner() -> None:
@@ -119,3 +168,19 @@ async def test_remote_cancel_requires_authorization_for_changed_pending_owner() 
         await manager.cancel_authorized("execution", CancelExecutionRequest(_PRINCIPAL, "cancel"))
     assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
     assert not port.signalled
+
+
+async def test_cancel_authorization_reuses_its_source_record() -> None:
+    from linktools.ai.execution import CancelExecutionRequest
+
+    class SourcePort(_ReadPort):
+        def has_local_pending(self, execution_id, *, tenant_id):
+            return False
+
+    record = _execution()
+    port = SourcePort(record)
+    manager = ExecutionManager(port, TenantAuthorizationPolicy())
+    assert await manager._load_cancel_execution(
+        "execution", CancelExecutionRequest(_PRINCIPAL, "cancel"),
+    ) is record
+    assert port.reads == [("source_execution", "execution", "tenant")]

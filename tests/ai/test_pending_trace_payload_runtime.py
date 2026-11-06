@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, agent_run_id
-from linktools.ai.persistence.contracts import ExecutionHistoryState
+
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend, SqlStorageContext
@@ -132,8 +132,8 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
             assert calls == (0 if outcome == "reject_before" else 1) and len(transactions) == 1
             source = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert source.status is expected
-            head = await persistence.execution.executions.get_history_head(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert head.state is ExecutionHistoryState.SEALED and head.seal_digest is not None
+            head = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert (head.history_seal_digest is not None) and head.history_seal_digest is not None
             assert (await trace.get_agent_run(agent_run_id=run_id) is None) == (outcome == "reject_before")
         assert set(acknowledged) == set(accepted)
         assert set(execution_buffer.acknowledged) == set(execution_buffer.accepted)

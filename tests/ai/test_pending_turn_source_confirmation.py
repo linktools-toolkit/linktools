@@ -8,6 +8,7 @@ import pytest
 
 from linktools.ai.persistence import Persistence
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.execution import ExecutionRecord
 from linktools.ai.persistence.contracts import PersistenceDomain, RuntimePayloadRef
 from linktools.ai.storage import StoredPayload
 from linktools.ai.persistence.state import active_state_scope
@@ -128,7 +129,7 @@ async def test_promotion_unknown_confirms_only_original_source_receipt(tmp_path,
                 turn.reservation, expected_session=expected,
                 captured_input_context=context, producer_claim_id=claim,
             )
-            assert result is not None and result[0].revision == (3 if prepared else 1)
+            assert result is not None and result.revision == (3 if prepared else 1)
             if prepared:
                 with pytest.raises(AIError) as raised:
                     await state.commands.read_pending_turn_promotion(
@@ -168,7 +169,7 @@ async def test_promotion_concurrent_conflicting_digest_is_definite_conflict(tmp_
                         producer_claim_id="claim-" + turn.reservation.execution.execution_id,
                     ) for state, turn in zip((first, second), turns)
                 ), return_exceptions=True), 15)
-            assert len([value for value in results if isinstance(value, tuple)]) == 1, results
+            assert len([value for value in results if isinstance(value, ExecutionRecord)]) == 1, results
             errors = [value for value in results if isinstance(value, AIError)]
             assert len(errors) == 1 and errors[0].code in {ErrorCode.IDEMPOTENCY_CONFLICT, ErrorCode.SESSION_BUSY}, results
         finally:

@@ -47,6 +47,16 @@ class ConversationCursor:
     agent_run_id: str
     history_id: str | None = None
     message_count: int | None = None
+    checkpoint_sequence: int | None = None
+    projection_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.checkpoint_sequence is not None and (
+            isinstance(self.checkpoint_sequence, bool)
+            or not isinstance(self.checkpoint_sequence, int)
+            or self.checkpoint_sequence < 1
+        ):
+            raise ValueError("conversation checkpoint sequence is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,6 +438,7 @@ class SessionRepository(Protocol):
         tenant_id: str,
         execution_id: str,
         expected: ConversationCursor | None,
+        expected_session: SessionRecord | None = None,
     ) -> SessionRecord: ...
 
     async def release_execution(
@@ -449,6 +460,7 @@ class SessionRepository(Protocol):
         next_status: SessionStatus,
         closed_at: datetime | None = None,
         require_no_active: bool = False,
+        expected_owner_principal_id: str | None = None,
     ) -> SessionRecord: ...
 
     async def advance_continuation(

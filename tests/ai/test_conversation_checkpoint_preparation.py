@@ -65,10 +65,10 @@ async def test_conversation_preparation_reuses_new_run_metadata(
             domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
         assert batches[0] == batches[1]
         # New-run metadata and content existence share one group query. Replay
-        # still recaptures after source validation; range JOINs bound archive reads.
-        assert domain_counts == ([7, 7] if existing == "replay" else [2, 1])
+        # still validates the source fact; its embedded projection avoids a head reread.
+        assert domain_counts == ([6, 6] if existing == "replay" else [2, 1])
         assert counts == {
-            "absent": [3, 1], "replay": [9, 9], "head_without_run": [3, 1],
+            "absent": [3, 1], "replay": [8, 8], "head_without_run": [3, 1],
         }[existing]
         assert active_state_scope() is None
     finally:

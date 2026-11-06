@@ -22,18 +22,18 @@ class PersistenceStorage:
         coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None = None,
     ) -> None:
         _validate_storage_configuration(plan, object_store)
-        if coordination is not None and not isinstance(
-            coordination, (CacheBackend, TurnCoordinationBackend, StreamBackend),
-        ):
-            raise TypeError("coordination must implement cache, turn coordination or stream operations")
         for names in (
             ("get", "put", "delete"),
-            ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn"),
+            ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn", "enter"),
             ("open_stream", "read_stream"),
         ):
             methods = tuple(getattr(coordination, name, None) for name in names)
             if any(method is not None for method in methods) and not all(callable(method) for method in methods):
                 raise TypeError(f"coordination must implement {', '.join(names)} together")
+        if coordination is not None and not isinstance(
+            coordination, (CacheBackend, TurnCoordinationBackend, StreamBackend),
+        ):
+            raise TypeError("coordination must implement cache, turn coordination or stream operations")
         self._coordination = coordination
         self._plan = plan
         self._object_store = object_store

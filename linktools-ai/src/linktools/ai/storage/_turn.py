@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Optional atomic ownership of live turns on a borrowed cache."""
+"""Atomic ownership and backend-owned lifetimes of live turns."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from types import TracebackType
+from typing import Literal, Protocol, runtime_checkable
 
 from ._lock import Lease
 
@@ -25,15 +26,43 @@ class TurnCoordination:
 
 
 @runtime_checkable
+class TurnScope(Protocol):
+    """Single-use ownership lifetime, entered and exited by the same task.
+
+    Entry preserves claim's busy/replay/owned outcomes. Only an owned outcome
+    permits validity checks and signal waits. Validity is local and synchronous;
+    owner loss is permanent. Cancellation is delivered once and does not release
+    ownership or stop renewal. A subsequent wait can observe owner loss.
+    Exit settles renewal and releases the exact lease, without suppressing the
+    body's exception. Callers must settle their own work before exiting.
+    """
+
+    async def __aenter__(self) -> TurnCoordination | None: ...
+
+    def require_active(self) -> None:
+        """Raise AIError(STORAGE_CONFLICT) when this ownership is no longer valid."""
+        ...
+
+    async def wait_signal(self) -> Literal["owner_lost", "cancel_requested"]: ...
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
+
+
+@runtime_checkable
 class TurnCoordinationBackend(Protocol):
-    """One optional cache capability; all five methods must be implemented.
+    """One optional coordination capability; all six methods must be implemented.
 
     ``scope`` is the caller's opaque tenant-and-Runtime namespace. Session,
     request, and execution identities are isolated by that scope. A request key
     binds both its session key and request digest while the claim is live.
-    Execution and owner IDs must be fresh for every new ownership generation;
-    execution IDs must never be reused after release or expiry. Lease keys are
-    backend-owned opaque values and callers must not interpret them.
+    Execution IDs identify logical turns; owner IDs identify fresh ownership
+    generations. After release or expiry, the same logical turn may be claimed
+    by a new owner with its original session/request identity. Live claims are
+    never preempted: duplicate claims return observation, not a new lease.
+    Lease keys are backend-owned opaque values and callers must not interpret them.
 
     Implementations atomically maintain session exclusion, request replay, and
     execution lookup. Reads, duplicates, and cancellation do not renew expiry.
@@ -44,6 +73,13 @@ class TurnCoordinationBackend(Protocol):
     must never be converted into absence, contention, or permission to execute.
     This capability does not define a byte codec or require a Redis dependency.
     """
+
+    def enter(
+        self, scope: str, *, session_key: str, request_key: str,
+        request_digest: str, execution_id: str, owner_id: str,
+    ) -> TurnScope:
+        """Create a lifetime using backend-owned lease and renewal policy."""
+        ...
 
     async def claim_turn(
         self,
@@ -81,10 +117,11 @@ class TurnCoordinationBackend(Protocol):
         ...
 
     async def cancel_turn(self, scope: str, execution_id: str) -> bool:
-        """Mark this live execution cancelled; return False if it is absent.
+        """Cancel the logical execution's current owner; False means absent.
 
-        Repeating cancellation of a live target returns True. Cancellation
-        neither releases ownership nor renews its expiry.
+        A delayed cancellation also targets a recovered owner of that same
+        execution. Repeating cancellation of a live target returns True.
+        Cancellation neither releases ownership nor renews its expiry.
         """
         ...
 
@@ -122,4 +159,4 @@ class TurnSessionReader(Protocol):
         ...
 
 
-__all__ = ["TurnAdmissionReader", "TurnCoordination", "TurnCoordinationBackend", "TurnSessionReader"]
+__all__ = ["TurnAdmissionReader", "TurnCoordination", "TurnCoordinationBackend", "TurnSessionReader", "TurnScope"]

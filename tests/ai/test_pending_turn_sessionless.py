@@ -14,7 +14,7 @@ from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.contracts import (
     ExecutionTerminalCommitResult,
-    ExecutionCheckpointState,
+    ExecutionRecoveryState,
     PersistenceDomain,
     RuntimePayloadRef,
 )
@@ -52,20 +52,23 @@ def _standalone(state, **kwargs):
 
 
 async def _commit(state, turn, **kwargs):
+    if turn.commit.execution.status is ExecutionStatus.SUCCEEDED and not turn.commit.execution.durable_trace:
+        kwargs.setdefault("conversation_agent_run", turn.run)
+        kwargs.setdefault("conversation_checkpoint", turn.checkpoint)
     return await state.commands.commit_pending_turn(
         turn.reservation, turn.commit, audit_events=turn.audit_events,
-        recovery_run=turn.run, recovery_agent_run_checkpoint=turn.checkpoint, **kwargs,
+        **kwargs,
     )
 
 
 async def _conversation(state):
-    store = state.storage.conversation.sessions.state_store
-
-    async def read(transaction):
-        return (await transaction.scan_records(), await transaction.scan_facts(),
-                await transaction.scan_sequences())
-
-    return await store.read(read)
+    session = await state.storage.conversation.sessions.get(state.session.session_id, tenant_id="tenant")
+    history = await state.storage.conversation.histories.get(state.session.history_id, tenant_id="tenant")
+    sequence = await state.storage.conversation.sessions.timeline_head(state.session.session_id, tenant_id="tenant")
+    timeline = await state.storage.conversation.sessions.list_timeline_turns(
+        state.session.session_id, tenant_id="tenant", start_turn_seq=1, end_turn_seq=sequence + 1,
+    )
+    return session, history, sequence, timeline
 
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
@@ -92,9 +95,12 @@ async def test_sessionless_pending_commit_replay_and_unique_result(tmp_path: Pat
         assert result.execution.retention_closed and result.result == turn.commit.result
         if engine is not None:
             assert len(transactions) == 1 and None not in transactions
-        recovery = await state.storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
-        assert recovery is not None and recovery.state is ExecutionCheckpointState.COMPLETED
+        recovery = await state.storage.execution.executions.get("execution", tenant_id="tenant")
+        assert recovery is not None and recovery.recovery_state is ExecutionRecoveryState.COMPLETED
         assert await _conversation(state) == before
+        conversation = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
+        context = await conversation.latest_checkpoint(agent_run_id=turn.run.agent_run_id)
+        assert context is not None and context.messages == turn.checkpoint.messages
         committed = await _snapshot(state)
         assert await _commit(state, turn) == result
         assert await _commit(state, _standalone(state, execution_id="loser", answer="other")) == result
@@ -112,8 +118,8 @@ async def test_sessionless_pending_rejects_partial_context_and_lineage(tmp_path:
             name, value = {
                 "session": ("expected_session", state.session),
                 "cursor": ("next_cursor", turn.cursor),
-                "run": ("conversation_agent_run", turn.run),
-                "checkpoint": ("conversation_checkpoint", turn.checkpoint),
+                "run": ("conversation_agent_run", replace(turn.run, agent_run_id="foreign")),
+                "checkpoint": ("conversation_checkpoint", replace(turn.checkpoint, agent_run_id="foreign")),
             }[invalid]
             kwargs[name] = value
         else:
@@ -132,17 +138,17 @@ async def test_sessionless_pending_failure_rolls_back_every_domain(tmp_path: Pat
     async with _turn_state(backend, tmp_path) as state:
         turn = _standalone(state)
         before = await _snapshot(state)
-        repository = state.storage.checkpoint.checkpoints
-        original = type(repository).admit_in_transaction
+        repository = state.storage.execution.executions
+        original = type(repository).insert_pending_turn_in_transaction
 
-        async def fail(self, transaction, record):
-            result = await original(self, transaction, record)
+        async def fail(self, *args, **kwargs):
+            result = await original(self, *args, **kwargs)
             if self is repository:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return result
 
         with monkeypatch.context() as patch:
-            patch.setattr(type(repository), "admit_in_transaction", fail)
+            patch.setattr(type(repository), "insert_pending_turn_in_transaction", fail)
             with pytest.raises(AIError) as raised:
                 await _commit(state, turn)
             assert raised.value.code is ErrorCode.STORAGE_CONFLICT
@@ -156,7 +162,7 @@ async def test_sessionless_pending_lost_ack_requires_strong_confirmation(tmp_pat
         turn = _standalone(state)
         store = state.storage.execution.executions.state_store
         group = store.storage_group
-        original_mutate, original_read = type(group).mutate, type(store).read
+        original_mutate, original_read = type(group).mutate, type(group).read_many
         lost = False
 
         async def mutate(self, stores, callback):
@@ -167,14 +173,14 @@ async def test_sessionless_pending_lost_ack_requires_strong_confirmation(tmp_pat
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             return result
 
-        async def read(self, callback):
-            if self is store and lost and not readable:
+        async def read(self, stores, callback):
+            if self is group and lost and not readable:
                 raise RuntimeError("source read unavailable")
-            return await original_read(self, callback)
+            return await original_read(self, stores, callback)
 
         with monkeypatch.context() as patch:
             patch.setattr(type(group), "mutate", mutate)
-            patch.setattr(type(store), "read", read)
+            patch.setattr(type(group), "read_many", read)
             if readable:
                 assert (await _commit(state, turn)).execution.status is ExecutionStatus.SUCCEEDED
             else:
@@ -191,13 +197,13 @@ async def test_sessionless_pending_promotes_before_effects(tmp_path: Path, backe
         turn = _standalone(state)
         before = await _conversation(state)
         context = RuntimePayloadRef(StoredPayload.inline_bytes(b"[]"), PersistenceDomain.EXECUTION) if prepared else None
-        execution, recovery = await state.commands.promote_pending_turn(
+        execution = await state.commands.promote_pending_turn(
             turn.reservation, expected_session=None, captured_input_context=context,
         )
         assert execution.session_id is None
         assert execution.revision == (3 if prepared else 1)
         assert execution.agent_run_seq == (1 if prepared else 0)
-        assert recovery.state is (ExecutionCheckpointState.ACTIVE if prepared else ExecutionCheckpointState.ADMITTED)
+        assert execution.recovery_state is (ExecutionRecoveryState.ACTIVE if prepared else ExecutionRecoveryState.ADMITTED)
         assert await _conversation(state) == before
 
 @pytest.mark.parametrize("identity", ("same_request", "different_request", "conflicting_digest"))

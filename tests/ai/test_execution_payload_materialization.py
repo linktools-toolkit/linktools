@@ -165,7 +165,7 @@ async def test_rejected_admission_does_not_publish_large_input_or_context(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:
         coordination = runtime._execution_service._runtime_bridge.pending_turns.coordination
-        monkeypatch.setattr(type(coordination), "claim", reject)
+        monkeypatch.setattr(coordination._backend, "claim_turn", reject)
         with pytest.raises(AIError) as raised:
             await runtime.agents.get().start(("input" * 16000,), input_context=context)
         assert raised.value.code is ErrorCode.SESSION_BUSY

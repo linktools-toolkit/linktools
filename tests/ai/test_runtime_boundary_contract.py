@@ -322,7 +322,8 @@ async def test_launch_normal_return_without_worker_abandons_prepared_stream(exec
     service, prepared, abandoned = _launch_service(Backend(), execution_storage)
     await service._launch_started(
         SimpleNamespace(),
-        SimpleNamespace(execution_id="execution", tenant_id="tenant"),
+        SimpleNamespace(execution_id="execution", tenant_id="tenant",
+                        status=ExecutionStatus.STARTED, agent_run_seq=0),
         scope="execution.run",
         idempotency_key_digest="digest",
         prepare_local_stream=True,
@@ -344,7 +345,8 @@ async def test_existing_worker_skips_new_prepared_reservation(execution_storage:
     service, prepared, abandoned = _launch_service(Backend(), execution_storage)
     await service._launch_started(
         SimpleNamespace(),
-        SimpleNamespace(execution_id="execution", tenant_id="tenant"),
+        SimpleNamespace(execution_id="execution", tenant_id="tenant",
+                        status=ExecutionStatus.STARTED, agent_run_seq=0),
         scope="execution.run",
         idempotency_key_digest="digest",
         prepare_local_stream=True,
@@ -368,7 +370,8 @@ async def test_cancellation_before_worker_installation_abandons_reservation(exec
     with pytest.raises(asyncio.CancelledError):
         await service._launch_started(
             SimpleNamespace(),
-            SimpleNamespace(execution_id="execution", tenant_id="tenant"),
+            SimpleNamespace(execution_id="execution", tenant_id="tenant",
+                        status=ExecutionStatus.STARTED, agent_run_seq=0),
             scope="execution.run",
             idempotency_key_digest="digest",
             prepare_local_stream=True,
@@ -396,7 +399,8 @@ async def test_cancellation_after_worker_installation_retains_reservation(execut
     with pytest.raises(asyncio.CancelledError):
         await service._launch_started(
             SimpleNamespace(),
-            SimpleNamespace(execution_id="execution", tenant_id="tenant"),
+            SimpleNamespace(execution_id="execution", tenant_id="tenant",
+                        status=ExecutionStatus.STARTED, agent_run_seq=0),
             scope="execution.run",
             idempotency_key_digest="digest",
             prepare_local_stream=True,

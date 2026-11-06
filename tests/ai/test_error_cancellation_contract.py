@@ -605,7 +605,8 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     backend._run_store = None
     backend._live_broker = LiveExecutionEventBroker()
     backend._pending_turns = _PendingExecutionTurns()
-    backend._pending_renewals = {}
+    backend._turn_monitors = {}
+    backend._turn_owners = {}
     backend._accepting = True
     backend._tasks = {}
     backend._executor = SimpleNamespace(pending_background_tasks=())

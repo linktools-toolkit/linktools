@@ -69,9 +69,7 @@
     "evaluation_model_usage",
     "evaluation_human_decision",
     "execution_event",
-    "execution_history_head",
     "execution_history_seal",
-    "execution_history_state",
     "execution_record",
     "execution_run_seal_head",
     "model_client_body_ref",
@@ -95,7 +93,7 @@
     "principal",
     "pending_deferred_call",
     "pending_tool_continuation",
-    "recovery_checkpoint",
+    "execution_recovery_detail",
     "recovery_conversation_intent",
     "recovery_terminal_handoff",
     "recovery_terminal_outcome",
@@ -158,7 +156,6 @@
     "approval_decision",
     "approval_status",
     "execution_event_type",
-    "execution_history_state",
     "execution_lineage_kind",
     "execution_status",
     "external_call_status",
@@ -169,7 +166,7 @@
     "resource_kind",
     "runtime_domain",
     "runtime_retention_mode",
-    "recovery_checkpoint_state",
+    "execution_recovery_state",
     "recovery_handoff_phase",
     "session_status",
     "stop_reason",
@@ -197,10 +194,10 @@
     {
       "v": 1,
       "value": {
-        "type": "execution_history_state",
+        "type": "execution_status",
         "payload": {
-          "$enum": "execution_history_state",
-          "value": "open"
+          "$enum": "execution_status",
+          "value": "STARTED"
         }
       }
     },

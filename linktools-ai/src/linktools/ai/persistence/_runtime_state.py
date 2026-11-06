@@ -34,6 +34,7 @@ from .snapshots import SnapshotResources, RuntimeSnapshotOperations, restore_sna
 from ._object_cleanup import ObjectCleanupResult
 
 if TYPE_CHECKING:
+    from pydantic_ai_harness.step_persistence import StepStore
     from ._materializer import _MaterializedRuntimeStorage
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
@@ -235,7 +236,7 @@ class Persistence:
                     self.durable_capability_ids = self.durable_capability_ids | {identity}
             return store
 
-    async def create_agent_run_store(self) -> "RuntimeAgentRunStore":
+    async def create_agent_run_store(self, *, step_store: "StepStore | None" = None) -> "RuntimeAgentRunStore":
         """Create a producer-owned capture lifetime over these borrowed repositories."""
         self._require_ready()
         from ._step_materializer import build_runtime_agent_run_store
@@ -248,6 +249,8 @@ class Persistence:
             execution_repository=self.execution.executions,
             namespace=self.namespace, tenant_id=self.tenant_id,
         )
+        if step_store is not None:
+            store.bind_step_store(step_store)
         try:
             await store.initialize()
         except BaseException:

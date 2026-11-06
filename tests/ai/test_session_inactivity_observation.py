@@ -16,9 +16,10 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence.coordination import PendingTurnCoordination
+from linktools.ai.persistence.contracts import ExecutionRecoveryDetail, PendingDeferredCall, PendingToolContinuation
 from linktools.ai.runtime._session import RuntimeSessionService
 import linktools.ai.runtime._session as session_module
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_timeline import _commit_empty_turn, _execution, _session
@@ -49,8 +50,14 @@ def _service(state, *, observe=None, owner=None, waiter=None, authorization=None
 
 
 async def _admit(state, execution_id="execution", status=ExecutionStatus.STARTED):
-    record = _execution(execution_id, status=status, prompt="question")
-    await state.execution.executions.create_with_history_head(record)
+    record = _execution(execution_id, status=(ExecutionStatus.STARTED
+        if status is ExecutionStatus.WAITING_DEFERRED else status), prompt="question")
+    record = replace(record, status=status, recovery=(
+        ExecutionRecoveryDetail(agent_run_id="run", pending_tools=PendingToolContinuation("run", calls=(
+            PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),
+        ))) if status is ExecutionStatus.WAITING_DEFERRED else None
+    ))
+    await state.execution.executions.create_execution(record)
     await state.conversation.sessions.admit_execution(
         "session", tenant_id="tenant", execution_id=execution_id, expected=None,
     )
@@ -135,7 +142,8 @@ async def test_live_coordination_without_display_record_stays_busy(tmp_path: Pat
     async with _state(tmp_path) as state:
         cache = InMemoryCacheBackend(max_bytes=2**20)
         coordination = PendingTurnCoordination(cache, cache, namespace="inactivity", tenant_id="tenant")
-        claim = await coordination.claim(
+        claim = await cache.claim_turn(
+            coordination._scope,
             session_key="session:session", request_key="request", request_digest="digest",
             execution_id="remote", owner_id="owner", lease_seconds=60,
         )

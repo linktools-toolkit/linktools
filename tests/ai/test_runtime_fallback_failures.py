@@ -78,7 +78,7 @@ class _CostLimitCapability(AbstractCapability[AgentContext[None]]):
 @pytest.mark.parametrize(("referenced", "limit"), [
     (False, None), (True, None), (False, "tokens"), (False, "cost"),
 ])
-async def test_exhausted_fallback_retains_known_usage_and_safe_attempts_after_reopen(
+async def test_exhausted_fallback_retains_known_usage_and_attempt_diagnostics_after_reopen(
     tmp_path: Path, referenced: bool, limit: str | None,
 ) -> None:
     requests: list[str] = []
@@ -146,13 +146,15 @@ async def test_exhausted_fallback_retains_known_usage_and_safe_attempts_after_re
         assert [item["usage"]["cost"] for item in attempts[:2]] == ["0.003", "0.005"]
         assert all(item["usage"] is None for item in attempts[2:])
         assert all(isinstance(item["duration_us"], int) and item["duration_us"] >= 0 for item in attempts)
-        assert "failure-secret" not in repr(result.safe_error_details)
-        assert "failure-secret" not in repr(result.error_diagnostics)
         if referenced:
+            assert "failure-secret" not in repr(result.safe_error_details)
+            assert "failure-secret" not in repr(result.error_diagnostics)
             assert all(item["error"] is None for item in attempts)
             assert result.error_diagnostics.content_omission_reason == "referenced_content_lifecycle"
         else:
-            assert "detail=unavailable" in attempts[2]["error"]
+            assert attempts[2]["error"] == 'ModelAPIError: password="failure-secret" detail=unavailable'
+            assert attempts[2]["error"] in result.error_diagnostics.traceback
+            assert result.error_diagnostics.content_omission_reason is None
         interactions = (await execution.model_interactions(include_content=True)).items
         assert len(interactions) == 1
         assert interactions[0].status == "FAILED"
@@ -166,6 +168,7 @@ async def test_exhausted_fallback_retains_known_usage_and_safe_attempts_after_re
     async with Persistence.open('exhausted-fallback', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_165, Runtime.attach(persistence=persistence_165, features=features()) as runtime:
         restored = await runtime.executions.result(execution_id, principal=principal)
         assert restored.safe_error_details == result.safe_error_details
+        assert restored.error_diagnostics == result.error_diagnostics
         assert restored.usage == result.usage
         assert restored.error_code == result.error_code
         restored_interactions = (await runtime.executions.model_interactions(
@@ -200,9 +203,10 @@ async def test_exhausted_provider_errors_keep_model_api_classification_and_unkno
         attempts = result.safe_error_details["failed_attempts"]
         assert [item["model_name"] for item in attempts] == ["first", "second"]
         assert all(item["outcome"] == "error" and item["usage"] is None for item in attempts)
-        assert "provider-secret" not in repr(result.safe_error_details)
-        assert "provider-secret" not in repr(result.error_diagnostics)
-        assert "detail=unavailable" in attempts[0]["error"]
+        assert all(item["error"] == 'ModelAPIError: password="provider-secret" detail=unavailable'
+                   for item in attempts)
+        assert attempts[0]["error"] in result.error_diagnostics.traceback
+        assert result.error_diagnostics.content_omission_reason is None
         assert result.usage.input_tokens == result.usage.output_tokens == result.usage.model_requests == 0
         interactions = (await execution.model_interactions(include_content=True)).items
         assert len(interactions) == 1

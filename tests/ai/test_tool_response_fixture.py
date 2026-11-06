@@ -369,6 +369,7 @@ async def test_native_runtime_consumes_fixture_with_captured_effect_policy(
     from linktools.ai.core import ExecutionStatus, JsonValue, ToolOperationStatus
     from linktools.ai.runtime import Runtime
     from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.model.messages import decode_model_messages
     from linktools.ai.runtime._mcp import _MCPModelToolset, prepare_mcp_projections
     from linktools.ai.workspace import WorkspaceResource
 
@@ -471,15 +472,19 @@ async def test_native_runtime_consumes_fixture_with_captured_effect_policy(
             operations = await runtime._state.checkpoint.tools.list_by_execution(
                 execution.execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
-            if strict:
-                assert len(operations) == 1
-                operation = operations[0]
-                assert operation.tool_name == name and operation.tool_call_id == "fixture-call"
-                assert operation.status is ToolOperationStatus.COMPLETED
-                assert operation.replay_safe is False
-                assert operation.result_payload is not None
-            else:
-                assert operations == ()
+            assert len(operations) == 1
+            operation = operations[0]
+            assert operation.tool_name == name and operation.tool_call_id == "fixture-call"
+            assert operation.status is ToolOperationStatus.COMPLETED
+            assert operation.replay_safe is (not strict)
+            assert operation.result_payload is not None
+            stored = decode_model_messages(operation.result_payload.decode())
+            assert len(stored) == 1 and isinstance(stored[0], ModelRequest)
+            assert len(stored[0].parts) == 1
+            returned = stored[0].parts[0]
+            assert isinstance(returned, ToolReturnPart)
+            assert returned.tool_call_id == operation.tool_operation_id
+            assert returned.content == expected
         assert await assets.read_versions((fixture.ref,)) == (canonical_json_bytes(payload),)
     finally:
         await assets.close()

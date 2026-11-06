@@ -11,7 +11,9 @@ from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.observe import Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from .test_explicit_runtime_features import _FeatureModels, _features, _definitions
@@ -56,7 +58,7 @@ def test_runtime_metrics_requires_provider():
 @pytest.mark.asyncio
 async def test_trace_and_checkpoint_do_not_enable_metrics():
     store = _RecordingStore()
-    async with Persistence.open('trace-only', storage=PersistenceStorage.in_memory()) as persistence_59, Runtime.attach(persistence=persistence_59, features=model_features(_FeatureModels(), _features(TraceCapability(), CheckpointCapability()))) as runtime:
+    async with Persistence.open('trace-only', storage=PersistenceStorage.in_memory()) as persistence_59, Runtime.attach(persistence=persistence_59, features=model_features(_FeatureModels(), _features(TraceCapability(), native_checkpoint()))) as runtime:
         execution = await runtime.agents.get().start("question")
         await execution.wait(timeout_seconds=5)
         assert (await execution.model_interactions()).items

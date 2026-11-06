@@ -843,7 +843,7 @@ class Runtime(Generic[AppT]):
         """Close this Runtime without cancelling its checkpointed executions.
 
         A fresh Runtime must explicitly recover the original execution IDs.
-        Requires durable synchronous admission and CheckpointCapability.
+        Requires durable synchronous admission and StepPersistence.
         Unknown external effects still require explicit recovery resolution.
         """
         await self._close(handoff=True)

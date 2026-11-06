@@ -72,6 +72,11 @@ class MaterializedUserContent(tuple):
         value.view = ImmutableJsonMapping(view, allow_empty_keys=True)
         return value
 
+    def __getnewargs__(self) -> tuple[tuple[UserContent, ...], Mapping[str, JsonValue]]:
+        # The upstream checkpoint capability deep-copies native messages.
+        # Preserve accepted provenance as well as the tuple payload.
+        return tuple(self), self.view
+
     def append_text(self, text: str) -> "MaterializedUserContent":
         prompt = self.view.get("prompt")
         if isinstance(prompt, str):

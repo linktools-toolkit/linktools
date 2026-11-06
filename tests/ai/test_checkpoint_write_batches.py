@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Checkpoint batches preserve scalar persistence and owner override semantics."""
+"""Trace checkpoint batches preserve scalar persistence and owner override semantics."""
 
 from linktools.ai.persistence import Persistence
 import sqlite3
@@ -18,11 +18,7 @@ from sqlalchemy.exc import OperationalError
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import (
-    ContextProjection, ExecutionEventAppend, ExecutionHistoryHeadRecord,
-    ExecutionHistorySealRecord, ExecutionTerminalCommit, ExecutionTerminalCommitResult,
-    HistoryQuality, ResultRecord, TranscriptChunk,
-)
+from linktools.ai.persistence.contracts import ContextProjection, ExecutionEventAppend, ExecutionHistorySealRecord, ExecutionTerminalCommit, ExecutionTerminalCommitResult, HistoryQuality, ResultRecord, TranscriptChunk
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence._history import TranscriptRepository
 from linktools.ai.persistence._archive_closure import rekey_archive_roots
@@ -33,6 +29,8 @@ from linktools.ai.persistence.state import StateTransaction, StoredRecord
 
 from .test_history_projection_conformance import _record
 from .test_incremental_projection_boundaries import _storage
+
+from .test_checkpoint_metadata_snapshot_io import _trace_archive
 
 pytestmark = pytest.mark.asyncio
 
@@ -82,14 +80,14 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
             state = Persistence(_storage(backend, path))
             await state.initialize(namespace="checkpoint-batch", tenant_id="tenant")
             states.append(state)
-            archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+            archive = await _trace_archive(state)
             if name == "scalar":
                 archive._history = ScalarTranscript(
                     archive.state_store, object_store=archive.transcript_repository._object_store, namespace="checkpoint-batch",
-                    tenant_id="tenant", runtime_domain=PersistenceDomain.CHECKPOINT,
-                    archive_object_store=state.archive_object_store(PersistenceDomain.CHECKPOINT),
+                    tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
+                    archive_object_store=state.archive_object_store(PersistenceDomain.TRACE),
                     archive_object_reader=lambda reference, owner=state: owner.read_archive_object(
-                        PersistenceDomain.CHECKPOINT, reference,
+                        PersistenceDomain.TRACE, reference,
                     ),
                 )
             archives.append(archive)
@@ -109,7 +107,7 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
                 if engine is not None:
                     event.listen(engine, "before_cursor_execute", capture)
                 try:
-                    await archive.materialize_checkpoint(run, checkpoint)
+                    await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
                 finally:
                     if engine is not None:
                         event.remove(engine, "before_cursor_execute", capture)
@@ -126,7 +124,7 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
             assert await archive.checkpoint_count(agent_run_id="run") == 3
             assert [message async for message in archive.iter_messages(agent_run_id="run")] == messages
             snapshot = await _snapshot(archive.state_store)
-            await archive.materialize_checkpoint(run, checkpoints[-1])
+            await archive.materialize_checkpoint(run, checkpoints[-1], execution_id="execution")
             assert await _snapshot(archive.state_store) == snapshot
     finally:
         for state in states:
@@ -139,12 +137,12 @@ async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
 ) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-cas", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     first = ModelRequest(parts=[UserPromptPart("first")])
     second = ModelRequest(parts=[UserPromptPart("second")])
     try:
-        await archive.materialize_checkpoint(run, AgentRunCheckpoint("run", 1, [first], transcript_message_count_before=0))
+        await archive.materialize_checkpoint(run, AgentRunCheckpoint("run", 1, [first], transcript_message_count_before=0), execution_id="execution")
         before = await _snapshot(archive.state_store)
         original = _SqlTransaction.replace_records
         lost = []
@@ -166,7 +164,7 @@ async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
             with pytest.raises(AIError) as raised:
                 await archive.materialize_checkpoint(run, AgentRunCheckpoint(
                     "run", 2, [first, second], transcript_message_count_before=1,
-                ))
+                ), execution_id="execution")
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
         assert lost == [target]
         assert await _snapshot(archive.state_store) == before
@@ -185,13 +183,6 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
         ) -> ExecutionHistorySealRecord:
             calls.append("seal")
             return await super().put_history_seal_in_transaction(transaction, seal)
-
-        async def replace_history_head_in_transaction(
-            self, transaction: StateTransaction, current_record: StoredRecord,
-            next_head: ExecutionHistoryHeadRecord,
-        ) -> ExecutionHistoryHeadRecord:
-            calls.append("head")
-            return await super().replace_history_head_in_transaction(transaction, current_record, next_head)
 
         async def commit_terminal_in_transaction(
             self, transaction: StateTransaction, commit: ExecutionTerminalCommit, *,
@@ -222,22 +213,29 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
             repository = original if name == "batch" else ScalarExecution(
                 original.state_store, namespace="terminal-batch", tenant_id="tenant",
             )
-            await repository.create_with_history_head(current)
+            await repository.create_execution(current)
             commands = StateCommands(
                 repository, namespace="terminal-batch", events=state.execution.events,
                 background_tasks=set(),
             )
             results.append(await commands.commit_terminal_checkpoint(commit))
             snapshots.append(await _snapshot(repository.state_store))
-        assert calls == (["seal"] if trace else []) + ["head", "terminal"]
-        assert results[0] == results[1]
+        assert calls == (["seal"] if trace else []) + ["terminal"]
+        assert results[0].execution == results[1].execution
+        assert results[0].result == results[1].result
+        assert results[0].session_released == results[1].session_released
+        for receipt, (records, _facts, _sequences) in zip(results, snapshots, strict=True):
+            source = next(record for record in records if record.kind == "execution")
+            assert receipt.observed.value == receipt.execution
+            assert receipt.observed.storage_revision == source.storage_revision
         batch_records, batch_facts, batch_sequences = snapshots[0]
         scalar_records, scalar_facts, scalar_sequences = snapshots[1]
         assert batch_facts == scalar_facts
         assert batch_sequences == scalar_sequences
         for batch, scalar in zip(batch_records, scalar_records, strict=True):
-            removed_guard = (int(batch.kind == "execution_history_head") - int(batch.kind == "execution")) if not trace else 0
-            assert batch.storage_revision + removed_guard == scalar.storage_revision
+            # Scalar fallback explicitly guards the same Execution row before replacement.
+            extra_guard = int(not trace and batch.kind == "execution")
+            assert batch.storage_revision + extra_guard == scalar.storage_revision
             assert replace(batch, storage_revision=scalar.storage_revision) == scalar
     finally:
         for state in states:
@@ -247,7 +245,7 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
 async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_path: Path) -> None:
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="checkpoint-owner", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     repository = archive.transcript_repository
     run = AgentRunRecord("run")
     try:
@@ -268,13 +266,13 @@ async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_p
         with pytest.raises(AIError) as raised:
             await archive.sync_prepared_projection(
                 run, events=(), checkpoints=(prepared, replace(prepared, owner_id="foreign", chunks=())),
-            )
+            execution_id="execution")
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await _snapshot(archive.state_store) == before
-        await archive.register_agent_run(run)
+        await archive.register_agent_run(run, execution_id="execution")
         before = await _snapshot(archive.state_store)
         with pytest.raises(AIError) as raised:
-            await archive.state_store.mutate(lambda transaction: repository.append_checkpoint(
+            await archive._mutate(lambda transaction: repository.append_checkpoint(
                 transaction, "run", (replace(chunk, owner_id="foreign"),), prepared.projection,
             ))
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
@@ -283,7 +281,7 @@ async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_p
         await state.close()
 
 
-@pytest.mark.parametrize("target", ("execution_history_head", "execution"))
+@pytest.mark.parametrize("target", ("execution",))
 async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str,
 ) -> None:
@@ -291,7 +289,7 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
     await state.initialize(namespace="terminal-cas", tenant_id="tenant")
     repository = state.execution.executions
     current = replace(_record(ExecutionStatus.STARTED, 0), durable_trace=False)
-    await repository.create_with_history_head(current)
+    await repository.create_execution(current)
     result = ResultRecord(None, StopReason.ERROR, UsageMetrics(), current.updated_at)
     commit = ExecutionTerminalCommit(
         current.revision, current.event_seq,
@@ -307,7 +305,7 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
     lost = []
 
     async def interleave(transaction, replacements):
-        if {value.record.kind for value in replacements} == {"execution_history_head", "execution"}:
+        if {value.record.kind for value in replacements} == {"execution"}:
             member = next(value for value in replacements if value.record.kind == target)
             table = transaction._table("ai_state_records")
             await transaction._execute(update(table).where(
@@ -337,7 +335,7 @@ async def test_new_checkpoint_fact_batch_rolls_back_or_retries_without_sequence_
 ) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-batch-rollback", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint(
         "run", 1, [ModelRequest(parts=[UserPromptPart("owned")])],
@@ -369,21 +367,21 @@ async def test_new_checkpoint_fact_batch_rolls_back_or_retries_without_sequence_
         with monkeypatch.context() as patch:
             patch.setattr(_SqlTransaction, method_name, fail_once)
             if retry:
-                await archive.materialize_checkpoint(run, checkpoint)
+                await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
             else:
                 with pytest.raises(AIError) as raised:
-                    await archive.materialize_checkpoint(run, checkpoint)
+                    await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
                 assert raised.value.code is ErrorCode.STORAGE_CONFLICT
                 assert await _snapshot(archive.state_store) == before
         assert failures == [failure_stage]
         if not retry:
-            await archive.materialize_checkpoint(run, checkpoint)
+            await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         snapshot = await _snapshot(archive.state_store)
         _, facts, sequences = snapshot
         assert {fact.kind for fact in facts} == {"transcript_chunk", "step_checkpoint"}
         assert all(fact.sequence == 1 for fact in facts)
         assert len(sequences) == 2 and all(value == 1 for value in sequences.values())
-        await archive.materialize_checkpoint(run, checkpoint)
+        await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         assert await _snapshot(archive.state_store) == snapshot
     finally:
         await state.close()

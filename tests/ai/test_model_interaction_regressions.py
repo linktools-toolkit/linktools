@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """Model interaction paging, public projection, and replay invariants."""
 
 import hashlib
@@ -124,7 +125,6 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
         execution_archive=None,
-        checkpoint_archive=None,
     )
     await store.initialize()
     try:
@@ -141,14 +141,13 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_run_store_continues_recovery_interaction_high_water() -> None:
+async def test_runtime_run_store_continues_trace_interaction_high_water() -> None:
     staging = StagingAgentRunStore()
-    recovery = ModelInteractionInMemoryStepArchive(PersistenceDomain.CHECKPOINT)
+    recovery = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
     store = RuntimeAgentRunStore(
         staging,
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
-        execution_archive=None,
-        checkpoint_archive=recovery,
+        execution_archive=recovery,
     )
     await store.initialize()
     try:

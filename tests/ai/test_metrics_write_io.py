@@ -39,10 +39,13 @@ async def _assert_writes(engine: AsyncEngine) -> None:
     def capture(conn, cursor, sql, params, context, many):
         if sql.split()[0] in {"SELECT", "INSERT", "UPDATE", "DELETE"}:
             if many:
-                assert engine.dialect.name == "mysql" and sql.startswith("UPDATE ai_state_records")
-                statements.extend([sql] * len(params))
-            else:
-                statements.append(sql)
+                assert engine.dialect.name == "mysql"
+                if sql.startswith("UPDATE ai_state_records"):
+                    statements.extend([sql] * len(params))
+                    return
+                # These small INSERT batches are combined by the MySQL driver.
+                assert sql.startswith("INSERT")
+            statements.append(sql)
 
     def counted() -> Counter[str]:
         return Counter(sql.split()[0] for sql in statements)

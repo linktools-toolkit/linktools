@@ -18,7 +18,8 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.execution import ExecutionRequest
@@ -33,7 +34,7 @@ _NAMESPACE = "startup-recovery"
 
 def _capabilities() -> RuntimeFeatures[None]:
     group: RuntimeFeatures[None] = RuntimeFeatures(_NAMESPACE)
-    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     return group
 
@@ -159,10 +160,10 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
             owner_run = await owner.agents.get().start("keep running", idempotency_key="owner")
             await asyncio.wait_for(owner_entered.wait(), 10)
             before = await owner._state.execution.executions.get(owner_run.execution_id, tenant_id=owner.tenant_id)
-            head = await owner._state.execution.executions.get_history_head(
+            head = await owner._state.execution.executions.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
-            checkpoint = await owner._state.checkpoint.checkpoints.get(
+            checkpoint = await owner._state.execution.executions.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
             async with Persistence.open(_NAMESPACE, storage=other_storage) as persistence_173, Runtime.attach(persistence=persistence_173, features=model_features(_Models(FunctionModel(stream_function=owned_model)), _capabilities()), auto_recover=False) as other:
@@ -171,13 +172,12 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
                 assert await other._state.execution.executions.get(
                     owner_run.execution_id, tenant_id=other.tenant_id,
                 ) == before
-                observed_head = await other._state.execution.executions.get_history_head(
+                observed_head = await other._state.execution.executions.get(
                     owner_run.execution_id, tenant_id=other.tenant_id,
                 )
                 assert head is not None and observed_head is not None
-                assert observed_head.producer_generation == head.producer_generation
-                assert observed_head.producer_claim_id == head.producer_claim_id
-                assert await other._state.checkpoint.checkpoints.get(
+                assert observed_head == head
+                assert await other._state.execution.executions.get(
                     owner_run.execution_id, tenant_id=other.tenant_id,
                 ) == checkpoint
                 owned_run = await other.agents.get().start("close only this worker", idempotency_key="owned")
@@ -192,12 +192,11 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
             assert await owner._state.execution.executions.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             ) == before
-            after_close_head = await owner._state.execution.executions.get_history_head(
+            after_close_head = await owner._state.execution.executions.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
             assert after_close_head is not None
-            assert after_close_head.producer_generation == head.producer_generation
-            assert after_close_head.producer_claim_id == head.producer_claim_id
+            assert after_close_head == head
             release_owner.set()
             assert (await owner_run.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
             assert owner_calls == ["owner"]

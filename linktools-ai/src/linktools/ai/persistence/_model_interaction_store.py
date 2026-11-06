@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pydantic_ai.messages import ModelMessage
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
@@ -18,7 +18,8 @@ from ._model_interaction import (
 )
 from .contracts import (
     ContextProjection,
-    ExecutionHistoryHeadRecord,
+    ExecutionRecord,
+    ExecutionInsertionReceipt,
     InlineContextBlock,
     ModelInteractionRecord,
     RuntimePayloadRef,
@@ -40,6 +41,7 @@ from ._archive import PreparedArchive
 from .state import (
     RecordQuery,
     RecordReplacement,
+    StateStore,
     StateTransaction,
     StoredRecord,
     record_key_digest,
@@ -220,25 +222,18 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             [agent_run_id, model_request_seq],
         )
 
-    async def capture_checkpoint_progress(
-        self, *, agent_run_id: str, checkpoint: PreparedAgentRunCheckpoint,
-    ) -> tuple[int, int]:
-        require_no_run_history_lock("StateStepArchive.capture_checkpoint_progress")
-        if type(self) is not ModelInteractionStateStepArchive:
-            return await super().capture_checkpoint_progress(
-                agent_run_id=agent_run_id, checkpoint=checkpoint,
-            )
-
-        async def read(transaction: StateTransaction) -> tuple[int, int]:
-            await transaction.get_sequences((
-                self._sequence(agent_run_id, "checkpoint"),
-                self._sequence(agent_run_id, "interaction"),
-            ))
-            return await super(ModelInteractionStateStepArchive, self).capture_checkpoint_progress(
-                agent_run_id=agent_run_id, checkpoint=checkpoint,
-            )
-
-        return await self.state_store.read(read)
+    async def checkpoint_publication_record_keys(
+        self, run: AgentRunRecord, checkpoint: PreparedAgentRunCheckpoint,
+        *, interactions: Sequence[ModelInteractionRecord] = (),
+    ) -> Mapping[StateStore, tuple[bytes, ...]]:
+        keys = dict(await super().checkpoint_publication_record_keys(run, checkpoint))
+        if all(isinstance(value, ModelInteractionRecord) and value.agent_run_id == run.agent_run_id
+               for value in interactions):
+            keys[self.state_store] = tuple(dict.fromkeys((
+                *keys.get(self.state_store, ()),
+                *(self._interaction_key(value.agent_run_id, value.model_request_seq) for value in interactions),
+            )))
+        return keys
 
     async def list_model_interactions(
         self,
@@ -342,14 +337,9 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         require_no_run_history_lock("StateStepArchive.interrupt_model_interactions")
 
         async def mutate(transaction: StateTransaction) -> None:
-            guard = await self._execution_history_guard_in_transaction(
-                transaction,
-                execution_id,
-                None,
-                producer_generation=producer_generation,
+            await self.guard_execution_producer(
+                transaction, execution_id=execution_id, producer_generation=producer_generation,
             )
-            if guard is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             owner = await transaction.get_record(self._agent_run_key(agent_run_id))
             if owner is None:
                 return
@@ -367,14 +357,12 @@ class ModelInteractionStateStepArchive(StateStepArchive):
                 replace(self._decode_interaction_record(record), status="INTERRUPTED")
                 for record in records
             )
-            changed = await self._sync_interactions_in_transaction(
+            await self._sync_interactions_in_transaction(
                 transaction,
                 run,
                 interactions,
                 owner_already_guarded=False,
             )
-            if changed:
-                await self._advance_execution_history_head_in_transaction(transaction, guard)
 
         await self._mutate(mutate)
 
@@ -389,19 +377,20 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         observation: PreparedTranscriptObservation | None = None,
         producer_generation: int | None = None,
         execution_id: str | None = None,
-        history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        inserted_terminal: ExecutionInsertionReceipt | None = None,
     ) -> bool:
-        supplied_guard = history_head_guard is not None
         guard = await self._execution_history_guard_in_transaction(
             transaction,
             execution_id,
-            history_head_guard,
+            execution_guard,
             producer_generation=producer_generation,
+            inserted_terminal=inserted_terminal,
         )
         # Invalid inputs retain the original validation/error ordering below.
         prefetch_keys = (
             tuple(self._interaction_key(value.agent_run_id, value.model_request_seq) for value in interactions)
-            if guard is not None and all(
+            if (guard is not None or producer_generation is not None) and all(
                 isinstance(value, ModelInteractionRecord) and value.agent_run_id == run.agent_run_id
                 for value in interactions
             )
@@ -415,8 +404,9 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             interactions=(),
             observation=observation,
             producer_generation=producer_generation,
+            inserted_terminal=inserted_terminal,
             execution_id=execution_id,
-            history_head_guard=guard,
+            execution_guard=guard,
             prefetch_keys=prefetch_keys,
         )
         inserted = await self._sync_interactions_in_transaction(
@@ -425,13 +415,6 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             interactions,
             owner_already_guarded=bool(events or checkpoints),
         )
-        if guard is not None and not supplied_guard and (
-            created or events or checkpoints or inserted or observation is not None
-        ):
-            await self._advance_execution_history_head_in_transaction(
-                transaction,
-                guard,
-            )
         return created
 
     async def _sync_interactions_in_transaction(
@@ -532,7 +515,6 @@ def _validate_interaction_batch(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sequences.add(interaction.model_request_seq)
     return values
-
 
 
 def _interaction_sort_key(model_request_seq: int) -> str:

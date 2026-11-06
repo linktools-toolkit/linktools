@@ -7,5 +7,6 @@ from ._plan import PersistencePlan
 from ._root import PersistenceStorage
 from ._runtime_state import Persistence, PersistenceStatus
 from ._filesystem_snapshot import FilesystemSnapshotReader
+from ._step_store import PreparedStep, SqlStepStore, StepWriteReceipt
 
-__all__ = ["Persistence", "PersistenceStorage", "PersistencePlan", "PersistenceStatus", "PersistenceDomain", "FilesystemSnapshotReader"]
+__all__ = ["Persistence", "PersistenceStorage", "PersistencePlan", "PersistenceStatus", "PersistenceDomain", "FilesystemSnapshotReader", "SqlStepStore", "PreparedStep", "StepWriteReceipt"]

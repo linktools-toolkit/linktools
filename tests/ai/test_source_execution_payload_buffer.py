@@ -9,14 +9,15 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability, TraceCapability
-from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, agent_run_id
+from linktools.ai.core import CommitPolicy, ExecutionEventType, ExecutionStatus, PersistenceDomain, agent_run_id
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.contracts import ExecutionHistoryState
+
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.storage import InMemoryCacheBackend, StorageRoute
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_execution_terminal_payload_runtime import _PayloadBuffer
+from .test_runtime_turn_lifecycle import _ObservedCache
 
 
 @pytest.mark.asyncio
@@ -296,14 +297,15 @@ async def test_source_terminal_confirmation_and_remote_cancel_preserve_buffer_tr
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trace", (False, True))
-async def test_pending_candidate_can_promote_for_cancel_during_context_prepare(
+async def test_pending_candidate_stops_for_cancel_during_context_prepare(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trace: bool,
 ) -> None:
     from linktools.ai.execution import CancelExecutionRequest
 
     buffer = _PayloadBuffer()
     entered, release = asyncio.Event(), asyncio.Event()
-    promoted = asyncio.Event()
+    cancel_observed = asyncio.Event()
+    confirmed_terminals = []
     calls = preparations = 0
     accepted, acknowledged = [], []
 
@@ -333,22 +335,42 @@ async def test_pending_candidate_can_promote_for_cancel_during_context_prepare(
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("promotion-cancel-buffer",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db",
-            coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence:
+            coordination=_ObservedCache())) as persistence:
         async with Runtime.attach(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime, \
             Runtime.attach(persistence=persistence,
                 features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as remote:
             backend = runtime._execution_service.runtime_backend()
             prepare = backend._context_archive.prepare
-            coordinator = remote._execution_service.runtime_backend()._pending_turns.coordination
-            cancel = coordinator.cancel
+            cancel = backend._pending_cancel
 
             async def observe_cancel(*args, **kwargs):
-                value = await cancel(*args, **kwargs)
-                promoted.set()
-                return value
+                cancel_observed.set()
+                return await cancel(*args, **kwargs)
 
-            monkeypatch.setattr(coordinator, "cancel", observe_cancel)
+            monkeypatch.setattr(backend, "_pending_cancel", observe_cancel)
+            terminal_command = backend._runtime_commands.commit_terminal_checkpoint
+            pending_command = backend._runtime_commands.commit_pending_turn
+
+            def require_cancelled_candidate(commit):
+                assert commit.execution.status is ExecutionStatus.CANCELLED
+                assert commit.result.output is None
+                assert not acknowledged and not buffer.acknowledged
+
+            async def observe_terminal(commit, **kwargs):
+                require_cancelled_candidate(commit)
+                result = await terminal_command(commit, **kwargs)
+                confirmed_terminals.append(result.execution.status)
+                return result
+
+            async def observe_pending(reservation, commit, **kwargs):
+                require_cancelled_candidate(commit)
+                result = await pending_command(reservation, commit, **kwargs)
+                confirmed_terminals.append(result.execution.status)
+                return result
+
+            monkeypatch.setattr(backend._runtime_commands, "commit_terminal_checkpoint", observe_terminal)
+            monkeypatch.setattr(backend._runtime_commands, "commit_pending_turn", observe_pending)
 
             async def gated_prepare(*args, **kwargs):
                 nonlocal preparations
@@ -370,7 +392,7 @@ async def test_pending_candidate_can_promote_for_cancel_during_context_prepare(
                     assert accepted and not acknowledged
                 cancelling = asyncio.create_task(remote.executions.cancel(execution.execution_id,
                     CancelExecutionRequest(remote.default_principal, "cancel")))
-                await asyncio.wait_for(promoted.wait(), 5)
+                await asyncio.wait_for(cancel_observed.wait(), 5)
             finally:
                 release.set()
             await asyncio.wait_for(cancelling, 10)
@@ -378,22 +400,31 @@ async def test_pending_candidate_can_promote_for_cancel_during_context_prepare(
             assert result.status is ExecutionStatus.CANCELLED
             assert result.output is None
             assert calls == 1
+            assert confirmed_terminals == [ExecutionStatus.CANCELLED]
             if trace:
-                head = await persistence.execution.executions.get_history_head(
+                head = await persistence.execution.executions.get(
                     execution.execution_id, tenant_id=runtime.tenant_id)
-                assert head.state is ExecutionHistoryState.SEALED
+                assert (head.history_seal_digest is not None)
                 archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
                 run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                     execution_id=execution.execution_id, agent_run_seq=1)
                 interactions = await archive.list_model_interactions(agent_run_id=run_id)
+                assert len(interactions) == 1
                 assert "candidate" in repr(await archive.resolve_model_interactions(interactions))
+            events = await persistence.execution.events.list(execution.execution_id,
+                tenant_id=runtime.tenant_id, after_event_seq=0, limit=100)
+            assert sum(event.event_type == ExecutionEventType.EXECUTION_CANCELLED for event in events.items) == 1
         assert set(buffer.acknowledged) == set(buffer.accepted)
         assert set(acknowledged) == set(accepted)
+        assert len(buffer.acknowledged) == len(set(buffer.acknowledged))
+        assert len(acknowledged) == len(set(acknowledged))
 
 
 @pytest.mark.asyncio
 async def test_execution_buffer_does_not_recapture_rejected_trace_checkpoint(tmp_path: Path) -> None:
-    from linktools.ai.capability import CheckpointCapability, TraceCapability
+    from linktools.ai.capability import TraceCapability
+    from pydantic_ai_harness.step_persistence import StepPersistence
+    from tests.ai._runtime_test_helpers import native_checkpoint
 
     calls = 0
 
@@ -414,7 +445,7 @@ async def test_execution_buffer_does_not_recapture_rejected_trace_checkpoint(tmp
         commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
     features.capability(TraceCapability(commit=CommitPolicy.batch(
         buffer=TraceBuffer(max_bytes=4 * 1024 * 1024), batch_size=128, flush_interval=60)), scope="runtime")
-    features.capability(CheckpointCapability(), scope="runtime")
+    features.capability(native_checkpoint(), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-trace-rejection",
         storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
@@ -523,6 +554,15 @@ async def test_deferred_source_boundary_releases_buffer_and_resumes_new_producer
             assert result.status is ExecutionStatus.SUCCEEDED
             assert result.output == {"text": "resumed"}
             assert calls == 2
+            record = await persistence.execution.executions.get(execution.execution_id, tenant_id=tenant)
+            assert record is not None and record.agent_run_seq == 2
+            assert record.conversation and not record.restart_checkpoints and not record.durable_trace
+            from pydantic_ai.messages import ToolReturnPart, UserPromptPart
+            history = await runtime.history.messages("session", principal=runtime.default_principal, limit=100)
+            parts = [part for message in history.items for part in message.parts]
+            assert [part.content for part in parts if isinstance(part, UserPromptPart)] == ["read"]
+            assert len([part for part in parts if isinstance(part, ToolReturnPart)]) == 1
+            assert [part.content for part in parts if isinstance(part, TextPart)] == ["resumed"]
         assert set(buffer.acknowledged) == set(buffer.accepted)
 
 
@@ -640,7 +680,9 @@ async def test_zero_prefix_source_failure_retains_control_until_same_execution_c
 
 @pytest.mark.asyncio
 async def test_unknown_tool_effect_retires_only_source_confirmed_execution_audits(tmp_path: Path) -> None:
-    from linktools.ai.capability import AgentContext, CheckpointCapability
+    from linktools.ai.capability import AgentContext
+    from pydantic_ai_harness.step_persistence import StepPersistence
+    from tests.ai._runtime_test_helpers import native_checkpoint
     from linktools.ai.errors import AIError, ErrorCode
     from .test_task_mixed_node_reliability import _TaskTestModels
 
@@ -654,7 +696,7 @@ async def test_unknown_tool_effect_retires_only_source_confirmed_execution_audit
     features = RuntimeFeatures("source-effect-unknown")
     features.capability(ExecutionCapability(retain_history=True,
         commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
-    features.capability(CheckpointCapability(), scope="runtime")
+    features.capability(native_checkpoint(), scope="runtime")
     features.tool(write, effect_policy="non_replay_safe")
     features.agent("default", allow_tools=("write",))
     async with Persistence.open("source-effect-unknown",

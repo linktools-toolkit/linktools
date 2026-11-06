@@ -18,7 +18,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _archive(state: Persistence) -> ContentArchive:
-    source = state.run_store.read_store(PersistenceDomain.CHECKPOINT).state_store
+    source = state.run_store.read_store(PersistenceDomain.TRACE).state_store
     scope, store = await source.storage_group.open_archive(create=True)
     return ContentArchive(store, scope, namespace="archive", tenant_id="tenant", object_store=None)
 

@@ -10,12 +10,14 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
-from linktools.ai.core import AuthorizationAction, HmacCursorSigner, Principal, SessionStatus, TenantAuthorizationPolicy
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.core import AuthorizationAction, CommitPolicy, HmacCursorSigner, Principal, SessionStatus, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.session import ResumeSessionRequest, SessionManager
+from linktools.ai.storage import InMemoryCacheBackend
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
@@ -77,7 +79,7 @@ async def test_session_start_preparation_reads_one_authorized_snapshot_per_call(
                 if method == "start":
                     result = await result.wait(timeout_seconds=5)
                 assert result.result.output == {"text": "answer"}
-                assert len(selects) == (4 if entry == "loaded" else 2)
+                assert len(selects) == (2 if entry == "loaded" else 1)
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", capture)
 
@@ -107,8 +109,9 @@ async def test_session_start_preserves_create_and_reauthorizes_created_record(tm
             assert reads[0].owner_principal_id == runtime.default_principal.principal_id
 
 
-@pytest.mark.parametrize("change", ("owner-before-start", "owner-in-policy", "closed", "agent"))
-async def test_session_start_rechecks_live_authority_status_and_binding(tmp_path, change):
+@pytest.mark.parametrize("change", ("owner-before-start", "owner-in-policy", "owner-in-run-policy", "closed", "agent", "agent-in-policy", "cwd-in-policy"))
+@pytest.mark.parametrize("terminal", (False, True))
+async def test_session_start_rechecks_live_authority_status_and_binding(tmp_path, change, terminal):
     calls = 0
     armed = False
 
@@ -121,12 +124,26 @@ async def test_session_start_rechecks_live_authority_status_and_binding(tmp_path
         async def authorize(self, principal, action, resource):
             nonlocal armed
             await super().authorize(principal, action, resource)
-            if armed and change == "owner-in-policy" and action is AuthorizationAction.SESSION_READ:
+            if armed and (
+                change in {"owner-in-policy", "agent-in-policy", "cwd-in-policy"} and action is AuthorizationAction.SESSION_READ
+                or change == "owner-in-run-policy" and action is AuthorizationAction.EXECUTION_RUN
+            ):
                 armed = False
-                await update(owner_principal_id="other")
+                changes = {"owner_principal_id": "other"}
+                if change == "agent-in-policy":
+                    changes = {"agent_id": "other"}
+                elif change == "cwd-in-policy":
+                    changes = {"cwd": "changed"}
+                await update(**changes)
 
-    async with Persistence.open("session-start-preparation", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
-        async with Runtime.attach(persistence=state, features=_features(model), metrics=None, authorization=Policy()) as runtime:
+    features = _features(model)
+    if terminal:
+        features.capability(ExecutionCapability(retain_history=True,
+            commit=CommitPolicy.terminal(buffer=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))), scope="runtime")
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db",
+        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None)
+    async with Persistence.open("session-start-preparation", storage=storage) as state:
+        async with Runtime.attach(persistence=state, features=features, metrics=None, authorization=Policy()) as runtime:
             await runtime.agents.get().create_session("session")
             target = await runtime.sessions.get("session", principal=runtime.default_principal)
 
@@ -150,7 +167,8 @@ async def test_session_start_rechecks_live_authority_status_and_binding(tmp_path
             armed = True
             with pytest.raises(AIError) as denied:
                 await target.start("question", idempotency_key="request")
-            expected = {"closed": ErrorCode.SESSION_CONFLICT, "agent": ErrorCode.SESSION_BINDING_MISMATCH}
+            expected = {"closed": ErrorCode.SESSION_CONFLICT, "agent": ErrorCode.SESSION_BINDING_MISMATCH,
+                        "agent-in-policy": ErrorCode.SESSION_BINDING_MISMATCH, "cwd-in-policy": ErrorCode.SESSION_CONFLICT}
             assert denied.value.code is expected.get(change, ErrorCode.AUTHORIZATION_DENIED)
             assert calls == 0
 
@@ -284,3 +302,120 @@ async def test_prepared_open_session_does_not_override_fresh_source_closed_statu
             assert calls == 0
             record = await state.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
             assert record.status is SessionStatus.CLOSED and record.active_execution_id is None
+
+
+async def test_session_start_reuses_authorized_source_and_commit_receipt(tmp_path, monkeypatch):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def model(messages, info):
+        entered.set()
+        await release.wait()
+        return await _answer(messages, info)
+
+    async with Persistence.open("session-start-receipt", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
+        async with Runtime.attach(persistence=state, features=_features(model), metrics=None) as runtime:
+            target = await runtime.agents.get().create_session("session")
+            service = runtime._execution_service
+            load_session = service._load_session
+            load_execution = service.load_source_execution
+            launch = service._launch_started_impl
+            launching = ContextVar("launch_source_read", default=False)
+            session_reads = []
+            launch_reads = []
+
+            async def read_session(*args, **kwargs):
+                session_reads.append(args[0])
+                return await load_session(*args, **kwargs)
+
+            async def read_execution(*args, **kwargs):
+                if launching.get():
+                    launch_reads.append(args[0])
+                return await load_execution(*args, **kwargs)
+
+            async def launch_started(*args, **kwargs):
+                token = launching.set(True)
+                try:
+                    return await launch(*args, **kwargs)
+                finally:
+                    launching.reset(token)
+
+            monkeypatch.setattr(service, "_load_session", read_session)
+            monkeypatch.setattr(service, "load_source_execution", read_execution)
+            monkeypatch.setattr(service, "_launch_started_impl", launch_started)
+            execution = await target.start("question", idempotency_key="request")
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                assert session_reads == []
+                assert launch_reads == []
+                replay = await target.start("question", idempotency_key="request")
+                assert replay.execution_id == execution.execution_id
+                assert launch_reads == [execution.execution_id]
+            finally:
+                release.set()
+            assert (await execution.wait(timeout_seconds=5)).result.output == {"text": "answer"}
+
+
+async def test_reconciled_unknown_session_refreshes_source_before_start(tmp_path, monkeypatch):
+    async with Persistence.open("session-start-reconciled", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as state:
+        async with Runtime.attach(persistence=state, features=_features(_answer), metrics=None) as runtime:
+            target = await runtime.agents.get().create_session("session")
+            service = runtime._execution_service
+            load_session = service._load_session
+            source_reads = []
+
+            async def settle(session_id, *, tenant_id):
+                record = await state.conversation.sessions.get(session_id, tenant_id=tenant_id)
+                await _delete_session(state)
+                await state.conversation.sessions.create(replace(record, owner_principal_id="replacement"))
+                return True
+
+            async def read_session(*args, **kwargs):
+                source_reads.append(args[0])
+                return await load_session(*args, **kwargs)
+
+            monkeypatch.setattr(service._runtime_bridge.pending_turns, "settle_session", settle)
+            monkeypatch.setattr(service, "_load_session", read_session)
+            with pytest.raises(AIError) as denied:
+                await target.start("question", idempotency_key="request")
+            assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+            assert source_reads == ["session"]
+
+
+async def test_session_start_authorizes_source_owner_after_remote_cached_replacement(tmp_path, monkeypatch):
+    from linktools.ai.storage import _write_cache
+
+    monkeypatch.setattr(_write_cache, "time", lambda: 1000.0)
+    decisions = []
+    calls = 0
+
+    async def model(messages, info):
+        nonlocal calls
+        calls += 1
+        return await _answer(messages, info)
+
+    class Policy(TenantAuthorizationPolicy):
+        async def authorize(self, principal, action, resource):
+            if action is AuthorizationAction.SESSION_READ:
+                decisions.append(resource.owner_principal_id)
+            await super().authorize(principal, action, resource)
+
+    from .test_session_admission import _session
+
+    path = tmp_path / "state.db"
+    storage = PersistenceStorage.sqlite(path, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Persistence.open("session-start-source-owner", storage=PersistenceStorage.sqlite(path)) as writer:
+        await writer.conversation.sessions.create(replace(_session(), owner_principal_id="runtime", agent_id="default"))
+        async with Persistence.open("session-start-source-owner", storage=storage) as reader:
+            async with Runtime.attach(persistence=reader, features=_features(model), metrics=None, authorization=Policy()) as runtime:
+                target = runtime.agents.get().session("session")
+                original = await reader.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
+                await _delete_session(writer)
+                await writer.conversation.sessions.create(replace(original, owner_principal_id="replacement"))
+                cached = await reader.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
+                assert cached.owner_principal_id == original.owner_principal_id
+                with pytest.raises(AIError) as denied:
+                    await target.start("question", idempotency_key="request")
+                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+                assert decisions and set(decisions) == {"replacement"}
+                assert calls == 0

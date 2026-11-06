@@ -155,9 +155,7 @@ from .contracts import (
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionEventRecord,
-    ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
-    ExecutionHistoryState,
     ExecutionRecord,
     ExecutionRunSealHead,
     ExecutionStartClaim,
@@ -181,8 +179,8 @@ from .contracts import (
     OperationTerminalUpdate,
     PendingDeferredCall,
     PendingToolContinuation,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
     RecoveryConversationIntent,
     RecoveryHandoffPhase,
     RecoveryTerminalHandoff,
@@ -300,9 +298,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("evaluation_model_usage", ModelUsage),
     ("evaluation_human_decision", EvaluationHumanDecision),
     ("execution_event", ExecutionEventRecord),
-    ("execution_history_head", ExecutionHistoryHeadRecord),
     ("execution_history_seal", ExecutionHistorySealRecord),
-    ("execution_history_state", ExecutionHistoryState),
     ("execution_record", ExecutionRecord),
     ("execution_run_seal_head", ExecutionRunSealHead),
     ("model_client_body_ref", ModelClientBodyRef),
@@ -326,7 +322,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("principal", Principal),
     ("pending_deferred_call", PendingDeferredCall),
     ("pending_tool_continuation", PendingToolContinuation),
-    ("recovery_checkpoint", ExecutionCheckpoint),
+    ("execution_recovery_detail", ExecutionRecoveryDetail),
     ("recovery_conversation_intent", RecoveryConversationIntent),
     ("recovery_terminal_handoff", RecoveryTerminalHandoff),
     ("recovery_terminal_outcome", RecoveryTerminalOutcome),
@@ -396,7 +392,6 @@ _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("approval_decision", ApprovalDecision),
     ("approval_status", ApprovalStatus),
     ("execution_event_type", ExecutionEventType),
-    ("execution_history_state", ExecutionHistoryState),
     ("execution_lineage_kind", ExecutionLineageKind),
     ("execution_status", ExecutionStatus),
     ("external_call_status", ExternalCallStatus),
@@ -407,7 +402,7 @@ _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("resource_kind", ResourceKind),
     ("runtime_domain", PersistenceDomain),
     ("runtime_retention_mode", StorageRetentionMode),
-    ("recovery_checkpoint_state", ExecutionCheckpointState),
+    ("execution_recovery_state", ExecutionRecoveryState),
     ("recovery_handoff_phase", RecoveryHandoffPhase),
     ("session_status", SessionStatus),
     ("stop_reason", StopReason),
@@ -1780,6 +1775,15 @@ def _iter_runtime_object_refs(
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     continue
                 yield from _iter_runtime_object_refs(item, domain, codec)
+            return
+        if dataclass_name == codec.wire_ids.get(PendingDeferredCall):
+            fields_value = value.get("fields")
+            if not isinstance(fields_value, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for key, item in fields_value.items():
+                yield from _iter_runtime_object_refs(
+                    item, PersistenceDomain.CHECKPOINT if key == "arguments_payload" else domain, codec,
+                )
             return
         if dataclass_name == codec.wire_ids[RuntimePayloadRef]:
             decoded = _decode_domain(

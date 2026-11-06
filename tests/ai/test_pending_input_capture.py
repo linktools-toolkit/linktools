@@ -76,7 +76,7 @@ async def test_pending_capture_authorizes_promotion_and_refreshes_source_misses(
             header = ResourceRef(ResourceKind.EXECUTION, execution_id, "tenant", record.principal_id)
             await policy.authorize(principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT, header)
             await policy.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
-            await state.execution.executions.create_with_history_head(record)
+            await state.execution.executions.create_execution(record)
             promotions.append(execution_id)
 
         captures = _captures(state, prepare=prepare)
@@ -106,7 +106,7 @@ async def test_denied_pending_capture_does_not_promote(principal) -> None:
             await policy.authorize(principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT, header)
             await policy.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
             promotions.append(execution_id)
-            await state.execution.executions.create_with_history_head(record)
+            await state.execution.executions.create_execution(record)
 
         captures = _captures(state, prepare=prepare)
         with pytest.raises(AIError) as raised:
@@ -130,7 +130,7 @@ async def test_promoted_capture_still_applies_both_canonical_authorization_actio
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
         async def prepare(execution_id, principal):
-            await state.execution.executions.create_with_history_head(record)
+            await state.execution.executions.create_execution(record)
 
         captures = _captures(state, prepare=prepare, authorization=Denied())
         with pytest.raises(AIError) as raised:
@@ -143,7 +143,7 @@ async def test_promoted_capture_still_applies_both_canonical_authorization_actio
 async def test_promotion_callback_does_not_bypass_source_input_owner() -> None:
     async with _storage() as state:
         async def prepare(execution_id, principal):
-            await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+            await state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
 
         captures = _captures(state, prepare=prepare)
         with pytest.raises(AIError) as raised:
@@ -167,7 +167,7 @@ async def test_pending_capture_requires_source_header_even_after_preparation(pre
 @pytest.mark.asyncio
 async def test_source_capture_does_not_request_pending_promotion() -> None:
     async with _storage() as state:
-        await state.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+        await state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
 
         async def prepare(execution_id, principal):
             raise AssertionError("source execution must not request pending promotion")

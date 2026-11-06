@@ -35,8 +35,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
     RecoveryHandoffPhase,
     StoredUserInput,
 )
@@ -210,35 +210,13 @@ def _pending_tools() -> PendingToolContinuation:
     )
 
 
-def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
-    now = datetime.now(timezone.utc)
-
-    def checkpoint(
-        state: ExecutionCheckpointState,
-        agent_run_id: str | None,
-        pending_tools: PendingToolContinuation | None = None,
-    ) -> ExecutionCheckpoint:
-        return ExecutionCheckpoint(
-            execution_id="execution",
-            agent_run_id=agent_run_id,
-            state=state,
-            revision=0,
-            created_at=now,
-            updated_at=now,
-            pending_tools=pending_tools,
-            handoff_phase=RecoveryHandoffPhase.NONE,
-        )
-
+def test_recovery_detail_owns_only_the_deferred_frontier() -> None:
     with pytest.raises(ValueError):
-        checkpoint(ExecutionCheckpointState.ADMITTED, "step-1")
+        ExecutionRecoveryDetail(source_agent_run_id="step-1")
     with pytest.raises(ValueError):
-        checkpoint(ExecutionCheckpointState.ACTIVE, None)
-    assert checkpoint(ExecutionCheckpointState.COMPLETED, None).agent_run_id is None
-    waiting = checkpoint(
-        ExecutionCheckpointState.WAITING,
-        "step-1",
-        _pending_tools(),
-    )
+        ExecutionRecoveryDetail(pending_tools=_pending_tools())
+    assert ExecutionRecoveryDetail().agent_run_id is None
+    waiting = ExecutionRecoveryDetail(agent_run_id="step-1", pending_tools=_pending_tools())
     assert waiting.pending_tools is not None
     assert waiting.pending_tools.source_agent_run_id == waiting.agent_run_id
 

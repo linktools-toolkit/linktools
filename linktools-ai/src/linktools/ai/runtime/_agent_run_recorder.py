@@ -85,6 +85,13 @@ class AgentRunRecorder:
         self._history_boundary = history_boundary
         self._checkpoint_sink = checkpoint_sink
         self._agent_run_id = agent_run_id
+        initial_request = initial_messages[-1] if initial_messages else None
+        self._initial_request = (
+            freeze_model_messages((initial_request,))[0]
+            if isinstance(initial_request, ModelRequest)
+            and initial_request.run_id and initial_request.run_id != agent_run_id
+            else None
+        )
         self._run: AgentRunRecord | None = None
         self._next_event_index = 0
         self._tool_events: dict[str, set[str]] = {}
@@ -140,7 +147,11 @@ class AgentRunRecorder:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._run = record
         await self._store.register_agent_run(record, execution_id=self._execution_id)
-        previous = await self.latest_checkpoint(include_interrupted=True)
+        # Native StepPersistence registers a fresh run for each attempt; a
+        # previous snapshot under this identity cannot be a recovery source.
+        previous = (None if isinstance(self._store, RuntimeAgentRunStore)
+                    and self._store.execution_persistence(record.agent_run_id)[1]
+                    else await self.latest_checkpoint(include_interrupted=True))
         if previous is not None:
             self._transcript_messages = list(freeze_model_messages(previous.messages))
         observed = (
@@ -290,10 +301,18 @@ class AgentRunRecorder:
         )
 
     def request_already_captured(self, messages: Sequence[ModelMessage]) -> bool:
-        if self._pending_parts or not messages or not self._transcript_messages:
+        initial_request, self._initial_request = self._initial_request, None
+        if self._pending_parts or not messages:
+            return False
+        request = freeze_model_messages((messages[-1],))[0]
+        # Recovery can dispatch an existing request from the source attempt.
+        # Its native occurrence is input, not new raw history for this attempt.
+        if initial_request is not None and request == initial_request:
+            return True
+        if not self._transcript_messages:
             return False
         latest = self._transcript_messages[-1]
-        return isinstance(latest, ModelRequest) and latest == freeze_model_messages((messages[-1],))[0]
+        return isinstance(latest, ModelRequest) and latest == request
 
     def _pending_matches(self, message: ModelMessage) -> bool:
         if isinstance(message, ModelResponse):

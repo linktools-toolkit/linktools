@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
@@ -33,9 +32,8 @@ _PRINCIPAL = Principal(principal_id="reader", tenant_id="tenant")
 
 class _PendingStore:
     def __init__(self) -> None:
-        self.pending = replace(_execution(), event_seq=1, conversation=True)
+        self.pending = _execution(status=ExecutionStatus.PENDING_START)
         self.execution = None
-        self.head = None
         self.owner = "pending-owner"
         self.records = ()
         self.pending_read = asyncio.Event()
@@ -47,10 +45,6 @@ class _PendingStore:
     async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         assert execution_id == "execution" and tenant_id == "tenant"
         return self.execution
-
-    async def get_history_head(self, execution_id: str, *, tenant_id: str) -> SimpleNamespace | None:
-        assert execution_id == "execution" and tenant_id == "tenant"
-        return self.head
 
     async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
         record = await self.get(execution_id, tenant_id=tenant_id)
@@ -74,28 +68,33 @@ class _PendingStore:
         self, execution_id: str, *, tenant_id: str,
     ) -> tuple[ExecutionRecord, int, str] | None:
         assert execution_id == "execution" and tenant_id == "tenant"
-        if self.pending is None or self.pending.agent_run_seq != 1 or self.owner is None:
+        if (self.pending is None or self.pending.agent_run_seq != 1
+                or self.pending.producer_generation < 1 or self.pending.producer_claim_id is None
+                or self.pending.producer_claim_id != self.owner):
             return None
-        return self.pending, 2, self.owner
+        return self.pending, self.pending.producer_generation, self.pending.producer_claim_id
 
     def activate(self) -> None:
-        self.pending = replace(self.pending, agent_run_seq=1)
+        self.pending = replace(
+            self.pending, status=ExecutionStatus.STARTED, event_seq=1, agent_run_seq=1,
+            producer_generation=2, producer_claim_id=self.owner,
+        )
 
     def promote(self) -> None:
         self.execution = self.pending
         self.pending = None
-        self.head = SimpleNamespace(
-            producer_generation=2, producer_claim_id=self.owner, state=SimpleNamespace(value="open"),
+        self.records = (
+            ExecutionEvent("execution", 1, "EXECUTION_STARTED", {"source": "canonical SQL"}),
         )
 
     def commit(self) -> None:
+        if self.pending is not None and self.pending.agent_run_seq == 0:
+            self.activate()
         self.execution = replace(
             self.pending or self.execution, status=ExecutionStatus.SUCCEEDED, event_seq=2,
+            history_seal_digest="a" * 64,
         )
         self.pending = None
-        self.head = SimpleNamespace(
-            producer_generation=2, producer_claim_id=self.owner, state=SimpleNamespace(value="sealed"),
-        )
         self.records = (
             ExecutionEvent("execution", 1, "EXECUTION_STARTED", {"source": "canonical SQL"}),
             ExecutionEvent("execution", 2, "EXECUTION_SUCCEEDED", {"source": "canonical SQL"}),
@@ -256,9 +255,11 @@ async def test_pending_owner_change_resets_buffered_preview_before_durable_fallb
             assert (await anext(stream)).payload["text"] == "first"
             if change == "sql_replaced":
                 store.promote()
-                store.head.producer_claim_id = "replacement"
+                store.execution = replace(store.execution, producer_claim_id="replacement")
             else:
                 store.owner = None if change == "lost" else "replacement"
+                if change == "replaced":
+                    store.pending = replace(store.pending, producer_claim_id=store.owner)
             await asyncio.sleep(1.01)
             reset = await asyncio.wait_for(anext(stream), 2)
             assert reset.event_type == "STREAM_RESET" and reset.durable_seq is None

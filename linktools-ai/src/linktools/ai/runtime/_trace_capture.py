@@ -7,8 +7,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol
 
-from linktools.core import environ
-
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.usage import UsageLimitExceeded
 from pydantic_ai.messages import ModelMessage, ModelResponse
@@ -285,7 +283,7 @@ class ModelInteractionCapture:
             client_request_start=attempt.client_request_start, client_request_end=attempt.client_request_end,
             response_context=context, usage=_usage_metrics(attempt.usage),
             error_code=error_code, error_type=(None if error is None else
-                environ.logging.redact(f"{type(error).__module__}.{type(error).__qualname__}")),
+                f"{type(error).__module__}.{type(error).__qualname__}"),
             retry_scheduled=attempt.retry_scheduled,
         )
 

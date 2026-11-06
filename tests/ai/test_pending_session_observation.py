@@ -59,3 +59,21 @@ def test_local_session_observation_preserves_unknown_without_reconciliation() ->
         turns.observe_session("session", tenant_id="tenant")
     assert error.value is failure
     assert turns.get("execution", tenant_id="tenant") is turn
+
+
+@pytest.mark.asyncio
+async def test_session_settlement_reports_only_reconciled_unknown_outcomes() -> None:
+    turns = _PendingExecutionTurns()
+    assert not await turns.settle_session("session", tenant_id="tenant")
+    reservation = _reservation()
+    turn, _ = turns.admit("tenant", reservation, _session(), now=reservation.execution.created_at)
+    assert not await turns.settle_session("session", tenant_id="tenant")
+    turns.fail(turn, AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN))
+    assert not await turns.settle_session("session", tenant_id="tenant")
+
+    async def reconcile():
+        turns.release(turn)
+
+    turn.reconcile = reconcile
+    assert await turns.settle_session("session", tenant_id="tenant")
+    assert not await turns.settle_session("session", tenant_id="tenant")

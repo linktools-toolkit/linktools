@@ -14,7 +14,35 @@ from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task.engine import TaskEngine
-from linktools.ai.task import TaskGraph, TaskNode
+from linktools.ai.task import TaskGraph, TaskInputSupplyRequest, TaskNode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_deferred_input_survives_producer_reopen_without_agent_continuation(
+    tmp_path: Path, backend: str,
+) -> None:
+    storage = (PersistenceStorage.in_memory() if backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
+    principal = Principal("owner", "default")
+    async with Persistence.open("input-reopen", storage=storage) as persistence:
+        async with TaskEngine.open(persistence=persistence) as engine:
+            graph = await engine.start(
+                TaskGraph("input", (TaskNode.wait("value"),)),
+                principal=principal, idempotency_key="start",
+            )
+            waiting = (await graph.wait(timeout_seconds=10)).result.node_states[0]
+            assert waiting.status is TaskStatus.WAITING
+            assert waiting.execution_id is not None
+        async with TaskEngine.open(persistence=persistence) as reopened:
+            graph = await reopened.get("input", principal=principal)
+            current = (await graph.state()).node_states[0]
+            assert current.status is TaskStatus.WAITING
+            assert current.execution_id == waiting.execution_id
+            request = TaskInputSupplyRequest(principal, waiting.execution_id, None, "supply")
+            assert (await graph.resume("value", request)).status is TaskStatus.SUCCEEDED
+            assert await graph.result("value") is None
+            assert (await graph.resume("value", request)).status is TaskStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio

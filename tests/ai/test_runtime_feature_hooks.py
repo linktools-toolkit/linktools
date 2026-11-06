@@ -15,7 +15,9 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 
@@ -43,7 +45,7 @@ async def test_wrapped_features_keep_native_order_and_isolate_concurrent_runs(ne
     events: list[tuple[str, str, str]] = []
     trace = TraceCapability()
     inner = _ObservedWrapper(trace, label="inner", events=events)
-    tree = (_ObservedWrapper(CombinedCapability([inner, CheckpointCapability(), ExecutionCapability(retain_history=True)]),
+    tree = (_ObservedWrapper(CombinedCapability([inner, native_checkpoint(), ExecutionCapability(retain_history=True)]),
                              id="wrapped.features", label="outer", events=events) if nested else inner)
     features = _features(tree)
     state = PersistenceStorage.in_memory()
@@ -83,7 +85,7 @@ class _RequiresFeatureTypes(AbstractCapability):
     id: str | None = "test.requires-features"
 
     def get_ordering(self) -> CapabilityOrdering:
-        features = (ExecutionCapability, CheckpointCapability, TraceCapability)
+        features = (ExecutionCapability, StepPersistence, TraceCapability)
         return CapabilityOrdering(requires=features, wraps=features)
 
     async def before_run(self, ctx: RunContext) -> None:
@@ -94,7 +96,7 @@ class _RequiresFeatureTypes(AbstractCapability):
 async def test_bound_features_preserve_public_types_and_subclass_hooks_for_native_ordering() -> None:
     events: list[tuple[str, str]] = []
     trace = _ObservedTrace(events=events)
-    checkpoint = CheckpointCapability()
+    checkpoint = native_checkpoint()
     conversation = ExecutionCapability(retain_history=True)
     features = _features(trace, checkpoint, conversation, _RequiresFeatureTypes(events=events))
     async with Persistence.open('type-ordering', storage=PersistenceStorage.in_memory()) as persistence_98, Runtime.attach(persistence=persistence_98, features=model_features(_FeatureModels(), features)) as runtime:
@@ -104,4 +106,5 @@ async def test_bound_features_preserve_public_types_and_subclass_hooks_for_nativ
         for execution in executions:
             assert [label for owner, label in events if owner == execution.execution_id] == ["requires", "trace"]
             assert len((await execution.model_interactions()).items) == 1
-    assert trace._service is checkpoint._service is conversation._service is None
+    assert trace._service is conversation._service is None
+    assert isinstance(checkpoint, StepPersistence)

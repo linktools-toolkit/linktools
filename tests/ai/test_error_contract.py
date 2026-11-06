@@ -239,7 +239,6 @@ def _failed_tool_record(
         status=ToolOperationStatus.FAILED,
         owner=None,
         fence=1,
-        lease_expires_at=None,
         error_code=error_code,
         created_at=now,
         updated_at=now,

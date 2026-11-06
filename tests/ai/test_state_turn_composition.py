@@ -24,7 +24,7 @@ from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.snapshot import Snapshot, SnapshotLimits
 from linktools.ai.storage import (
     CacheBackend, InMemoryCacheBackend, InMemoryObjectStore, Lease, TurnCoordination, read_object,
-    TurnAdmissionReader, TurnCoordinationBackend, TurnSessionReader,
+    TurnAdmissionReader, TurnCoordinationBackend, TurnScope, TurnSessionReader,
 )
 
 from ._filesystem_legacy_fixture_helpers import load_legacy_turn_source
@@ -86,6 +86,15 @@ class _HostCoordination:
 
     async def delete(self, key):
         await self.cache.delete(key)
+
+    def enter(
+        self, scope: str, *, session_key: str, request_key: str,
+        request_digest: str, execution_id: str, owner_id: str,
+    ) -> TurnScope:
+        return self._bound().enter(
+            scope, session_key=session_key, request_key=request_key,
+            request_digest=request_digest, execution_id=execution_id, owner_id=owner_id,
+        )
 
     async def claim_turn(self, scope, **kwargs):
         return await self._bound().claim_turn(scope, **kwargs)
@@ -355,7 +364,9 @@ async def test_runtime_selects_source_authority_before_sync_execution_reservatio
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
+    release_entered, release_allowed, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
     claim = StateTurnCoordination.claim_turn
+    release_turn = StateTurnCoordination.release_turn
     observed = {}
     provider_calls = 0
 
@@ -366,12 +377,20 @@ async def test_runtime_selects_source_authority_before_sync_execution_reservatio
         await release.wait()
         return result
 
+    async def blocked_release(backend, lease):
+        release_entered.set()
+        await release_allowed.wait()
+        result = await release_turn(backend, lease)
+        released.set()
+        return result
+
     async def model(messages, info):
         nonlocal provider_calls
         provider_calls += 1
         return ModelResponse(parts=[TextPart("answer")])
 
     monkeypatch.setattr(StateTurnCoordination, "claim_turn", blocked_claim)
+    monkeypatch.setattr(StateTurnCoordination, "release_turn", blocked_release)
     features = RuntimeFeatures("source-turns")
     features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()), scope="runtime")
     features.agent("default", model="default", allow_tools=())
@@ -392,14 +411,21 @@ async def test_runtime_selects_source_authority_before_sync_execution_reservatio
                 ) == replace(admitted, lease=None)
                 release.set()
                 execution = await asyncio.wait_for(starting, 5)
-                result = await execution.wait()
+                result = await execution.wait(timeout_seconds=5)
                 assert result.result.status is ExecutionStatus.SUCCEEDED
                 assert provider_calls == 1
+                await asyncio.wait_for(release_entered.wait(), 5)
+                assert await state.coordination_backend.read_turn_by_session(
+                    observed["scope"], observed["session_key"],
+                ) == replace(admitted, lease=None)
+                release_allowed.set()
+                await asyncio.wait_for(released.wait(), 5)
                 assert await state.coordination_backend.read_turn_by_session(
                     observed["scope"], observed["session_key"],
                 ) is None
             finally:
                 release.set()
+                release_allowed.set()
                 if not starting.done():
                     starting.cancel()
                 await asyncio.gather(starting, return_exceptions=True)

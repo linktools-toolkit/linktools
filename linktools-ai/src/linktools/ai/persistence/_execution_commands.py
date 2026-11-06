@@ -10,7 +10,6 @@ from ..errors import AIError, ErrorCode
 from .contracts import (
     ExecutionEventAppend,
     ExecutionHistorySealRecord,
-    ExecutionHistoryState,
     ExecutionRepository,
     ExecutionRunSealHead,
     ExecutionTerminalCommit,
@@ -79,14 +78,18 @@ class ExecutionStateCommands:
         async def mutate(
             transaction: StateTransaction,
         ) -> ExecutionTerminalCommitResult:
-            head, head_record = (
-                await self._executions.require_open_history_head_in_transaction(
-                    transaction,
-                    commit.execution.execution_id,
+            if commit.producer_generation is not None:
+                execution_guard = await self._executions.require_execution_producer_in_transaction(
+                    transaction, commit.execution.execution_id,
                     expected_producer_generation=commit.producer_generation,
                 )
-            )
-            effective_commit = commit
+            else:
+                execution_guard = await self._executions.require_execution_history_write_in_transaction(
+                    transaction, commit.execution.execution_id,
+                )
+            effective_commit = replace(commit, execution=replace(
+                commit.execution, history_seal_digest=None if history_seal is None else history_seal.seal_digest,
+            ))
             if effective_commit.idempotency is None:
                 idempotency = (
                     await self._executions.terminal_idempotency_in_transaction(
@@ -112,20 +115,10 @@ class ExecutionStateCommands:
                         else ()
                     ),
                     execution_id=commit.execution.execution_id,
-                    history_head_guard=(head, head_record),
+                    execution_guard=execution_guard,
                 )
             if history_seal is not None:
                 await self._executions.put_history_seal_in_transaction(transaction, history_seal)
-            await self._executions.replace_history_head_in_transaction(
-                transaction,
-                head_record,
-                replace(
-                    head,
-                    state=ExecutionHistoryState.SEALED if history_seal is not None else ExecutionHistoryState.CLOSED,
-                    revision=head.revision + 1,
-                    seal_digest=None if history_seal is None else history_seal.seal_digest,
-                ),
-            )
             return await self._executions.commit_terminal_in_transaction(
                 transaction,
                 effective_commit,
@@ -135,10 +128,6 @@ class ExecutionStateCommands:
         async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:
             try:
                 execution = await self._executions.get(
-                    commit.execution.execution_id,
-                    tenant_id=self._executions.tenant_id,
-                )
-                head = await self._executions.get_history_head(
                     commit.execution.execution_id,
                     tenant_id=self._executions.tenant_id,
                 )
@@ -156,14 +145,14 @@ class ExecutionStateCommands:
                     DurableCommitState.UNRESOLVED,
                     error=error,
                 )
-            if execution is None or head is None or history_seal is not None and seal is None:
+            if execution is None or history_seal is not None and seal is None:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             expected_revision = commit.expected_revision + len(audit_events) + 1
             expected_event_seq = (
                 commit.expected_event_seq + len(audit_events) + 1
             )
             if (
-                head.state is (ExecutionHistoryState.SEALED if history_seal is not None else ExecutionHistoryState.CLOSED)
+                execution.history_seal_digest == (None if history_seal is None else history_seal.seal_digest)
                 and seal == history_seal
                 and execution.status is commit.execution.status
                 and execution.result == commit.result
@@ -178,7 +167,7 @@ class ExecutionStateCommands:
                         commit.result,
                     ),
                 )
-            if head.state in {ExecutionHistoryState.SEALED, ExecutionHistoryState.CLOSED}:
+            if execution.result is not None:
                 return CommitObservation(
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),

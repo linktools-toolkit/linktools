@@ -24,8 +24,8 @@ from linktools.ai.persistence.contracts import (
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
     RecoveryHandoffPhase,
     SessionRecord,
 )
@@ -104,6 +104,8 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
                 if await archive.latest_checkpoint(agent_run_id="run") is None:
                     await archive.materialize_checkpoint(run, agent_run_checkpoint)
 
+        await archive.materialize_checkpoint(run, agent_run_checkpoint)
+
         backend = object.__new__(LocalExecutionBackend)
         backend._tenant_id = "tenant"
         backend._conversation = state.conversation
@@ -163,16 +165,9 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             "run",
             intent,
         )
-        recovery_checkpoint = ExecutionCheckpoint(
-            execution_id="execution",
-            agent_run_id="run",
-            state=ExecutionCheckpointState.HANDOFF,
-            revision=0,
-            created_at=now,
-            updated_at=now,
-            handoff_phase=RecoveryHandoffPhase.PREPARED,
-            terminal_handoff=handoff,
-        )
+        recovery_checkpoint = replace(observed, recovery=ExecutionRecoveryDetail(
+            agent_run_id="run", handoff_phase=RecoveryHandoffPhase.PREPARED, terminal_handoff=handoff,
+        ))
 
         await backend._resolve_handoff_conversation(recovery_checkpoint, handoff)
 

@@ -17,7 +17,9 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability, AgentContext
+from linktools.ai.capability import ExecutionCapability, TraceCapability, AgentContext
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -63,7 +65,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     for capability in (
         ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()),
         TraceCapability(commit=policy),
-        *((CheckpointCapability(),) if checkpoint else ()),
+        *((native_checkpoint(),) if checkpoint else ()),
     ):
         features.capability(capability, scope="runtime")
     callback = ContextVar("transaction_callback", default=None)

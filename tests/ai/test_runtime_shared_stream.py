@@ -8,12 +8,14 @@ from ._runtime_test_helpers import model_features
 from ._runtime_test_helpers import workspace_features
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import ExecutionCapability
+from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 
@@ -21,6 +23,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage, PersistenceDomain
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 from ._runtime_test_helpers import _Models
+from .test_runtime_stream_order import _execution
 
 
 @pytest.fixture
@@ -202,30 +205,46 @@ async def _collect(stream):
 
 
 def _event_service(backend, *, durable_count=3):
-    from types import SimpleNamespace
-    from linktools.ai.core import ExecutionStatus, Page
+    from linktools.ai.core import Page
     from linktools.ai.execution.events import DefaultEventService, LiveExecutionEventBroker
     from linktools.ai.execution.stream import SharedStreamPublisher
     from linktools.ai.execution import ExecutionEvent
+    from linktools.ai.persistence.contracts import ExecutionRecord
 
     class Executions:
-        reads = 0
-        head = SimpleNamespace(producer_generation=1, producer_claim_id="claim", state=SimpleNamespace(value="open"))
+        def __init__(self) -> None:
+            self.reads = 0
+            self.execution = replace(
+                _execution(event_seq=durable_count), agent_run_seq=1,
+                producer_generation=1, producer_claim_id="claim",
+            )
 
-        async def get_history_head(self, *args, **kwargs):
+        async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
+            assert execution_id == "execution" and tenant_id == "tenant"
             self.reads += 1
-            return self.head
+            return self.execution
 
-        async def get(self, *args, **kwargs):
-            return SimpleNamespace(status=ExecutionStatus.SUCCEEDED, event_seq=durable_count)
+        def commit_terminal(self) -> None:
+            self.execution = replace(
+                self.execution, status=ExecutionStatus.SUCCEEDED,
+                event_seq=self.execution.event_seq + 1, revision=self.execution.revision + 1,
+                history_seal_digest="a" * 64,
+            )
 
     class Events:
         reads = 0
 
         async def list(self, execution_id, *, after_event_seq, limit, **kwargs):
             self.reads += 1
-            return Page(tuple(ExecutionEvent(execution_id, value, "COMMITTED", {})
-                              for value in range(after_event_seq + 1, min(durable_count, after_event_seq + limit) + 1)), None)
+            execution = executions.execution
+            return Page(tuple(
+                ExecutionEvent(
+                    execution_id, value,
+                    "EXECUTION_SUCCEEDED" if execution.status is ExecutionStatus.SUCCEEDED
+                    and value == execution.event_seq else "COMMITTED", {},
+                )
+                for value in range(after_event_seq + 1, min(execution.event_seq, after_event_seq + limit) + 1)
+            ), None)
 
     executions, events = Executions(), Events()
     shared = SharedStreamPublisher(backend, "scope", "tenant")
@@ -267,25 +286,35 @@ async def test_durable_only_cursor_does_not_replay_already_committed_preview() -
     backend = InMemoryStreamBackend(max_bytes=10000)
     writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     await writer.append(1, canonical_json_bytes({"kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "old"}))
-    service, _, _ = _event_service(backend)
-    values = await _collect(service._stream_shared("execution", principal=_principal(), after_event_seq=3))
-    assert [item.event_type for item in values] == ["STREAM_RESET"]
+    service, executions, _ = _event_service(backend)
+    stream = service._stream_shared("execution", principal=_principal(), after_event_seq=3)
+    try:
+        assert (await anext(stream)).event_type == "STREAM_RESET"
+        executions.commit_terminal()
+        values = await asyncio.wait_for(_collect(stream), 2)
+        assert [item.event_type for item in values] == ["EXECUTION_SUCCEEDED"]
+        assert [item.durable_seq for item in values] == [4]
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.asyncio
 async def test_missing_stream_replays_durable_tail_after_bounded_open_grace() -> None:
     backend = InMemoryStreamBackend(max_bytes=0)
-    service, _, events = _event_service(backend)
-    values = await asyncio.wait_for(_collect(service._stream_shared(
-        "execution", principal=_principal(), after_event_seq=0,
-    )), 2)
-    assert [item.durable_seq for item in values] == [None, 1, 2, 3]
-    assert values[0].event_type == "STREAM_RESET" and events.reads > 0
+    service, executions, events = _event_service(backend)
+    stream = service._stream_shared("execution", principal=_principal(), after_event_seq=0)
+    try:
+        assert (await asyncio.wait_for(anext(stream), 2)).event_type == "STREAM_RESET"
+        executions.commit_terminal()
+        values = await asyncio.wait_for(_collect(stream), 2)
+        assert [item.durable_seq for item in values] == [1, 2, 3, 4]
+        assert values[-1].event_type == "EXECUTION_SUCCEEDED" and events.reads > 0
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.asyncio
 async def test_buffered_batch_cannot_postpone_terminal_authority_check(authority_clock) -> None:
-    from types import SimpleNamespace
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.execution.stream import stream_key
     backend = InMemoryStreamBackend(max_bytes=10000)
@@ -295,11 +324,14 @@ async def test_buffered_batch_cannot_postpone_terminal_authority_check(authority
     service, executions, _ = _event_service(backend, durable_count=0)
     stream = service._stream_shared("execution", principal=_principal(), after_event_seq=0)
     assert (await anext(stream)).payload["text"] == "1"
-    executions.head.state = SimpleNamespace(value="sealed")
+    executions.commit_terminal()
     assert executions.reads == 1
     authority_clock.now = 1.01
     assert (await anext(stream)).event_type == "STREAM_RESET"
     assert executions.reads == 2
+    remaining = await _collect(stream)
+    assert [item.durable_seq for item in remaining] == [1]
+    assert remaining[0].event_type == "EXECUTION_SUCCEEDED"
     await stream.aclose()
 
 
@@ -385,10 +417,16 @@ async def test_corrupt_transport_frame_resets_to_authoritative_events(record) ->
     backend = InMemoryStreamBackend(max_bytes=10000)
     writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     await writer.append(1, canonical_json_bytes(record))
-    service, _, _ = _event_service(backend)
-    values = await _collect(service._stream_shared("execution", principal=_principal(), after_event_seq=0))
-    assert [item.durable_seq for item in values] == [None, 1, 2, 3]
-    assert values[0].event_type == "STREAM_RESET"
+    service, executions, _ = _event_service(backend)
+    stream = service._stream_shared("execution", principal=_principal(), after_event_seq=0)
+    try:
+        assert (await anext(stream)).event_type == "STREAM_RESET"
+        executions.commit_terminal()
+        values = await asyncio.wait_for(_collect(stream), 2)
+        assert [item.durable_seq for item in values] == [1, 2, 3, 4]
+        assert values[-1].event_type == "EXECUTION_SUCCEEDED"
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.asyncio
@@ -399,10 +437,18 @@ async def test_missing_marker_tail_stops_later_preview_in_same_batch() -> None:
     writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     await writer.append(1, canonical_json_bytes({"kind": "event", "durable": 4}))
     await writer.append(2, canonical_json_bytes({"kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "stale"}))
-    service, _, _ = _event_service(backend)
-    values = await _collect(service._stream_shared("execution", principal=_principal(), after_event_seq=0))
-    assert [item.durable_seq for item in values] == [1, 2, 3, None]
-    assert values[-1].event_type == "STREAM_RESET"
+    service, executions, _ = _event_service(backend)
+    stream = service._stream_shared("execution", principal=_principal(), after_event_seq=0)
+    try:
+        values = [await anext(stream) for _ in range(4)]
+        assert [item.durable_seq for item in values] == [1, 2, 3, None]
+        assert values[-1].event_type == "STREAM_RESET"
+        executions.commit_terminal()
+        remaining = await asyncio.wait_for(_collect(stream), 2)
+        assert [item.durable_seq for item in remaining] == [4]
+        assert remaining[0].event_type == "EXECUTION_SUCCEEDED"
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.asyncio
@@ -513,6 +559,9 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
             lambda: owner._state.execution.executions.get(execution.execution_id, tenant_id=tenant),
             lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
         )
+        waiting = await owner._state.execution.executions.get(execution.execution_id, tenant_id=tenant)
+        assert waiting is not None
+        assert not waiting.conversation and not waiting.restart_checkpoints and not waiting.durable_trace
         worker = owner._execution_service.runtime_backend()._tasks.get(execution.execution_id)
         if worker is not None:
             await asyncio.wait_for(asyncio.shield(worker), 10)
@@ -613,21 +662,20 @@ async def test_marker_batch_corrupt_tail_preserves_valid_prefix() -> None:
 
 @pytest.mark.asyncio
 async def test_marker_batch_prefetched_tail_respects_authority_deadline(authority_clock) -> None:
-    from types import SimpleNamespace
-
     stream, executions, events = await _marker_batch_stream([
         {"kind": "event", "durable": target} for target in (1, 2, 3)
     ])
     try:
         assert (await anext(stream)).durable_seq == 1
         assert events.reads == 1
-        executions.head = SimpleNamespace(
-            producer_generation=1, producer_claim_id="claim", state=SimpleNamespace(value="sealed"),
-        )
+        executions.commit_terminal()
         assert executions.reads == 1
         authority_clock.now = 1.05
         assert (await anext(stream)).event_type == "STREAM_RESET"
         assert executions.reads == 2
+        remaining = await _collect(stream)
+        assert [item.durable_seq for item in remaining] == [2, 3, 4]
+        assert remaining[-1].event_type == "EXECUTION_SUCCEEDED"
     finally:
         await stream.aclose()
 
@@ -659,19 +707,16 @@ async def test_marker_batch_terminal_does_not_deliver_prefetched_suffix() -> Non
     from linktools.ai.core import Page
     from linktools.ai.execution import ExecutionEvent
 
-    stream, _, events = await _marker_batch_stream([
+    stream, executions, events = await _marker_batch_stream([
         {"kind": "event", "durable": target} for target in (1, 2, 3)
-    ])
+    ], durable_count=1)
     original_list = events.list
 
     async def terminal_list(*args, **kwargs):
+        executions.commit_terminal()
         page = await original_list(*args, **kwargs)
-        return Page(tuple(
-            ExecutionEvent(value.execution_id, value.event_seq,
-                           "EXECUTION_SUCCEEDED" if value.event_seq == 2 else value.event_type,
-                           value.payload)
-            for value in page.items
-        ), page.next_cursor)
+        # A malformed page suffix cannot extend the canonical terminal boundary.
+        return Page(page.items + (ExecutionEvent("execution", 3, "COMMITTED", {}),), page.next_cursor)
 
     events.list = terminal_list
     try:
@@ -680,6 +725,8 @@ async def test_marker_batch_terminal_does_not_deliver_prefetched_suffix() -> Non
         assert [value.position[1] for value in values] == [1, 2]
         assert values[-1].event_type == "EXECUTION_SUCCEEDED"
         assert events.reads == 1
+        assert executions.execution.status is ExecutionStatus.SUCCEEDED
+        assert executions.execution.event_seq == 2
     finally:
         await stream.aclose()
 
@@ -712,7 +759,6 @@ async def test_nondurable_runtime_keeps_combined_cache_without_opening_shared_st
 
 @pytest.mark.asyncio
 async def test_first_admission_attach_rejects_changed_producer_identity() -> None:
-    from types import SimpleNamespace
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.execution.stream import stream_key
 
@@ -722,16 +768,18 @@ async def test_first_admission_attach_rejects_changed_producer_identity() -> Non
         "kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "wrong admission",
     }))
     service, executions, _ = _event_service(backend)
-    executions.head = SimpleNamespace(
-        producer_generation=7, producer_claim_id="replacement", state=SimpleNamespace(value="open"),
+    executions.execution = replace(
+        executions.execution, producer_generation=7, producer_claim_id="replacement",
     )
     stream = service._stream_shared(
         "execution", principal=_principal(), after_event_seq=1, initial_admission=(4, "first"),
     )
     try:
-        items = [item async for item in stream]
-        assert items[0].event_type == "STREAM_RESET"
-        assert [item.durable_seq for item in items[1:]] == [2, 3]
+        assert (await anext(stream)).event_type == "STREAM_RESET"
+        executions.commit_terminal()
+        items = await asyncio.wait_for(_collect(stream), 2)
+        assert [item.durable_seq for item in items] == [2, 3, 4]
+        assert items[-1].event_type == "EXECUTION_SUCCEEDED"
         assert all(item.event_type != "ASSISTANT_TEXT_DELTA" for item in items)
     finally:
         await stream.aclose()
@@ -740,36 +788,28 @@ async def test_first_admission_attach_rejects_changed_producer_identity() -> Non
 @pytest.mark.asyncio
 @pytest.mark.parametrize("local_takeover", (False, True))
 async def test_early_shared_watch_does_not_attach_to_later_attempt(local_takeover: bool) -> None:
-    from types import SimpleNamespace
-    from linktools.ai.core import ExecutionStatus
-
     backend = _CountingStreamBackend()
     service, executions, _ = _event_service(backend, durable_count=0)
     if local_takeover:
         service._live.is_local_producer = lambda execution_id: True
-    reads = 0
+    executions.execution = replace(
+        executions.execution, agent_run_seq=2, producer_generation=7, producer_claim_id="later",
+    )
+    original_get = executions.get
 
     async def get(*args, **kwargs):
-        nonlocal reads
-        reads += 1
-        return SimpleNamespace(
-            status=ExecutionStatus.STARTED if reads == 1 else ExecutionStatus.SUCCEEDED,
-            event_seq=0, agent_run_seq=2,
-        )
-
-    async def read(callback):
-        return await callback(None)
+        if executions.reads == 1:
+            executions.commit_terminal()
+        return await original_get(*args, **kwargs)
 
     executions.get = get
-    executions.state_store = SimpleNamespace(read=read)
-    executions.head = SimpleNamespace(
-        producer_generation=7, producer_claim_id="later", state=SimpleNamespace(value="open"),
-    )
     stream = service._stream_durable(
         "execution", tenant_id="tenant", after_event_seq=0, principal=_principal(), initial_shared=True,
     )
     try:
-        assert await asyncio.wait_for(_collect(stream), 5) == []
+        items = await asyncio.wait_for(_collect(stream), 5)
+        assert [item.event_type for item in items] == ["EXECUTION_SUCCEEDED"]
+        assert [item.durable_seq for item in items] == [1]
         assert not backend.read_entered.is_set()
     finally:
         await stream.aclose()

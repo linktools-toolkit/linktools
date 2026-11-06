@@ -307,7 +307,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.STARTED
             before = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert before.requires_task_invocation_capture
-            before_head = await runtime._state.execution.executions.get_history_head(execution.execution_id,
+            before_head = await runtime._state.execution.executions.get(execution.execution_id,
                 tenant_id=principal.tenant_id)
             with pytest.raises(AIError) as pending:
                 await runtime_engine.inputs.capture_input(execution.execution_id,
@@ -322,7 +322,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
                 models.release.set()
             await asyncio.wait_for(run.recover(idempotency_key="recover"), 5)
             assert models.requests == 1
-            recovered_head = await runtime._state.execution.executions.get_history_head(execution.execution_id,
+            recovered_head = await runtime._state.execution.executions.get(execution.execution_id,
                 tenant_id=principal.tenant_id)
             assert recovered_head.producer_generation == before_head.producer_generation
             assert recovered_head.producer_claim_id == before_head.producer_claim_id

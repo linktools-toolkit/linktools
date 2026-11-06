@@ -348,7 +348,6 @@ def _runtime_commands(
         tools=state.checkpoint.tools,
         conversation_run_store=state.run_store.read_store(PersistenceDomain.CONVERSATION),
         execution_run_store=state.run_store.read_store(PersistenceDomain.TRACE),
-        checkpoint_archive=state.run_store.read_store(PersistenceDomain.CHECKPOINT),
         background_tasks=set() if background_tasks is None else background_tasks,
     )
 
@@ -366,7 +365,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     ))
     await state.initialize(namespace="parallel-tools", tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(
+        await state.execution.executions.create_execution(
             _execution(datetime.now(timezone.utc)),
         )
         agent_run_id = "run"

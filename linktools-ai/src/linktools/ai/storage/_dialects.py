@@ -485,7 +485,7 @@ class MySQLDialect(SQLiteDialect):
         from sqlalchemy.exc import IntegrityError
 
         try:
-            await session.execute(insert(table).values(dict(values)))
+            result = await session.execute(insert(table).values(dict(values)))
         except IntegrityError as error:
             if (
                 self.classify_integrity_error(error)
@@ -502,7 +502,7 @@ class MySQLDialect(SQLiteDialect):
             if existing is None:
                 raise
             return InsertResult(False, None)
-        return InsertResult(True, None)
+        return InsertResult(True, int(result.inserted_primary_key[0]))
 
     async def insert_ignore_conflict_many(
         self,
@@ -517,18 +517,22 @@ class MySQLDialect(SQLiteDialect):
         from sqlalchemy.dialects.mysql import insert
         from sqlalchemy.exc import IntegrityError
 
-        statement = insert(table).values([dict(row) for row in rows])
+        statement = insert(table)
+        parameters = [dict(row) for row in rows]
+        # Let the driver batch escaped values within its statement-size limit.
         try:
-            await session.execute(statement)
+            await session.execute(statement, parameters)
         except IntegrityError as error:
             if _read_mysql_errno(error.orig) != 1062:
                 raise
-            # InnoDB rolls back the failed statement, keeping this transaction usable.
+            # Earlier driver batches can remain pending; the idempotent retry
+            # covers every row in the same outer transaction.
         else:
             return len(rows)
         column = index_elements[0]
         await session.execute(
-            statement.on_duplicate_key_update(**{column: statement.inserted[column]})
+            statement.on_duplicate_key_update(**{column: statement.inserted[column]}),
+            parameters,
         )
         # FOUND_ROWS makes an ignored duplicate indistinguishable from an insert.
         return None
@@ -595,11 +599,12 @@ class MySQLDialect(SQLiteDialect):
             return
         from sqlalchemy.dialects.mysql import insert
 
-        statement = insert(table).values([dict(row) for row in rows])
+        statement = insert(table)
         await session.execute(
             statement.on_duplicate_key_update(
                 **{column: statement.inserted[column] for column in set_columns}
-            )
+            ),
+            [dict(row) for row in rows],
         )
 
     async def upsert_increment_many(
@@ -617,14 +622,17 @@ class MySQLDialect(SQLiteDialect):
         from sqlalchemy import and_, or_, select
         from sqlalchemy.dialects.mysql import insert
 
-        insert_statement = insert(table).values([dict(row) for row in rows])
+        insert_statement = insert(table)
         value_column = table.c[column]
         set_values = {column: value_column + insert_statement.inserted[column]}
         if "updated_at" in table.c:
             from sqlalchemy import func
 
             set_values["updated_at"] = func.current_timestamp()
-        await session.execute(insert_statement.on_duplicate_key_update(**set_values))
+        await session.execute(
+            insert_statement.on_duplicate_key_update(**set_values),
+            [dict(row) for row in rows],
+        )
         predicates = tuple(
             and_(
                 *(

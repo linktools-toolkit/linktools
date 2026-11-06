@@ -262,6 +262,10 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             state, created.history_id
         )
 
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
+        checkpoint_sequence = await archive.latest_checkpoint_sequence(agent_run_id=agent_run_id)
+        fact = await archive.checkpoint_at_sequence(agent_run_id=agent_run_id, checkpoint_sequence=checkpoint_sequence)
+
         async def commit_success(transaction):
             await state.conversation.sessions.commit_timeline_turn_in_transaction(
                 transaction,
@@ -282,6 +286,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                     agent_run_id,
                     history_id=created.history_id,
                     message_count=message_count,
+                    checkpoint_sequence=checkpoint_sequence, projection_digest=fact.projection_digest,
                 ),
                 release_execution=True,
                 history_quality="complete",
@@ -336,6 +341,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 agent_run_id,
                 history_id=created.history_id,
                 message_count=message_count,
+                checkpoint_sequence=checkpoint_sequence, projection_digest=fact.projection_digest,
             ),
         )
         await _commit_empty_turn(state, failed)

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Live-turn ownership and non-authoritative views on one borrowed cache."""
+"""Live-turn coordination with optional non-authoritative cache views."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from ..core import (
     ExecutionStatus,
@@ -15,9 +16,13 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, StreamBackend, Lease, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader
+from ..storage import CacheBackend, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader
 from .codec import decode_domain, encode_domain
 from ..execution import ExecutionRecord
+
+
+if TYPE_CHECKING:
+    from ..storage import TurnScope
 
 
 _PROMOTION_INTENT = b"promote"
@@ -26,12 +31,12 @@ _PROMOTION_INTENT = b"promote"
 class PendingTurnCoordination:
     """Coordinate pending turns without owning lifecycle or durable state.
 
-    Both capability groups must belong to the same borrowed object. There is no
-    implicit process-local substitute for an incomplete configured cache.
+    Ownership is independent of optional cache views on the borrowed backend.
+    There is no implicit process-local substitute for missing ownership.
     Observation failures propagate to the caller; they never authorize a claim.
     """
 
-    def __init__(self, cache: CacheBackend, backend: TurnCoordinationBackend, *, namespace: str, tenant_id: str) -> None:
+    def __init__(self, cache: CacheBackend | None, backend: TurnCoordinationBackend, *, namespace: str, tenant_id: str) -> None:
         self._cache = cache
         self._backend = backend
         self._namespace = validate_persistence_namespace(namespace)
@@ -44,18 +49,27 @@ class PendingTurnCoordination:
     def select(
         cls, cache: CacheBackend | TurnCoordinationBackend | StreamBackend | None, *, namespace: str, tenant_id: str,
     ) -> PendingTurnCoordination | None:
-        if not isinstance(cache, CacheBackend) or not isinstance(cache, TurnCoordinationBackend):
+        if not isinstance(cache, TurnCoordinationBackend):
             return None
-        return cls(cache, cache, namespace=namespace, tenant_id=tenant_id)
+        return cls(
+            cache if isinstance(cache, CacheBackend) else None, cache,
+            namespace=namespace, tenant_id=tenant_id,
+        )
 
-    async def claim(
+    @property
+    def supports_pending_views(self) -> bool:
+        """Whether the backend can carry disposable pending views and hints."""
+        return self._cache is not None
+
+    def enter(
         self, *, session_key: str, request_key: str, request_digest: str,
-        execution_id: str, owner_id: str, lease_seconds: float,
-    ) -> TurnCoordination | None:
-        return await self._backend.claim_turn(
+        execution_id: str, owner_id: str,
+    ) -> TurnScope:
+        """Enter backend-owned admission using the same scope as all readers."""
+        return self._backend.enter(
             self._scope, session_key=session_key, request_key=request_key,
             request_digest=request_digest, execution_id=execution_id,
-            owner_id=owner_id, lease_seconds=lease_seconds,
+            owner_id=owner_id,
         )
 
     async def publish(
@@ -70,6 +84,11 @@ class PendingTurnCoordination:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if record.execution_id != coordination.execution_id or not self._is_pending(record):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._cache is None:
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"reason": "pending_views_not_supported"},
+            )
         envelope = {
             "scope": self._scope,
             "execution_id": coordination.execution_id,
@@ -156,15 +175,19 @@ class PendingTurnCoordination:
         if current is None:
             return None
         record, coordination = current
-        if record.agent_run_seq != 1:
+        if (record.agent_run_seq != 1 or record.producer_generation < 1
+                or record.producer_claim_id is None
+                or record.producer_claim_id != coordination.owner_id):
             return None
-        return record, 2, coordination.owner_id
+        return record, record.producer_generation, record.producer_claim_id
 
     async def read_session_execution(
         self, session_id: str, *, tenant_id: str,
     ) -> ExecutionRecord | None:
         """Resolve a session observation without treating absence as admission."""
         if tenant_id != self._tenant_id:
+            return None
+        if self._cache is None:
             return None
         content = await self._cache.get(self._session_key(session_id))
         if content is None:
@@ -196,6 +219,8 @@ class PendingTurnCoordination:
             or (owner_id is not None and current.owner_id != owner_id)
         ):
             return None
+        if self._cache is None:
+            return None
         content = await self._cache.get(self._record_key(current))
         if content is None:
             return None
@@ -225,12 +250,6 @@ class PendingTurnCoordination:
             return None
         return record, confirmed
 
-    async def renew(self, lease: Lease, *, lease_seconds: float) -> TurnCoordination | None:
-        return await self._backend.renew_turn(lease, lease_seconds=lease_seconds)
-
-    async def release(self, lease: Lease) -> bool:
-        return await self._backend.release_turn(lease)
-
     async def cancel(self, execution_id: str, *, tenant_id: str) -> bool:
         if tenant_id != self._tenant_id:
             return False
@@ -243,6 +262,8 @@ class PendingTurnCoordination:
         current = await self.read_owner(execution_id, tenant_id=tenant_id)
         if current is None or current.execution_id != execution_id:
             return None
+        if self._cache is None:
+            return None
         await self._cache.put(self._promotion_key(current), _PROMOTION_INTENT)
         if not await self.promotion_requested(current):
             return None
@@ -250,8 +271,9 @@ class PendingTurnCoordination:
         return current.owner_id if self._same_generation(confirmed, current) else None
 
     async def promotion_requested(self, coordination: TurnCoordination) -> bool:
-        """Read an owner's hint; only a separate successful renewal proves ownership."""
-        return await self._cache.get(self._promotion_key(coordination)) == _PROMOTION_INTENT
+        """Read a lossy hint without granting or extending ownership."""
+        return (self._cache is not None
+                and await self._cache.get(self._promotion_key(coordination)) == _PROMOTION_INTENT)
 
     async def remote_promotion_pending(
         self, execution_id: str, owner_id: str, *, tenant_id: str,

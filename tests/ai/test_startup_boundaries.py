@@ -13,6 +13,8 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ExecutionCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage._database import SqlStorageContext
@@ -22,7 +24,8 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 
 @pytest.mark.asyncio
-async def test_first_provider_has_three_metadata_commits_and_original_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('checkpointed', (False, True))
+async def test_first_provider_has_durable_prepared_input_and_original_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     calls = []
@@ -33,6 +36,9 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    checkpoint = native_checkpoint() if checkpointed else None
+    if checkpoint is not None:
+        group.capability(checkpoint, scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     async with Persistence.open('startup-boundaries', storage=state) as persistence_35, Runtime.attach(persistence=persistence_35, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -49,12 +55,22 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 current = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-                head = await runtime._state.execution.executions.get_history_head(execution.execution_id, tenant_id=runtime.tenant_id)
+                head = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
                 assert current.status is ExecutionStatus.STARTED
                 assert current.revision == 3 and current.agent_run_seq == 1
                 assert current.input_context is not None
-                assert head.producer_generation == 2 and head.producer_claim_id is not None
-                assert len(commits) == 3
+                async with Persistence.open('startup-boundaries', storage=PersistenceStorage.sqlite(tmp_path / 'state.db'), read_only=True) as observer:
+                    visible = await observer.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+                    admitted_session = await observer.conversation.sessions.get('session', tenant_id=runtime.tenant_id)
+                    checkpoint_record = await observer.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+                    assert visible.status is ExecutionStatus.STARTED and visible.input_context == current.input_context
+                    assert admitted_session.active_execution_id == execution.execution_id
+                    assert checkpoint_record.recovery.agent_run_id is not None
+                assert current.producer_generation == 2 and current.producer_claim_id is not None
+                if checkpoint is not None:
+                    runs = await checkpoint.store.list_runs()
+                    assert len(runs) == 1
+                    assert await checkpoint.store.latest_snapshot(run_id=runs[0].run_id) is not None
                 replay = await session.start('question', idempotency_key='same')
                 assert replay.execution_id == execution.execution_id
                 assert len(calls) == 1
@@ -66,21 +82,26 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
 @pytest.mark.asyncio
 @pytest.mark.parametrize('backend', ('memory', 'local_sqlite', 'sqlite'))
 @pytest.mark.parametrize('phase', ('before', 'after'))
+@pytest.mark.parametrize('boundary', ('admission', 'activation'))
+@pytest.mark.parametrize('checkpointed', (False, True))
 async def test_startup_unknown_commit_never_repeats_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, phase: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, phase: str, checkpointed: bool, boundary: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence.contracts import (
         ExecutionRecord,
-        ExecutionCheckpoint,
+        ExecutionRecoveryDetail,
+        ExecutionStartReservationResult,
     )
-    from linktools.ai.persistence.state import active_state_scope
+    from linktools.ai.persistence.state import Observed, active_state_scope
     calls = []
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-ack')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    if checkpointed:
+        group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = (PersistenceStorage.in_memory() if backend == 'memory' else
              PersistenceStorage.from_root(tmp_path / 'state', exclusive_writer=True) if backend == 'local_sqlite' else
@@ -91,8 +112,10 @@ async def test_startup_unknown_commit_never_repeats_provider(
         original = group_type.mutate
         faults = []
         def matches(value):
-            return (isinstance(value, tuple) and len(value) == 2
-                    and isinstance(value[0], ExecutionRecord) and isinstance(value[1], ExecutionCheckpoint))
+            if boundary == 'admission':
+                return isinstance(value, ExecutionStartReservationResult) and value.created
+            current = value.value if isinstance(value, Observed) else value
+            return isinstance(current, ExecutionRecord) and current.recovery is not None and current.recovery.agent_run_id is not None
         async def mutate(group, stores, callback):
             outer = active_state_scope() is None
             async def guarded(transaction):
@@ -117,8 +140,9 @@ async def test_startup_unknown_commit_never_repeats_provider(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('checkpointed', (False, True))
 async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool,
 ) -> None:
     from linktools.ai.inputs import ExecutionContextArchive
     prepared = asyncio.Event()
@@ -130,6 +154,8 @@ async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-race')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    if checkpointed:
+        group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
@@ -159,7 +185,8 @@ async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
 
 
 @pytest.mark.asyncio
-async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: Path) -> None:
+@pytest.mark.parametrize('checkpointed', (False, True))
+async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: Path, checkpointed: bool) -> None:
     from linktools.ai.errors import AIError, ErrorCode
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -171,6 +198,8 @@ async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: 
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-busy')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    if checkpointed:
+        group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
@@ -196,8 +225,9 @@ async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('checkpointed', (False, True))
 async def test_cancel_during_context_preparation_never_calls_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool,
 ) -> None:
     from linktools.ai.inputs import ExecutionContextArchive
     preparing = asyncio.Event()
@@ -207,6 +237,8 @@ async def test_cancel_during_context_preparation_never_calls_provider(
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-cancel')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    if checkpointed:
+        group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     async with Persistence.open('startup-cancel', storage=state) as persistence_213, Runtime.attach(persistence=persistence_213, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -228,8 +260,9 @@ async def test_cancel_during_context_preparation_never_calls_provider(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('fault', ('object', 'context', 'timeout'))
+@pytest.mark.parametrize('checkpointed', (False, True))
 async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancelled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, checkpointed: bool,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.inputs import ExecutionContextArchive
@@ -242,6 +275,8 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-preparation-failure')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    if checkpointed:
+        group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     async with Persistence.open('startup-preparation-failure', storage=state) as persistence_248, Runtime.attach(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
@@ -274,8 +309,9 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('checkpointed', (False, True))
 async def test_remote_cancel_during_preparation_settles_without_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool,
 ) -> None:
     from linktools.ai.inputs import ExecutionContextArchive
     preparing = asyncio.Event()
@@ -286,6 +322,8 @@ async def test_remote_cancel_during_preparation_settles_without_provider(
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-remote-cancel')
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    if checkpointed:
+        group.capability(native_checkpoint(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = PersistenceStorage.sqlite(tmp_path / 'state.db')
@@ -313,7 +351,7 @@ async def test_remote_cancel_during_preparation_settles_without_provider(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('member', ('execution', 'execution_history_head', 'recovery_checkpoint'))
+@pytest.mark.parametrize('member', ('execution',))
 async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str,
 ) -> None:
@@ -322,8 +360,8 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence.contracts import (
         AgentAttemptClaim,
-        ExecutionCheckpoint,
-        ExecutionCheckpointState,
+        ExecutionRecoveryDetail,
+        ExecutionRecoveryState,
         RuntimePayloadRef,
     )
     from linktools.ai.persistence._runtime_commands import StateCommands
@@ -337,15 +375,12 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
     state = Persistence(PersistenceStorage.sqlite(tmp_path / 'state.db'))
     await state.initialize(namespace='startup-member-cas', tenant_id='tenant')
     try:
-        execution = replace(_record(ExecutionStatus.STARTED, 0), revision=1, durable_trace=False)
-        await state.execution.executions.create_with_history_head(execution)
-        checkpoint = ExecutionCheckpoint(execution.execution_id, None, ExecutionCheckpointState.ADMITTED,
-                                        0, execution.created_at, execution.updated_at)
-        await state.checkpoint.checkpoints.create(checkpoint)
+        execution = replace(_record(ExecutionStatus.STARTED, 0), revision=1, durable_trace=False, recovery=ExecutionRecoveryDetail())
+        await state.execution.executions.create_execution(execution)
         commands = StateCommands(state.execution.executions, namespace='startup-member-cas',
                                         events=state.execution.events, checkpoint=state.checkpoint,
                                         background_tasks=set())
-        stores = (state.execution.executions.state_store, state.checkpoint.checkpoints.state_store)
+        stores = (state.execution.executions.state_store,)
         before = [await _snapshot(store) for store in stores]
         original = _SqlTransaction.replace_records
         conflicts = []
@@ -363,7 +398,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
             patch.setattr(_SqlTransaction, 'replace_records', conflict)
             with pytest.raises(AIError) as caught:
                 await commands.commit_prepared_agent_attempt_checkpoint(
-                    AgentAttemptClaim(execution.execution_id, 1, 0, 0, ExecutionCheckpointState.ADMITTED),
+                    AgentAttemptClaim(execution.execution_id, 1, 0, ExecutionRecoveryState.ADMITTED),
                     RuntimePayloadRef(StoredPayload.inline_json({'prepared': True}), None),
                 )
         assert caught.value.code is ErrorCode.STORAGE_CONFLICT
@@ -429,7 +464,7 @@ async def test_admission_readback_rejects_real_session_partial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
-    from linktools.ai.persistence.contracts import ExecutionRecord
+    from linktools.ai.persistence.contracts import ExecutionRecord, ExecutionStartReservationResult
     from linktools.ai.persistence.state import active_state_scope
 
     calls, faults = [], []
@@ -448,10 +483,11 @@ async def test_admission_readback_rejects_real_session_partial(
         async def mutate(owner, stores, callback):
             outer = active_state_scope() is None
             result = await original(owner, stores, callback)
-            if owner is group and outer and not faults and isinstance(result, ExecutionRecord) and result.status is ExecutionStatus.STARTED and result.agent_run_seq == 0:
-                faults.append(result.execution_id)
+            admitted = result.execution if isinstance(result, ExecutionStartReservationResult) else result
+            if owner is group and outer and not faults and isinstance(admitted, ExecutionRecord) and admitted.status is ExecutionStatus.STARTED and admitted.agent_run_seq == 0:
+                faults.append(admitted.execution_id)
                 if partial == 'unbound':
-                    await repository.release_execution('session', tenant_id=runtime.tenant_id, execution_id=result.execution_id)
+                    await repository.release_execution('session', tenant_id=runtime.tenant_id, execution_id=admitted.execution_id)
                 else:
                     async def remove(transaction):
                         key = repository._key('session', 'session')
@@ -470,3 +506,58 @@ async def test_admission_readback_rejects_real_session_partial(
         assert current.status is ExecutionStatus.STARTED and current.agent_run_seq == 0
         value = await repository.get('session', tenant_id=runtime.tenant_id)
         assert value is None if partial == 'missing' else value.active_execution_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ('before', 'after'))
+async def test_cancelled_admission_commit_never_dispatches_before_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.execution import CancelExecutionRequest, ExecutionStartReservationResult
+    from linktools.ai.persistence.state import active_state_scope
+
+    calls, faults = [], []
+    async def model(messages, info):
+        calls.append(messages)
+        return ModelResponse(parts=[TextPart('not expected')])
+    features = RuntimeFeatures('cancelled-admission')
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    features.agent('default', model='default', allow_tools=())
+    state = PersistenceStorage.sqlite(tmp_path / 'state.db')
+    async with Persistence.open('cancelled-admission', storage=state) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
+    ) as runtime:
+        session = await runtime.agents.get().create_session('session')
+        group = runtime._state.execution.executions.state_store.storage_group
+        original = type(group).mutate
+        async def mutate(owner, stores, callback):
+            outer = active_state_scope() is None
+            async def guarded(transaction):
+                result = await callback(transaction)
+                if outer and phase == 'before' and not faults and isinstance(result, ExecutionStartReservationResult) and result.created:
+                    faults.append(result.execution.execution_id)
+                    raise asyncio.CancelledError
+                return result
+            result = await original(owner, stores, guarded)
+            if outer and phase == 'after' and not faults and isinstance(result, ExecutionStartReservationResult) and result.created:
+                faults.append(result.execution.execution_id)
+                raise asyncio.CancelledError
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(type(group), 'mutate', mutate)
+            with pytest.raises(AIError) as caught:
+                await session.start('question', idempotency_key='cancelled')
+        assert caught.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+        assert len(faults) == 1 and calls == []
+        execution_id = faults[0]
+        current = await runtime._state.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
+        if phase == 'before':
+            assert current is None
+            assert await runtime._state.execution.executions.list_by_session('session', tenant_id=runtime.tenant_id) == ()
+        else:
+            assert current.status is ExecutionStatus.STARTED and current.agent_run_seq == 0
+            await runtime.executions.cancel(execution_id, CancelExecutionRequest(runtime.default_principal, 'settle-cancel'))
+            result = await runtime.executions.result(execution_id, principal=runtime.default_principal)
+            assert result.status is ExecutionStatus.CANCELLED
+        assert calls == []

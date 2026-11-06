@@ -17,10 +17,11 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.tools import RunContext
+from pydantic_ai_harness.step_persistence import SqliteStepStore, StepPersistence
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
-    AgentContext, AssetCapability, CheckpointCapability, ExecutionCapability,
+    AgentContext, AssetCapability, ExecutionCapability,
     FileSystem, MemoryCapability, SessionCapability, ShellCapability, TraceCapability,
 )
 from linktools.ai.core import ExecutionStatus, JsonValue
@@ -202,9 +203,13 @@ async def planning_and_sessions(root: Path) -> None:
             {"id": "inspect", "content": "Inspect the example", "status": "completed"},
         ]}, tool_call_id="plan")])
 
+    # The official database-backed store opens and closes a connection per call.
+    # Runtime borrows the store; its lifetime also covers reads after Runtime closes.
+    steps = SqliteStepStore(database=root / "steps.db")
     features = RuntimeFeatures("planning-session")
     features.capability(CombinedCapability([
-        ExecutionCapability(retain_history=True), CheckpointCapability(),
+        ExecutionCapability(retain_history=True),
+        StepPersistence(store=steps, capture_frontier=True),
         TraceCapability(), SessionCapability(), ObserveRuns(runs),
     ], id="example.session-policy"))
     features.model("offline", OfflineModel("planning", respond))
@@ -220,7 +225,10 @@ async def planning_and_sessions(root: Path) -> None:
         assert (await execution.transcript(include_content=True)).items
         assert (await execution.model_interactions()).items
         assert returned and runs == [execution.execution_id]
-    print("Planning, Session, retained history, Checkpoint and Trace composition passed")
+    saved_runs = await steps.list_runs()
+    assert len(saved_runs) == 1
+    assert await steps.latest_snapshot(run_id=saved_runs[0].run_id) is not None
+    print("Planning, Session, retained history, native StepPersistence and Trace composition passed")
 
 
 async def main() -> None:

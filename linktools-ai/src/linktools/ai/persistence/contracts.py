@@ -11,6 +11,16 @@ from __future__ import annotations
 from ._archive import ArchiveRoot
 from ..execution import (
     RuntimePayloadRef,
+    PendingDeferredCall,
+    PendingToolContinuation,
+    RepositoryInstructionBarrier,
+    ExecutionRecoveryState,
+    RecoveryHandoffPhase,
+    RecoveryTerminalOutcome,
+    RecoveryConversationIntent,
+    RecoveryTerminalHandoff,
+    ExecutionRecoveryDetail,
+
     StoredUserInput,
     ExecutionRecord,
     ExecutionStartClaim,
@@ -35,9 +45,10 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai_harness.step_persistence import ToolEffectRecord
 
 from ..agent import AgentBindingContract
 from ..asset import AssetVersionRef
@@ -106,7 +117,7 @@ from ._plan import PersistenceDomain
 
 if TYPE_CHECKING:
     from ._archive import ContentArchive, PreparedArchive
-    from .state import StateStore, StateTransaction, StoredRecord
+    from .state import Observed, StateStore, StateTransaction, StoredRecord
 
 
 def _is_sha256(value: object) -> bool:
@@ -783,12 +794,18 @@ class StoredAgentRunCheckpoint:
     step_index: int
     timestamp: datetime
     state: str
-    projection_digest: str
+    projection: ContextProjection
     transcript_message_count: int
     has_context_projection: bool = False
     pending_request_index: int | None = None
 
+    @property
+    def projection_digest(self) -> str:
+        return self.projection.digest
+
     def __post_init__(self) -> None:
+        if not isinstance(self.projection, ContextProjection):
+            raise ValueError("stored checkpoint projection is invalid")
         if (
             isinstance(self.transcript_message_count, bool)
             or not isinstance(self.transcript_message_count, int)
@@ -907,60 +924,12 @@ class ExecutionHistorySealRecord:
         )
 
 
-class ExecutionHistoryState(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
-    OPEN = "open"
-    SEALED = "sealed"
-    CLOSED = "closed"
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionHistoryHeadRecord:
-    """Durable fencing head for one execution's mutable history.
-
-    Every terminal boundary closes producer writes: SEALED commits a durable
-    trace digest; CLOSED retains only the control barrier. Earlier mutations
-    replace the OPEN head with revision + 1.
-    """
-
-    execution_id: str
-    state: ExecutionHistoryState
-    revision: int
-    seal_digest: str | None
-    producer_generation: int = 0
-    producer_claim_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.producer_generation, bool)
-            or not isinstance(self.producer_generation, int)
-            or self.producer_generation < 0
-        ):
-            raise ValueError("execution history producer generation is invalid")
-        if self.producer_claim_id is not None and (
-            not isinstance(self.producer_claim_id, str)
-            or not self.producer_claim_id
-            or self.producer_generation < 1
-        ):
-            raise ValueError("execution history producer claim is invalid")
-        if self.revision < 0:
-            raise ValueError("execution history head revision cannot be negative")
-        if not self.execution_id:
-            raise ValueError("execution history head identity cannot be empty")
-        if self.state is ExecutionHistoryState.SEALED and not self.seal_digest:
-            raise ValueError("sealed history head requires a seal digest")
-        if self.state in {ExecutionHistoryState.OPEN, ExecutionHistoryState.CLOSED} and self.seal_digest is not None:
-            raise ValueError("unarchived history head cannot carry a seal digest")
-
-
 @dataclass(frozen=True, slots=True)
 class AgentAttemptClaim:
     execution_id: str
     expected_execution_revision: int
     expected_agent_run_seq: int
-    expected_recovery_revision: int
-    expected_recovery_state: ExecutionCheckpointState
+    expected_recovery_state: ExecutionRecoveryState
 
 
 @dataclass(frozen=True, slots=True)
@@ -976,7 +945,7 @@ class MemoryRecord:
 
 @dataclass(frozen=True, slots=True)
 class ToolOperationRecord:
-    """Durable authority for one accepted model tool call."""
+    """One authorized effect fact and its replay-safe terminal outcome."""
 
     tool_operation_id: str
     execution_id: str
@@ -987,18 +956,33 @@ class ToolOperationRecord:
     arguments_digest: str
     binding_digest: str
     replay_safe: bool
-    status: "ToolOperationStatus"
+    status: ToolOperationStatus
     owner: str | None
     fence: int
-    lease_expires_at: datetime | None
     error_code: str | None
     created_at: datetime
     updated_at: datetime
+    producer_generation: int | None = None
     arguments_payload: StoredPayload | None = None
     result_payload: StoredPayload | None = None
     error_payload: StoredPayload | None = None
+    effect_started_at: datetime | None = None
+    effect_ended_at: datetime | None = None
+    effect_idempotency_key: str | None = None
+    effect_summary: str | None = None
 
     def __post_init__(self) -> None:
+        if self.producer_generation is not None and (
+            isinstance(self.producer_generation, bool)
+            or not isinstance(self.producer_generation, int)
+            or self.producer_generation < 1
+        ):
+            raise ValueError("tool producer generation is invalid")
+        if (not isinstance(self.status, ToolOperationStatus)
+                or not isinstance(self.arguments_digest, str)
+                or not isinstance(self.idempotency_key_digest, str)
+                or not isinstance(self.replay_safe, bool)):
+            raise ValueError("admitted tool operation is incomplete")
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
         if self.status in {
             ToolOperationStatus.PENDING,
@@ -1046,6 +1030,24 @@ class ToolOperationRecord:
                 validate_lease_owner(self.owner)
         except AIError as error:
             raise ValueError("tool operation lease identity is invalid") from error
+
+    def to_tool_effect(self, run_id: str) -> ToolEffectRecord:
+        """Expose native observations without weakening dispatch's effect proof."""
+        if self.status is ToolOperationStatus.COMPLETED:
+            status = "completed"
+        elif self.status in {ToolOperationStatus.FAILED, ToolOperationStatus.CANCELLED}:
+            status = "failed"
+        else:
+            # An exception observed by a native hook is not proof of effect failure.
+            status = "started"
+        return ToolEffectRecord(
+            run_id=run_id, tool_call_id=self.tool_call_id, tool_name=self.tool_name,
+            status=status,
+            started_at=self.effect_started_at or self.created_at,
+            ended_at=(None if status == "started" else self.effect_ended_at or self.updated_at),
+            idempotency_key=self.effect_idempotency_key,
+            effect_summary=self.effect_summary,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1140,220 +1142,40 @@ def deferred_resource_id(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class PendingDeferredCall:
-    tool_call_id: str
-    tool_name: str
-    arguments_payload: StoredPayload
-    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.tool_call_id or not self.tool_name:
-            raise ValueError("deferred call identity is required")
-        try:
-            object.__setattr__(self, "metadata", dict(self.metadata))
-        except (TypeError, ValueError) as error:
-            raise ValueError("deferred call metadata is invalid") from error
 
 
-@dataclass(frozen=True, slots=True)
-class PendingToolContinuation:
-    source_agent_run_id: str
-    approvals: tuple[PendingDeferredCall, ...] = ()
-    calls: tuple[PendingDeferredCall, ...] = ()
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionStartReceipt(ExecutionStartReservationResult):
+    """Confirmed admission state and the exact timeline fact inserted with it."""
 
-    def __post_init__(self) -> None:
-        if not self.source_agent_run_id:
-            raise ValueError("deferred continuation identity is invalid")
-        values = (*self.approvals, *self.calls)
-        ids = tuple(item.tool_call_id for item in values)
-        if not values or len(ids) != len(set(ids)):
-            raise ValueError("deferred continuation calls must be unique")
+    observed: Observed[ExecutionRecord]
+    turn: SessionTurnRef | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionTerminalPublication(ExecutionTerminalCommitResult):
+    """Full publication confirmed by its owner, including any Session release."""
+
+    observed: Observed[ExecutionRecord]
+    session_released: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class RepositoryInstructionBarrier:
-    agent_run_id: str
-    tool_call_id: str
-    arguments_digest: str
+class ExecutionInsertionReceipt:
+    """Transaction-local evidence of a newly inserted terminal execution."""
 
-    def __post_init__(self) -> None:
-        if not all(
-            isinstance(value, str) and value
-            for value in (
-                self.agent_run_id,
-                self.tool_call_id,
-                self.arguments_digest,
-            )
-        ) or not _is_sha256(self.arguments_digest):
-            raise ValueError("repository instruction barrier is invalid")
-
-
-class ExecutionCheckpointState(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
-    ADMITTED = "admitted"
-    ACTIVE = "active"
-    WAITING = "waiting"
-    HANDOFF = "handoff"
-    COMPLETED = "completed"
-
-
-class RecoveryHandoffPhase(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
-    NONE = "none"
-    PREPARED = "prepared"
-    COMPLETED = "completed"
+    transaction: StateTransaction
+    execution: ExecutionRecord
+    record: StoredRecord
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionCheckpoint:
-    execution_id: str
-    agent_run_id: str | None
-    state: ExecutionCheckpointState
-    revision: int
-    created_at: datetime
-    updated_at: datetime
-    pending_tools: PendingToolContinuation | None = None
-    repository_instruction_overlay: RuntimePayloadRef | None = None
-    repository_instruction_barriers: tuple[RepositoryInstructionBarrier, ...] = ()
-    handoff_phase: RecoveryHandoffPhase = RecoveryHandoffPhase.NONE
-    terminal_handoff: RecoveryTerminalHandoff | None = None
-    pending_operation_id: str | None = None
+class ToolBoundaryReceipt:
+    """Confirmed control and effect receipts; neither grants a future dispatch."""
 
-    def __post_init__(self) -> None:
-        if self.state is ExecutionCheckpointState.ADMITTED and (
-            self.agent_run_id is not None
-            or self.pending_operation_id is not None
-            or self.pending_tools is not None
-        ):
-            raise ValueError("admitted recovery checkpoint cannot have an attempt")
-        if self.state in {
-            ExecutionCheckpointState.ACTIVE,
-            ExecutionCheckpointState.WAITING,
-        } and self.agent_run_id is None:
-            raise ValueError("active recovery checkpoint requires an attempt")
-        if self.state is ExecutionCheckpointState.WAITING:
-            if (
-                self.pending_tools is None
-                or self.agent_run_id != self.pending_tools.source_agent_run_id
-                or self.pending_operation_id is not None
-                or self.handoff_phase is not RecoveryHandoffPhase.NONE
-                or self.terminal_handoff is not None
-            ):
-                raise ValueError("deferred waiting checkpoint is inconsistent")
-        if (
-            self.state
-            in {ExecutionCheckpointState.HANDOFF, ExecutionCheckpointState.COMPLETED}
-            and self.pending_tools is not None
-        ):
-            raise ValueError(
-                "terminal recovery checkpoint cannot retain deferred continuation"
-            )
-        if self.state is ExecutionCheckpointState.ACTIVE and self.pending_tools is not None:
-            raise ValueError("active recovery checkpoint cannot retain deferred work")
-        barriers = tuple(self.repository_instruction_barriers)
-        identities = tuple((item.agent_run_id, item.tool_call_id) for item in barriers)
-        if len(identities) != len(set(identities)):
-            raise ValueError("repository instruction barriers must be unique")
-        object.__setattr__(self, "repository_instruction_barriers", barriers)
-        if self.handoff_phase is RecoveryHandoffPhase.NONE:
-            if self.terminal_handoff is not None:
-                raise ValueError(
-                    "unprepared recovery checkpoint cannot contain a handoff"
-                )
-            if self.state is ExecutionCheckpointState.HANDOFF:
-                raise ValueError(
-                    "unprepared recovery checkpoint cannot be in handoff state"
-                )
-        elif self.handoff_phase is RecoveryHandoffPhase.COMPLETED:
-            if self.state is not ExecutionCheckpointState.COMPLETED:
-                raise ValueError("completed recovery checkpoint must be completed")
-        elif self.terminal_handoff is None:
-            raise ValueError("prepared recovery checkpoint requires a terminal handoff")
-        elif self.state is not ExecutionCheckpointState.HANDOFF:
-            raise ValueError(
-                "active recovery checkpoint handoff must be in handoff state"
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryTerminalOutcome:
-    terminal_status: ExecutionStatus
-    error_code: str | None
-    safe_error_details: Mapping[str, JsonValue]
-    stop_reason: StopReason
-    output: StoredPayload | None
-    object_source_domain: PersistenceDomain | None
-    usage: UsageMetrics
-    terminal_event_type: ExecutionEventType
-    terminal_event_payload: Mapping[str, JsonValue]
-    result_created_at: datetime
-    error_diagnostics: ErrorDiagnostics | None = None
-
-    def __post_init__(self) -> None:
-        if self.terminal_status is ExecutionStatus.SUCCEEDED and self.output is None:
-            raise ValueError("successful recovery outcome requires output")
-        if (
-            self.terminal_status is not ExecutionStatus.SUCCEEDED
-            and self.output is not None
-        ):
-            raise ValueError("failed terminal result cannot contain output")
-        if self.output is None and self.object_source_domain is not None:
-            raise ValueError("recovery object source requires output")
-        if (
-            self.output is not None
-            and self.output.kind == "inline"
-            and self.object_source_domain is not None
-        ):
-            raise ValueError("inline recovery output cannot have an object source")
-        if (
-            self.output is not None
-            and self.output.kind == "object"
-            and self.object_source_domain is None
-        ):
-            raise ValueError("object recovery output requires an object source")
-        if self.object_source_domain not in {
-            None,
-            PersistenceDomain.EXECUTION,
-            PersistenceDomain.CHECKPOINT,
-        }:
-            raise ValueError("recovery object source domain is invalid")
-        if self.result_created_at.tzinfo is None:
-            raise ValueError("recovery outcome requires an aware timestamp")
-        if self.error_diagnostics is not None and not isinstance(
-            self.error_diagnostics, ErrorDiagnostics
-        ):
-            raise TypeError("recovery error diagnostics are invalid")
-        if (
-            self.terminal_status is not ExecutionStatus.FAILED
-            and self.error_diagnostics is not None
-        ):
-            raise ValueError("only failed recovery outcome can carry error diagnostics")
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryConversationIntent:
-    session_id: str
-    expected_cursor: ConversationCursor | None
-    next_cursor: ConversationCursor
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryTerminalHandoff:
-    outcome: RecoveryTerminalOutcome
-    source_agent_run_id: str | None
-    conversation: RecoveryConversationIntent | None
-
-    def __post_init__(self) -> None:
-        if (
-            self.outcome.terminal_status is ExecutionStatus.SUCCEEDED
-            and self.source_agent_run_id is None
-        ):
-            raise ValueError("successful recovery handoff requires a source attempt")
-        if self.conversation is not None and self.source_agent_run_id is None:
-            raise ValueError("conversation recovery intent requires a source attempt")
+    execution: Observed[ExecutionRecord]
+    operation: Observed[ToolOperationRecord]
+    budget: BudgetUsage | None = None
 
 
 class RuntimeRepository(Protocol):
@@ -1400,6 +1222,7 @@ class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
         error_code: str | None,
         safe_error_details: Mapping[str, JsonValue],
         allow_unadmitted: bool = False,
+        admitted_turn: SessionTurnRef | None = None,
     ) -> SessionTurnCommit | None: ...
 
     async def get_in_transaction(
@@ -1479,10 +1302,10 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
 
 class ExecutionRepository(RuntimeRepository, Protocol):
     async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
-    async def create_with_history_head(
+    async def create_execution(
         self, record: ExecutionRecord
     ) -> ExecutionRecord: ...
-    async def create_with_history_head_in_transaction(
+    async def create_execution_in_transaction(
         self,
         transaction: StateTransaction,
         record: ExecutionRecord,
@@ -1493,6 +1316,26 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def get(
         self, execution_id: str, *, tenant_id: str
     ) -> ExecutionRecord | None: ...
+    async def get_recovery(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
+    async def get_recovery_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
+    ) -> ExecutionRecord | None: ...
+    async def get_observed(self, execution_id: str, *, tenant_id: str) -> Observed[ExecutionRecord] | None: ...
+    async def get_observed_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
+    ) -> Observed[ExecutionRecord] | None: ...
+    async def list_recoverable_page(
+        self, *, tenant_id: str, cursor: str | None, limit: int,
+    ) -> Page[ExecutionRecord]: ...
+    async def compare_and_swap_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
+        expected_revision: int, next_record: ExecutionRecord,
+    ) -> ExecutionRecord: ...
+    async def commit_boundary_in_transaction(
+        self, transaction: StateTransaction, observed: Observed[ExecutionRecord], *,
+        next_record: ExecutionRecord, expected_producer_generation: int,
+        expected_producer_claim_id: str,
+    ) -> Observed[ExecutionRecord]: ...
     async def get_many(
         self,
         execution_ids: Sequence[str],
@@ -1531,6 +1374,8 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         next_safe_error_details: Mapping[str, JsonValue],
         audit_events: Sequence[ExecutionEventAppend] = (),
         producer_generation: int | None = None,
+        agent_run_seq: int | None = None,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord: ...
     async def get_start_idempotency(
         self, claim: ExecutionStartClaim
@@ -1574,6 +1419,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         expected_revision: int,
         expected_agent_run_seq: int,
+        producer_claim_id: str | None = None,
     ) -> ExecutionRecord: ...
     async def claim_next_agent_run_in_transaction(
         self,
@@ -1583,6 +1429,8 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         expected_revision: int,
         expected_agent_run_seq: int,
+        producer_claim_id: str | None = None,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord: ...
     async def enter_deferred_wait_in_transaction(
         self,
@@ -1596,6 +1444,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         audit_events: Sequence[ExecutionEventAppend] = (),
         deferred_events: Sequence[ExecutionEventAppend],
         occurred_at: datetime,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord: ...
     async def claim_deferred_resume_in_transaction(
         self,
@@ -1606,6 +1455,8 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_revision: int,
         expected_event_seq: int,
         expected_agent_run_seq: int,
+        producer_claim_id: str | None = None,
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord: ...
     async def transition_task_execution(
         self,
@@ -1642,6 +1493,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         expected_status: ExecutionStatus | None = None,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        recovery: ExecutionRecoveryDetail | None = None,
     ) -> ExecutionRecord: ...
     async def advance_event_seq(
         self, execution_id: str, *, tenant_id: str, expected_event_seq: int
@@ -1690,39 +1542,26 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         against current dependency holds; an unknown outcome is not confirmation.
         """
         ...
-    async def get_history_head(
+    async def close_retention_in_transaction(
         self,
+        transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> ExecutionHistoryHeadRecord | None: ...
-    async def require_open_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-        *,
-        expected_revision: int | None = None,
-        expected_producer_generation: int | None = None,
-        allow_cancelling: bool = True,
-    ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord]: ...
-    async def admit_history_producer_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution: ExecutionRecord,
-        *,
-        producer_claim_id: str | None = None,
-    ) -> int: ...
-    async def replace_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        current_record: StoredRecord,
-        next_head: ExecutionHistoryHeadRecord,
-    ) -> ExecutionHistoryHeadRecord: ...
-    async def insert_history_head_in_transaction(
-        self,
-        transaction: StateTransaction,
-        head: ExecutionHistoryHeadRecord,
-    ) -> ExecutionHistoryHeadRecord: ...
+    ) -> tuple[bool, ExecutionRecord | None]:
+        """Close retention and return the same transaction's execution receipt.
+
+        The publication requirements of close_retention also apply here. The
+        returned value authorizes cleanup only after transaction confirmation.
+        """
+        ...
+    async def require_execution_producer_in_transaction(
+        self, transaction: StateTransaction, execution_id: str, *,
+        expected_producer_generation: int, allow_cancelling: bool = True,
+    ) -> tuple[ExecutionRecord, StoredRecord]: ...
+    async def require_execution_history_write_in_transaction(
+        self, transaction: StateTransaction, execution_id: str,
+    ) -> tuple[ExecutionRecord, StoredRecord]: ...
     async def put_history_seal_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1808,7 +1647,6 @@ class ToolOperationAdmission:
     binding_digest: str
     replay_safe: bool
     owner: str
-    lease_seconds: int
     arguments_payload: StoredPayload | None = None
     producer_generation: int | None = None
 
@@ -1937,45 +1775,6 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
     async def list_pending(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ExternalCallRecord, ...]: ...
-
-
-class ExecutionCheckpointRepository(RuntimeRepository, Protocol):
-    async def create(self, record: ExecutionCheckpoint) -> ExecutionCheckpoint: ...
-    async def get(
-        self, execution_id: str, *, tenant_id: str
-    ) -> ExecutionCheckpoint | None: ...
-    async def get_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ExecutionCheckpoint | None: ...
-    async def list(self, *, tenant_id: str) -> tuple[ExecutionCheckpoint, ...]: ...
-    async def list_recoverable_page(
-        self,
-        *,
-        tenant_id: str,
-        cursor: str | None,
-        limit: int,
-    ) -> Page[ExecutionCheckpoint]: ...
-    async def compare_and_swap(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        next_record: ExecutionCheckpoint,
-    ) -> ExecutionCheckpoint: ...
-    async def compare_and_swap_in_transaction(
-        self,
-        transaction: StateTransaction,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        next_record: ExecutionCheckpoint,
-    ) -> ExecutionCheckpoint: ...
 
 
 class OperationLedgerRepository(RuntimeRepository, Protocol):
@@ -2243,7 +2042,15 @@ class ConversationRepositories:
     operations: OperationLedgerRepository
 
 
+BudgetAdmissionT = TypeVar("BudgetAdmissionT")
+
+
 class BudgetRepository(Protocol):
+    @property
+    def state_store(self) -> StateStore: ...
+    async def retry_admission(
+        self, operation: Callable[[], Awaitable[BudgetAdmissionT]],
+    ) -> BudgetAdmissionT: ...
     async def close(self) -> None: ...
     async def ensure(self, scope_id: str, limits: RunBudget) -> BudgetUsage: ...
     async def ensure_in_transaction(
@@ -2259,6 +2066,12 @@ class BudgetRepository(Protocol):
         self, scope_id: str, request_id: str, total_tokens: int | None,
     ) -> BudgetUsage: ...
     async def admit_tool(self, scope_id: str, call_id: str) -> BudgetUsage: ...
+    async def admit_tool_in_transaction(
+        self, transaction: StateTransaction, scope_id: str, call_id: str, *, admission_id: str,
+    ) -> BudgetUsage: ...
+    async def read_tool_admission(
+        self, scope_id: str, call_id: str, *, admission_id: str,
+    ) -> BudgetUsage | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -2302,17 +2115,35 @@ class CheckpointRepositories:
 
     approvals: ApprovalRepository
     external_calls: ExternalCallRepository
-    checkpoints: ExecutionCheckpointRepository
     operations: OperationLedgerRepository
     tools: ToolStateRepository
 
 
 from ._evaluation_records import EvaluationHumanDecision
 
-__all__ = ['AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionHistoryState', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionCheckpoint', 'ExecutionCheckpointRepository', 'ExecutionCheckpointState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
+__all__ = ['ExecutionStartReceipt', 'ExecutionTerminalPublication', 'ToolBoundaryReceipt', 'ExecutionInsertionReceipt', 'AgentAttemptClaim', 'ApprovalRecord', 'ApprovalRepository', 'ArchivedContextBlock', 'ArtifactRecord', 'ArtifactRepositories', 'ArtifactRepository', 'BudgetRepository', 'ContextProjection', 'ConversationCursor', 'ConversationHistoryRecord', 'ConversationHistoryRepository', 'ConversationRepositories', 'EvaluationHumanDecision', 'EvaluationLaunchIntent', 'EvaluationRecord', 'EvaluationRepositories', 'EvaluationRepository', 'EvaluationSlotDisposition', 'EvaluationTrialEvidence', 'EventRepository', 'ExecutionCancelRequestCommit', 'ExecutionEventAppend', 'ExecutionEventRecord', 'ExecutionHistorySealRecord', 'ExecutionRecord', 'ExecutionRepositories', 'ExecutionRepository', 'ExecutionRunSealHead', 'ExecutionStartClaim', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'ExecutionStartUnknownCommit', 'ExecutionTerminalCommit', 'ExecutionTerminalCommitResult', 'ExternalCallRecord', 'ExternalCallRepository', 'HistoryQuality', 'IdempotencyRecord', 'IdempotencyRepository', 'IdempotencyTerminalUpdate', 'InlineContextBlock', 'LoadedContextMessage', 'LoadedModelContext', 'MemoryRecord', 'MemoryRepositories', 'MemoryRepository', 'ModelClientBodyRef', 'ModelClientRequestRef', 'ModelClientResponseRef', 'ModelInteractionRecord', 'OperationLedgerRepository', 'OperationTerminalUpdate', 'PendingDeferredCall', 'PendingToolContinuation', 'ExecutionRecoveryDetail', 'ExecutionRecoveryState', 'RecoveryConversationIntent', 'RecoveryHandoffPhase', 'CheckpointRepositories', 'RecoveryTerminalHandoff', 'RecoveryTerminalOutcome', 'RepositoryInstructionBarrier', 'ResultRecord', 'RuntimePayloadRef', 'RuntimeRepository', 'SessionRecord', 'SessionRepository', 'StoredAgentRunCheckpoint', 'StreamAttemptRecord', 'TaskAdmissionRepository', 'TaskPreparedInputRecord', 'TaskRepositories', 'TaskRepository', 'ToolOperationAdmission', 'ToolOperationRecord', 'ToolStateRepository', 'TranscriptChunk', 'TranscriptHeadRecord', 'TranscriptMessageRef', 'TranscriptOrigin', 'TranscriptOwnerDomain', 'TranscriptSeekDimension', 'TranscriptSeekRecord', 'TranscriptSpanRef', 'decode_tool_operation_failure', 'deferred_resource_id']
 
 
 class ToolStateRepository(Protocol):
+    async def record_tool_effect(
+        self, effect: ToolEffectRecord, *, execution_id: str,
+        tool_operation_id: str, binding_digest: str,
+        recovery_agent_run_id: str | None = None,
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> "Observed[ToolOperationRecord]": ...
+
+    async def observe_operation(
+        self, tool_operation_id: str, *, tenant_id: str,
+    ) -> "Observed[ToolOperationRecord] | None": ...
+
+    async def get_tool_effect(
+        self, *, run_id: str, tool_call_id: str, source_run_id: str | None = None,
+    ) -> ToolEffectRecord | None: ...
+
+    async def list_unresolved_tool_effects(
+        self, *, execution_id: str, run_id: str, source_run_id: str | None = None,
+    ) -> list[ToolEffectRecord]: ...
+
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
     async def get_operation(
@@ -2324,24 +2155,10 @@ class ToolStateRepository(Protocol):
     async def get_by_call_ids(
         self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]: ...
-    async def reconcile_expired_claim(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-    ) -> ToolOperationRecord: ...
-    async def claim(
-        self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int
-    ) -> ToolOperationRecord: ...
-    async def renew(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        lease_seconds: int,
-    ) -> ToolOperationRecord: ...
+    async def list_by_agent_run(
+        self, agent_run_id: str, *, tenant_id: str,
+        execution_id: str | None = None, recovery_agent_run_id: str | None = None,
+    ) -> tuple[ToolOperationRecord, ...]: ...
     async def fail_payload(
         self,
         tool_operation_id: str,
@@ -2351,6 +2168,11 @@ class ToolStateRepository(Protocol):
         fence: int,
         error_code: str,
         error_payload: StoredPayload,
+    ) -> ToolOperationRecord: ...
+    async def mark_effect_unknown(
+        self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int,
+        error_code: str | None,
+        write: Callable[[StateTransaction], Awaitable[None]] | None = None,
     ) -> ToolOperationRecord: ...
     async def defer(
         self,

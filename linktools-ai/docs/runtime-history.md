@@ -13,13 +13,15 @@ completed turn makes subsequent resume/fork fail with
 later. See
 [optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
 
-For runs with restart checkpoints disabled, model-boundary control checks may
-reuse one execution/history-head observation captured within the last three
-seconds. Both records share the same source capture and expiry. Without a hot
-record cache, each check reads the source. Tool admission, recovery checkpoints,
-terminal commits and result consumption retain their authoritative transaction
-checks. Task-owned runs and their delegated descendants keep source-only model control
-checks, including on transient execution routes.
+ExecutionRecord is the sole producer-control authority. The bound, same-group
+native writer uses its confirmed storage revision for a conditional update at
+each dispatch boundary. A conflicting cancellation or takeover rejects that
+update before another external call. Other dispatch paths read fresh control;
+an ordinary record-cache hit never grants permission to continue. Conversation
+and Trace may stage observations locally, but their durable publication still
+requires the producer fence. Result consumption uses this Runtime's confirmed
+terminal publication or reads the source; it still checks caller access and
+owned worker failures.
 
 With durable trace enabled and an explicit `CommitPolicy.batch(buffer=...)`,
 Trace coalesces observation writes through its owned cache-buffer scopes. The
@@ -153,7 +155,7 @@ of HTTP body capture. It belongs to that exact dispatch, not another request or
 the execution as a whole. `started_at` is UTC; `*_ns` observations are monotonic
 elapsed nanoseconds from that attempt's start. The mapping can include header,
 first/last chunk and close timings, received byte/chunk counts, HTTP version and a
-sanitized protocol request ID, transport read/close errors, and separate `sdk_*`
+bounded, syntax-validated protocol request ID, transport read/close errors, and separate `sdk_*`
 stream entry, exhaustion, cancellation and cleanup observations. Error observations
 contain qualified exception types, not exception text or headers. Missing keys
 mean unobserved; buffered responses do not invent stream chunk timings. See
@@ -185,12 +187,13 @@ Provider failures for recoverable reference inputs also omit arbitrary exception
 messages, notes and source lines, since an SDK or server can echo the temporary
 file body. Their optional `content_omission_reason` identifies that policy.
 Exception types, relationships and frame locations remain available without locals.
-This does not weaken ordinary credential-redacted diagnostics or fabricate absent
-content for older records.
+Ordinary diagnostics retain original exception text; omission does not fabricate
+absent content for older records.
 
-Collection uses the shared credential redactor before persistence, including the
-bounded summary. It does not retain arbitrary exception attributes, connection
-headers or local variables. Existing access, retention and deletion rules apply;
+Collection preserves original exception text before persistence, including the
+bounded summary. Text already present in exceptions may include credentials. It
+does not separately collect arbitrary exception attributes, connection headers or
+local variables. Existing access, retention and deletion rules apply;
 complete diagnostics are not automatically safe for publication outside that scope.
 Terminal failure events, retained results and reopened history use the same
 diagnostic projection. Optional fields absent from older records remain absent or
@@ -616,9 +619,13 @@ SQL and SQLite permit several Runtime instances to use one namespace. Opening
 another Runtime does not take over an admitted or running execution, or finish
 an unhanded-off cancellation. Separate sessions can run concurrently; one
 session's active-execution admission still uses its existing optimistic claim.
-The ordinary durable path does not add an ownership heartbeat or a
-namespace-wide database lock. Eligible deferred turns use the optional cache
-turn-coordination lease while a turn has no database record; see
+The ordinary durable path does not add a namespace-wide database lock. An
+optional turn-coordination scope covers the active worker lifetime, including
+its model/tool steps. Each child has its own scope; a parent stop also drains
+the child workers owned by that parent attempt. The injected coordinator owns lease
+renewal and loss delivery; Runtime owns stopping and draining the exact worker.
+Without a coordinator, source control and conditional writes remain in effect.
+Pending turns can additionally use the coordinator's pending views; see
 [independent commit boundaries](runtime-capabilities.md#independent-commit-boundaries).
 
 With `ExecutionCapability(retain_history=True)` and non-transient conversation storage,

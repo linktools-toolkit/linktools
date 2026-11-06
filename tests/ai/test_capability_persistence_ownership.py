@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from tests.ai._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 """Capability-owned persistence preserves isolated reads and committed context."""
 
 import asyncio
@@ -59,7 +61,7 @@ async def test_conversation_owners_isolate_identical_run_ids_and_preserve_contex
             assert [message async for message in owner.iter_conversation_message_range(
                 **request, start=1, end=2,
             )] == messages[1:]
-            assert await owner.load_conversation_model_context(**request) == tuple(messages)
+            assert await owner.load_conversation_model_context(**{key: value for key, value in request.items() if key != "history_id"}) == tuple(messages)
     finally:
         for archive in archives:
             await archive.close()
@@ -81,7 +83,9 @@ async def test_conversation_owner_reads_committed_state_without_changing_cursor(
             **request, start=1, end=2,
         )] == turn.checkpoint.messages[1:]
         assert await owner.load_conversation_model_context(
-            **request, message_count=turn.cursor.message_count,
+            agent_run_id=turn.run.agent_run_id, tenant_id="tenant",
+            checkpoint_sequence=before.continuation.checkpoint_sequence,
+            projection_digest=before.continuation.projection_digest,
         ) == tuple(turn.checkpoint.messages)
         assert await state.storage.conversation.sessions.get("session", tenant_id="tenant") == before
 
@@ -91,7 +95,7 @@ async def test_state_conversation_reads_require_history_identity(tmp_path: Path)
         owner = ConversationPersistence(state.storage.run_store.read_store(PersistenceDomain.CONVERSATION))
         request = dict(history_id=None, agent_run_id="run", tenant_id="tenant")
         with pytest.raises(AIError) as missing:
-            await owner.load_conversation_model_context(**request)
+            await owner.load_conversation_model_context(**{key: value for key, value in request.items() if key != "history_id"})
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         with pytest.raises(AIError) as missing:
             await owner.conversation_message_count(**request)
@@ -102,32 +106,30 @@ async def test_state_conversation_reads_require_history_identity(tmp_path: Path)
 
 
 @pytest.mark.parametrize("complete", (False, True))
-async def test_checkpoint_owner_requires_complete_recovery_before_materializing(complete: bool) -> None:
+async def test_checkpoint_owner_requires_complete_official_snapshot(complete: bool) -> None:
     staging = StagingAgentRunStore()
-    archive = InMemoryStepArchive(PersistenceDomain.CHECKPOINT)
     await staging.initialize()
-    await archive.initialize()
     try:
-        owner = CheckpointPersistence(staging, archive, None)
-        run = AgentRunRecord("recovery")
-        checkpoint = AgentRunCheckpoint(
-            "recovery", 1, [ModelRequest(parts=[UserPromptPart("question")])],
+        native = native_checkpoint().store
+        owner = CheckpointPersistence(staging, native_checkpoints=lambda _run: True)
+        owner.bind_step_store(native)
+        messages = [ModelRequest(parts=[UserPromptPart("question")], run_id="recovery")]
+        await seed_native_snapshot(
+            native, run_id="recovery", messages=messages,
             state="complete" if complete else "interrupted",
         )
-        await staging.register_agent_run(run)
-        await staging.save_checkpoint(checkpoint)
+        before = await native.latest_snapshot(run_id="recovery", include_interrupted=True)
         if complete:
             await owner.materialize_recovery_checkpoint(agent_run_id="recovery", require_complete=True)
-            assert await archive.latest_checkpoint(agent_run_id="recovery") == checkpoint
+            assert (await owner.reader.latest_checkpoint(agent_run_id="recovery")).messages == messages
         else:
             with pytest.raises(AIError) as interrupted:
                 await owner.materialize_recovery_checkpoint(agent_run_id="recovery", require_complete=True)
             assert interrupted.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-            assert await archive.get_agent_run(agent_run_id="recovery") is None
-        assert await staging.latest_checkpoint(agent_run_id="recovery", include_interrupted=True) == checkpoint
+        assert await native.latest_snapshot(run_id="recovery", include_interrupted=True) == before
+        assert await staging.get_agent_run(agent_run_id="recovery") is None
     finally:
         await staging.close()
-        await archive.close()
 
 
 async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners() -> None:
@@ -209,11 +211,8 @@ async def _separate_trace_stores() -> AsyncIterator[tuple[ExecutionRepositoryImp
     )
     await archive.initialize()
     try:
-        execution = replace(_execution(), revision=1)
-        await repository.create_with_history_head(execution)
-        await core.mutate(lambda transaction: repository.admit_history_producer_in_transaction(
-            transaction, execution,
-        ))
+        execution = replace(_execution(), revision=1, producer_generation=1)
+        await repository.create_execution(execution)
         yield repository, archive
     finally:
         await archive.close()
@@ -225,17 +224,17 @@ async def test_separate_trace_store_fences_against_core_producer_generation() ->
     async with _separate_trace_stores() as (repository, archive):
         run = AgentRunRecord("run")
         await archive.register_agent_run(run, execution_id="execution")
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
         event = StepEvent("run", "TOOL_CALL_STARTED", 1, tool_call_id="tool")
         await archive.sync_prepared_projection(
             run, events=(event,), checkpoints=(), execution_id="execution", producer_generation=1,
         )
-        after = await repository.get_history_head("execution", tenant_id="tenant")
-        assert after.revision == before.revision + 1
+        after = await repository.get_observed("execution", tenant_id="tenant")
+        assert after.storage_revision == before.storage_revision + 1
         assert await archive.list_events(agent_run_id="run") == [event]
-        await repository.state_store.mutate(lambda transaction: repository.admit_history_producer_in_transaction(
-            transaction, replace(_execution(), revision=2),
-        ))
+        current = await repository.get("execution", tenant_id="tenant")
+        await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=current.revision,
+                                          next_record=replace(current, revision=current.revision + 1, producer_generation=2))
         with pytest.raises(AIError) as stale:
             await archive.sync_prepared_projection(
                 run, events=(replace(event, step_index=2),), checkpoints=(),
@@ -246,13 +245,13 @@ async def test_separate_trace_store_fences_against_core_producer_generation() ->
 
 
 @pytest.mark.parametrize("committed", (False, True))
-async def test_trace_and_core_head_share_rollback_and_unknown_commit(
+async def test_trace_and_execution_fence_share_rollback_and_unknown_commit(
     monkeypatch: pytest.MonkeyPatch, committed: bool,
 ) -> None:
     async with _separate_trace_stores() as (repository, archive):
         run = AgentRunRecord("run")
         await archive.register_agent_run(run, execution_id="execution")
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
         event = StepEvent("run", "TOOL_CALL_STARTED", 1, tool_call_id="tool")
         group = archive.state_store.storage_group
         mutate = group.mutate
@@ -273,14 +272,14 @@ async def test_trace_and_core_head_share_rollback_and_unknown_commit(
             assert error.value.code is (
                 ErrorCode.STORAGE_COMMIT_UNKNOWN if committed else ErrorCode.STORAGE_CONFLICT
             )
-        after = await repository.get_history_head("execution", tenant_id="tenant")
-        assert after.revision == before.revision + int(committed)
+        after = await repository.get_observed("execution", tenant_id="tenant")
+        assert after.storage_revision == before.storage_revision + int(committed)
         assert await archive.list_events(agent_run_id="run") == ([event] if committed else [])
 
 
 async def test_trace_cannot_expand_an_existing_transaction_without_core_enlistment() -> None:
     async with _separate_trace_stores() as (repository, archive):
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
 
         async def incomplete(_transaction) -> None:
             await archive.register_agent_run(AgentRunRecord("run"), execution_id="execution")
@@ -288,22 +287,19 @@ async def test_trace_cannot_expand_an_existing_transaction_without_core_enlistme
         with pytest.raises(StateTransactionNestingError):
             await archive.state_store.mutate(incomplete)
         assert await archive.get_agent_run(agent_run_id="run") is None
-        assert await repository.get_history_head("execution", tenant_id="tenant") == before
+        assert await repository.get_observed("execution", tenant_id="tenant") == before
 
 
 @pytest.mark.parametrize("checkpoint_enabled", (False, True))
 async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_enabled: bool) -> None:
     async with _separate_trace_stores() as (repository, unused_trace):
-        recovery = ModelInteractionStateStepArchive(
-            unused_trace.state_store, object_store=None, namespace="trace-owner", tenant_id="tenant",
-            runtime_domain=PersistenceDomain.CHECKPOINT,
-        )
         store = RuntimeAgentRunStore(
             StagingAgentRunStore(),
             conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
-            execution_archive=None, checkpoint_archive=recovery if checkpoint_enabled else None,
+            execution_archive=None,
             execution_repository=repository, tenant_id="tenant",
         )
+        store.bind_step_store(native_checkpoint().store)
         await store.initialize()
         try:
             store.bind_execution_producer(
@@ -311,16 +307,20 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
                 conversation=False, restart_checkpoints=checkpoint_enabled, durable_trace=False,
             )
             await store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
-            await repository.state_store.mutate(lambda transaction: repository.admit_history_producer_in_transaction(
-                transaction, replace(_execution(), revision=2),
-            ))
+            current = await repository.get("execution", tenant_id="tenant")
+            await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=current.revision,
+                                              next_record=replace(current, revision=current.revision + 1, producer_generation=2))
+            # Local staging is not a dispatch or persistence boundary.
+            await store.save_checkpoint(
+                AgentRunCheckpoint("run", 1, [ModelRequest(parts=[UserPromptPart("question")])]),
+                execution_id="execution", producer_generation=1,
+            )
             with pytest.raises(AIError) as stale:
-                await store.save_checkpoint(
-                    AgentRunCheckpoint("run", 1, [ModelRequest(parts=[UserPromptPart("question")])]),
-                    execution_id="execution", producer_generation=1,
-                )
+                await store.require_active_producer("run")
             assert stale.value.code is ErrorCode.STORAGE_CONFLICT
-            assert await recovery.latest_checkpoint(agent_run_id="run", include_interrupted=True) is None
+            assert await store.read_store(PersistenceDomain.CHECKPOINT).latest_snapshot(
+                run_id="run", include_interrupted=True,
+            ) is None
         finally:
             await store.preflight_close()
             await store.close()
@@ -332,21 +332,19 @@ async def test_materialized_trace_partition_is_atomic_with_core_state(
 ) -> None:
     storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="trace-partition", tenant_id="tenant")
+    storage.run_store.bind_step_store(native_checkpoint().store)
     try:
         repository = storage.execution.executions
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         assert archive.state_store is not repository.state_store
         assert archive.state_store.storage_group is repository.state_store.storage_group
-        execution = replace(_execution(), revision=1)
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(lambda transaction: repository.admit_history_producer_in_transaction(
-            transaction, execution,
-        ))
+        execution = replace(_execution(), revision=1, producer_generation=1)
+        await repository.create_execution(execution)
         run = AgentRunRecord("run")
         await archive.register_agent_run(run, execution_id="execution")
         event = StepEvent("run", "TOOL_CALL_STARTED", 1, tool_call_id="tool")
-        before = await repository.get_history_head("execution", tenant_id="tenant")
+        before = await repository.get_observed("execution", tenant_id="tenant")
         group = archive.state_store.storage_group
         mutate = group.mutate
 
@@ -362,9 +360,9 @@ async def test_materialized_trace_partition_is_atomic_with_core_state(
                 await archive.append_event(event, execution_id="execution")
             assert failure.value.code is ErrorCode.STORAGE_CONFLICT
         assert await archive.list_events(agent_run_id="run") == []
-        assert await repository.get_history_head("execution", tenant_id="tenant") == before
+        assert await repository.get_observed("execution", tenant_id="tenant") == before
         await archive.append_event(event, execution_id="execution")
         assert await archive.list_events(agent_run_id="run") == [event]
-        assert (await repository.get_history_head("execution", tenant_id="tenant")).revision == before.revision + 1
+        assert (await repository.get_observed("execution", tenant_id="tenant")).storage_revision == before.storage_revision + 1
     finally:
         await storage.close()

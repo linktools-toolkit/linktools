@@ -69,7 +69,7 @@ class _Session:
     def __init__(self) -> None:
         self.statements: list[ClauseElement] = []
 
-    async def execute(self, statement: ClauseElement) -> _Result:
+    async def execute(self, statement: ClauseElement, parameters: list[dict[str, str | int | datetime]] | None = None) -> _Result:
         self.statements.append(statement)
         return _Result()
 
@@ -332,7 +332,7 @@ async def test_mysql_batch_preserves_non_duplicate_integrity_errors(errno: int |
     error = IntegrityError("insert", {}, Exception(errno, "value contains 1062"))
 
     class FailingSession(_Session):
-        async def execute(self, statement: ClauseElement) -> _Result:
+        async def execute(self, statement: ClauseElement, parameters: list[dict[str, str | int | datetime]] | None = None) -> _Result:
             self.statements.append(statement)
             raise error
 
@@ -351,7 +351,7 @@ async def test_mysql_batch_insert_budget_and_duplicate_fallback(duplicate: bool)
     from sqlalchemy.exc import IntegrityError
 
     class Session(_Session):
-        async def execute(self, statement: ClauseElement) -> _Result:
+        async def execute(self, statement: ClauseElement, parameters: list[dict[str, str | int | datetime]] | None = None) -> _Result:
             self.statements.append(statement)
             if duplicate and len(self.statements) == 1:
                 raise IntegrityError("insert", {}, Exception(1062, "Duplicate entry"))

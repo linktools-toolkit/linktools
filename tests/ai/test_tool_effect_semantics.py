@@ -50,8 +50,8 @@ class _Bridge:
         self.calls.append("begin")
         return self.decision
 
-    async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
-        return decision
+    async def require_active(self) -> None:
+        return None
 
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:
         del decision, result

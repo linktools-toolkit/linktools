@@ -15,6 +15,9 @@ from ..core import (
     ExternalCallStatus,
     JsonValue,
     Principal,
+    ResourceKind,
+    ResourceRef,
+    ExecutionStatus,
     canonical_json_bytes,
     canonical_sha256,
     normalize_json_value,
@@ -32,15 +35,13 @@ from ..execution import (
     ExternalSupplyRequest,
     ExternalSupplyResult,
 )
+from ..execution import ExecutionRecord, ExecutionRecoveryState
 from ..persistence.contracts import (
     deferred_resource_id,
     ExternalCallRecord,
     ExternalCallRepository,
     ExecutionRepository,
     PendingDeferredCall,
-    ExecutionCheckpoint,
-    ExecutionCheckpointRepository,
-    ExecutionCheckpointState,
 )
 from ..persistence import PersistenceDomain
 
@@ -64,7 +65,6 @@ class DefaultExternalService:
         self,
         calls: ExternalCallRepository,
         executions: ExecutionRepository,
-        checkpoints: ExecutionCheckpointRepository,
         authorization: AuthorizationPolicy,
         *,
         objects: ObjectStore,
@@ -74,7 +74,6 @@ class DefaultExternalService:
     ) -> None:
         self._calls = calls
         self._executions = executions
-        self._checkpoints = checkpoints
         self._authorization = authorization
         self._objects = objects
         self._object_key_factory = object_key_factory
@@ -87,30 +86,19 @@ class DefaultExternalService:
         *,
         principal: Principal,
     ) -> tuple[ExternalCallView, ...]:
-        header = await self._executions.get_header(
-            execution_id,
-            tenant_id=principal.tenant_id,
+        execution = await self._waiting_execution(
+            execution_id, principal=principal,
+            action=AuthorizationAction.EXTERNAL_READ,
         )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
-            AuthorizationAction.EXTERNAL_READ,
-            header,
-        )
-        checkpoint = await self._waiting_checkpoint(
-            execution_id,
-            tenant_id=principal.tenant_id,
-        )
-        if checkpoint is None or checkpoint.pending_tools is None:
+        if execution is None or execution.recovery is None or execution.recovery.pending_tools is None:
             return ()
         views: list[ExternalCallView] = []
-        for pending in checkpoint.pending_tools.calls:
+        for pending in execution.recovery.pending_tools.calls:
             call_id = deferred_resource_id(
                 "external-call-v1",
                 principal.tenant_id,
                 execution_id,
-                checkpoint.pending_tools.source_agent_run_id,
+                execution.recovery.pending_tools.source_agent_run_id,
                 pending.tool_call_id,
             )
             record = await self._calls.get(call_id, tenant_id=principal.tenant_id)
@@ -133,23 +121,12 @@ class DefaultExternalService:
         execution_id: str,
         request: ExternalSupplyRequest,
     ) -> ExternalSupplyResult:
-        header = await self._executions.get_header(
-            execution_id,
-            tenant_id=request.principal.tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            request.principal,
-            AuthorizationAction.EXTERNAL_SUPPLY,
-            header,
-        )
-        checkpoint = await self._waiting_checkpoint(
-            execution_id,
-            tenant_id=request.principal.tenant_id,
+        execution = await self._waiting_execution(
+            execution_id, principal=request.principal,
+            action=AuthorizationAction.EXTERNAL_SUPPLY,
         )
         pending = _pending_call(
-            checkpoint,
+            execution,
             request.call_id,
             tenant_id=request.principal.tenant_id,
         )
@@ -202,23 +179,28 @@ class DefaultExternalService:
         await _reconcile(self._continuation, execution_id, request.principal.tenant_id)
         return ExternalSupplyResult(request.call_id, request.idempotency_key, True)
 
-    async def _waiting_checkpoint(
+    async def _waiting_execution(
         self,
         execution_id: str,
         *,
-        tenant_id: str,
-    ) -> ExecutionCheckpoint | None:
+        principal: Principal,
+        action: AuthorizationAction,
+    ) -> ExecutionRecord | None:
         execution = await self._executions.state_store.read(
-            lambda _transaction: self._executions.get(execution_id, tenant_id=tenant_id)
+            lambda _transaction: self._executions.get(execution_id, tenant_id=principal.tenant_id)
         )
         if execution is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        checkpoint = await self._checkpoints.get(execution_id, tenant_id=tenant_id)
-        if execution.status.value != "WAITING_DEFERRED":
+        await self._authorization.authorize(
+            principal, action,
+            ResourceRef(ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id),
+        )
+        if execution.status is not ExecutionStatus.WAITING_DEFERRED:
             return None
-        if checkpoint is None or checkpoint.state is not ExecutionCheckpointState.WAITING:
+        if (execution.recovery_state is not ExecutionRecoveryState.WAITING
+                or execution.recovery is None or execution.recovery.pending_tools is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return checkpoint
+        return execution
 
     async def _resolution_payload(
         self,
@@ -247,19 +229,19 @@ class DefaultExternalService:
 
 
 def _pending_call(
-    checkpoint: ExecutionCheckpoint | None,
+    execution: ExecutionRecord | None,
     call_id: str,
     *,
     tenant_id: str,
 ) -> PendingDeferredCall | None:
-    if checkpoint is None or checkpoint.pending_tools is None:
+    if execution is None or execution.recovery is None or execution.recovery.pending_tools is None:
         return None
-    for pending in checkpoint.pending_tools.calls:
+    for pending in execution.recovery.pending_tools.calls:
         candidate = deferred_resource_id(
             "external-call-v1",
             tenant_id,
-            checkpoint.execution_id,
-            checkpoint.pending_tools.source_agent_run_id,
+            execution.execution_id,
+            execution.recovery.pending_tools.source_agent_run_id,
             pending.tool_call_id,
         )
         if candidate == call_id:

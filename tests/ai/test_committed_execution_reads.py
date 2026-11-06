@@ -13,7 +13,9 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability
+from linktools.ai.capability import ExecutionCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.execution import CancelExecutionRequest
@@ -44,7 +46,7 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
     group.agent("default", model="default", allow_tools=())
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     # This test observes a source-admitted execution through a stale reader.
-    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(native_checkpoint(), scope="runtime")
     database = tmp_path / "runtime.db"
     models = _Models(FunctionModel(stream_function=model))
     owner_storage = PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))

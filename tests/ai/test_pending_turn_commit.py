@@ -21,14 +21,11 @@ from linktools.ai.core import (
     ResourceKind,
     StopReason,
     UsageMetrics,
+    agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, Persistence
-from linktools.ai.persistence.contracts import (
-    ConversationCursor, ExecutionEventAppend, ExecutionHistoryState,
-    ExecutionStartReservation, ExecutionTerminalCommit, ExecutionTerminalCommitResult,
-    IdempotencyRecord, ExecutionCheckpointState, ResultRecord, SessionRecord,
-)
+from linktools.ai.persistence.contracts import ConversationCursor, ExecutionEventAppend, ExecutionStartReservation, ExecutionTerminalCommit, ExecutionTerminalCommitResult, IdempotencyRecord, ExecutionRecoveryDetail, ExecutionRecoveryState, ResultRecord, SessionRecord
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.persistence.state import StateStore, StateTransaction
@@ -96,6 +93,7 @@ def _pending_turn(
     terminal = replace(
         pending, status=ExecutionStatus.SUCCEEDED, revision=4, event_seq=2,
         agent_run_seq=1, started_at=now, updated_at=finished_at,
+        producer_generation=2, producer_claim_id="pending-turn",
     )
     commit = ExecutionTerminalCommit(
         3, 1, terminal, result, ExecutionEventType.EXECUTION_SUCCEEDED,
@@ -130,7 +128,7 @@ def _stores(state: _TurnState) -> tuple[StateStore, ...]:
     return tuple(dict.fromkeys((
         storage.execution.executions.state_store,
         storage.conversation.sessions.state_store,
-        storage.checkpoint.checkpoints.state_store,
+        storage.execution.executions.state_store,
     )))
 
 
@@ -162,6 +160,9 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert result.execution == replace(
         turn.commit.execution, revision=4 + len(turn.audit_events),
         event_seq=2 + len(turn.audit_events), result=turn.commit.result, retention_closed=True,
+        recovery=ExecutionRecoveryDetail(agent_run_id=agent_run_id(
+            namespace=_NAMESPACE, tenant_id="tenant", execution_id=execution_id, agent_run_seq=1,
+        )),
     )
     assert result.result == turn.commit.result
     assert await storage.execution.executions.get(execution_id, tenant_id="tenant") == result.execution
@@ -173,7 +174,14 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert committed_identity.result_digest == result.result.output.digest
     session = await storage.conversation.sessions.get("session", tenant_id="tenant")
     assert session is not None and session.active_execution_id is None
-    assert session.continuation == turn.cursor
+    assert session.continuation is not None
+    archive = storage.run_store.read_store(PersistenceDomain.CONVERSATION)
+    checkpoint = await archive.checkpoint_at_sequence(
+        agent_run_id=turn.run.agent_run_id, checkpoint_sequence=session.continuation.checkpoint_sequence,
+    )
+    assert session.continuation == replace(
+        turn.cursor, checkpoint_sequence=1, projection_digest=checkpoint.projection_digest,
+    )
     assert session.revision == state.session.revision + 1
     assert await storage.conversation.sessions.timeline_head("session", tenant_id="tenant") == 1
     timeline = await storage.conversation.sessions.list_timeline_turns("session", tenant_id="tenant", start_turn_seq=1, end_turn_seq=2)
@@ -184,12 +192,12 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert await archive.checkpoint_count(agent_run_id=turn.run.agent_run_id) == 1
     messages = [item async for item in archive.iter_session_messages("history", tenant_id="tenant")]
     assert messages == turn.checkpoint.messages
-    head = await storage.execution.executions.get_history_head(execution_id, tenant_id="tenant")
-    assert head is not None and head.state is ExecutionHistoryState.CLOSED
-    assert head.producer_generation == turn.commit.producer_generation
+    head = await storage.execution.executions.get(execution_id, tenant_id="tenant")
+    assert head is not None and (head.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
+    assert result.execution.producer_generation == turn.commit.producer_generation
     assert await storage.execution.executions.get_history_seal(execution_id, tenant_id="tenant") is None
-    recovery = await storage.checkpoint.checkpoints.get(execution_id, tenant_id="tenant")
-    assert recovery is not None and recovery.state is ExecutionCheckpointState.COMPLETED
+    recovery = await storage.execution.executions.get(execution_id, tenant_id="tenant")
+    assert recovery is not None and recovery.recovery_state is ExecutionRecoveryState.COMPLETED
     events = (await storage.execution.events.list(execution_id, tenant_id="tenant", after_event_seq=0, limit=20)).items
     assert [item.event_type for item in events] == [
         ExecutionEventType.EXECUTION_STARTED,

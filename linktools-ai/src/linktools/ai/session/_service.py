@@ -90,6 +90,7 @@ class SessionExecutionService(Protocol[HandleT_co]):
         session_id: str,
         request: ResumeSessionRequest,
         *,
+        session: SessionRecord | None = None,
         binding_contract: AgentBindingContract | None = None,
         resolved_binding: AgentBinding | None = None,
         dependency_hold_id: str | None = None,
@@ -428,6 +429,7 @@ class SessionManager(Generic[HandleT]):
                 binding_digest,
                 session_id,
                 request,
+                session=record,
                 binding_contract=binding_contract, resolved_binding=resolved_binding,
                 dependency_hold_id=dependency_hold_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
@@ -596,8 +598,12 @@ class SessionManager(Generic[HandleT]):
     async def _close(
         self, session_id: str, request: CloseSessionRequest
     ) -> SessionView:
-        await self.read_authorized(
+        current = await self.read_authorized(
             session_id, request.principal, AuthorizationAction.SESSION_CLOSE
+        )
+        authority = ResourceRef(
+            ResourceKind.SESSION, session_id, request.principal.tenant_id,
+            current.owner_principal_id,
         )
         if self._pending_session_execution is not None:
             pending = await self._pending_session_execution(
@@ -611,6 +617,12 @@ class SessionManager(Generic[HandleT]):
                     principal=request.principal,
                     idempotency_key=f"{request.idempotency_key}/{pending.execution_id}",
                 )
+                current = await self._read_session(
+                    session_id, tenant_id=request.principal.tenant_id,
+                )
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._check_display_authority(current, authority)
         digest = canonical_sha256(
             {
                 "action": "session.close",
@@ -633,6 +645,7 @@ class SessionManager(Generic[HandleT]):
             )
             if closed is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._check_display_authority(closed, authority)
             self._validate_close_replay(
                 operation,
                 closed,
@@ -646,13 +659,8 @@ class SessionManager(Generic[HandleT]):
                 closed.continuation,
             )
             return view
-        current = await self._read_session(
-            session_id,
-            tenant_id=request.principal.tenant_id,
-        )
-        if current is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = await self.reconcile_admission(current)
+        self._check_display_authority(current, authority)
         if current.status is SessionStatus.CLOSED:
             await self._complete_close_operation(
                 operation,
@@ -678,6 +686,7 @@ class SessionManager(Generic[HandleT]):
                     current = await self._conversation.sessions.transition_status(
                         session_id,
                         tenant_id=request.principal.tenant_id,
+                        expected_owner_principal_id=authority.owner_principal_id,
                         expected=frozenset({SessionStatus.OPEN}),
                         next_status=SessionStatus.CLOSING,
                         require_no_active=True,
@@ -694,6 +703,7 @@ class SessionManager(Generic[HandleT]):
                     )
                     if latest is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    self._check_display_authority(latest, authority)
                     if (
                         latest.status is SessionStatus.OPEN
                         and latest.active_execution_id is not None
@@ -703,6 +713,7 @@ class SessionManager(Generic[HandleT]):
                         current = await self._conversation.sessions.transition_status(
                             session_id,
                             tenant_id=request.principal.tenant_id,
+                            expected_owner_principal_id=authority.owner_principal_id,
                             expected=frozenset({SessionStatus.OPEN}),
                             next_status=SessionStatus.CLOSING,
                             require_no_active=True,
@@ -723,6 +734,7 @@ class SessionManager(Generic[HandleT]):
                     current = await self._conversation.sessions.transition_status(
                         session_id,
                         tenant_id=request.principal.tenant_id,
+                        expected_owner_principal_id=authority.owner_principal_id,
                         expected=frozenset({SessionStatus.OPEN}),
                         next_status=SessionStatus.CLOSING,
                     )
@@ -737,6 +749,7 @@ class SessionManager(Generic[HandleT]):
                     )
                     if current is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    self._check_display_authority(current, authority)
                     if current.status is SessionStatus.OPEN:
                         raise
                     if current.status not in {
@@ -746,13 +759,8 @@ class SessionManager(Generic[HandleT]):
                     }:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             while True:
-                current = await self._read_session(
-                    session_id,
-                    tenant_id=request.principal.tenant_id,
-                )
-                if current is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 current = await self.reconcile_admission(current)
+                self._check_display_authority(current, authority)
                 if current.active_execution_id is None:
                     break
                 execution = await self._active_admitted_execution(current)
@@ -779,21 +787,24 @@ class SessionManager(Generic[HandleT]):
                     )
                     if current is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    self._check_display_authority(current, authority)
                     if current.status is SessionStatus.CLOSING:
                         await self._conversation.sessions.transition_status(
                             session_id,
                             tenant_id=request.principal.tenant_id,
+                            expected_owner_principal_id=authority.owner_principal_id,
                             expected=frozenset({SessionStatus.CLOSING}),
                             next_status=SessionStatus.CLEANUP_REQUIRED,
                         )
                     raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
+                current = await self._read_session(
+                    session_id,
+                    tenant_id=request.principal.tenant_id,
+                )
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._check_display_authority(current, authority)
                 break
-            current = await self._read_session(
-                session_id,
-                tenant_id=request.principal.tenant_id,
-            )
-            if current is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current.status in {
                 SessionStatus.CLOSING,
                 SessionStatus.CLEANUP_REQUIRED,
@@ -836,6 +847,7 @@ class SessionManager(Generic[HandleT]):
             return await self._conversation.sessions.transition_status(
                 session_id,
                 tenant_id=tenant_id,
+                expected_owner_principal_id=current.owner_principal_id,
                 expected=frozenset({current.status}),
                 next_status=SessionStatus.CLOSED,
                 closed_at=datetime.now(timezone.utc),
@@ -853,6 +865,10 @@ class SessionManager(Generic[HandleT]):
             )
             if latest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._check_display_authority(
+                latest, ResourceRef(ResourceKind.SESSION, session_id, tenant_id,
+                                    current.owner_principal_id),
+            )
             if latest.status is SessionStatus.CLOSED:
                 return latest
             if latest.active_execution_id is not None:
@@ -964,18 +980,17 @@ class SessionManager(Generic[HandleT]):
     async def read_authorized(
         self, session_id: str, principal: Principal, action: AuthorizationAction
     ) -> SessionRecord:
-        header = await self._conversation.sessions.get_header(
-            session_id, tenant_id=principal.tenant_id
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(principal, action, header)
-        record = await self._conversation.sessions.get(
+        record = await self._read_session(
             session_id, tenant_id=principal.tenant_id
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        self._check_display_authority(record, header)
+        await self._authorization.authorize(
+            principal,
+            action,
+            ResourceRef(ResourceKind.SESSION, record.session_id, principal.tenant_id,
+                        record.owner_principal_id),
+        )
         return record
 
     @overload
@@ -1085,7 +1100,7 @@ class SessionManager(Generic[HandleT]):
         )
         if self.validate_admission(record, execution) is not None:
             return record
-        await self._conversation.sessions.release_execution(
+        updated = await self._conversation.sessions.release_execution(
             record.session_id,
             tenant_id=self._conversation.sessions.tenant_id,
             execution_id=execution_id,
@@ -1094,12 +1109,11 @@ class SessionManager(Generic[HandleT]):
             ),
             require_turn_commit=execution is not None and execution.conversation,
         )
-        updated = await self._conversation.sessions.get(
-            record.session_id,
-            tenant_id=self._conversation.sessions.tenant_id,
+        self._check_display_authority(
+            updated,
+            ResourceRef(ResourceKind.SESSION, record.session_id,
+                        self._conversation.sessions.tenant_id, record.owner_principal_id),
         )
-        if updated is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
             "released stale session admission: session=%s execution=%s",
             record.session_id,

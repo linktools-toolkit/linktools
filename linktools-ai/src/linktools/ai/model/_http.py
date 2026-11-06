@@ -8,7 +8,6 @@ import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
 from httpx2 import AsyncClient, AsyncByteStream, ByteStream, EventSource, Request, RequestNotRead, Response
-from linktools.core import environ
 
 from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request, _record_http_bodies
 from ..core import JsonValue
@@ -186,8 +185,7 @@ async def capture_response(response: Response) -> None:
     if response.http_version in {"HTTP/1.0", "HTTP/1.1", "HTTP/2", "HTTP/3"}:
         observations["http_version"] = response.http_version
     request_id = response.headers.get("request-id" if entry.api == "anthropic" else "x-request-id")
-    if (request_id is not None and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id)
-            and environ.logging.redact(request_id) == request_id):
+    if request_id is not None and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id):
         observations["request_id"] = request_id
     entry.record_observation(**observations)
     try:

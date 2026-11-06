@@ -312,38 +312,47 @@ flush/close ownership.
 ### Runtime archive routes and defaults
 
 `PersistencePlan.checkpoint=None` and `trace=None` inherit the execution route,
-including its hot-read cache. Registering CheckpointCapability or TraceCapability
-enables behavior; neither capability accepts a physical storage argument. An explicit
-Trace or Checkpoint route must remain in the same `StateStorageGroup` as Execution,
-because safety and terminal boundaries require atomic writes. Persistence validates this when it opens. Routes share a group when they use the same SQLite path, the same SQL
-engine instance; memory routes share
-one binding-local group. Separate SQL engine instances targeting the same database do not
-establish a shared SQL group.
+including its hot-read cache. Approvals, external results and tool outcomes
+share the execution transaction group. They
+are available through `persistence.checkpoint` and `CheckpointRepositories`.
+The current attempt, recovery pointers and handoff detail belong to
+`ExecutionRecord.recovery`; there is no second execution-control checkpoint row.
 
-Checkpoint owns the small execution-control records, approval/external-result
-waits, retained tool results and the run-context archive. Its control repositories
-are available at `persistence.checkpoint`, replacing `persistence.recovery`.
-`CheckpointCapability` enables automatic model/tool-boundary captures; omitting it
-does not remove the minimal execution control or the checkpoint required to resume
-an approval or external-result wait.
+Native `StepPersistence(store=...)` owns message snapshots, runs and events in the
+explicit supplied store. Runtime does not create an additional checkpoint archive
+or provide a legacy checkpoint writer. The official `SqliteStepStore` is suitable
+for local examples; `SqlStepStore` implements the same protocol on the project's
+provisioned SQL tables. Production provisioning remains a migration operation,
+not Runtime initialization. Native snapshot writes are confirmed independently
+before the terminal business state is published.
 
-`PersistenceDomain.CHECKPOINT` is the single domain for control records and the
-run-context archive. Both use the same route, StateStore, transaction group and
-object source. `resolved_routes` and `Persistence.status()` report that domain
-once. Small control updates do not rewrite model-message bodies.
+The Runtime-owned working set reuses acknowledged native run/snapshot objects.
+Unknown writes invalidate confirmation; cancellation and producer control are not
+made authoritative by this cache. Native tool-effect views use the existing
+Runtime tool-operation record, including permitted canonical results and UNKNOWN
+status. Host result-projection rules still run before the first durable payload.
 
-Low-level callers use `persistence.checkpoint.tools` and
-`PersistenceDomain.CHECKPOINT`; the repository bundle is `CheckpointRepositories`.
-`StateCommands` accepts this bundle as `checkpoint` and the optional context
-archive as `checkpoint_archive`. `ExecutionCheckpoint` and
-`ExecutionCheckpointState` describe the control record; `AgentRunCheckpoint`
-describes the model-context checkpoint.
+Retained Session context selects an immutable checkpoint fact by its run and
+sequence, with the projection digest carried by the committed Session cursor.
+The fact contains the exact context projection and content root. A later deferred
+run or compaction cannot replace that selection by updating the latest raw-history
+head. Raw history paging and branch appends retain their separate cutoff checks.
 
-The retired `recovery` data partition is not migrated. Existing filesystem
-sources retain their recorded layout. Offline export accepts an empty retired
-partition and includes the current domains only; retained `checkpoint` archives
-and unrelated domains are preserved. Populated retired partitions or references
-into retired recovery data require their original reader.
+The conversation route's `CacheBackend` can retain the confirmed context body and
+its append frontier. Reads first confirm the exact fact still exists, then reuse
+the immutable body by source scope and projection identity. Cache entries are
+published only after commit confirmation, verified against the selected root,
+and decoded into independent message objects. A miss or invalid entry reads the
+same immutable projection from storage. Cache availability does not grant
+Session access, producer authority, or permission to ignore an unknown commit.
+
+The active turn also retains its confirmed admission and publication receipts.
+These carry physical CAS revisions and the timeline identity already committed
+by that turn. Normal activation, final-result delivery and consumer cleanup can
+reuse them instead of querying their own successful writes. A conflicting write,
+unconfirmed handoff or unknown outcome uses source reconciliation; dependency
+holds and caller authorization still apply. These receipts belong to the
+Runtime's existing turn/retention owners, not to an independently mutable cache.
 
 A transient Checkpoint route retains unscoped control objects for the Runtime's
 lifetime. Releasing one execution removes only its scoped working objects;
@@ -351,11 +360,12 @@ it does not remove control payloads or another execution's working objects.
 Durable routes still share the Execution transaction group.
 
 For a per-domain hot cache, derive the execution route rather than selecting
-an unrelated database. This current API example keeps Checkpoint's inherited
-cache while disabling Trace's hot cache:
+an unrelated database. This example keeps the control route's inherited
+cache while disabling Trace's hot cache. Native snapshot storage is explicit:
 
 ```python
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence, SqliteStepStore
 from linktools.ai.runtime import RuntimeFeatures
 from dataclasses import replace
 from linktools.ai.runtime import Runtime
@@ -365,7 +375,7 @@ from linktools.ai.persistence import PersistenceStorage
 storage = PersistenceStorage.from_root("state", cache=hot_cache)
 execution_route = storage.plan.route(PersistenceDomain.EXECUTION)
 features = RuntimeFeatures("app")
-features.capability(CheckpointCapability())
+features.capability(StepPersistence(store=SqliteStepStore(database="steps.db"), capture_frontier=True))
 features.capability(TraceCapability())
 storage = PersistenceStorage(replace(storage.plan, trace=execution_route.with_cache(None)))
 async with Runtime.open("app", storage=storage,
@@ -650,7 +660,7 @@ must compare the borrowed instance separately.
 A failed pending turn that never submitted a source operation can release only
 its own staged payloads while the shared Runtime remains open. Cleanup joins the
 stopped worker's renewal and source tasks, verifies that its ephemeral claim is
-gone, and reads fresh source Execution and history-head absence. Neither an
+gone, and reads fresh source Execution absence. Neither an
 absent cache value nor source absence alone proves that an unknown commit failed.
 A sealed source prefix, reconciliation obligation, live owner or read failure
 retains the evidence instead of authorizing discard. Exact-ID acknowledgement
@@ -1184,3 +1194,23 @@ source out of generic cleanup until its original owner supplies a complete
 reference inventory; do not treat an absent marker as proof of no custom data.
 The check adds one source read scope per discovered partition to offline cleanup,
 not to Runtime writes or reads. It neither creates markers nor changes schema.
+
+## Native StepStore backup boundary
+
+The official StepStore protocol has no portable export/restore method. Its
+caller-owned records are not silently copied into Persistence's portable format.
+When any persisted execution uses native restart checkpoints, portable export
+raises `SNAPSHOT_UNSUPPORTED`; checkpoint-free portable export is unchanged.
+
+Stop writers and object cleanup, then take a consistent backend backup of the
+Runtime database and the StepStore. With `SqlStepStore` on that database, include
+all five `ai_step_*` tables along with the business tables. For a separate official
+SQLite store, use SQLite's backup facility or copy the database only after all
+writers are stopped and WAL state has been safely checkpointed. Include any
+configured external MediaStore. Restore these resources together before reopening
+writers. Do not restore a source under active workers or interpret restored tool
+records as proof that external effects were rolled back.
+
+There is no new backup wire format or compatibility reader for old checkpoint
+archives. Provisioning or changing a production database is never performed by
+Runtime startup.

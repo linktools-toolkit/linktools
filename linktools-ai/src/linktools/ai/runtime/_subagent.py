@@ -20,6 +20,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._execution import DefaultExecutionService
+from ._handoff import execution_handoff_scope
 from ..execution import CancelExecutionRequest, ExecutionRequest, ExecutionResult
 
 _logger = environ.get_logger("ai.runtime.subagent")
@@ -78,6 +79,7 @@ class SubagentDispatcher:
         self,
         *,
         parent_execution_id: str,
+        parent_producer_generation: int,
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
@@ -116,6 +118,7 @@ class SubagentDispatcher:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             return await self.dispatch(
                 parent_execution_id=parent_execution_id,
+                parent_producer_generation=parent_producer_generation,
                 root_execution_id=root_execution_id,
                 memory_scope=memory_scope,
                 principal=principal,
@@ -133,6 +136,7 @@ class SubagentDispatcher:
         self,
         *,
         parent_execution_id: str,
+        parent_producer_generation: int,
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
@@ -167,6 +171,7 @@ class SubagentDispatcher:
         )
         child = await self._dispatch(
             parent_execution_id=parent_execution_id,
+            parent_producer_generation=parent_producer_generation,
             root_execution_id=root_execution_id,
             memory_scope=memory_scope,
             principal=principal,
@@ -191,6 +196,7 @@ class SubagentDispatcher:
         self,
         *,
         parent_execution_id: str,
+        parent_producer_generation: int,
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
@@ -211,6 +217,7 @@ class SubagentDispatcher:
             memory_scope=memory_scope,
             mode=child_mode,
             parent_execution_id=parent_execution_id,
+            parent_producer_generation=parent_producer_generation,
             root_execution_id=root_execution_id,
             parent_invocation_id=invocation_id,
         )
@@ -244,6 +251,7 @@ class SubagentDispatcher:
                 child_binding.binding_digest,
                 request,
                 parent_execution_id=parent_execution_id,
+                parent_producer_generation=parent_producer_generation,
                 root_execution_id=root_execution_id,
                 parent_invocation_id=invocation_id,
                 binding_contract=child_binding.binding_contract,
@@ -261,6 +269,7 @@ class SubagentDispatcher:
             memory_scope=memory_scope,
             mode=child_mode,
             parent_execution_id=parent_execution_id,
+            parent_producer_generation=parent_producer_generation,
             root_execution_id=root_execution_id,
             parent_invocation_id=invocation_id,
         )
@@ -276,12 +285,29 @@ class SubagentDispatcher:
         principal: Principal,
         ref: SubagentRef,
     ) -> "dict[str, JsonValue]":
+        scope = execution_handoff_scope.get()
+        waiter = asyncio.current_task()
+        if scope is not None and waiter is not None:
+            scope.register_child_wait(waiter)
         try:
             result = await self._execution.wait(
                 execution_id,
                 principal=principal,
             )
         except BaseException as primary:  # noqa: BLE001
+            if (isinstance(primary, AIError)
+                    and primary.safe_details.get("phase") == "turn_owner_lost"):
+                # Losing an observer/worker is not authorization to cancel the
+                # logical child, which a new parent may explicitly resume.
+                raise
+            if (
+                isinstance(primary, asyncio.CancelledError)
+                and scope is not None
+                and scope.stopping
+                and not scope.cancelled
+            ):
+                # Worker handoff abandons this observer, not the logical child.
+                raise
             cleanup = asyncio.create_task(
                 self.cancel_child(
                     execution_id,
@@ -311,6 +337,9 @@ class SubagentDispatcher:
                 )
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
             raise
+        finally:
+            if scope is not None and waiter is not None:
+                scope.unregister_child_wait(waiter)
         self._background_failures.pop(execution_id, None)
         if result.status is ExecutionStatus.SUCCEEDED:
             return _subagent_result(result)
@@ -360,17 +389,20 @@ class SubagentDispatcher:
         parent_execution_id: str,
         principal: Principal,
     ) -> None:
-        current = await self._execution.inspect(
-            execution_id,
-            principal=principal,
-        )
-        if current.status in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
-            self._background_failures.pop(execution_id, None)
-            return
+        try:
+            current = await self._execution.inspect(execution_id, principal=principal)
+        except AIError as error:
+            if error.safe_details.get("phase") != "turn_owner_lost":
+                raise
+            # A failed worker observer must not block explicit source cancellation.
+        else:
+            if current.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                self._background_failures.pop(execution_id, None)
+                return
         request = CancelExecutionRequest(
             principal=principal,
             idempotency_key="subagent-cancel:"

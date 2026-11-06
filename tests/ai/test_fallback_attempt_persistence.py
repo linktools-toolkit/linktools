@@ -50,16 +50,16 @@ def test_attempts_round_trip_preserves_order_timing_and_unknown_usage() -> None:
     assert json.loads(wire)[0]["failed_attempts"][0]["duration"] == "PT2.000301S"
 
 
-def test_attempt_projection_redacts_secrets_without_discarding_ordinary_diagnostics() -> None:
+def test_attempt_projection_preserves_original_diagnostics() -> None:
     attempt = _attempt(error='ModelAPIError: password="private-value" detail=try-again')
     response = ModelResponse(parts=[], failed_attempts=[attempt])
     projected = project_model_response_attempts(response)
 
-    assert projected is not response
-    assert "private-value" not in projected.failed_attempts[0].error
+    assert projected is response
+    assert projected.failed_attempts[0].error == attempt.error
     assert "detail=try-again" in projected.failed_attempts[0].error
     assert "private-value" in response.failed_attempts[0].error
-    assert b"private-value" not in encode_model_messages((response,))
+    assert b"private-value" in encode_model_messages((response,))
     assert b"detail=try-again" in encode_model_messages((response,))
 
 

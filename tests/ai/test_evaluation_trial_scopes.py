@@ -40,7 +40,8 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.migrate import provision_database
 
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.evaluation.engine import Evaluations, EvaluationTrialScope
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -392,7 +393,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
     model_prompts: list[str] = []
     interrupted = True
     group = RuntimeFeatures[Path]("recoverable-scoped-agent")
-    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(native_checkpoint(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     class RecoveringModels(FixtureModels):
@@ -433,7 +434,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         if not marker.exists():
             marker.write_text("application-owned recovery workspace", encoding="utf-8")
         group = workspace_features("recoverable-scoped-agent", workspace=Workspace.load(workspace))
-        group.capability(CheckpointCapability(), scope="runtime")
+        group.capability(native_checkpoint(), scope="runtime")
         group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         models = RecoveringModels(interrupt=interrupted and descriptor.scorer_slot_id is None)
         child_storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite")
@@ -468,7 +469,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
                         repository = child._state.execution.executions
 
                         async def resume_with_hold_change(execution, **kwargs):
-                            resumed, checkpoint = await original_resume(execution, **kwargs)
+                            resumed = await original_resume(execution, **kwargs)
                             if hold_change == "release":
                                 await repository.acquire_dependency_hold(
                                     execution.execution_id, tenant_id=child.default_principal.tenant_id,
@@ -478,7 +479,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
                                       else repository.release_dependency_hold)
                             await change(execution.execution_id, tenant_id=child.default_principal.tenant_id,
                                          hold_id="concurrent-reader")
-                            return resumed, checkpoint
+                            return resumed
 
                         fault.setattr(backend, "_commit_recovery_resume", resume_with_hold_change)
                     child_engine = await child_stack.enter_async_context(
@@ -525,7 +526,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
             )
             execution_id = bound.node_states[0].execution_id
             original = await runtime._state.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
-            checkpoint = await runtime._state.checkpoint.checkpoints.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
+            checkpoint = await runtime._state.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
             assert checkpoint is not None
             assert original.status is ExecutionStatus.STARTED
             stop_owner.set()

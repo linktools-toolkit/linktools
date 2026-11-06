@@ -36,14 +36,12 @@ from .contracts import (
     ConversationHistoryIndexNodeRecord,
     ConversationHistoryRecord,
     EvaluationRecord,
-    ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
     ExecutionRecord,
     ExternalCallRecord,
     IdempotencyRecord,
     MemoryRecord,
     ModelInteractionRecord,
-    ExecutionCheckpoint,
     SessionRecord,
     SessionTurnCommit,
     StoredAgentRunCheckpoint,
@@ -105,7 +103,6 @@ _ALLOWED_RECORD_KINDS = {
             "budget_model",
             "budget_tool",
             "execution",
-            "execution_history_head",
             "execution_history_seal",
             "idempotency",
             "transcript_head",
@@ -133,7 +130,6 @@ _ALLOWED_RECORD_KINDS = {
     PersistenceDomain.EVALUATION: frozenset({"evaluation", "idempotency", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison", "evaluation_tombstone", "evaluation_content_tombstone", "evaluation_cleanup"}),
     PersistenceDomain.CHECKPOINT: frozenset(
         {
-            "recovery_checkpoint",
             "approval",
             "external_call",
             "tool_operation",
@@ -165,7 +161,6 @@ _RECORD_TYPES = {
     "transcript_seek": TranscriptSeekRecord,
     "context_projection": ContextProjection,
     "execution": ExecutionRecord,
-    "execution_history_head": ExecutionHistoryHeadRecord,
     "execution_history_seal": ExecutionHistorySealRecord,
     "idempotency": IdempotencyRecord,
     "memory": MemoryRecord,
@@ -179,7 +174,6 @@ _RECORD_TYPES = {
     "evaluation_evidence": EvidenceBundle,
     "evaluation_report": EvaluationReport,
     "evaluation_comparison": ComparisonReport,
-    "recovery_checkpoint": ExecutionCheckpoint,
     "approval": ApprovalRecord,
     "external_call": ExternalCallRecord,
     "tool_operation": ToolOperationRecord,
@@ -446,7 +440,7 @@ def _decode_record(record: StoredRecord) -> object:
                 value,
                 owner=record.lease_owner,
                 fence=record.lease_fence,
-                lease_expires_at=record.lease_expires_at,
+                **({"lease_expires_at": record.lease_expires_at} if isinstance(value, TaskNodeView) else {}),
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -599,11 +593,6 @@ def _expected_record(
         _require_anchor(namespace, tenant_id, domain, records, "budget_scope", value.budget_scope_id)
     elif isinstance(value, TaskGraphView):
         state = value.status.value
-    elif isinstance(value, ExecutionHistoryHeadRecord):
-        state = value.state.value
-        _require_anchor(
-            namespace, tenant_id, domain, records, "execution", value.execution_id
-        )
     elif isinstance(value, ExecutionHistorySealRecord):
         _require_anchor(
             namespace, tenant_id, domain, records, "execution", value.execution_id
@@ -829,7 +818,7 @@ def _record_identity(
         return value.history_id
     if isinstance(value, ConversationHistoryIndexNodeRecord):
         return value.node_id
-    if isinstance(value, (ExecutionHistoryHeadRecord, ExecutionHistorySealRecord)):
+    if isinstance(value, ExecutionHistorySealRecord):
         return value.execution_id
     if isinstance(value, (TaskGraphAdmission, TaskSubmissionRef)):
         return value.graph_id

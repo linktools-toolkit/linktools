@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Checkpoint materialization keeps replay and optimistic ownership checks."""
+"""Trace checkpoint materialization keeps replay and optimistic ownership checks."""
 
 from linktools.ai.persistence import Persistence
 import asyncio
@@ -14,10 +14,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.persistence.state import FactQuery, StoredFact
+from linktools.ai.persistence.state import FactQuery, StoredFact, StoredRecord
+from .test_checkpoint_metadata_snapshot_io import _trace_archive
 
 
 @pytest.mark.asyncio
@@ -28,7 +29,7 @@ async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_rep
     await provision_database(engine)
     state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="checkpoint-io", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     statements: list[str] = []
@@ -42,10 +43,10 @@ async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_rep
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
     try:
-        await archive.materialize_checkpoint(run, checkpoint)
+        await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         assert len(statements) == 0
         statements.clear()
-        await archive.materialize_checkpoint(run, checkpoint)
+        await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         assert len(statements) == 1
         assert await archive.checkpoint_count(agent_run_id="run") == 1
         latest = await archive.latest_checkpoint(agent_run_id="run")
@@ -58,7 +59,7 @@ async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_rep
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("_server", ("postgresql",), indirect=True)
-async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
+async def test_checkpoint_publication_fences_concurrent_execution_writers(
     _server: tuple[str, list[str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, command = _server
@@ -69,14 +70,17 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
     await provision_database(engine)
     state = Persistence(PersistenceStorage.sql(engine))
     await state.initialize(namespace="checkpoint-race", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
-    await archive.register_agent_run(run)
+    await archive.register_agent_run(run, execution_id="execution")
     observed = asyncio.Event()
+    competing = asyncio.Event()
     release = asyncio.Event()
     original = _SqlTransaction.list_facts
+    original_guard = _SqlTransaction.guard_record
     first: asyncio.Task[None] | None = None
+    second: asyncio.Task[None] | None = None
 
     async def pause_after_absent_fact(
         transaction: _SqlTransaction, query: FactQuery,
@@ -88,34 +92,50 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
             await release.wait()
         return result
 
+    async def observe_competing_guard(
+        transaction: _SqlTransaction, key: bytes, *, expected_storage_revision: int,
+    ) -> StoredRecord | None:
+        if asyncio.current_task() is second:
+            competing.set()
+        return await original_guard(
+            transaction, key, expected_storage_revision=expected_storage_revision,
+        )
+
     monkeypatch.setattr(_SqlTransaction, "list_facts", pause_after_absent_fact)
+    monkeypatch.setattr(_SqlTransaction, "guard_record", observe_competing_guard)
     try:
-        first = asyncio.create_task(archive.materialize_checkpoint(run, checkpoint))
+        first = asyncio.create_task(archive.materialize_checkpoint(run, checkpoint, execution_id="execution"))
         await asyncio.wait_for(observed.wait(), 5)
-        await archive.materialize_checkpoint(run, checkpoint)
+        second = asyncio.create_task(archive.materialize_checkpoint(run, checkpoint, execution_id="execution"))
+        await asyncio.wait_for(competing.wait(), 5)
+        # The first writer already holds the execution CAS row lock. Let it
+        # commit before awaiting the competing writer's stale-revision conflict.
         release.set()
+        await asyncio.wait_for(first, 5)
         with pytest.raises(AIError) as raised:
-            await asyncio.wait_for(first, 5)
+            await asyncio.wait_for(second, 5)
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-        await archive.materialize_checkpoint(run, checkpoint)
+        await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         assert await archive.checkpoint_count(agent_run_id="run") == 1
         latest = await archive.latest_checkpoint(agent_run_id="run")
         assert latest is not None and latest.messages == [] and latest.step_index == 1
     finally:
         release.set()
-        if first is not None and not first.done():
-            first.cancel()
-            await asyncio.gather(first, return_exceptions=True)
+        tasks = [task for task in (first, second) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await state.close()
         await engine.dispose()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replay", (False, True))
-async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: Path, replay: bool) -> None:
+async def test_trace_preparation_bounds_metadata_read_transactions(tmp_path: Path, replay: bool) -> None:
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "preparation.db"))
     await state.initialize(namespace="checkpoint-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     engine = archive.state_store.storage_group.context.engine.sync_engine
@@ -126,16 +146,15 @@ async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: 
 
     try:
         if replay:
-            await archive.materialize_checkpoint(run, checkpoint)
+            await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         event.listen(engine, "begin", begin)
         try:
-            prepared, interactions, sequence = await state.run_store.checkpoint_persistence.prepare_checkpoint(
-                archive, run, checkpoint, (),
-            )
+            batch = await archive.prepare_checkpoints(run, (checkpoint,))
+            prepared, = batch.checkpoints
         finally:
             event.remove(engine, "begin", begin)
         assert prepared.stored.step_index == checkpoint.step_index
-        assert interactions == () and sequence == 1
+        assert batch.target_transcript_message_count == 0
         assert len(begins) <= 3
     finally:
         await state.close()
@@ -143,53 +162,7 @@ async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
-) -> None:
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
-    from linktools.ai.persistence.state import active_state_scope
-    from .test_incremental_projection_boundaries import _storage
-
-    state = Persistence(_storage(backend, tmp_path))
-    await state.initialize(namespace="checkpoint-relocation", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-    run = AgentRunRecord("run")
-    checkpoint = AgentRunCheckpoint(
-        "run", 1, [ModelRequest(parts=[UserPromptPart("retained message")])],
-        transcript_message_count_before=0,
-    )
-    try:
-        await archive.materialize_checkpoint(run, checkpoint)
-        read = archive.state_store.read
-        load = archive.transcript_repository.load_message_span
-        scopes, bodies = [], []
-
-        async def tracked_read(callback):
-            async def capture(transaction):
-                if not bodies:
-                    scopes.append(active_state_scope())
-                return await callback(transaction)
-            return await read(capture)
-
-        async def tracked_load(*args, **kwargs):
-            assert active_state_scope() is None
-            bodies.append(True)
-            return await load(*args, **kwargs)
-
-        monkeypatch.setattr(archive.state_store, "read", tracked_read)
-        monkeypatch.setattr(archive.transcript_repository, "load_message_span", tracked_load)
-        relocated = await archive.relocate_run_checkpoint(run, checkpoint)
-        assert relocated.transcript_message_count_before == 1
-        assert scopes and all(scope is not None and scope is scopes[0] for scope in scopes)
-        assert bodies == [True]
-        assert active_state_scope() is None
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_recovery_metadata_cancellation_releases_scope(
+async def test_trace_metadata_cancellation_releases_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     from linktools.ai.persistence.state import active_state_scope
@@ -197,22 +170,24 @@ async def test_recovery_metadata_cancellation_releases_scope(
 
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-cancel", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
-    count = archive.model_interaction_count
+    read = archive.state_store.read
 
-    async def cancelled_count(*args, **kwargs):
-        assert active_state_scope() is not None
-        raise asyncio.CancelledError
+    async def cancelled_read(callback):
+        async def cancel(transaction):
+            assert active_state_scope() is not None
+            raise asyncio.CancelledError
+        return await read(cancel)
 
     try:
-        monkeypatch.setattr(archive, "model_interaction_count", cancelled_count)
+        monkeypatch.setattr(archive.state_store, "read", cancelled_read)
         with pytest.raises(asyncio.CancelledError):
-            await state.run_store.checkpoint_persistence.prepare_checkpoint(archive, run, checkpoint, ())
+            await archive.prepare_checkpoints(run, (checkpoint,))
         assert active_state_scope() is None
-        monkeypatch.setattr(archive, "model_interaction_count", count)
-        _, interactions, sequence = await state.run_store.checkpoint_persistence.prepare_checkpoint(archive, run, checkpoint, ())
-        assert interactions == () and sequence == 1
+        monkeypatch.setattr(archive.state_store, "read", read)
+        batch = await archive.prepare_checkpoints(run, (checkpoint,))
+        assert batch.checkpoints[0].stored.step_index == 1
     finally:
         await state.close()

@@ -32,8 +32,8 @@ class _Bridge:
         self.calls.append("begin")
         raise AssertionError("deferred gate must run before tool admission")
 
-    async def renew(self, decision: Any) -> Any:
-        return decision
+    async def require_active(self) -> None:
+        return None
 
     async def complete(self, decision: Any, result: Any) -> bool:
         del decision, result

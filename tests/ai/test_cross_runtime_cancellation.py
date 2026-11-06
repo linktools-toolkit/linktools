@@ -13,7 +13,9 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
@@ -100,13 +102,13 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 )
                 assert outcome.cancelled is False
                 tenant = owner.default_principal.tenant_id
-                pending_head = await remote._state.execution.executions.get_history_head(
+                pending_head = await remote._state.execution.executions.get(
                     execution.execution_id, tenant_id=tenant,
                 )
                 await execution.history(include_content=True)
                 while_active = await owner.executions.inspect(execution.execution_id, principal=owner.default_principal)
                 assert while_active.status is ExecutionStatus.CANCELLING
-                assert pending_head.state.value == "open"
+                assert (pending_head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and pending_head.history_seal_digest is None)
                 assert owner._run_store._staging._runs
                 backend = owner._execution_service.runtime_backend()
                 worker = backend._tasks[execution.execution_id]
@@ -136,7 +138,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         await asyncio.sleep(0.01)
                 await asyncio.wait_for(released(), 10)
                 result = await remote.executions.result(execution.execution_id, principal=owner.default_principal)
-                sealed = await remote._state.execution.executions.get_history_head(
+                sealed = await remote._state.execution.executions.get(
                     execution.execution_id, tenant_id=tenant,
                 )
                 history = await execution.history(include_content=True)
@@ -162,7 +164,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         joined.update(tasks)
 
                 await asyncio.wait_for(settled(), 10)
-                assert await owner._state.execution.executions.get_history_head(
+                assert await owner._state.execution.executions.get(
                     execution.execution_id, tenant_id=tenant,
                 ) == sealed
                 assert (await execution.history(include_content=True)).items == history.items
@@ -208,13 +210,16 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
     finish_fast = asyncio.Event()
     slow_stopped = asyncio.Event()
     requests = 0
+    effects = []
 
     async def fast(_ctx: AgentContext[None]) -> str:
         fast_entered.set()
         await finish_fast.wait()
+        effects.append("fast")
         return "completed effect"
 
     async def slow(_ctx: AgentContext[None]) -> str:
+        effects.append("slow")
         slow_entered.set()
         try:
             await asyncio.Event().wait()
@@ -239,7 +244,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
 
     group = RuntimeFeatures("individual-tool-cancel")
     if checkpoint:
-        group.capability(CheckpointCapability(), scope="runtime")
+        group.capability(native_checkpoint(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.tool(fast, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
@@ -259,7 +264,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
             assert not outcome.cancelled
             assert not slow_stopped.is_set()
             finish_fast.set()
-            if sibling_settles or not checkpoint:
+            if sibling_settles:
                 result = (await execution.wait(timeout_seconds=15)).result
                 assert result.status is ExecutionStatus.CANCELLED
                 assert result.output is None
@@ -271,22 +276,136 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
                 assert view.status is ExecutionStatus.RECOVERY_REQUIRED
             assert slow_stopped.is_set()
             assert requests == 1
+            assert sorted(effects) == ["fast", "slow"]
             operations = await owner._state.checkpoint.tools.list_by_execution(
                 execution.execution_id, tenant_id=owner.default_principal.tenant_id,
             )
-            if checkpoint:
-                assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
-                if not sibling_settles:
-                    assert next(item for item in operations if item.tool_call_id == "slow-call").status is ToolOperationStatus.EFFECT_UNKNOWN
-            else:
-                assert operations == ()
+            assert len(operations) == 2
+            assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
+            assert next(item for item in operations if item.tool_call_id == "slow-call").status is (
+                ToolOperationStatus.COMPLETED if sibling_settles else ToolOperationStatus.EFFECT_UNKNOWN
+            )
             history = (await execution.history(tool_call_id="fast-call", include_content=True)).items
-            if checkpoint:
-                assert [item.item_kind for item in history] == ["tool_call", "tool_result"]
-                assert history[-1].content == "completed effect"
+            assert [item.item_kind for item in history] == ["tool_call", "tool_result"]
+            assert history[-1].content == "completed effect"
+        finally:
+            finish_fast.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_settles", (False, True))
+async def test_forced_remote_cancel_drains_sibling_after_late_known_result(
+    tmp_path: Path, sibling_settles: bool,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+
+    from linktools.ai.capability import AgentContext
+    from linktools.ai.core import ToolOperationStatus
+    from linktools.ai.errors import AIError, ErrorCode
+
+    from ._runtime_test_helpers import _UsageFunctionModel
+
+    fast_entered = asyncio.Event()
+    slow_entered = asyncio.Event()
+    finish_fast = asyncio.Event()
+    slow_stopped = asyncio.Event()
+    requests = 0
+    effects = []
+
+    async def fast(_ctx: AgentContext[None]) -> str:
+        fast_entered.set()
+        await finish_fast.wait()
+        effects.append("fast")
+        return "completed effect"
+
+    async def slow(_ctx: AgentContext[None]) -> str:
+        effects.append("slow")
+        slow_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if sibling_settles:
+                return "settled sibling"
+            raise
+        finally:
+            slow_stopped.set()
+        return "unreachable"
+
+    async def model(messages, info):
+        nonlocal requests
+        del messages, info
+        requests += 1
+        if requests > 1:
+            return ModelResponse(parts=[TextPart("unexpected continuation")])
+        return ModelResponse(parts=[
+            ToolCallPart("fast", {}, tool_call_id="fast-call"),
+            ToolCallPart("slow", {}, tool_call_id="slow-call"),
+        ])
+
+    group = RuntimeFeatures("individual-tool-cancel")
+    group.capability(native_checkpoint(), scope="runtime")
+    group.capability(TraceCapability(), scope="runtime")
+    group.tool(fast, effect_policy="replay_safe")
+    group.tool(slow, effect_policy="replay_safe")
+    group.agent("default", model="default", allow_tools=("fast", "slow"))
+    owner_storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    async with Persistence.open('individual-tool-cancel', storage=owner_storage) as persistence_248, Runtime.attach(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as owner, Persistence.open('individual-tool-cancel', storage=PersistenceStorage.sqlite(tmp_path / 'runtime.db')) as persistence_251, Runtime.attach(persistence=persistence_251, features=model_features(_Models(_UsageFunctionModel(model)), group)) as remote:
+        execution = await owner.agents.get("default").start("run both")
+        try:
+            await asyncio.wait_for(asyncio.gather(fast_entered.wait(), slow_entered.wait()), 10)
+            await owner._run_store.flush_dirty_execution_projections(
+                execution_id=execution.execution_id,
+            )
+            outcome = await remote.executions.cancel(
+                execution.execution_id,
+                CancelExecutionRequest(owner.default_principal, "stop-at-completion", force=True),
+            )
+            assert not outcome.cancelled
+            assert not slow_stopped.is_set()
+            current = await owner._state.execution.executions.get(
+                execution.execution_id, tenant_id=owner.default_principal.tenant_id,
+            )
+            assert current.status is ExecutionStatus.CANCELLING
+            pending = await owner._state.checkpoint.tools.list_by_execution(
+                execution.execution_id, tenant_id=owner.default_principal.tenant_id,
+            )
+            assert len(pending) == 2
+            assert all(item.status is ToolOperationStatus.CLAIMED for item in pending)
+            worker = owner._execution_service.runtime_backend()._tasks[execution.execution_id]
+            assert not worker.done()
+            finish_fast.set()
+            worker_outcomes = await asyncio.wait_for(
+                asyncio.gather(asyncio.shield(worker), return_exceptions=True), 10,
+            )
+            assert slow_stopped.is_set()
+            assert worker_outcomes[0] is None or isinstance(worker_outcomes[0], asyncio.CancelledError)
+            if sibling_settles:
+                result = (await execution.wait(timeout_seconds=15)).result
+                assert result.status is ExecutionStatus.CANCELLED
+                assert result.output is None
             else:
-                # Cancellation prevents the native caller from observing the returned value.
-                assert [item.item_kind for item in history] == ["tool_call"]
+                with pytest.raises(AIError) as unknown:
+                    await execution.wait(timeout_seconds=15)
+                assert unknown.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+                view = await owner.executions.inspect(execution.execution_id, principal=owner.default_principal)
+                assert view.status is ExecutionStatus.RECOVERY_REQUIRED
+                repeated = await remote.executions.cancel(
+                    execution.execution_id,
+                    CancelExecutionRequest(owner.default_principal, "force-still-unknown", force=True),
+                )
+                assert not repeated.cancelled
+            assert requests == 1
+            assert sorted(effects) == ["fast", "slow"]
+            operations = await owner._state.checkpoint.tools.list_by_execution(
+                execution.execution_id, tenant_id=owner.default_principal.tenant_id,
+            )
+            assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
+            assert next(item for item in operations if item.tool_call_id == "slow-call").status is (
+                ToolOperationStatus.COMPLETED if sibling_settles else ToolOperationStatus.EFFECT_UNKNOWN
+            )
+            # Drain preserves known results while unresolved effects remain unknown.
+            fast_operation = next(item for item in operations if item.tool_call_id == "fast-call")
+            assert fast_operation.result_payload is not None
         finally:
             finish_fast.set()
 
@@ -420,29 +539,35 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", (False, True))
 async def test_remote_cancel_during_tool_budget_admission_never_dispatches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: bool,
 ) -> None:
+    from contextlib import AsyncExitStack
+
     from pydantic_ai.messages import ModelResponse, ToolCallPart
 
     from linktools.ai.capability import AgentContext
-    from linktools.ai.core import RunBudget
-    from linktools.ai.persistence._budget import BudgetRepositoryImpl
+    from linktools.ai.core import RunBudget, ToolOperationStatus
+    from linktools.ai.persistence._runtime_commands import StateCommands
+
+    from .test_official_runtime_recovery import _runtime as native_runtime
 
     from ._runtime_test_helpers import _UsageFunctionModel
 
     admitted, release = asyncio.Event(), asyncio.Event()
     effects = []
     requests = []
-    original_admit = BudgetRepositoryImpl.admit_tool
+    admission_method = "commit_tool_admission_boundary" if checkpoint else "commit_tool_admission"
+    original_admit = getattr(StateCommands, admission_method)
 
-    async def hold_after_admission(repository, scope_id, call_id):
-        result = await original_admit(repository, scope_id, call_id)
+    async def hold_after_admission(commands, *args, **kwargs):
+        result = await original_admit(commands, *args, **kwargs)
         admitted.set()
         await release.wait()
         return result
 
-    monkeypatch.setattr(BudgetRepositoryImpl, "admit_tool", hold_after_admission)
+    monkeypatch.setattr(StateCommands, admission_method, hold_after_admission)
 
     async def work(_context: AgentContext[None]) -> str:
         effects.append("effect")
@@ -451,30 +576,58 @@ async def test_remote_cancel_during_tool_budget_admission_never_dispatches(
     async def model(messages, info):
         del messages, info
         requests.append(1)
+        assert requests == [1], "Cancellation must prevent another model dispatch"
         return ModelResponse(parts=[ToolCallPart("work", {}, tool_call_id="call")])
 
     features = RuntimeFeatures("budget-cancel")
     features.tool(work, effect_policy="replay_safe")
     features.agent("default", model="default", allow_tools=("work",))
     database = tmp_path / "budget-cancel.db"
-    async with Persistence.open("budget-cancel", storage=PersistenceStorage.sqlite(database)) as storage, Runtime.attach(
-        persistence=storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
-    ) as owner, Persistence.open("budget-cancel", storage=PersistenceStorage.sqlite(database)) as other_storage, Runtime.attach(
-        persistence=other_storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
-    ) as remote:
+    async with AsyncExitStack() as stack:
+        if checkpoint:
+            owner, _, _ = await stack.enter_async_context(native_runtime(database, model, work))
+            remote, _, _ = await stack.enter_async_context(native_runtime(database, model, work))
+        else:
+            storage = await stack.enter_async_context(Persistence.open(
+                "budget-cancel", storage=PersistenceStorage.sqlite(database),
+            ))
+            owner = await stack.enter_async_context(Runtime.attach(
+                persistence=storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
+            ))
+            other_storage = await stack.enter_async_context(Persistence.open(
+                "budget-cancel", storage=PersistenceStorage.sqlite(database),
+            ))
+            remote = await stack.enter_async_context(Runtime.attach(
+                persistence=other_storage, features=model_features(_Models(_UsageFunctionModel(model)), features),
+            ))
         execution = await owner.agents.get().start("work", budget=RunBudget(tool_calls=1))
         try:
             await asyncio.wait_for(admitted.wait(), 5)
-            await remote.executions.cancel(
+            pending = await owner._state.checkpoint.tools.list_by_execution(
+                execution.execution_id, tenant_id=owner.tenant_id,
+            )
+            assert len(pending) == 1 and pending[0].status is ToolOperationStatus.CLAIMED
+            outcome = await remote.executions.cancel(
                 execution.execution_id, CancelExecutionRequest(owner.default_principal, "budget-remote-cancel"),
             )
+            assert not outcome.cancelled
+            current = await owner._state.execution.executions.get(
+                execution.execution_id, tenant_id=owner.tenant_id,
+            )
+            assert current.status is ExecutionStatus.CANCELLING
+            assert (await execution.budget_usage()).tool_calls == 1
+            assert effects == []
             release.set()
             result = (await execution.wait(timeout_seconds=5)).result
             assert result.status is ExecutionStatus.CANCELLED
             assert effects == []
             assert requests == [1]
-            assert await owner._state.checkpoint.tools.list_by_execution(
+            operations = await owner._state.checkpoint.tools.list_by_execution(
                 execution.execution_id, tenant_id=owner.tenant_id,
-            ) == ()
+            )
+            assert len(operations) == 1
+            assert operations[0].status is ToolOperationStatus.PENDING
+            assert operations[0].result_payload is None
+            assert (await execution.budget_usage()).tool_calls == 1
         finally:
             release.set()

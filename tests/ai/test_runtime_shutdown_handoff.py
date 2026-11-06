@@ -127,7 +127,9 @@ async def test_handoff_requires_checkpoint_capability_without_closing_runtime(tm
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", [False, True])
 async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage, unknown: bool) -> None:
-    from linktools.ai.capability import AgentContext, CheckpointCapability, ExecutionCapability
+    from linktools.ai.capability import AgentContext, ExecutionCapability
+    from pydantic_ai_harness.step_persistence import StepPersistence
+    from tests.ai._runtime_test_helpers import native_checkpoint
     from linktools.ai.core import CommitPolicy
     from linktools.ai.runtime import RuntimeFeatures
     from .test_task_mixed_node_reliability import _TaskTestModels
@@ -146,7 +148,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage,
     def features():
         group = RuntimeFeatures("handoff-tool")
         group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
-        group.capability(CheckpointCapability())
+        group.capability(native_checkpoint())
         group.tool(write, effect_policy="non_replay_safe")
         group.agent("default", allow_tools=("write",))
         return group
@@ -293,7 +295,9 @@ async def test_handoff_before_tool_leaf_defers_without_unknown_effect() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path, monkeypatch) -> None:
-    from linktools.ai.capability import AgentContext, CheckpointCapability, ExecutionCapability
+    from linktools.ai.capability import AgentContext, ExecutionCapability
+    from pydantic_ai_harness.step_persistence import StepPersistence
+    from tests.ai._runtime_test_helpers import native_checkpoint
     from linktools.ai.core import CommitPolicy
     from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime._execution import DefaultExecutionService
@@ -320,7 +324,7 @@ async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path
 
     group = RuntimeFeatures("cancel-handoff")
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
-    group.capability(CheckpointCapability())
+    group.capability(native_checkpoint())
     group.tool(write, effect_policy="non_replay_safe")
     group.agent("default", allow_tools=("write",))
     async with Persistence.open('cancel-handoff', storage=PersistenceStorage.sqlite(tmp_path / 'cancel.db')) as persistence_331, Runtime.attach(persistence=persistence_331, features=model_features(_TaskTestModels(), group)) as runtime:

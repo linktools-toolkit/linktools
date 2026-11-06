@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import TypeVar
 from uuid import uuid4
 
 from ..core import BudgetUsage, RunBudget
@@ -15,6 +16,9 @@ from .durability import CommitObservation, DurableCommitState, run_durable_commi
 from ._plan import PersistenceDomain
 from ._repository_common import RepositoryBase, replace_checked
 from .state import RecordQuery, RecordReplacement, StateStore, StateTransaction, StoredRecord
+
+
+AdmissionT = TypeVar("AdmissionT")
 
 
 class _UnresolvedLocalReservation(AIError):
@@ -58,11 +62,12 @@ class BudgetRepositoryImpl(RepositoryBase):
     async def _mutate(
         self, callback: Callable[[StateTransaction], Awaitable[BudgetUsage]],
     ) -> BudgetUsage:
-        return await self._retry(lambda: self._store.mutate(callback))
+        return await self.retry_admission(lambda: self._store.mutate(callback))
 
-    async def _retry(
-        self, operation: Callable[[], Awaitable[BudgetUsage]],
-    ) -> BudgetUsage:
+    async def retry_admission(
+        self, operation: Callable[[], Awaitable[AdmissionT]],
+    ) -> AdmissionT:
+        """Retry a short owning transaction against current shared-budget facts."""
         for attempt in range(16):
             try:
                 return await operation()
@@ -208,7 +213,7 @@ class BudgetRepositoryImpl(RepositoryBase):
             row, usage = await self._scope_record(transaction, scope_id)
             await self._check_admission(transaction, row, usage, None)
             return usage
-        return await self._retry(lambda: self._store.read(read))
+        return await self.retry_admission(lambda: self._store.read(read))
 
     def _reject(self, scope_id: str, dimension: str, reason: str) -> None:
         raise AIError(ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED, safe_details={
@@ -359,35 +364,54 @@ class BudgetRepositoryImpl(RepositoryBase):
                 if value[:2] == (scope_id, request_id)
             )
 
-    async def admit_tool(self, scope_id: str, call_id: str) -> BudgetUsage:
-        reservation = BudgetToolReservation(scope_id, call_id, uuid4().hex)
+    async def admit_tool_in_transaction(
+        self, transaction: StateTransaction, scope_id: str, call_id: str, *, admission_id: str,
+    ) -> BudgetUsage:
+        """Reserve one dispatch inside its caller's atomic admission boundary."""
+        reservation = BudgetToolReservation(scope_id, call_id, admission_id)
         identity = [scope_id, call_id]
-
-        async def write(transaction: StateTransaction) -> BudgetUsage:
-            scope_key = self._key("budget_scope", scope_id)
-            reservation_key = self._key("budget_tool", identity)
-            records = await transaction.get_records((scope_key, reservation_key))
-            row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
-            if records.get(reservation_key) is not None:
+        scope_key = self._key("budget_scope", scope_id)
+        reservation_key = self._key("budget_tool", identity)
+        records = await transaction.get_records((scope_key, reservation_key))
+        row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
+        existing = records.get(reservation_key)
+        if existing is not None:
+            value = await self._decode(existing, BudgetToolReservation)
+            if (value.scope_id, value.call_id) != (scope_id, call_id):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if value.admission_id != admission_id:
                 self._reject(scope_id, "tool_calls", "duplicate_dispatch")
-            await self._check_admission(transaction, row, usage, "tool_calls")
-            updated = replace(usage, tool_calls=usage.tool_calls + 1)
-            await transaction.insert_record(self._stored("budget_tool", identity, reservation))
-            await self._replace_usage(transaction, row, updated)
-            return updated
+            return usage
+        await self._check_admission(transaction, row, usage, "tool_calls")
+        updated = replace(usage, tool_calls=usage.tool_calls + 1)
+        await transaction.insert_record(self._stored("budget_tool", identity, reservation))
+        await self._replace_usage(transaction, row, updated)
+        return updated
 
-        async def readback() -> BudgetUsage | None:
-            async def read(transaction: StateTransaction) -> BudgetUsage | None:
-                row = await transaction.get_record(self._key("budget_tool", identity))
-                if row is None:
-                    return None
-                value = await self._decode(row, BudgetToolReservation)
-                if value.admission_id != reservation.admission_id:
-                    return None
-                return (await self._scope_record(transaction, scope_id))[1]
-            return await self._store.read(read)
+    async def read_tool_admission(
+        self, scope_id: str, call_id: str, *, admission_id: str,
+    ) -> BudgetUsage | None:
+        """Confirm this command's immutable reservation after an uncertain commit."""
+        async def read(transaction: StateTransaction) -> BudgetUsage | None:
+            row = await transaction.get_record(self._key("budget_tool", [scope_id, call_id]))
+            if row is None:
+                return None
+            value = await self._decode(row, BudgetToolReservation)
+            if (value.scope_id, value.call_id) != (scope_id, call_id):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if value.admission_id != admission_id:
+                return None
+            return (await self._scope_record(transaction, scope_id))[1]
+        return await self._store.read(read)
 
-        return await self._commit(lambda: self._mutate(write), readback)
+    async def admit_tool(self, scope_id: str, call_id: str) -> BudgetUsage:
+        admission_id = uuid4().hex
+        return await self._commit(
+            lambda: self._mutate(lambda transaction: self.admit_tool_in_transaction(
+                transaction, scope_id, call_id, admission_id=admission_id,
+            )),
+            lambda: self.read_tool_admission(scope_id, call_id, admission_id=admission_id),
+        )
 
 
 __all__ = ["BudgetRepositoryImpl"]

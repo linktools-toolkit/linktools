@@ -33,17 +33,7 @@ from linktools.ai.history._service import DefaultExecutionHistoryService
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.codec import _encode_persisted_domain, encode_envelope
-from linktools.ai.persistence.contracts import (
-    ConversationHistoryRecord,
-    ExecutionHistoryHeadRecord,
-    ExecutionHistorySealRecord,
-    ExecutionHistoryState,
-    ExecutionRecord,
-    ExecutionRunSealHead,
-    RuntimePayloadRef,
-    TranscriptChunk,
-    TranscriptMessageRef,
-)
+from linktools.ai.persistence.contracts import ConversationHistoryRecord, ExecutionHistorySealRecord, ExecutionRecord, ExecutionRunSealHead, RuntimePayloadRef, TranscriptChunk, TranscriptMessageRef
 from linktools.ai.persistence.runs import ExecutionTerminalSealPlan, StateStepArchive
 from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 from linktools.ai.persistence.state import (
@@ -119,41 +109,32 @@ async def test_history_head_requires_open_for_mutations() -> None:
     repository = state.execution.executions
     store = repository.state_store
     try:
-        await repository.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
-        head = await repository.get_history_head("execution", tenant_id="tenant")
+        await repository.create_execution(_record(ExecutionStatus.STARTED, 1))
+        head = await repository.get("execution", tenant_id="tenant")
         assert head is not None
-        assert head.state is ExecutionHistoryState.OPEN
+        assert (head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and head.history_seal_digest is None)
         assert head.revision == 0
-        assert head.seal_digest is None
+        assert head.history_seal_digest is None
+
+        seal_record = ExecutionHistorySealRecord("execution", (), 0)
 
         async def require_open(transaction: object) -> None:
-            (
-                open_head,
-                record,
-            ) = await repository.require_open_history_head_in_transaction(
-                transaction,
-                "execution",
-            )
-            sealed = ExecutionHistoryHeadRecord(
-                "execution",
-                ExecutionHistoryState.SEALED,
-                open_head.revision + 1,
-                "d" * 64,
-            )
-            await repository.replace_history_head_in_transaction(
-                transaction,
-                record,
-                sealed,
+            execution, _ = await repository.require_execution_history_write_in_transaction(transaction, "execution")
+            await repository.put_history_seal_in_transaction(transaction, seal_record)
+            await repository.compare_and_swap_in_transaction(
+                transaction, "execution", tenant_id="tenant", expected_revision=execution.revision,
+                next_record=replace(execution, revision=execution.revision + 1,
+                                    status=ExecutionStatus.SUCCEEDED, history_seal_digest=seal_record.seal_digest),
             )
 
         await store.mutate(require_open)
-        head = await repository.get_history_head("execution", tenant_id="tenant")
+        head = await repository.get("execution", tenant_id="tenant")
         assert head is not None
-        assert head.state is ExecutionHistoryState.SEALED
-        assert head.seal_digest == "d" * 64
+        assert (head.history_seal_digest is not None)
+        assert head.history_seal_digest == seal_record.seal_digest
 
         async def mutate_sealed(transaction: object) -> None:
-            await repository.require_open_history_head_in_transaction(
+            await repository.require_execution_history_write_in_transaction(
                 transaction,
                 "execution",
             )
@@ -175,25 +156,19 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "before-seal")
         repository = state.execution.executions
-        open_head = await repository.get_history_head("execution", tenant_id="tenant")
+        open_head = await repository.get("execution", tenant_id="tenant")
         assert open_head is not None
-        assert open_head.state is ExecutionHistoryState.OPEN
-        assert open_head.revision == 1
+        assert (open_head.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and open_head.history_seal_digest is None)
+        assert open_head.revision == 0
 
         async def seal(transaction: object) -> None:
-            head, record = await repository.require_open_history_head_in_transaction(
-                transaction,
-                "execution",
-            )
-            await repository.replace_history_head_in_transaction(
-                transaction,
-                record,
-                ExecutionHistoryHeadRecord(
-                    head.execution_id,
-                    ExecutionHistoryState.SEALED,
-                    head.revision + 1,
-                    "s" * 64,
-                ),
+            execution, _ = await repository.require_execution_history_write_in_transaction(transaction, "execution")
+            seal_record = await repository.get_history_seal("execution", tenant_id="tenant")
+            await repository.put_history_seal_in_transaction(transaction, seal_record)
+            await repository.compare_and_swap_in_transaction(
+                transaction, "execution", tenant_id="tenant", expected_revision=execution.revision,
+                next_record=replace(execution, revision=execution.revision + 1,
+                                    status=ExecutionStatus.SUCCEEDED, history_seal_digest=seal_record.seal_digest),
             )
 
         await repository.state_store.mutate(seal)
@@ -208,7 +183,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
         run = await archive.get_agent_run(agent_run_id=agent_run_id)
         assert run is not None
         before_events = await archive.list_events(agent_run_id=agent_run_id)
-        before_head = await repository.get_history_head("execution", tenant_id="tenant")
+        before_head = await repository.get("execution", tenant_id="tenant")
         assert before_head is not None
         now = datetime.now(timezone.utc)
 
@@ -259,7 +234,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
         assert checkpoint_error.value.code is ErrorCode.STORAGE_CONFLICT
         assert await archive.list_events(agent_run_id=agent_run_id) == before_events
         assert (
-            await repository.get_history_head("execution", tenant_id="tenant")
+            await repository.get("execution", tenant_id="tenant")
             == before_head
         )
     finally:
@@ -422,6 +397,7 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
     backend._pending_audit_locks = {}
     backend._execution_durable_tasks = {}
     backend._metric_recorder = None
+    backend._terminal_publication = None
     backend._namespace = "test"
     started = asyncio.Event()
 
@@ -512,18 +488,8 @@ async def test_read_only_state_callback_rejects_record_guard() -> None:
 
 async def _materialize_attempt(state: Persistence, sequence: int, prompt: str) -> None:
     repository = state.execution.executions
-    if await repository.get_history_head("execution", tenant_id="tenant") is None:
-        await repository.state_store.mutate(
-            lambda transaction: repository.insert_history_head_in_transaction(
-                transaction,
-                ExecutionHistoryHeadRecord(
-                    "execution",
-                    ExecutionHistoryState.OPEN,
-                    0,
-                    None,
-                ),
-            )
-        )
+    if await repository.get("execution", tenant_id="tenant") is None:
+        await repository.create_execution(_record(ExecutionStatus.STARTED, sequence))
     agent_run_id = make_agent_run_id(
         namespace="history",
         tenant_id="tenant",
@@ -624,6 +590,17 @@ async def _materialize_attempt(state: Persistence, sequence: int, prompt: str) -
     )
 
 
+async def _finish_attempt(state: Persistence, status: ExecutionStatus) -> None:
+    repository = state.execution.executions
+    execution = await repository.get("execution", tenant_id="tenant")
+    seal = await repository.get_history_seal("execution", tenant_id="tenant")
+    await repository.compare_and_swap(
+        "execution", tenant_id="tenant", expected_revision=execution.revision,
+        next_record=replace(execution, revision=execution.revision + 1, status=status,
+                            history_seal_digest=seal.seal_digest),
+    )
+
+
 def _reader(state: Persistence) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace="history",
@@ -672,8 +649,9 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
     state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime",exclusive_writer=True))
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
-        await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+        await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "durable-only")
+        await _finish_attempt(state, ExecutionStatus.SUCCEEDED)
         await state.retention.release_execution_handoff("execution", tenant_id="tenant")
         agent_run_id = make_agent_run_id(
             namespace="history",
@@ -735,8 +713,9 @@ async def test_history_skips_missing_non_final_attempt() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
-        await state.execution.executions.create(_record(ExecutionStatus.FAILED, 2))
+        await state.execution.executions.create(_record(ExecutionStatus.STARTED, 2))
         await _materialize_attempt(state, 2, "attempt-2")
+        await _finish_attempt(state, ExecutionStatus.FAILED)
         await state.retention.release_execution_handoff("execution", tenant_id="tenant")
         reader = _reader(state)
 
@@ -789,8 +768,9 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         prompt = '  {"question":"你好\\nworld","x":1}  '
-        await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
+        await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, prompt)
+        await _finish_attempt(state, ExecutionStatus.SUCCEEDED)
         await state.retention.release_execution_handoff("execution", tenant_id="tenant")
         reader = _reader(state)
 

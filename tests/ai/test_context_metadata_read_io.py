@@ -56,7 +56,7 @@ async def test_empty_context_batches_projection_and_head(
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
         assert results[0] == results[1]
         assert results[1].model_messages() == ()
-        assert counts == ([(3, 3), (2, 2)] if reader == "session" else [(2, 2), (1, 1)])
+        assert counts == ([(1, 1), (1, 1)] if reader == "session" else [(2, 2), (1, 1)])
     finally:
         await state.close()
 

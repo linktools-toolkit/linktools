@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import update
 
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
@@ -26,12 +28,12 @@ from .test_incremental_projection_boundaries import _storage
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("fault", ("execution", "session", "recovery_checkpoint", "archive_collision"))
+@pytest.mark.parametrize("fault", ("execution", "session", "archive_collision"))
 async def test_terminal_observations_keep_physical_guards_and_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
     application = _application([])
-    application.capability(CheckpointCapability(), scope="runtime")
+    application.capability(native_checkpoint(), scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
     terminal = ContextVar("terminal_publication_observation", default=False)
     original_commit = StateCommands.commit_terminal_checkpoint
@@ -69,6 +71,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                 store, record = next((store, record) for store, record in records if record.kind == fault)
                 tx = self.transaction(store)
                 table = store.storage_group.metadata.tables["ai_state_records"]
+                # Execution includes recovery control under the same physical CAS.
                 # A competing physical revision must defeat the later CAS even
                 # when the transaction has already captured the previous row.
                 await tx._execute(update(table).where(

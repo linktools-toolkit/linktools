@@ -17,7 +17,9 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
@@ -34,7 +36,7 @@ def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
     group = RuntimeFeatures(_NAMESPACE)
     if conversation:
         group.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(native_checkpoint(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
@@ -85,16 +87,15 @@ def _runtime_process(
                 assert execution_id is not None
                 tenant = runtime.default_principal.tenant_id
                 execution = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
-                head = await runtime._state.execution.executions.get_history_head(execution_id, tenant_id=tenant)
-                assert execution is not None and head is not None
-                checkpoint = await runtime._state.checkpoint.checkpoints.get(execution_id, tenant_id=tenant)
+                assert execution is not None
+                checkpoint = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
                 session = await runtime._state.conversation.sessions.get("session", tenant_id=tenant)
                 return {
-                    "handoff_phase": None if checkpoint is None else checkpoint.handoff_phase.value,
+                    "handoff_phase": None if checkpoint is None or checkpoint.recovery is None else checkpoint.recovery.handoff_phase.value,
                     "active_execution_id": None if session is None else session.active_execution_id,
                     "execution_id": execution_id, "status": execution.status.value,
-                    "revision": execution.revision, "generation": head.producer_generation,
-                    "claim_id": head.producer_claim_id, "model_calls": calls,
+                    "revision": execution.revision, "generation": execution.producer_generation,
+                    "claim_id": execution.producer_claim_id, "model_calls": calls,
                 }
 
             if recovery_barrier is not None:
@@ -111,31 +112,27 @@ def _runtime_process(
 
                 backend._reconcile_handoff = synchronized_reconcile
             if publication_order is not None:
-                from linktools.ai.persistence import PersistenceDomain
-                from linktools.ai.persistence._step_archive import StateStepArchive
-
                 role, prepared, cursor_committed, publication_finished = publication_order
                 backend = runtime._execution_service.runtime_backend()
                 original_terminal = backend._commit_reconciled_terminal
+                original_conversation = backend._resolve_handoff_conversation
                 waiting = True
 
-                def ordered_publication(original):
-                    async def publish(store, run, **kwargs):
-                        nonlocal waiting
-                        if store._runtime_domain is not PersistenceDomain.CONVERSATION or not waiting:
-                            return await original(store, run, **kwargs)
-                        waiting = False
+                async def ordered_conversation(checkpoint, handoff):
+                    nonlocal waiting
+                    if not waiting:
+                        return await original_conversation(checkpoint, handoff)
+                    waiting = False
+                    if role == "delayed":
+                        prepared.set()
+                        assert await asyncio.to_thread(cursor_committed.wait, 15)
+                    else:
+                        assert await asyncio.to_thread(prepared.wait, 15)
+                    try:
+                        return await original_conversation(checkpoint, handoff)
+                    finally:
                         if role == "delayed":
-                            prepared.set()
-                            assert await asyncio.to_thread(cursor_committed.wait, 15)
-                        else:
-                            assert await asyncio.to_thread(prepared.wait, 15)
-                        try:
-                            return await original(store, run, **kwargs)
-                        finally:
-                            if role == "delayed":
-                                publication_finished.set()
-                    return publish
+                            publication_finished.set()
 
                 async def ordered_terminal(*args, **kwargs):
                     if role == "first":
@@ -143,14 +140,15 @@ def _runtime_process(
                         assert await asyncio.to_thread(publication_finished.wait, 15)
                     return await original_terminal(*args, **kwargs)
 
-                # Pause after preparation, allowing the other process to publish
-                # and advance the session cursor before this writer commits.
-                StateStepArchive.sync_projection = ordered_publication(StateStepArchive.sync_projection)
-                StateStepArchive.sync_prepared_projection = ordered_publication(StateStepArchive.sync_prepared_projection)
+                # Conversation content is durable before PREPARED. Race the real
+                # cursor reconciliation boundary, before terminal/result commit.
+                backend._resolve_handoff_conversation = ordered_conversation
                 backend._commit_reconciled_terminal = ordered_terminal
             if execution_id is None:
                 backend = runtime._execution_service.runtime_backend()
                 if phase == "reserved":
+                    # This crash boundary belongs to independently reserved starts.
+                    runtime._execution_service._runtime_bridge.prepare_reserved_start = None
                     original_prepare = backend.prepare_start
 
                     async def pause_prepare(request, execution, identity):

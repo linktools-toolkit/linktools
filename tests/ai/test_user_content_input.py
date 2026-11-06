@@ -292,3 +292,37 @@ def test_url_vendor_metadata_must_be_json() -> None:
         validate_user_content((content,))
 
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+def test_materialized_user_content_copy_preserves_detached_provenance() -> None:
+    from copy import deepcopy
+    from linktools.ai.model import MaterializedUserContent
+
+    content = BinaryContent(data=b"input", media_type="application/octet-stream")
+    original = MaterializedUserContent(("inspect", content), {"prompt": {"kind": "items", "items": [{"kind": "text", "text": "inspect"}]}})
+    copied = deepcopy(original)
+    assert isinstance(copied, MaterializedUserContent)
+    assert copied == original and copied is not original
+    assert copied.view == original.view
+    assert copied[1] is not content
+    copied[1].data = b"changed"
+    assert content.data == b"input"
+    assert copied.append_text("more").view["prompt"]["items"][-1] == {"kind": "text", "text": "more"}
+
+
+def test_native_reference_projection_preserves_ordinary_metadata_and_opaque_json() -> None:
+    from pydantic_ai.messages import ModelRequest, ModelMessagesTypeAdapter, ToolReturnPart, UserPromptPart
+    from linktools.ai.model.messages import native_checkpoint_messages
+    from .test_referenced_content import _content
+
+    reference = _content()
+    ordinary = TextContent("ordinary", metadata={"linktools-content": {"kind": "application-data"}})
+    opaque = {"linktools-content": {"type": "runtime-reference", "value": "ordinary JSON"}}
+    messages = [ModelRequest(parts=[UserPromptPart([ordinary, reference]),
+        ToolReturnPart("tool", [reference, opaque], tool_call_id="call")])]
+    encoded = ModelMessagesTypeAdapter.dump_json(native_checkpoint_messages(messages))
+    decoded = native_checkpoint_messages(ModelMessagesTypeAdapter.validate_json(encoded), restore=True)
+    assert decoded[0].parts[0].content[0] == ordinary
+    assert decoded[0].parts[0].content[1] == reference
+    assert decoded[0].parts[1].content == [reference, opaque]
+    assert messages[0].parts[0].content[1] is reference

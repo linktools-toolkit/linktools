@@ -36,10 +36,10 @@ from .contracts import (
     ArtifactRecord,
     EvaluationRecord,
     ExecutionRecord,
+    RecoveryHandoffPhase,
     ExternalCallRecord,
     IdempotencyRecord,
     MemoryRecord,
-    ExecutionCheckpoint,
     SessionRecord,
 )
 from ._evaluation_records import (
@@ -258,7 +258,9 @@ class _RepositoryBase:
             target,
             payload_transform=lambda payload: _restore_lease_fields(payload, target),
         )
-        if isinstance(value, (TaskNodeView, ToolOperationRecord)):
+        if isinstance(value, ToolOperationRecord):
+            return replace(value, owner=record.lease_owner, fence=record.lease_fence)
+        if isinstance(value, TaskNodeView):
             return replace(
                 value,
                 owner=record.lease_owner,
@@ -297,6 +299,15 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
 
     def _identity(self, value: object) -> object:
         return _canonical_record_identity(self._kind, value)
+
+    async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
+        value = await super()._decode(record, target)
+        if target is self._value_type and (
+            record.kind != self._kind
+            or record.key_digest != self._key(self._kind, self._identity(value))
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
 
     async def create(self, value: ValueT) -> ValueT:
         _require_tenant(value, self._tenant_id)
@@ -706,6 +717,8 @@ def project_record(
             kind,
             value,
         )
+    if isinstance(value, ExecutionRecord):
+        state = _record_state(value)
     lease_owner, lease_fence, lease_expires_at = _record_lease(value)
     return StoredRecord(
         record_key_digest(namespace, tenant_id, domain.value, kind, identity),
@@ -859,8 +872,6 @@ def _canonical_record_identity(kind: str, value: object) -> object:
         return value.ref.evidence_id
     if isinstance(value, (EvaluationReport, ComparisonReport)):
         return value.report_id
-    if isinstance(value, ExecutionCheckpoint):
-        return value.execution_id
     if isinstance(value, ApprovalRecord):
         return value.approval_id
     if isinstance(value, ExternalCallRecord):
@@ -897,13 +908,15 @@ def _restore_lease_fields(payload: object, target: type[ValueT]) -> object:
         **fields,
         "owner": None,
         "fence": 1,
-        "lease_expires_at": None,
+        **({"lease_expires_at": None} if target is TaskNodeView else {}),
     }
     return restored
 
 
 def _record_lease(value: object) -> tuple[str | None, int, datetime | None]:
-    if isinstance(value, (TaskNodeView, ToolOperationRecord)):
+    if isinstance(value, ToolOperationRecord):
+        return value.owner, value.fence, None
+    if isinstance(value, TaskNodeView):
         return value.owner, value.fence, value.lease_expires_at
     return None, 0, None
 
@@ -933,7 +946,6 @@ def _domain_revision(value: object) -> int:
             IdempotencyRecord,
             MemoryRecord,
             EvaluationRecord,
-            ExecutionCheckpoint,
         ),
     ):
         return value.revision
@@ -941,8 +953,8 @@ def _domain_revision(value: object) -> int:
 
 
 def _status_value(value: object) -> str | None:
-    if isinstance(value, ExecutionCheckpoint):
-        return value.state.value
+    if isinstance(value, ExecutionRecord) and value.recovery is not None and value.recovery.handoff_phase is RecoveryHandoffPhase.PREPARED:
+        return "execution_handoff"
     if isinstance(
         value,
         (

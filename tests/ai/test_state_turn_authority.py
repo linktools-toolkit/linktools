@@ -3,6 +3,7 @@
 """Source-owned turn authority preserves admission, expiry and unknown outcomes."""
 
 import asyncio
+from pathlib import Path
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -233,13 +234,15 @@ async def test_state_turn_independent_sql_connections_choose_one_session_winner(
             await other.close()
 
 
-@pytest.mark.parametrize("operation", ("claim", "renew", "cancel", "release"))
+@pytest.mark.parametrize("operation", ("claim", "reclaim", "renew", "cancel", "release"))
 async def test_state_turn_sql_commit_then_lost_transport_confirms_exact_receipt(tmp_path, monkeypatch, operation):
     from sqlalchemy.ext.asyncio import AsyncSessionTransaction
     from linktools.ai.storage import SqlTransactionDisposition, SqlTransactionPhase
     async with _open_store("sql", tmp_path / "sql") as store:
         authority = _backend(store)
         first = None if operation == "claim" else await _claim(authority)
+        if operation == "reclaim":
+            assert await authority.release_turn(first.lease)
         exit_transaction = AsyncSessionTransaction.__aexit__
         classify = store.context.dialect.classify_transaction_error
         lost = OSError("commit reply lost")
@@ -261,6 +264,10 @@ async def test_state_turn_sql_commit_then_lost_transport_confirms_exact_receipt(
             if operation == "claim":
                 result = await _claim(authority)
                 assert result.lease is not None
+            elif operation == "reclaim":
+                result = await _claim(authority, owner="new")
+                assert result.lease is not None and result.owner_id == "new"
+                assert result.lease != first.lease
             elif operation == "renew":
                 result = await authority.renew_turn(first.lease, lease_seconds=90)
                 assert result.lease == first.lease
@@ -272,7 +279,7 @@ async def test_state_turn_sql_commit_then_lost_transport_confirms_exact_receipt(
         records = await store.read(lambda tx: tx.scan_records())
         assert len(records) == 3
         execution = next(record for record in records if record.kind == "turn_execution")
-        assert execution.data["receipt_kind"] == operation
+        assert execution.data["receipt_kind"] == ("claim" if operation == "reclaim" else operation)
         validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
 
 
@@ -506,7 +513,8 @@ async def test_state_turn_retirement_batch_failure_preserves_every_edge(tmp_path
             if {value.record.kind for value in values} == {"turn_session", "turn_request", "turn_execution"}:
                 batches.append(values)
                 if failure == "cas":
-                    values = tuple(replace(value, expected_storage_revision=value.expected_storage_revision + 1)
+                    values = tuple(replace(value, expected_storage_revision=value.expected_storage_revision + 1,
+                                           record=replace(value.record, storage_revision=value.record.storage_revision + 1))
                                    if value.record.kind == "turn_request" else value for value in values)
                     return await original(tx, values)
                 await original(tx, values)
@@ -547,3 +555,34 @@ async def test_state_turn_sqlite_known_graph_statement_budgets(tmp_path):
             assert counts["SELECT"] <= 4 and counts["UPDATE"] <= 2
         finally:
             event.remove(engine, "before_cursor_execute", count)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("expired", (False, True))
+async def test_recover_logical_turn_with_fresh_owner_after_release_or_expiry(
+    tmp_path: Path, backend: str, expired: bool,
+) -> None:
+    async with _open_store(backend, tmp_path / backend) as store:
+        authority = _backend(store)
+        first = await _claim(authority)
+        assert first is not None and first.lease is not None
+        assert await _claim(authority, owner="new") == replace(first, lease=None)
+        if expired:
+            await _expire(store, session="s")
+        else:
+            assert await authority.release_turn(first.lease)
+        recovered = await _claim(authority, owner="new")
+        assert recovered is not None and recovered.lease is not None
+        assert recovered.execution_id == first.execution_id
+        assert recovered.owner_id == "new" and recovered.lease != first.lease
+        assert recovered.lease.fence > first.lease.fence
+        assert await authority.renew_turn(first.lease, lease_seconds=60) is None
+        assert not await authority.release_turn(first.lease)
+        assert await authority.read_turn("scope", "e") == replace(recovered, lease=None)
+        assert await authority.cancel_turn("scope", "e")
+        cancelled = await authority.renew_turn(recovered.lease, lease_seconds=60)
+        assert cancelled is not None and cancelled.cancel_requested
+        assert cancelled.owner_id == recovered.owner_id
+        assert not await authority.release_turn(first.lease)
+        records = await store.read(lambda tx: tx.scan_records())
+        validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")

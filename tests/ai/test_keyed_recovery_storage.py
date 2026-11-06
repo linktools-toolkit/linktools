@@ -24,8 +24,8 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import (
     AgentAttemptClaim,
     ExecutionRecord,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
 )
 from linktools.ai.persistence._runtime_commands import StateCommands
 
@@ -68,20 +68,14 @@ async def _admission(
 ) -> tuple[ExecutionRecord, Callable[[OperationLedgerInput], Awaitable[ExecutionRecord]]]:
     execution = _execution(_NOW)
     if mode == "attempt":
-        execution = replace(execution, agent_run_seq=0)
-    await storage.execution.executions.create_with_history_head(execution)
+        execution = replace(execution, agent_run_seq=0, recovery=ExecutionRecoveryDetail())
+    await storage.execution.executions.create_execution(execution)
     if mode == "resume":
         async def admit(operation: OperationLedgerInput) -> ExecutionRecord:
             return await _commands(storage).commit_resumed(
                 execution, recovery_operation=operation,
             )
         return execution, admit
-    checkpoint = ExecutionCheckpoint(
-        execution_id=execution.execution_id, agent_run_id=None,
-        state=ExecutionCheckpointState.ADMITTED, revision=0,
-        created_at=_NOW, updated_at=_NOW,
-    )
-    await storage.checkpoint.checkpoints.create(checkpoint)
     commands = StateCommands(
         storage.execution.executions, namespace=_NAMESPACE,
         events=storage.execution.events, operations=storage.execution.operations,
@@ -89,13 +83,14 @@ async def _admission(
     )
     claim = AgentAttemptClaim(
         execution.execution_id, execution.revision, execution.agent_run_seq,
-        checkpoint.revision, checkpoint.state,
+        execution.recovery_state,
     )
 
     async def admit(operation: OperationLedgerInput) -> ExecutionRecord:
-        current, _ = await commands.commit_agent_attempt_checkpoint(
+        current = await commands.commit_agent_attempt_checkpoint(
             claim, recovery_operation=operation,
         )
+        current = current.value
         return current
     return execution, admit
 
@@ -117,23 +112,23 @@ async def test_competing_claims_share_one_recovery_admission(
     assert receipt is not None
     assert receipt.result_ref in {first.result_ref, second.result_ref}
     assert receipt.status is OperationStatus.RUNNING
-    head = await storage.execution.executions.get_history_head("execution", tenant_id="tenant")
+    head = await storage.execution.executions.get("execution", tenant_id="tenant")
     assert head.producer_generation == admitted.revision
     assert head.producer_claim_id == receipt.result_ref
     events = await storage.execution.events.list("execution", tenant_id="tenant", after_event_seq=0, limit=10)
     assert len(events.items) == int(mode == "resume")
     if mode == "attempt":
-        checkpoint = await storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
+        checkpoint = await storage.execution.executions.get("execution", tenant_id="tenant")
         assert checkpoint is not None
         assert checkpoint.revision == 1
-        assert checkpoint.state is ExecutionCheckpointState.ACTIVE
+        assert checkpoint.recovery_state is ExecutionRecoveryState.ACTIVE
 
     advanced = await storage.execution.executions.compare_and_swap(
         "execution", tenant_id="tenant", expected_revision=admitted.revision,
         next_record=replace(admitted, revision=admitted.revision + 1, status=ExecutionStatus.CANCELLING),
     )
     assert await admit(second) == advanced
-    assert await storage.execution.executions.get_history_head("execution", tenant_id="tenant") == head
+    assert (await storage.execution.executions.get("execution", tenant_id="tenant")).producer_claim_id == head.producer_claim_id
 
     for changed in (
         replace(second, request_digest="b" * 64),
@@ -155,7 +150,7 @@ async def test_recovery_receipt_rolls_back_with_producer_checkpoint(
     storage: Persistence, mode: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     execution, admit = await _admission(storage, mode)
-    head = await storage.execution.executions.get_history_head("execution", tenant_id="tenant")
+    head = await storage.execution.executions.get("execution", tenant_id="tenant")
     operations = storage.execution.operations
 
     async def fail_receipt(*args, **kwargs):
@@ -166,13 +161,13 @@ async def test_recovery_receipt_rolls_back_with_producer_checkpoint(
         await admit(_operation())
     assert failed.value.code is ErrorCode.STORAGE_UNAVAILABLE
     assert await storage.execution.executions.get("execution", tenant_id="tenant") == execution
-    assert await storage.execution.executions.get_history_head("execution", tenant_id="tenant") == head
+    assert await storage.execution.executions.get("execution", tenant_id="tenant") == head
     assert await operations.get("recovery-key", tenant_id="tenant") is None
     assert not (await storage.execution.events.list("execution", tenant_id="tenant", after_event_seq=0, limit=10)).items
     if mode == "attempt":
-        checkpoint = await storage.checkpoint.checkpoints.get("execution", tenant_id="tenant")
+        checkpoint = await storage.execution.executions.get("execution", tenant_id="tenant")
         assert checkpoint is not None
-        assert checkpoint.state is ExecutionCheckpointState.ADMITTED
+        assert checkpoint.recovery_state is ExecutionRecoveryState.ADMITTED
         assert checkpoint.revision == 0
 
 
@@ -200,7 +195,7 @@ async def test_recovery_receipt_reconciles_lost_commit_acknowledgement(
     assert admitted.revision == execution.revision + 1
     receipt = await storage.execution.operations.get("recovery-key", tenant_id="tenant")
     assert receipt is not None
-    head = await storage.execution.executions.get_history_head("execution", tenant_id="tenant")
+    head = await storage.execution.executions.get("execution", tenant_id="tenant")
     assert head.producer_claim_id == receipt.result_ref == "first-producer"
     assert await admit(_operation(claim="retry-producer")) == admitted
 
@@ -211,14 +206,14 @@ async def test_cancellation_receipt_guards_revision_without_admitting_producer(
 ) -> None:
     execution = replace(_execution(_NOW), status=ExecutionStatus.RECOVERY_REQUIRED)
     repository = storage.execution.executions
-    await repository.create_with_history_head(execution)
-    head = await repository.get_history_head("execution", tenant_id="tenant")
+    await repository.create_execution(execution)
+    head = await repository.get("execution", tenant_id="tenant")
     commands = _commands(storage)
     operation = _operation(claim=None)
     receipt = await commands.admit_recovery_without_producer(execution, operation)
     assert receipt.result_ref is None
     assert await repository.get("execution", tenant_id="tenant") == execution
-    assert await repository.get_history_head("execution", tenant_id="tenant") == head
+    assert await repository.get("execution", tenant_id="tenant") == head
     assert not (await storage.execution.events.list("execution", tenant_id="tenant", after_event_seq=0, limit=10)).items
     cancelling = await commands.commit_cancel_claim(execution)
     assert await commands.admit_recovery_without_producer(execution, operation) == receipt
@@ -230,7 +225,7 @@ async def test_cancellation_receipt_guards_revision_without_admitting_producer(
         )
     assert stale.value.code is ErrorCode.STORAGE_CONFLICT
     assert await storage.execution.operations.get("new-recovery-key", tenant_id="tenant") is None
-    assert await repository.get_history_head("execution", tenant_id="tenant") == head
+    assert (await repository.get("execution", tenant_id="tenant")).producer_claim_id == head.producer_claim_id
 
 
 @pytest.mark.asyncio

@@ -906,17 +906,15 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     backend._tenant_id = "tenant"
     backend._namespace = "stream-order"
     backend._agent_run_lifecycle = SimpleNamespace(
-        execution_producer_generation=lambda agent_run_id, *, execution_id: 1,
+        latest_local_producer_generation=lambda *, execution_id: 1,
     )
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
-    class Reader(_ExecutionReader):
-        async def get_history_head(self, execution_id: str, *, tenant_id: str) -> SimpleNamespace:
-            return SimpleNamespace(producer_generation=1)
-
-    backend._execution = SimpleNamespace(executions=Reader(replace(_execution(), agent_run_seq=1)))
+    backend._execution = SimpleNamespace(executions=_ExecutionReader(replace(
+        _execution(), agent_run_seq=1, producer_generation=1, producer_claim_id="claim",
+    )))
     backend._live_broker = broker
     backend._runtime_commands = commands
     backend._metric_recorder = None
@@ -1024,6 +1022,8 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     backend._live_broker = broker
     backend._runtime_commands = commands
     backend._terminal_events = {}
+    published = []
+    backend._terminal_publication = published.append
     backend._metric_recorder = None
     live = broker.subscribe("execution")
     task = asyncio.create_task(backend.commit_terminal_checkpoint(commit, session_id=None))
@@ -1040,6 +1040,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     await asyncio.gather(*owners)
     assert not backend._checkpoint_tasks
     assert "execution" not in backend._pending_audit_events
+    assert published == [terminal]
     first = await live.__anext__()
     second = await live.__anext__()
     await live.close()

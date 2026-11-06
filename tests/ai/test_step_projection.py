@@ -14,12 +14,13 @@ from linktools.ai.execution.events import ExecutionDelta, LiveExecutionEventBrok
 from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai_harness.step_persistence import RunRecord
 from linktools.ai.persistence._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
     StepEvent,
 )
-from ._runtime_test_helpers import execution_owner_fields
+from ._runtime_test_helpers import execution_owner_fields, native_checkpoint, seed_native_snapshot
 
 
 def _run() -> AgentRunRecord:
@@ -72,11 +73,13 @@ def _execution() -> ExecutionRecord:
 
 
 @pytest.mark.asyncio
-async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
+async def test_step_events_wait_for_trace_publication_separate_from_native_checkpoint(tmp_path: Path) -> None:
     state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
     await state.initialize(namespace="step-io", tenant_id="tenant")
+    native = native_checkpoint().store
+    state.run_store.bind_step_store(native)
     try:
-        await state.execution.executions.create_with_history_head(_execution())
+        await state.execution.executions.create_execution(_execution())
         run = _run()
         await state.run_store.register_agent_run(run)
         now = datetime.now(timezone.utc)
@@ -107,6 +110,7 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
                 ModelRequest(
                     parts=[UserPromptPart(content="hello")],
                     conversation_id=run.agent_conversation_id,
+                    run_id=run.agent_run_id,
                 )
             ],
             agent_conversation_id=run.agent_conversation_id,
@@ -117,12 +121,25 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
         )
         await state.run_store.save_checkpoint(checkpoint)
         assert await execution.list_events(agent_run_id=run.agent_run_id) == []
+        assert await recovery.get_agent_run(agent_run_id=run.agent_run_id) is None
+        await native.register_run(RunRecord(
+            run_id=run.agent_run_id, conversation_id=run.agent_conversation_id,
+            parent_run_id=run.parent_agent_run_id, agent_name=run.agent_id,
+            metadata={**run.metadata, "linktools.transcript_start": "0"}, started_at=run.started_at,
+        ))
+        await seed_native_snapshot(
+            native, run_id=run.agent_run_id, messages=checkpoint.messages, step_index=checkpoint.step_index,
+            conversation_id=run.agent_conversation_id, agent_name=run.agent_id,
+        )
+        native_before = await native.latest_snapshot(run_id=run.agent_run_id)
+        assert await execution.list_events(agent_run_id=run.agent_run_id) == []
 
         await state.run_store.flush_execution_projection(
             run.agent_run_id,
             execution_id="execution",
         )
 
+        assert await native.latest_snapshot(run_id=run.agent_run_id) == native_before
         assert len(await execution.list_events(agent_run_id=run.agent_run_id)) == 3
         latest = await execution.latest_checkpoint(agent_run_id=run.agent_run_id)
         assert latest is not None
@@ -138,9 +155,11 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> None:
+async def test_fresh_agent_run_staging_does_not_rewrite_native_recovery_identity(tmp_path: Path) -> None:
     state = Persistence(PersistenceStorage.from_root(tmp_path / "runtime", exclusive_writer=True))
     await state.initialize(namespace="agent-run-recovery", tenant_id="tenant")
+    native = native_checkpoint().store
+    state.run_store.bind_step_store(native)
     try:
         recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
         durable = AgentRunRecord(
@@ -151,9 +170,13 @@ async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> Non
             metadata={"scope": "recovery"},
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
-        await recovery.register_agent_run(durable)
+        await native.register_run(RunRecord(
+            run_id=durable.agent_run_id, conversation_id=durable.agent_conversation_id,
+            parent_run_id=durable.parent_agent_run_id, agent_name=durable.agent_id,
+            metadata=dict(durable.metadata), started_at=durable.started_at,
+        ))
         candidate = AgentRunRecord(
-            agent_run_id="run",
+            agent_run_id="fresh-run",
             agent_conversation_id="conversation",
             parent_agent_run_id=None,
             agent_id="agent",
@@ -163,7 +186,9 @@ async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> Non
 
         await state.run_store.register_agent_run(candidate)
 
-        assert await state.run_store.get_agent_run(agent_run_id="run") == durable
+        assert await state.run_store.get_agent_run(agent_run_id="fresh-run") == candidate
+        assert await recovery.get_agent_run(agent_run_id="run") == durable
+        assert await recovery.get_agent_run(agent_run_id="fresh-run") is None
     finally:
         await state.close()
 

@@ -56,7 +56,8 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend._execution = SimpleNamespace(executions=_ExecutionRecords(current))
     backend._tenant_id = "tenant"
     backend._pending_turns = _PendingExecutionTurns()
-    backend._pending_renewals = {}
+    backend._turn_monitors = {}
+    backend._turn_owners = {}
     backend._tasks = {}
     backend._worker_failures = {}
     backend._captured_usage = {}

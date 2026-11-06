@@ -115,9 +115,23 @@ async def test_runtime_binds_trace_batch_options_before_model_work(options, expe
 
 @pytest.mark.asyncio
 async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_path):
+    from dataclasses import replace
     from .test_incremental_projection_boundaries import _storage
+    from .test_step_projection import _execution
+    from linktools.ai.persistence._step_contracts import AgentRunRecord
 
-    state = await _setup(tmp_path, "sqlite")
+    state = Persistence(_storage("sqlite", tmp_path))
+    await state.initialize(namespace="observation-batches", tenant_id="tenant")
+    repository = state.execution.executions
+    execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim", restart_checkpoints=False)
+    await repository.create_execution(execution)
+    state.run_store.trace_persistence.configure(
+        "run", buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=60.0,
+    )
+    state.run_store.bind_execution_producer(
+        "run", execution_id="execution", producer_generation=1, restart_checkpoints=False,
+    )
+    await state.run_store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
     run = await state.run_store.get_agent_run(agent_run_id="run")
     assert run is not None
     await _observe(state.run_store, 1)
@@ -131,7 +145,9 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
     try:
         store = restored.run_store
         store.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
-        store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
+        store.bind_execution_producer(
+            "run", execution_id="execution", producer_generation=1, restart_checkpoints=False,
+        )
         await store.register_agent_run(run, execution_id="execution")
         offset = store.trace_persistence.offsets["run"]
         assert offset.events == 1

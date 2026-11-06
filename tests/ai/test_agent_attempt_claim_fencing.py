@@ -15,17 +15,17 @@ from linktools.ai.persistence.contracts import (
     AgentAttemptClaim,
     PendingDeferredCall,
     PendingToolContinuation,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
 )
 from linktools.ai.storage import StoredPayload
 
 from .test_execution_recovery_commands import _execution
-from .test_runtime_approval_recovery import _commands
+from .test_runtime_storage_contracts import _runtime_commands as _commands
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ("initial", "deferred"))
+@pytest.mark.parametrize("kind", ("initial", "deferred", "recovery"))
 @pytest.mark.parametrize("outcome", ("own", "own_then_unrelated_revision", "rival"))
 async def test_admission_readback_requires_own_receipt(
     monkeypatch: pytest.MonkeyPatch, kind: str, outcome: str,
@@ -40,30 +40,25 @@ async def test_admission_readback_requires_own_receipt(
             "prior-run", calls=(PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),),
         ) if kind == "deferred" else None
         execution = replace(
-            _execution(now), revision=1, agent_run_seq=0 if pending is None else 1,
+            _execution(now), revision=1, agent_run_seq=0 if kind == "initial" else 1,
             status=ExecutionStatus.STARTED if pending is None else ExecutionStatus.WAITING_DEFERRED,
-        )
-        checkpoint = ExecutionCheckpoint(
-            execution.execution_id, None if pending is None else pending.source_agent_run_id,
-            ExecutionCheckpointState.ADMITTED if pending is None else ExecutionCheckpointState.WAITING,
-            0, now, now, pending_tools=pending,
+            recovery=ExecutionRecoveryDetail(agent_run_id=None if kind == "initial" else "prior-run", pending_tools=pending),
         )
         repository = state.execution.executions
-        await repository.create_with_history_head(execution)
-        await state.checkpoint.checkpoints.create(checkpoint)
+        await repository.create_execution(execution)
         commands = _commands(state, namespace)
 
         async def claim():
             if pending is None:
-                return await commands.commit_agent_attempt_checkpoint(AgentAttemptClaim(
+                observed = await commands.commit_agent_attempt_checkpoint(AgentAttemptClaim(
                     execution.execution_id, execution.revision, execution.agent_run_seq,
-                    checkpoint.revision, checkpoint.state,
-                ))
+                    execution.recovery_state,
+                ), source_agent_run_id=execution.recovery.agent_run_id)
+                return observed.value
             return await commands.claim_deferred_resume_checkpoint(
                 execution_id=execution.execution_id, tenant_id="tenant",
                 expected_execution_revision=execution.revision,
                 expected_event_seq=execution.event_seq,
-                expected_recovery_revision=checkpoint.revision,
                 expected_agent_run_seq=execution.agent_run_seq,
                 expected_pending_tools=pending,
             )
@@ -95,12 +90,12 @@ async def test_admission_readback_requires_own_receipt(
             assert caught.value.code is ErrorCode.STORAGE_CONFLICT
             assert caught.value.retryable is False
             assert rival is not None
-            current, active = rival
+            current = rival
         else:
-            current, active = await claim()
+            current = await claim()
         assert current.agent_run_seq == execution.agent_run_seq + 1
-        assert active.state is ExecutionCheckpointState.ACTIVE
-        head = await repository.get_history_head(execution.execution_id, tenant_id="tenant")
+        assert current.recovery_state is ExecutionRecoveryState.ACTIVE
+        head = await repository.get(execution.execution_id, tenant_id="tenant")
         assert head.producer_generation == execution.revision + 1
         assert isinstance(head.producer_claim_id, str) and head.producer_claim_id
         if outcome == "own_then_unrelated_revision":

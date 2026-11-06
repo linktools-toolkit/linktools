@@ -51,7 +51,7 @@ async def _seed(state, *, output=None):
     if output is not None:
         result = replace(result, output=output)
     execution = replace(execution, status=ExecutionStatus.SUCCEEDED, result=result)
-    await state.execution.executions.create_with_history_head(execution)
+    await state.execution.executions.create_execution(execution)
     return execution
 
 
@@ -91,8 +91,8 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
             if engine is not None:
                 event.remove(engine, "before_cursor_execute", capture)
         assert value.output == {"text": "result"} if method in {"result", "wait"} else value == record.result.output.size
-        # History needs the authorization header and fresh payload; live reads also fence handoff.
-        limit = 2 if history else 3
+        # The default policy never suspends, so Runtime reuses its authorized source record.
+        limit = 2 if history else 1
         assert reads <= limit
         assert sum(item.lstrip().upper().startswith("SELECT") for item in statements) <= limit
     finally:
@@ -330,5 +330,33 @@ async def test_history_result_uses_fresh_terminal_state_after_authorization(
                 await service.result("execution", principal=_PRINCIPAL)
             assert caught.value.code is (ErrorCode.STORAGE_INTEGRITY_ERROR if missing_result
                                          else ErrorCode.EXECUTION_NOT_READY)
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("method", ("result", "result_payload_size", "wait"))
+@pytest.mark.parametrize("policy_kind", ("independent", "subclass"))
+async def test_result_reauthorizes_owner_changed_during_custom_authorization(method, policy_kind):
+    state = Persistence(PersistenceStorage.in_memory())
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    try:
+        record = await _seed(state)
+        owners = []
+        policy = TenantAuthorizationPolicy()
+
+        class Authorization(TenantAuthorizationPolicy if policy_kind == "subclass" else object):
+            async def authorize(self, principal, action, resource):
+                owners.append(resource.owner_principal_id)
+                await policy.authorize(principal, action, resource)
+                await asyncio.sleep(0)
+                await state.execution.executions.compare_and_swap(
+                    "execution", tenant_id="tenant", expected_revision=record.revision,
+                    next_record=replace(record, revision=record.revision + 1, principal_id="other"),
+                )
+
+        with pytest.raises(AIError) as raised:
+            await getattr(_service(state, authorization=Authorization()), method)("execution", principal=_PRINCIPAL)
+        assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert owners == ["principal", "other"]
     finally:
         await state.close()

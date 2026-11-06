@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import CommitPolicy, ExecutionStatus, OperationStatus, PersistenceDomain, ResourceKind, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import CancelExecutionRequest
@@ -74,7 +76,7 @@ async def test_rejected_trace_payload_finishes_source_control_without_replaying_
               else CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60))
     capabilities = [TraceCapability(commit=policy)]
     if checkpoint:
-        capabilities.append(CheckpointCapability())
+        capabilities.append(native_checkpoint())
     features = model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(*capabilities))
     async with Persistence.open("trace-buffer-failure", storage=storage) as persistence:
         async with Runtime.attach(persistence=persistence, features=features, metrics=None) as runtime:
@@ -237,8 +239,8 @@ async def test_trace_buffer_cancellation_keeps_control_settled(tmp_path, monkeyp
             assert calls == 1
             source = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert source.status is ExecutionStatus.CANCELLED
-            head = await repository.get_history_head(execution.execution_id, tenant_id=runtime.tenant_id)
-            assert head.state.value == "sealed"
+            head = await repository.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert (head.history_seal_digest is not None)
             repeated = await runtime.executions.cancel(
                 execution.execution_id, CancelExecutionRequest(runtime.default_principal, "cancel"),
             )

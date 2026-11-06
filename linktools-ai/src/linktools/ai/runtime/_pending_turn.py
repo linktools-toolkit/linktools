@@ -6,20 +6,21 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 
-from ..core import ExecutionStatus, IdempotencyStatus, SessionStatus
+from ..core import ExecutionStatus, IdempotencyStatus, SessionStatus, ToolOperationStatus
 from ..errors import AIError, ErrorCode
-from ..storage import TurnCoordination
+from ..storage import StoredPayload, TurnCoordination
 from ..persistence.coordination import PendingTurnCoordination
 from ..persistence.runs import ArchiveRoot
+from ..persistence.contracts import ToolOperationAdmission, ToolOperationRecord
 from ..execution import (
     ExecutionRecord,
     ExecutionStartReservation,
     ExecutionTerminalCommitResult,
     RuntimePayloadRef,
 )
-from ..persistence.contracts import ExecutionCheckpoint, ExecutionCheckpointState
+from ..execution import ExecutionRecoveryDetail, ExecutionRecoveryState
 from ..session import SessionRecord
 
 
@@ -29,7 +30,6 @@ class _PendingExecutionTurn:
     reservation: ExecutionStartReservation
     session: SessionRecord | None
     execution: ExecutionRecord
-    recovery: ExecutionCheckpoint
     committing: bool = False
     committed: ExecutionTerminalCommitResult | None = None
     failure: AIError | None = None
@@ -40,32 +40,119 @@ class _PendingExecutionTurn:
     history_digest: str | None = None
     coordination: TurnCoordination | None = None
     boundary: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tool_operations: dict[str, ToolOperationRecord] = field(default_factory=dict)
+    promote_tools: Callable[[], Awaitable[None]] | None = None
+    promoted: bool = False
+
+    def pending_tool_operations(self) -> tuple[ToolOperationRecord, ...] | None:
+        return None if self.promoted else tuple(self.tool_operations.values())
+
+    async def materialize_tool_operations(self) -> None:
+        if not self.promoted:
+            if self.promote_tools is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            await self.promote_tools()
+
+    async def stage_tool_operation(self, request: ToolOperationAdmission) -> ToolOperationRecord | None:
+        if not request.replay_safe or self.uncertain:
+            await self.materialize_tool_operations()
+            return None
+        async with self.boundary:
+            if self.promoted:
+                return None
+            if self.uncertain:
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            self.require_active(request.producer_generation or 0, allow_cancelling=False)
+            if (request.execution_id != self.execution.execution_id
+                    or request.agent_run_id != self.execution.recovery.agent_run_id
+                    or request.binding_digest != self.execution.binding_digest
+                    or request.owner != self.execution.producer_claim_id
+                    or request.recovery_agent_run_id is not None):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            current = self.tool_operations.get(request.tool_operation_id)
+            if current is not None:
+                if any(getattr(current, name) != getattr(request, name) for name in (
+                    "execution_id", "agent_run_id", "tool_call_id", "idempotency_key_digest",
+                    "tool_name", "arguments_digest", "binding_digest", "replay_safe", "arguments_payload",
+                )):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                if current.status is not ToolOperationStatus.PENDING:
+                    return current
+                current = replace(current, status=ToolOperationStatus.CLAIMED, owner=request.owner,
+                                  fence=current.fence + 1, updated_at=datetime.now(timezone.utc))
+            else:
+                now = datetime.now(timezone.utc)
+                current = ToolOperationRecord(
+                    request.tool_operation_id, request.execution_id, request.agent_run_id, request.tool_call_id,
+                    request.idempotency_key_digest, request.tool_name, request.arguments_digest,
+                    request.binding_digest, True, ToolOperationStatus.CLAIMED, request.owner, 1, None, now, now,
+                    producer_generation=request.producer_generation, arguments_payload=request.arguments_payload,
+                )
+            self.tool_operations[current.tool_operation_id] = current
+            return current
+
+    async def settle_tool_operation(
+        self, operation_id: str, *, owner: str, fence: int, status: ToolOperationStatus,
+        result_payload: StoredPayload | None = None, error_code: str | None = None,
+        error_payload: StoredPayload | None = None,
+    ) -> bool:
+        """Retain a volatile outcome; this is not a source commit acknowledgement."""
+        async with self.boundary:
+            if self.promoted:
+                return False
+            if self.committing or self.committed is not None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            current = self.tool_operations.get(operation_id)
+            if current is None or current.owner != owner or current.fence != fence:
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            if current.status in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}:
+                if (current.status is not status or current.result_payload != result_payload
+                        or current.error_code != error_code or current.error_payload != error_payload):
+                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+                return True
+            if current.status not in {ToolOperationStatus.CLAIMED, ToolOperationStatus.EFFECT_UNKNOWN}:
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            if status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED,
+                              ToolOperationStatus.EFFECT_UNKNOWN, ToolOperationStatus.PENDING}:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self.tool_operations[operation_id] = replace(
+                current, status=status, owner=None if status is ToolOperationStatus.PENDING else owner,
+                result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+                updated_at=datetime.now(timezone.utc),
+            )
+            return True
 
     def activate(
         self, agent_run_id: str, context: RuntimePayloadRef, *, now: datetime,
-    ) -> tuple[ExecutionRecord, ExecutionCheckpoint]:
+    ) -> ExecutionRecord:
         if self.committing or self.execution.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.EXECUTION_CANCELLED)
-        if self.recovery.state is not ExecutionCheckpointState.ADMITTED:
+        if (self.execution.recovery is None
+                or self.execution.recovery_state is not ExecutionRecoveryState.ADMITTED):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        # These are semantic revisions, not storage CAS revisions. Only the
-        # terminal transaction acquires durable authority for the captured turn.
+        if self.coordination is None or self.coordination.execution_id != self.execution.execution_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        # These are semantic revisions, not storage CAS revisions. Promotion
+        # or terminal commit acquires durable authority for the captured turn.
         self.execution = replace(
             self.execution, revision=self.execution.revision + 2,
             agent_run_seq=1, input_context=context, updated_at=now,
+            producer_generation=self.execution.revision + 1,
+            producer_claim_id=self.coordination.owner_id,
+            recovery=replace(self.execution.recovery, agent_run_id=agent_run_id),
         )
-        self.recovery = replace(
-            self.recovery, revision=self.recovery.revision + 1,
-            state=ExecutionCheckpointState.ACTIVE, agent_run_id=agent_run_id,
-            updated_at=now,
-        )
-        return self.execution, self.recovery
+        return self.execution
 
     def require_active(self, generation: int, *, allow_cancelling: bool) -> None:
         if self.failure is not None:
             raise self.failure
-        if generation != 2 or self.committing or self.committed is not None:
+        if (generation < 1 or generation != self.execution.producer_generation
+                or self.committing or self.committed is not None):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if (self.coordination is None
+                or self.coordination.execution_id != self.execution.execution_id
+                or self.execution.producer_claim_id != self.coordination.owner_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if self.execution.status is ExecutionStatus.CANCELLING:
             if not allow_cancelling:
                 raise AIError(ErrorCode.EXECUTION_CANCELLED)
@@ -110,8 +197,9 @@ class _PendingExecutionTurns:
     async def read_stream(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionRecord, int, str] | None:
         turn = self.get(execution_id, tenant_id=tenant_id)
         if turn is not None and turn.coordination is not None and turn.execution.agent_run_seq == 1:
-            turn.require_active(2, allow_cancelling=True)
-            return turn.execution, 2, turn.coordination.owner_id
+            turn.require_active(turn.execution.producer_generation, allow_cancelling=True)
+            assert turn.execution.producer_claim_id is not None
+            return turn.execution, turn.execution.producer_generation, turn.execution.producer_claim_id
         if self.coordination is None:
             return None
         return await self.coordination.read_stream(execution_id, tenant_id=tenant_id)
@@ -150,14 +238,10 @@ class _PendingExecutionTurns:
         started = replace(
             reservation.execution, status=ExecutionStatus.STARTED, revision=1,
             event_seq=1, started_at=now, updated_at=now,
+            recovery=ExecutionRecoveryDetail(),
         )
         turn = _PendingExecutionTurn(
             tenant_id, reservation, session, started,
-            ExecutionCheckpoint(
-                execution_id=execution.execution_id, agent_run_id=None,
-                state=ExecutionCheckpointState.ADMITTED, revision=0,
-                created_at=now, updated_at=now,
-            ),
         )
         self._executions[execution_key] = turn
         self._requests[request_key] = turn
@@ -195,9 +279,11 @@ class _PendingExecutionTurns:
                 raise turn.failure
         return None if turn is None else turn.execution
 
-    async def settle(self, turn: _PendingExecutionTurn) -> None:
+    async def settle(self, turn: _PendingExecutionTurn) -> bool:
         if turn.uncertain and turn.reconcile is not None:
             await turn.reconcile()
+            return True
+        return False
 
     async def read_session_execution(self, session_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         await self.settle_session(session_id, tenant_id=tenant_id)
@@ -208,10 +294,9 @@ class _PendingExecutionTurns:
             return None
         return await self.coordination.read_session_execution(session_id, tenant_id=tenant_id)
 
-    async def settle_session(self, session_id: str, *, tenant_id: str) -> None:
+    async def settle_session(self, session_id: str, *, tenant_id: str) -> bool:
         turn = self._sessions.get((tenant_id, session_id))
-        if turn is not None:
-            await self.settle(turn)
+        return False if turn is None else await self.settle(turn)
 
     async def settle_all(self) -> None:
         for turn in tuple(self._executions.values()):

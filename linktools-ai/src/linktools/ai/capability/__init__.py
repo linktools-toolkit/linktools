@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public capability extension contracts."""
 
-from ._persistence import CheckpointCapability, TraceCapability
+from ._persistence import TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._tool_results import ToolResultsCapability
 from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
@@ -70,7 +70,7 @@ __all__ = [
     "MemoryCapability",
     "ExecutionCapability",
     "ToolResponseFixture",
-    "CheckpointCapability", "TraceCapability",
+    "TraceCapability",
     "ToolResponsesCapability",
     "ToolResultsCapability",
     "RunCallbacks", "RunCallbackScope", "bind_run_callbacks",

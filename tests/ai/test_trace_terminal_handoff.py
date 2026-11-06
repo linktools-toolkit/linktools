@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence._projection_payload import decode_projection_payload
@@ -47,7 +49,7 @@ async def test_terminal_trace_handoff_recovers_same_execution_without_losing_adm
         return model_features(_FeatureModels(_FeatureFunctionModel(model)), _features(
             ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()),
             TraceCapability(commit=CommitPolicy.terminal(buffer=buffer)),
-            CheckpointCapability(),
+            native_checkpoint(),
         ))
 
     database = tmp_path / "state.db"

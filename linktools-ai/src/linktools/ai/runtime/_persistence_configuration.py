@@ -4,11 +4,12 @@
 
 from collections.abc import Sequence
 
+from pydantic_ai_harness.step_persistence import StepPersistence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
 from ..errors import AIError, ErrorCode
 from ..core import CommitPolicy
-from ..capability import CheckpointCapability, ExecutionCapability, TraceCapability
+from ..capability import ExecutionCapability, TraceCapability
 from ..persistence import PersistenceDomain
 from ..persistence.capabilities import CapabilityPersistence
 
@@ -28,7 +29,7 @@ def validate_persistence_capabilities(
             return
         if isinstance(feature, ExecutionCapability) and feature.retain_history:
             domain = PersistenceDomain.CONVERSATION
-        elif isinstance(feature, CheckpointCapability):
+        elif isinstance(feature, StepPersistence):
             domain = PersistenceDomain.CHECKPOINT
         elif isinstance(feature, TraceCapability):
             domain = PersistenceDomain.TRACE

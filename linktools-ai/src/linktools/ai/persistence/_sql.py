@@ -4,7 +4,7 @@
 
 import asyncio
 import hashlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -57,7 +57,7 @@ from .state import (
 if TYPE_CHECKING:
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
-    from sqlalchemy.sql import Executable, Select
+    from sqlalchemy.sql import ColumnElement, Executable, Select
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 ValueT = TypeVar("ValueT")
@@ -490,13 +490,13 @@ class SqlStateStorageGroup:
                         raise transaction._mutation_error
                 captures = {
                     store: tuple(record for key, record in transaction._record_cache.items()
-                                 if key in transaction._guarded_record_keys
+                                 if key in transaction._guarded_record_revisions
                                  and record is not None and record.kind in {"session", "execution"})
                     for store, transaction in transactions.items()
                 }
                 changed_partitions = {
                     transaction._store_digest for transaction in transactions.values()
-                    if transaction._guarded_record_keys or transaction._deleted_records
+                    if transaction._guarded_record_revisions or transaction._deleted_records
                 }
                 changed = {store for store in members if store.store_digest in changed_partitions}
                 return result
@@ -891,13 +891,32 @@ class _SqlTransaction:
         self._context = context
         self._store_digest = store_digest
         self._store_hex = store_digest.hex()
-        self._guarded_record_keys: set[bytes] = set()
+        self._guarded_record_revisions: dict[bytes, int] = {}
         self._deleted_records = False
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._alias_cache: dict[bytes, bytes | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
         self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
+
+    async def run_sql(
+        self, context: SqlStorageContext,
+        callback: Callable[["AsyncSession"], Awaitable[ValueT]],
+    ) -> ValueT:
+        active = active_state_scope()
+        if (context.engine is not self._context.engine or context.closed or self._context.closed
+                or context.dialect.name != self._context.dialect.name
+                or active is None or not active.writable
+                or active.task is not asyncio.current_task()
+                or not any(transaction is self for transaction in active.transactions.values())):
+            raise StateTransactionNestingError(
+                "prepared SQL requires its own active writable storage group transaction"
+            )
+        try:
+            return await callback(self._session)
+        except BaseException as error:
+            self._abort_mutation(error)
+            raise
 
     def _abort_mutation(self, error: BaseException) -> None:
         if self._mutation_error is None:
@@ -1112,44 +1131,48 @@ class _SqlTransaction:
         )
         self._log_batch("insert_records", len(values), 1)
         for record in values:
-            self._guarded_record_keys.add(record.key_digest)
+            self._guarded_record_revisions[record.key_digest] = record.storage_revision
             self._record_cache[record.key_digest] = record
 
     async def guard_record(
-        self,
-        key: bytes,
-        *,
-        expected_storage_revision: int,
+        self, key: bytes, *, expected_storage_revision: int,
     ) -> StoredRecord | None:
+        await self.get_record(key)
+        revision = await self.guard_record_revision(key, expected_storage_revision=expected_storage_revision)
+        return None if revision is None else await self.get_record(key)
+
+    async def guard_record_revision(
+        self, key: bytes, *, expected_storage_revision: int,
+    ) -> int | None:
         if (
             isinstance(expected_storage_revision, bool)
             or not isinstance(expected_storage_revision, int)
             or expected_storage_revision < 0
         ):
             raise ValueError("expected_storage_revision must be a non-negative integer")
-        if key in self._guarded_record_keys:
-            return await self.get_record(key)
-        current = await self.get_record(key)
-        if current is None or current.storage_revision != expected_storage_revision:
-            return None
+        if key in self._guarded_record_revisions:
+            return self._guarded_record_revisions[key]
         from sqlalchemy import update
 
         table = self._table("ai_state_records")
         result = await self._execute(
-            update(table)
-            .where(
+            update(table).where(
                 table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(key),
                 table.c.storage_revision == expected_storage_revision,
-            )
-            .values(storage_revision=expected_storage_revision + 1)
+            ).values(storage_revision=expected_storage_revision + 1)
         )
         if result.rowcount != 1:
+            self._record_cache.pop(key, None)
             return None
-        guarded = replace(current, storage_revision=expected_storage_revision + 1)
-        self._guarded_record_keys.add(key)
-        self._record_cache[key] = guarded
-        return guarded
+        revision = expected_storage_revision + 1
+        self._guarded_record_revisions[key] = revision
+        cached = self._record_cache.get(key)
+        if cached is not None and cached.storage_revision == expected_storage_revision:
+            self._record_cache[key] = replace(cached, storage_revision=revision)
+        else:
+            self._record_cache.pop(key, None)
+        return revision
 
     async def replace_record(
         self, record: StoredRecord, *, expected_storage_revision: int
@@ -1171,17 +1194,9 @@ class _SqlTransaction:
             raise ValueError("replace_records contains duplicate keys")
         if not values:
             return
-        current = await self.get_records(keys)
         ordered = tuple(sorted(values, key=lambda value: value.record.key_digest))
         for replacement in ordered:
-            existing = current.get(replacement.record.key_digest)
-            if (
-                existing is None
-                or existing.storage_revision != replacement.expected_storage_revision
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
             validate_record_identity(replacement.record)
-            validate_record_replacement(existing, replacement.record)
             if (
                 replacement.record.storage_revision
                 != replacement.expected_storage_revision + 1
@@ -1189,12 +1204,13 @@ class _SqlTransaction:
                 raise ValueError(
                     "replacement must increment storage_revision exactly once"
                 )
-        from sqlalchemy import bindparam, case, func, literal, tuple_, update
+        from sqlalchemy import and_, bindparam, case, func, literal, or_, update
 
         table = self._table("ai_state_records")
         prepared = tuple(_record_values(value.record) for value in ordered)
         columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json")
+        identity_columns = ("scope_digest", "parent_digest", "kind", "sort_key")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
@@ -1206,17 +1222,24 @@ class _SqlTransaction:
                     table.c.store_digest == self._store_hex,
                     table.c.key_digest == bindparam("_replacement_key"),
                     table.c.storage_revision == bindparam("_replacement_expected_storage_revision"),
+                    *self._record_identity_conditions(table, {
+                        column: bindparam(f"_identity_{column}") for column in identity_columns
+                    }),
                 ).values(**{column: bindparam(f"_replacement_{column}") for column in columns},
                          updated_at=func.current_timestamp())
                 parameters = [
                     {"_replacement_key": row["key_digest"],
                      "_replacement_expected_storage_revision": value.expected_storage_revision,
+                     **{f"_identity_{column}": row[column] for column in identity_columns},
                      **{f"_replacement_{column}": row[column] for column in columns}}
                     for row, value in zip(rows, batch)
                 ]
             else:
-                cas_conditions = [(row["key_digest"], value.expected_storage_revision)
-                                  for row, value in zip(rows, batch)]
+                cas_conditions = [and_(
+                    table.c.key_digest == row["key_digest"],
+                    table.c.storage_revision == value.expected_storage_revision,
+                    *self._record_identity_conditions(table, row),
+                ) for row, value in zip(rows, batch)]
                 updates = {
                     column: rows[0][column] if len(rows) == 1 else case(
                         {row["key_digest"]: literal(row[column], type_=table.c[column].type)
@@ -1229,7 +1252,7 @@ class _SqlTransaction:
                 statement = update(table).where(
                     table.c.store_digest == self._store_hex,
                     table.c.key_digest.in_([row["key_digest"] for row in rows]),
-                    tuple_(table.c.key_digest, table.c.storage_revision).in_(cas_conditions),
+                    or_(*cas_conditions),
                 ).values(**updates, updated_at=func.current_timestamp())
             try:
                 result = await self._execute(statement, parameters)
@@ -1242,10 +1265,19 @@ class _SqlTransaction:
                 # A single failed CAS has not changed any record and can be retried.
                 if len(ordered) > 1 or result.rowcount != 0:
                     self._abort_mutation(error)
+                # Only a failed conditional write needs source inspection. Do not
+                # classify failure from a potentially stale transaction-local view.
+                for value in batch:
+                    self._record_cache.pop(value.record.key_digest, None)
+                current = await self.get_records(tuple(value.record.key_digest for value in batch))
+                for value in batch:
+                    existing = current.get(value.record.key_digest)
+                    if existing is not None and existing.storage_revision == value.expected_storage_revision:
+                        validate_record_replacement(existing, value.record)
                 raise error
         self._log_batch("replace_records", len(ordered), statement_count)
         for replacement in ordered:
-            self._guarded_record_keys.add(replacement.record.key_digest)
+            self._guarded_record_revisions[replacement.record.key_digest] = replacement.record.storage_revision
             self._record_cache[replacement.record.key_digest] = replacement.record
 
     async def transition_record_lease(
@@ -1262,7 +1294,7 @@ class _SqlTransaction:
         current = await self.get_record(key)
         if current is None or current.storage_revision != expected_storage_revision:
             return None
-        protected = key in self._guarded_record_keys
+        protected = key in self._guarded_record_revisions
         now = await self._context.run_statement(
             self._context.dialect.database_current_time(self._session)
         )
@@ -1333,7 +1365,7 @@ class _SqlTransaction:
             )
         )
         if result.rowcount == 1:
-            self._guarded_record_keys.add(key)
+            self._guarded_record_revisions[key] = expected_storage_revision + 1
             cached = self._record_cache.get(key)
             if cached is not None:
                 self._record_cache[key] = replace(
@@ -1399,7 +1431,7 @@ class _SqlTransaction:
             raise
         self._deleted_records = self._deleted_records or bool(deleted_keys)
         for key in deleted_keys:
-            self._guarded_record_keys.discard(key)
+            self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
         for alias, record_key in tuple(self._alias_cache.items()):
             if record_key in deleted_keys:
@@ -1460,7 +1492,7 @@ class _SqlTransaction:
             self._abort_mutation(AIError(ErrorCode.STORAGE_CONFLICT))
         if result.rowcount == 1:
             self._deleted_records = True
-            self._guarded_record_keys.discard(key)
+            self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
             for alias, record_key in tuple(self._alias_cache.items()):
                 if record_key == key:
@@ -1661,7 +1693,7 @@ class _SqlTransaction:
             by_alias[alias.alias_digest] = alias
         values = tuple(sorted(by_alias.values(), key=lambda value: value.alias_digest))
         if any(
-            alias.record_key_digest not in self._guarded_record_keys for alias in values
+            alias.record_key_digest not in self._guarded_record_revisions for alias in values
         ):
             raise RuntimeError("alias owner must be guarded in the current transaction")
         existing = await self.resolve_aliases(
@@ -1869,7 +1901,7 @@ class _SqlTransaction:
         if not facts:
             return
         if any(
-            fact.owner_key_digest not in self._guarded_record_keys for fact in facts
+            fact.owner_key_digest not in self._guarded_record_revisions for fact in facts
         ):
             raise RuntimeError("fact owner must be guarded in the current transaction")
         from sqlalchemy import insert
@@ -2095,6 +2127,23 @@ class _SqlTransaction:
                 )
             )
         return values
+
+    def _record_identity_conditions(
+        self, table: "Table", values: Mapping[str, object],
+    ) -> tuple["ColumnElement[bool]", ...]:
+        from sqlalchemy import cast, type_coerce
+        from sqlalchemy.dialects.mysql import BINARY
+
+        conditions = []
+        for name in ("scope_digest", "parent_digest", "kind", "sort_key"):
+            column = table.c[name]
+            # MySQL text equality may ignore case or trailing spaces even when
+            # the in-memory identity contract distinguishes those values.
+            if self._context.dialect.name == "mysql" and name in ("kind", "sort_key"):
+                # SQL compares bytes; Python parameters remain text, not BLOBs.
+                column = type_coerce(cast(column, BINARY), column.type)
+            conditions.append(column.is_not_distinct_from(values[name]))
+        return tuple(conditions)
 
     def _table(self, name: str) -> "Table":
         try:

@@ -8,6 +8,8 @@ from ._runtime_test_helpers import model_features
 import asyncio
 import multiprocessing
 import os
+
+import pytest
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -15,19 +17,23 @@ from typing import Any, Literal
 
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
+from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, SqliteStepStore
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage, PersistencePlan
+from linktools.ai.persistence import PersistenceStorage, PersistencePlan, PersistenceDomain
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+from linktools.ai.runtime._step_store import RuntimeStepStore
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
+from linktools.ai.persistence._step_archive import _decode_step, _encode_step
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
-from pydantic_ai.messages import ModelResponse
+from pydantic_ai.messages import ModelResponse, ToolReturnPart
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -116,19 +122,12 @@ def _crash_session_process(
 ) -> None:
     """Exit without cleanup after a selected durable boundary."""
     original_complete = RuntimeToolOperationBridge.complete
-    original_checkpoint = RuntimeAgentRunStore.save_checkpoint
+    original_step = RuntimeStepStore.commit_step
+    original_snapshot = SqliteStepStore.save_snapshot
     original_success = LocalExecutionBackend._commit_success
     original_reconcile_handoff = LocalExecutionBackend._reconcile_handoff
     original_commit_reconciled = LocalExecutionBackend._commit_reconciled_terminal
     original_activate = StateCommands.commit_agent_attempt_checkpoint
-    original_admission = StateCommands.commit_tool_admission
-
-    async def admit(self: StateCommands, request: Any) -> Any:
-        if phase == "effect_unconfirmed":
-            request = replace(request, lease_seconds=1)
-        elif phase == "effect_unconfirmed_live_lease":
-            request = replace(request, lease_seconds=5)
-        return await original_admission(self, request)
 
     async def activate(self: StateCommands, *args: Any, **kwargs: Any) -> Any:
         result = await original_activate(self, *args, **kwargs)
@@ -139,28 +138,32 @@ def _crash_session_process(
     async def complete(
         self: RuntimeToolOperationBridge, decision: Any, result: Any
     ) -> bool:
-        if phase in {"effect_unconfirmed", "effect_unconfirmed_live_lease"}:
+        if phase == "effect_unconfirmed":
             os._exit(91)
         cancelled = await original_complete(self, decision, result)
         if phase == "tool_completed":
             os._exit(91)
         return cancelled
 
-    async def save_checkpoint(
-        self: RuntimeAgentRunStore, checkpoint: AgentRunCheckpoint, **kwargs: Any
-    ) -> None:
-        await original_checkpoint(self, checkpoint, **kwargs)
-        if phase == "request_checkpoint" and not any(
-            isinstance(message, ModelResponse) for message in checkpoint.messages
+    async def save_snapshot(self: SqliteStepStore, snapshot: ContinuableSnapshot) -> None:
+        await original_snapshot(self, snapshot)
+        if phase == "request_checkpoint" and snapshot.messages and not any(
+            isinstance(message, ModelResponse) for message in snapshot.messages
         ):
             os._exit(91)
+
+    async def commit_step(self: RuntimeStepStore, **kwargs: Any) -> None:
+        await original_step(self, **kwargs)
+        snapshot = kwargs.get("snapshot")
         if (
             phase in {"tool_checkpoint", "projected_tool_checkpoint"}
-            and checkpoint.pending_request_index is not None
+            and snapshot is not None
+            and snapshot.messages
+            and any(isinstance(part, ToolReturnPart) for part in snapshot.messages[-1].parts)
         ):
             if phase == "projected_tool_checkpoint":
-                await self.flush_execution_projection(
-                    checkpoint.agent_run_id, execution_id=kwargs["execution_id"]
+                await self._working_set.flush_execution_projection(
+                    snapshot.run_id, execution_id=self._tool_operations._execution_id,
                 )
             os._exit(91)
 
@@ -188,10 +191,10 @@ def _crash_session_process(
         *,
         finish: Any,
     ) -> Any:
-        async def finish_after_crash(execution: Any) -> None:
+        async def finish_after_crash(execution: Any) -> Any:
             if phase == "terminal_before_handoff_complete":
                 os._exit(91)
-            await finish(execution)
+            return await finish(execution)
 
         return await original_commit_reconciled(
             self, checkpoint, finish=finish_after_crash,
@@ -199,8 +202,8 @@ def _crash_session_process(
 
     RuntimeToolOperationBridge.complete = complete
     StateCommands.commit_agent_attempt_checkpoint = activate
-    StateCommands.commit_tool_admission = admit
-    RuntimeAgentRunStore.save_checkpoint = save_checkpoint
+    RuntimeStepStore.commit_step = commit_step
+    SqliteStepStore.save_snapshot = save_snapshot
     LocalExecutionBackend._commit_success = commit_success
     LocalExecutionBackend._reconcile_handoff = reconcile_handoff
     LocalExecutionBackend._commit_reconciled_terminal = commit_reconciled
@@ -220,7 +223,7 @@ def _crash_session_process(
         application = _application(
             [], effect_policy="non_replay_safe", effect_log=Path(effect_log)
         )
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_222, Runtime.attach(persistence=persistence_222, features=model_features(_ToolModels(), application)) as runtime:
             if phase != "recovered_before_terminal":
@@ -257,7 +260,7 @@ async def _exit_at_boundary(
 
 
 async def _assert_tool_turn_recovers_without_replaying_effect(
-    tmp_path: Path, backend: str, phase: str
+    tmp_path: Path, backend: str, phase: str, *, trace_damage: str | None = None,
 ) -> None:
     database = tmp_path / "runtime.db"
     effect_log = tmp_path / "effects.txt"
@@ -278,7 +281,7 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
     calls: list[str] = []
     application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_284, Runtime.attach(persistence=persistence_284, features=model_features(_ToolModels(), application)) as runtime:
             session = runtime.agents.get("default").session("session")
@@ -314,6 +317,33 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
                 "tool_result",
                 "assistant",
             ]
+            if phase == "before_terminal":
+                finished = await runtime._state.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
+                assert finished is not None and finished.agent_run_seq == 2
+                latest_run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                                             execution_id=execution_id, agent_run_seq=2)
+                trace = runtime._run_store.read_store(PersistenceDomain.TRACE)
+                capture = (await trace.capture_history((latest_run_id,)))[latest_run_id]
+                assert capture.run is not None and capture.message_count == capture.model_interaction_count == 0
+                assert [event.event_type for event in await trace.list_events(agent_run_id=latest_run_id)] == [
+                    "AGENT_RUN_STARTED", "AGENT_RUN_SUCCEEDED",
+                ]
+                empty_attempt = await runtime.history.history(
+                    execution_id, principal=runtime.default_principal,
+                    include_content=True, agent_run_seq=2, limit=1,
+                )
+                assert empty_attempt.items == () and empty_attempt.next_cursor is None
+                first_attempt = await runtime.history.history(
+                    execution_id, principal=runtime.default_principal,
+                    include_content=True, agent_run_seq=1, limit=1,
+                )
+                assert first_attempt.items and first_attempt.next_cursor is not None
+                remaining = await runtime.history.history(
+                    execution_id, principal=runtime.default_principal,
+                    include_content=True, agent_run_seq=1,
+                    cursor=first_attempt.next_cursor, limit=1,
+                )
+                assert remaining.items
             execution_history = await runtime.history.history(
                 execution_id, principal=runtime.default_principal, include_content=True
             )
@@ -347,6 +377,40 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
                     "user",
                     "assistant",
                 ]
+            if trace_damage is not None:
+                assert phase == "before_terminal"
+                trace = runtime._run_store.read_store(PersistenceDomain.TRACE)
+                damaged_run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                                              execution_id=execution_id,
+                                              agent_run_seq=1 if trace_damage == "missing_source" else 2)
+
+                async def damage(transaction):
+                    owner_key = trace._agent_run_key(damaged_run_id)
+                    if trace_damage in {"missing_source", "missing_latest"}:
+                        await transaction.delete_records((owner_key,))
+                    else:
+                        owner = await transaction.get_record(owner_key)
+                        owned_facts = [fact for fact in await transaction.scan_facts()
+                                       if fact.owner_key_digest == owner_key]
+                        events = sorted((fact for fact in owned_facts
+                                         if fact.stream_digest == trace._stream(damaged_run_id, "event")),
+                                        key=lambda fact: fact.sequence)
+                        assert len(events) == 2
+                        terminal = _decode_step(events[-1].data)
+                        assert terminal.event_type == "AGENT_RUN_SUCCEEDED"
+                        await transaction.guard_record(owner_key, expected_storage_revision=owner.storage_revision)
+                        await transaction.delete_fact_streams(owner_key)
+                        await transaction.insert_facts(tuple(
+                            replace(fact, data=_encode_step(replace(terminal, event_type="AGENT_RUN_INTERRUPTED")))
+                            if fact == events[-1] else fact for fact in owned_facts
+                        ))
+
+                await trace.state_store.mutate(damage)
+                with pytest.raises(AIError) as unavailable:
+                    await runtime.history.history(execution_id, principal=runtime.default_principal, include_content=True)
+                assert unavailable.value.code in {ErrorCode.EXECUTION_HISTORY_UNAVAILABLE,
+                                                   ErrorCode.STORAGE_INTEGRITY_ERROR}
+                assert calls == [] and effect_log.read_text().splitlines() == committed_effects
     finally:
         await runtime._state.close()
         if engine is not None:

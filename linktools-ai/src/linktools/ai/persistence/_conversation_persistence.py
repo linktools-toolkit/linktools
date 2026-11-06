@@ -178,23 +178,19 @@ class ConversationPersistence:
     async def load_committed_conversation_context(
         self,
         *,
-        history_id: str | None,
         agent_run_id: str,
-        message_count: int | None,
+        checkpoint_sequence: int | None,
+        projection_digest: str | None,
         tenant_id: str,
     ) -> LoadedModelContext:
         archive = self.archive
         if isinstance(archive, StateStepArchive):
-            if history_id is None:
+            if checkpoint_sequence is None or projection_digest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if message_count is None:
-                return await archive.load_loaded_model_context(
-                    owner_id=history_id,
-                )
             return await archive.load_committed_session_model_context(
-                history_id,
                 agent_run_id=agent_run_id,
-                message_count=message_count,
+                checkpoint_sequence=checkpoint_sequence,
+                projection_digest=projection_digest,
                 tenant_id=tenant_id,
             )
         if isinstance(archive, InMemoryStepArchive):
@@ -212,15 +208,15 @@ class ConversationPersistence:
     async def load_conversation_model_context(
         self,
         *,
-        history_id: str | None,
         agent_run_id: str,
         tenant_id: str,
-        message_count: int | None = None,
+        checkpoint_sequence: int | None = None,
+        projection_digest: str | None = None,
     ) -> tuple[object, ...]:
         context = await self.load_committed_conversation_context(
-            history_id=history_id,
             agent_run_id=agent_run_id,
-            message_count=message_count,
+            checkpoint_sequence=checkpoint_sequence,
+            projection_digest=projection_digest,
             tenant_id=tenant_id,
         )
         return context.model_messages()

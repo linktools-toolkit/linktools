@@ -60,7 +60,8 @@ async def _consumer(*, authorization=None):
     await state.initialize(namespace="remote-pending", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
     coordination = PendingTurnCoordination(cache, cache, namespace="remote-pending", tenant_id="tenant")
-    owned = await coordination.claim(
+    owned = await cache.claim_turn(
+        coordination._scope,
         session_key="session", request_key="request", request_digest="digest",
         execution_id="execution", owner_id="owner", lease_seconds=30,
     )
@@ -108,8 +109,8 @@ async def test_remote_pending_inspect_result_and_wait_follow_source_commit() -> 
         assert raised.value.code is ErrorCode.EXECUTION_WAIT_TIMEOUT
         waiting = asyncio.create_task(service.wait("execution", principal=_PRINCIPAL, timeout_seconds=3))
         await asyncio.sleep(0)
-        await state.execution.executions.create_with_history_head(_terminal(record))
-        assert await coordination.release(owned.lease)
+        await state.execution.executions.create_execution(_terminal(record))
+        assert await coordination._backend.release_turn(owned.lease)
         result = await waiting
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"answer": "source"}
@@ -120,7 +121,7 @@ async def test_remote_pending_inspect_result_and_wait_follow_source_commit() -> 
 @pytest.mark.parametrize("method", ("inspect", "result", "wait", "cancel", "_cancel", "cancel_authorized"))
 async def test_source_terminal_winner_takes_priority_over_lingering_remote_pending(method) -> None:
     async with _consumer() as (state, service, pending, record, _coordination, _owned, _cache):
-        await state.execution.executions.create_with_history_head(_terminal(record))
+        await state.execution.executions.create_execution(_terminal(record))
         if "cancel" in method:
             result = await getattr(service, method)("execution", CancelExecutionRequest(_PRINCIPAL, method))
             assert result.cancelled is False
@@ -150,8 +151,8 @@ async def test_pending_remote_observation_preserves_owner_and_tenant_authorizati
 @pytest.mark.parametrize("principal", (_PRINCIPAL, Principal("other", "tenant", "service")))
 async def test_inspect_refreshes_stale_source_miss_after_pending_owner_releases(monkeypatch, principal) -> None:
     async with _consumer() as (state, service, _pending, record, coordination, owned, _cache):
-        await state.execution.executions.create_with_history_head(_terminal(record))
-        await coordination.release(owned.lease)
+        await state.execution.executions.create_execution(_terminal(record))
+        await coordination._backend.release_turn(owned.lease)
         repository = state.execution.executions
         get, read = repository.get, repository.state_store.read
         source_scope = ContextVar("source_scope", default=False)
@@ -170,8 +171,13 @@ async def test_inspect_refreshes_stale_source_miss_after_pending_owner_releases(
 
         monkeypatch.setattr(repository.state_store, "read", strong_read)
         monkeypatch.setattr(repository, "get", observed_get)
-        view = await service.inspect("execution", principal=principal)
-        assert view.status is ExecutionStatus.SUCCEEDED
+        if principal == _PRINCIPAL:
+            view = await service.inspect("execution", principal=principal)
+            assert view.status is ExecutionStatus.SUCCEEDED
+        else:
+            with pytest.raises(AIError) as raised:
+                await service.inspect("execution", principal=principal)
+            assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
 @pytest.mark.asyncio
@@ -184,17 +190,17 @@ async def test_remote_cancel_waits_for_source_outcome_instead_of_confirming_cach
         ))
         try:
             await asyncio.wait_for(pending.cancel_requested.wait(), 2)
-            current = await coordination.renew(owned.lease, lease_seconds=30)
+            current = await coordination._backend.renew_turn(owned.lease, lease_seconds=30)
             assert current.cancel_requested
             assert not cancelling.done()
             assert await state.execution.executions.get("execution", tenant_id="tenant") is None
-            await state.execution.executions.create_with_history_head(_terminal(record, terminal_status))
-            await coordination.release(owned.lease)
+            await state.execution.executions.create_execution(_terminal(record, terminal_status))
+            await coordination._backend.release_turn(owned.lease)
             outcome = await asyncio.wait_for(cancelling, 2)
             assert outcome.cancelled is (terminal_status is ExecutionStatus.CANCELLED)
         finally:
             if not cancelling.done():
-                await coordination.release(owned.lease)
+                await coordination._backend.release_turn(owned.lease)
                 await asyncio.gather(cancelling, return_exceptions=True)
 
 
@@ -203,7 +209,7 @@ async def test_remote_cancel_reports_not_ready_when_owner_is_lost_without_source
     async with _consumer() as (_state, service, pending, _record, coordination, owned, _cache):
         cancelling = asyncio.create_task(service.cancel("execution", CancelExecutionRequest(_PRINCIPAL, "lost")))
         await asyncio.wait_for(pending.cancel_requested.wait(), 2)
-        await coordination.release(owned.lease)
+        await coordination._backend.release_turn(owned.lease)
         with pytest.raises(AIError) as raised:
             await asyncio.wait_for(cancelling, 2)
         assert raised.value.code is ErrorCode.EXECUTION_NOT_READY
@@ -246,7 +252,7 @@ async def test_remote_authorization_cannot_bypass_canonical_source_policy(method
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if not seeded:
                 seeded = True
-                await state.execution.executions.create_with_history_head(_terminal(record))
+                await state.execution.executions.create_execution(_terminal(record))
 
     async with _consumer(authorization=Authorization()) as (state, service, pending, record, coordination, owned, _cache):
         other = Principal("other", "tenant", "service")
@@ -276,8 +282,8 @@ async def test_strong_result_refreshes_source_when_owner_commits_during_remote_r
 
         async def commit_during_read(execution_id, *, tenant_id):
             if authorized:
-                await state.execution.executions.create_with_history_head(_terminal(record))
-                await coordination.release(owned.lease)
+                await state.execution.executions.create_execution(_terminal(record))
+                await coordination._backend.release_turn(owned.lease)
             return await read_remote(execution_id, tenant_id=tenant_id)
 
         monkeypatch.setattr(pending, "read_remote_execution", commit_during_read)
@@ -294,7 +300,33 @@ async def test_remote_pending_children_use_source_after_parent_promotion() -> No
             record, execution_id="child", parent_execution_id="execution",
             lineage_kind=ExecutionLineageKind.SUBAGENT, parent_invocation_id="call",
         )
-        await state.execution.executions.create_with_history_head(record)
-        await state.execution.executions.create_with_history_head(child)
+        await state.execution.executions.create_execution(record)
+        await state.execution.executions.create_execution(child)
         children = await service.list_children("execution", principal=_PRINCIPAL)
         assert tuple(item.execution_id for item in children) == ("child",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ("inspect", "result", "wait", "list_children"))
+async def test_remote_read_uses_canonical_owner_committed_during_pending_lookup(monkeypatch, method):
+    async with _consumer() as (state, service, pending, record, coordination, owned, _cache):
+        await coordination.publish(replace(record, principal_id="other"), owned)
+        read_remote = pending.read_remote_execution
+        seeded = False
+
+        async def commit_after_lookup(execution_id, *, tenant_id):
+            nonlocal seeded
+            value = await read_remote(execution_id, tenant_id=tenant_id)
+            if not seeded:
+                seeded = True
+                await state.execution.executions.create_execution(_terminal(record))
+                await coordination._backend.release_turn(owned.lease)
+            return value
+
+        monkeypatch.setattr(pending, "read_remote_execution", commit_after_lookup)
+        result = await getattr(service, method)("execution", principal=_PRINCIPAL)
+        assert seeded
+        if method == "list_children":
+            assert result == ()
+        else:
+            assert result.status is ExecutionStatus.SUCCEEDED

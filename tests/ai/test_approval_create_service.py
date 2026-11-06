@@ -2,43 +2,39 @@
 # -*- coding: utf-8 -*-
 """V1 approval service surface and authorization regressions."""
 
+from types import SimpleNamespace
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
+
 import pytest
 
 from linktools.ai.core import (
     ApprovalDecision,
     ExecutionStatus,
     Principal,
-    ResourceKind,
-    ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest
 from linktools.ai.runtime._approval import DefaultApprovalService
 
 
+_T = TypeVar("_T")
+
+
+class _ReadStateStore:
+    async def read(self, callback: Callable[[object], Awaitable[_T]]) -> _T:
+        return await callback(None)
+
+
 class _Executions:
-    async def get_header(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ResourceRef | None:
+    state_store = _ReadStateStore()
+
+    async def get(self, execution_id: str, *, tenant_id: str) -> object | None:
         if execution_id == "execution" and tenant_id == "tenant":
-            return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
-        return None
-
-    async def get(self, execution_id: str, *, tenant_id: str) -> object:
-        del execution_id, tenant_id
-        return type("Execution", (), {"status": ExecutionStatus.SUCCEEDED})()
-
-
-class _Checkpoints:
-    def __init__(self) -> None:
-        self.reads = 0
-
-    async def get(self, execution_id: str, *, tenant_id: str) -> None:
-        del execution_id, tenant_id
-        self.reads += 1
+            return SimpleNamespace(
+                execution_id=execution_id, principal_id="owner",
+                status=ExecutionStatus.SUCCEEDED,
+            )
         return None
 
 
@@ -55,12 +51,10 @@ def test_approval_creation_is_not_a_public_runtime_operation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_approval_list_authorizes_before_reading_deferred_state() -> None:
-    checkpoints = _Checkpoints()
+async def test_approval_list_requires_authorization_even_without_pending_tools() -> None:
     service = DefaultApprovalService(
         object(),
         _Executions(),
-        checkpoints,
         _DenyAuthorization(),
         objects=object(),
     )
@@ -72,7 +66,6 @@ async def test_approval_list_authorizes_before_reading_deferred_state() -> None:
         )
 
     assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
-    assert checkpoints.reads == 0
 
 
 def test_approval_decision_request_keeps_only_external_decision_input() -> None:

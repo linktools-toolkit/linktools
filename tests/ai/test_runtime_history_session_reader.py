@@ -389,7 +389,7 @@ async def test_runtime_history_session_reader_independent_terminal_commit_is_aut
                 "session", tenant_id="tenant", execution_id="execution",
             )
             if not keep_pending:
-                await observer.release(lease.lease)
+                await coordination.release_turn(lease.lease)
                 assert await observer.read_execution("execution", tenant_id="tenant") is None
                 assert (await reader.inspect_execution(
                     "execution", principal=_OWNER, include_usage=False,
@@ -405,7 +405,7 @@ async def test_runtime_history_session_reader_independent_terminal_commit_is_aut
             assert len(final.timeline.items) == 1
             assert final.timeline.items[0].status is ExecutionStatus.CANCELLED
             assert final.timeline.items[0].conversation_committed
-            await observer.release(lease.lease)
+            await coordination.release_turn(lease.lease)
             assert await observer.read_execution("execution", tenant_id="tenant") is None
             assert (await reader.inspect_execution(
                 "execution", principal=_OWNER, include_usage=False,

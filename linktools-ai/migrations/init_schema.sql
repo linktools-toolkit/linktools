@@ -182,3 +182,124 @@ CREATE TABLE ai_metric_observations (
     KEY ix_namespace_digest_active_occurred_at (namespace_digest, active_occurred_at),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable metric observations and retained pruning receipts.';
+
+-- Official StepStore physical mapping.
+
+CREATE TABLE ai_step_events (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
+	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream boundary event kind.',
+	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
+	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 event time.',
+	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
+	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
+	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
+	tool_call_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream tool call identifier.',
+	tool_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream tool name.',
+	error LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary error text.',
+	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
+	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
+	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical lookup digest of the boundary replay key.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Append-only upstream agent execution boundary events.' COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_created_at ON ai_step_events (created_at);
+
+CREATE INDEX ix_store_digest_run_digest_id ON ai_step_events (store_digest, run_digest, id);
+
+CREATE INDEX ix_updated_at ON ai_step_events (updated_at);
+
+CREATE UNIQUE INDEX uk_store_digest_run_digest_key_digest ON ai_step_events (store_digest, run_digest, key_digest);
+
+CREATE TABLE ai_step_message_refs (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	snapshot_id BIGINT NOT NULL COMMENT 'Physical snapshot row identifier.',
+	position BIGINT NOT NULL COMMENT 'Zero-based position in the upstream message history.',
+	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Ordered message references belonging to upstream snapshots.' COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_created_at ON ai_step_message_refs (created_at);
+
+CREATE INDEX ix_updated_at ON ai_step_message_refs (updated_at);
+
+CREATE UNIQUE INDEX uk_store_digest_snapshot_id_position ON ai_step_message_refs (store_digest, snapshot_id, position);
+
+CREATE TABLE ai_step_messages (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the exact stored upstream message JSON.',
+	message LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'One upstream ModelMessage JSON body.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Deduplicated upstream ModelMessage JSON bodies.' COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_created_at ON ai_step_messages (created_at);
+
+CREATE INDEX ix_updated_at ON ai_step_messages (updated_at);
+
+CREATE UNIQUE INDEX uk_store_digest_sha256 ON ai_step_messages (store_digest, sha256);
+
+CREATE TABLE ai_step_runs (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
+	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
+	conversation_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical conversation lookup digest.',
+	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
+	parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical parent run lookup digest.',
+	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
+	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
+	started_at VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 run start time.',
+	registration_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream registration invocation identifier.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_created_at ON ai_step_runs (created_at);
+
+CREATE INDEX ix_store_digest_conversation_digest ON ai_step_runs (store_digest, conversation_digest);
+
+CREATE INDEX ix_store_digest_parent_digest ON ai_step_runs (store_digest, parent_digest);
+
+CREATE INDEX ix_updated_at ON ai_step_runs (updated_at);
+
+CREATE UNIQUE INDEX uk_store_digest_run_digest ON ai_step_runs (store_digest, run_digest);
+
+CREATE TABLE ai_step_snapshots (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
+	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
+	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
+	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
+	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
+	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 snapshot time.',
+	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
+	messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream stored_messages count for the ordered references.',
+	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
+	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical lookup digest of the snapshot replay key.',
+	pruned BOOL NOT NULL COMMENT 'Retired snapshot identity without retained message references.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream complete or interrupted message-history snapshots.' COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_created_at ON ai_step_snapshots (created_at);
+
+CREATE INDEX ix_store_digest_run_digest_id ON ai_step_snapshots (store_digest, run_digest, id);
+
+CREATE INDEX ix_updated_at ON ai_step_snapshots (updated_at);
+
+CREATE UNIQUE INDEX uk_store_digest_run_digest_key_digest ON ai_step_snapshots (store_digest, run_digest, key_digest);

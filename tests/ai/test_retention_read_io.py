@@ -32,6 +32,7 @@ def _controller(repository, calls):
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(executions=repository)
     controller._namespace = _NAMESPACE
+    controller._terminal_publications = {}
     controller._transient_domains = frozenset({PersistenceDomain.TRACE})
     controller._objects = SimpleNamespace()
     async def session_release(session_id, **kwargs):
@@ -60,7 +61,7 @@ async def test_retention_cleanup_observes_committed_closure(
     try:
         repository = state.execution.executions
         if condition != "missing":
-            await repository.create_with_history_head(replace(
+            await repository.create_execution(replace(
                 _execution(), session_id="session", agent_run_seq=2,
                 status=_execution().status if condition == "running" else ExecutionStatus.SUCCEEDED,
                 retention_closed=condition == "closed",
@@ -85,7 +86,7 @@ async def test_retention_failure_does_not_start_cleanup(
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(_execution(), status=ExecutionStatus.SUCCEEDED))
+        await repository.create_execution(replace(_execution(), status=ExecutionStatus.SUCCEEDED))
         calls = []
         controller = _controller(repository, calls)
         original_get = repository.get
@@ -115,7 +116,7 @@ async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fall
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(
+        await repository.create_execution(replace(
             _execution(), status=ExecutionStatus.SUCCEEDED, retention_closed=True,
         ))
         class CustomRepository(ExecutionRepositoryImpl):
@@ -147,14 +148,16 @@ async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fall
 
 
 @pytest.mark.parametrize("failure", ("unknown", "cancel_after_commit"))
+@pytest.mark.parametrize("confirmed", (False, True))
 async def test_retention_unknown_commit_does_not_clean_until_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, confirmed: bool,
 ) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(_execution(), status=ExecutionStatus.SUCCEEDED))
+        terminal = replace(_execution(), status=ExecutionStatus.SUCCEEDED)
+        await repository.create_execution(terminal)
         original = repository.state_store.mutate
         async def lose_ack(callback):
             outer = active_state_scope() is None
@@ -166,6 +169,8 @@ async def test_retention_unknown_commit_does_not_clean_until_retry(
             return result
         calls = []
         controller = _controller(repository, calls)
+        if confirmed:
+            controller.confirm_terminal_publication(terminal)
         with monkeypatch.context() as patch:
             patch.setattr(repository.state_store, "mutate", lose_ack)
             with pytest.raises(asyncio.CancelledError if failure == "cancel_after_commit" else AIError):
@@ -176,6 +181,42 @@ async def test_retention_unknown_commit_does_not_clean_until_retry(
         assert calls == [("objects", "execution")]
     finally:
         await state.close()
+
+
+async def test_confirmed_terminal_handoff_reads_only_current_dependency_holds(tmp_path: Path) -> None:
+    async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
+        repository = state.execution.executions
+        terminal = replace(_execution(), status=ExecutionStatus.SUCCEEDED)
+        await repository.create_execution(terminal)
+        controller = _controller(repository, [])
+        controller.confirm_terminal_publication(terminal)
+        releases = []
+
+        async def release_object_scope(domain, *, owner_scope):
+            assert active_state_scope() is None
+            releases.append((domain, owner_scope))
+
+        controller._objects = SimpleNamespace(release_object_scope=release_object_scope)
+        engine = repository.state_store.storage_group.context.engine.sync_engine
+        statements = []
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _many):
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            assert await controller.release_execution_handoff("execution", tenant_id="tenant")
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        selects = [statement for statement in statements if statement.startswith("SELECT")]
+        assert len(selects) == 2
+        assert sum("ai_state_records" in statement for statement in selects) == 1
+        assert sum(statement.startswith("UPDATE") for statement in statements) == 1
+        assert releases == [(PersistenceDomain.TRACE, "execution:execution")]
+        current = await repository.get("execution", tenant_id="tenant")
+        assert current.retention_closed
+        assert current.revision == terminal.revision + 1
+        assert not controller.terminal_publication_confirmed(terminal)
 
 
 @pytest.mark.parametrize("conversation,closed,held", (
@@ -190,7 +231,7 @@ async def test_terminal_policy_hint_still_requires_source_closure(
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(
+        await repository.create_execution(replace(
             _execution(), session_id=None, status=ExecutionStatus.SUCCEEDED,
             conversation=conversation, retention_closed=closed,
             dependency_hold_ids=("hold",) if held else (),
@@ -231,7 +272,7 @@ async def test_runtime_releases_only_producer_staging_after_durable_handoff(
         ) as peer:
             repository = state.execution.executions
             if condition != "missing":
-                await repository.create_with_history_head(replace(
+                await repository.create_execution(replace(
                     _execution(),
                     status=_execution().status if condition == "running" else ExecutionStatus.SUCCEEDED,
                     retention_closed=condition == "closed",
@@ -285,7 +326,7 @@ async def test_terminal_handoff_reuses_one_source_closure_read(tmp_path: Path) -
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         repository = state.execution.executions
-        await repository.create_with_history_head(replace(
+        await repository.create_execution(replace(
             _execution(), session_id=None, status=ExecutionStatus.SUCCEEDED,
             conversation=True, retention_closed=True,
         ))

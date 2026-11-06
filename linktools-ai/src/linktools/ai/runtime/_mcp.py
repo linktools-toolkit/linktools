@@ -202,15 +202,23 @@ async def close_mcp_resources(
     capabilities: Sequence[AbstractCapability[AgentContext[object]]],
 ) -> None:
     """Finish owned MCP cleanup before propagating caller cancellation."""
+    owned: dict[int, _MCPCapability] = {}
+
+    def collect(capability: AbstractCapability[AgentContext[object]]) -> None:
+        if isinstance(capability, _MCPCapability):
+            owned[id(capability)] = capability
+
+    for capability in capabilities:
+        capability.apply(collect)
+
     async def close_owned() -> BaseException | None:
         failure: BaseException | None = None
-        for capability in capabilities:
-            if isinstance(capability, _MCPCapability):
-                try:
-                    await capability.close_resources()
-                except BaseException as error:
-                    if failure is None:
-                        failure = error
+        for capability in owned.values():
+            try:
+                await capability.close_resources()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
         return failure
 
     task = asyncio.create_task(close_owned())

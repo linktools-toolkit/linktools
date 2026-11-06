@@ -13,7 +13,8 @@ from tempfile import TemporaryDirectory
 
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence, SqliteStepStore
 from linktools.ai.core import JsonValue, TaskStatus, service_principal
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec,
@@ -121,7 +122,8 @@ async def composed_agent_evaluation(root: Path) -> None:
     """Runtime owns all composed domains; callers need only one context."""
     model = OfflineModel()
     features = RuntimeFeatures("composed-agent")
-    features.capability(CheckpointCapability(), scope="runtime")
+    features.capability(StepPersistence(store=SqliteStepStore(database=root / "steps.db"),
+                                        capture_frontier=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     features.model("offline", model)
     features.agent("default", model="offline", allow_tools=())

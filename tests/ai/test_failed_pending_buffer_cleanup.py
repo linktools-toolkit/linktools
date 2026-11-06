@@ -87,7 +87,7 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
                 await failed.wait(timeout_seconds=10)
             assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
             assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None
-            assert await state.execution.executions.get_history_head(failed.execution_id, tenant_id=state.tenant_id) is None
+            assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None
             assert failed_entries
             assert buffer.close_calls == 0
             await asyncio.wait_for(cleanup_finished.wait(), 10)
@@ -122,4 +122,4 @@ async def test_failed_unsubmitted_turn_preserves_error_and_releases_exact_stagin
             assert set(buffer.pending) == {foreign}
             assert buffer.close_calls == 0
             assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None
-            assert await state.execution.executions.get_history_head(failed.execution_id, tenant_id=state.tenant_id) is None
+            assert await state.execution.executions.get(failed.execution_id, tenant_id=state.tenant_id) is None

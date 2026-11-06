@@ -111,10 +111,11 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     import json
     from contextvars import ContextVar
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-    from linktools.ai.capability import TraceCapability, CheckpointCapability
+    from linktools.ai.capability import TraceCapability
+    from pydantic_ai_harness.step_persistence import StepPersistence
+    from tests.ai._runtime_test_helpers import native_checkpoint
     from linktools.ai.persistence._archive import ContentArchive
     from linktools.ai.persistence._history import TranscriptRepository
-    from linktools.ai.persistence._step_archive import StateStepArchive
     phase = ContextVar('review_phase', default='other')
     observed = []
     details = []
@@ -137,7 +138,6 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
         return invoke
     monkeypatch.setattr(ContentArchive, '_read_content', read)
     monkeypatch.setattr(TranscriptRepository, 'prepare_model_projection', wrap(TranscriptRepository.prepare_model_projection, 'projection'))
-    monkeypatch.setattr(StateStepArchive, '_relocate_run_checkpoint', wrap(StateStepArchive._relocate_run_checkpoint, 'relocation'))
     async def lookup(ctx: AgentContext[None]) -> str:
         return 'value'
     async def model(messages, info):
@@ -146,7 +146,7 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     features = RuntimeFeatures('review-boundaries')
     features.capability(ExecutionCapability(retain_history=True))
     features.capability(TraceCapability(commit=CommitPolicy.sync()))
-    features.capability(CheckpointCapability())
+    features.capability(native_checkpoint())
     features.tool(lookup, effect_policy='none')
     features.agent('default', model='default', allow_tools=('lookup',))
     async with Persistence.open('review-boundaries', storage=PersistenceStorage.sqlite(tmp_path / 'boundaries.db')) as persistence_151, Runtime.attach(persistence=persistence_151, features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
@@ -156,9 +156,8 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
                        'object_calls': sum(item[0] == label and item[3] == 'object' for item in observed),
                        'bytes': sum(item[2] for item in observed if item[0] == label),
                        'unique': len({item[1] for item in observed if item[0] == label})}
-               for label in ('projection', 'relocation', 'other')}
+               for label in ('projection', 'other')}
     Path(f'/tmp/review-boundary-counts-{rounds}.json').write_text(json.dumps({'summary':summary,'projection_calls':details}, sort_keys=True))
-    assert summary['relocation']['calls'] == 0
     assert summary['projection']['calls'] <= 6 * rounds + 5
     assert summary['other']['calls'] <= 3 * rounds + 2
 

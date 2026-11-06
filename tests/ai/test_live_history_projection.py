@@ -44,7 +44,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
-        await state.execution.executions.create_with_history_head(
+        await state.execution.executions.create_execution(
             _record(ExecutionStatus.STARTED, 2)
         )
         reader = StepExecutionHistoryReader(

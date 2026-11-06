@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from .test_step_projection import _execution
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.core import HmacCursorSigner, agent_conversation_id, agent_run_id
@@ -16,7 +17,7 @@ from linktools.ai.history._projection import StepExecutionHistoryReader
 from linktools.ai.history._history import _merge_usage_summaries
 from linktools.ai.execution import UsageSummary
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
+
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
 
 from .test_model_interaction_lifecycle_paging import _Executions, _HistoryStore, _interaction, _record
@@ -58,9 +59,7 @@ async def test_trace_index_preserves_timestamp_order_and_fixed_event_membership(
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
-        await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
-            transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
-        ))
+        await executions.create_execution(replace(_execution(), execution_id="root", root_execution_id="root"))
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=1)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
@@ -99,9 +98,7 @@ async def test_history_cursor_preserves_response_association_cutoff(tmp_path: Pa
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
-        await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
-            transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
-        ))
+        await executions.create_execution(replace(_execution(), execution_id="root", root_execution_id="root"))
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=1)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
@@ -144,9 +141,7 @@ async def test_history_cursor_keeps_an_empty_captured_run_empty_after_completion
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
-        await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
-            transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
-        ))
+        await executions.create_execution(replace(_execution(), execution_id="root", root_execution_id="root"))
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")
         run_ids = tuple(agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=sequence)
@@ -195,9 +190,7 @@ async def test_history_and_trace_pagination_preserve_cross_run_and_child_order(t
         fake = _Executions(root)
         fake.children.append(child)
         for execution in (root, child):
-            await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
-                transaction, ExecutionHistoryHeadRecord(execution.execution_id, ExecutionHistoryState.OPEN, 0, None),
-            ))
+            await executions.create_execution(replace(_execution(), execution_id=execution.execution_id, root_execution_id="root"))
         started = datetime(2026, 1, 1, tzinfo=timezone.utc)
         for execution_id, sequence, times in (("root", 1, (2, 1)), ("root", 2, (1, 2)), ("child", 1, (1, 2))):
             run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id=execution_id, agent_run_seq=sequence)
@@ -258,9 +251,7 @@ async def test_history_replay_projection_omits_only_duplicate_calls_at_original_
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = storage.execution.executions
-        await executions.state_store.mutate(lambda transaction: executions.insert_history_head_in_transaction(
-            transaction, ExecutionHistoryHeadRecord("root", ExecutionHistoryState.OPEN, 0, None),
-        ))
+        await executions.create_execution(replace(_execution(), execution_id="root", root_execution_id="root"))
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="root", agent_run_seq=1)
         conversation_id = agent_conversation_id(namespace="history", tenant_id="tenant", execution_id="root")

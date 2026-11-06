@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,8 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.persistence.contracts import ExecutionRecord
+from linktools.ai.persistence.contracts import ExecutionRecord, ToolOperationAdmission
+from linktools.ai.persistence.commands import StateCommands
 from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 
@@ -53,7 +55,6 @@ def _tool_record() -> ToolOperationRecord:
         status=ToolOperationStatus.PENDING,
         owner=None,
         fence=0,
-        lease_expires_at=None,
         error_code=None,
         created_at=now,
         updated_at=now,
@@ -77,21 +78,28 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     state = Persistence(PersistenceStorage.from_root(root, exclusive_writer=True))
     await state.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
-        await state.checkpoint.tools.reserve(_tool_record())
-        await state.checkpoint.tools.claim(
-            "operation",
-            tenant_id="tenant",
-            owner="worker",
-            lease_seconds=1,
+        from .test_step_projection import _execution
+
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="worker")
+        await state.execution.executions.create_execution(execution)
+        commands = StateCommands(state.execution.executions, namespace="effect-unknown",
+            events=state.execution.events, tools=state.checkpoint.tools, background_tasks=set())
+        record = _tool_record()
+        request = ToolOperationAdmission(
+            execution_id=record.execution_id, tool_operation_id=record.tool_operation_id,
+            agent_run_id=record.agent_run_id, recovery_agent_run_id=None, tool_call_id=record.tool_call_id,
+            idempotency_key_digest=record.idempotency_key_digest, tool_name=record.tool_name,
+            arguments_digest=record.arguments_digest, binding_digest=record.binding_digest,
+            replay_safe=False, owner="worker", producer_generation=1,
         )
-        await asyncio.sleep(1.05)
+        await commands.commit_tool_admission(request)
+        successor = await state.execution.executions.claim_next_agent_run("execution", tenant_id="tenant",
+            expected_revision=1, expected_agent_run_seq=1, producer_claim_id="worker-2")
+        await commands.reconcile_tool_turn_takeover("operation", execution_id="execution",
+            producer_generation=successor.producer_generation, producer_claim_id=successor.producer_claim_id)
         with pytest.raises(AIError) as error:
-            await state.checkpoint.tools.claim(
-                "operation",
-                tenant_id="tenant",
-                owner="worker-2",
-                lease_seconds=1,
-            )
+            await commands.commit_tool_admission(replace(request,
+                owner=successor.producer_claim_id, producer_generation=successor.producer_generation))
         assert error.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     finally:
         await state.close()

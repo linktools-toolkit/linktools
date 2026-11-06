@@ -28,10 +28,10 @@ async def test_local_sqlite_persistence_rejects_second_agent_producer_before_com
         calls = 0
         original = persistence.create_agent_run_store
 
-        async def create():
+        async def create(**kwargs):
             nonlocal calls
             calls += 1
-            return await original()
+            return await original(**kwargs)
 
         await first.__aenter__()
         monkeypatch.setattr(persistence, "create_agent_run_store", create)

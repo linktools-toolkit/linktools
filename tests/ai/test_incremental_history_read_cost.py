@@ -28,7 +28,7 @@ from .test_history_projection_conformance import _record
 
 async def _seed_trace(storage: Persistence, count: int):
     await storage.initialize(namespace="history", tenant_id="tenant")
-    await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1)
     run = AgentRunRecord(
         run_id, agent_id="default", metadata={"agent_run_seq": "1"},

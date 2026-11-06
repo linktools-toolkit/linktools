@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.contracts import (
-    ExecutionHistoryState, ExecutionTerminalCommit, IdempotencyRecord, ResultRecord,
+    ExecutionTerminalCommit, IdempotencyRecord, ResultRecord,
 )
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence._runtime_commands import StateCommands
@@ -50,8 +50,7 @@ def _commit(current, *, generation=1):
 
 async def _seed(state, current):
     repository = state.execution.executions
-    await repository.create_with_history_head(current)
-    await repository.state_store.mutate(lambda tx: repository.admit_history_producer_in_transaction(tx, current))
+    await repository.create_execution(current)
     await state.execution.idempotency.reserve(IdempotencyRecord(
         "start", "a" * 64, "b" * 64, ResourceKind.EXECUTION, current.execution_id,
         IdempotencyStatus.STARTED, None, None, current.created_at, current.updated_at,
@@ -79,7 +78,7 @@ def _assert_semantic_snapshot(batch, scalar, reduced_guards):
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_final_control_cas_preserves_business_records_and_uses_fewer_writes(tmp_path: Path, backend: str) -> None:
-    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
+    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, producer_generation=1, durable_trace=False)
     states = []
     snapshots = []
     counts = []
@@ -108,13 +107,14 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
                 if engine is not None:
                     event.remove(engine, "before_cursor_execute", capture)
             assert result.execution.status is ExecutionStatus.FAILED
-            head = await repository.get_history_head(current.execution_id, tenant_id="tenant")
-            assert head.state is ExecutionHistoryState.CLOSED
-            assert head.producer_generation == 1
+            final = await repository.get_fresh(current.execution_id, tenant_id="tenant")
+            assert final == result.execution
+            assert final.producer_generation == 1
+            assert final.history_seal_digest is None
             assert await repository.get_history_seal(current.execution_id, tenant_id="tenant") is None
             snapshots.append(await _snapshot(repository.state_store))
             counts.append(calls)
-        _assert_semantic_snapshot(snapshots[0], snapshots[1], {"execution_history_head": 1})
+        _assert_semantic_snapshot(snapshots[0], snapshots[1], {"execution": 1})
         if backend == "sqlite":
             assert counts[0]["UPDATE"] < counts[1]["UPDATE"]
             assert counts[0]["INSERT"] == counts[1]["INSERT"]
@@ -124,39 +124,50 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
 
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_producer_final_cas_preserves_generation_and_subclass_guard(tmp_path: Path, backend: str) -> None:
-    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
+async def test_single_execution_cas_preserves_generation_and_subclass_guard(tmp_path: Path, backend: str) -> None:
+    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False,
+                      producer_generation=1, producer_claim_id="owner-claim")
     snapshots = []
     for scalar in (False, True):
         path = tmp_path / str(scalar)
         path.mkdir()
-        state = _storage(backend, path)
-        state = Persistence(state)
+        state = Persistence(_storage(backend, path))
         await state.initialize(namespace="owner-admit", tenant_id="tenant")
         try:
             source = state.execution.executions
             repository = (_ScalarExecution(source.state_store, namespace="owner-admit", tenant_id="tenant")
                           if scalar else source)
-            await repository.create_with_history_head(current)
-            await repository.state_store.mutate(lambda tx: repository.admit_history_producer_in_transaction(
-                tx, current, producer_claim_id="owner-claim",
+            await repository.create_execution(current)
+            updated = await repository.compare_and_swap(
+                current.execution_id, tenant_id="tenant", expected_revision=current.revision,
+                next_record=replace(current, revision=2, producer_generation=2, producer_claim_id="replacement-claim"),
+            )
+            assert (updated.revision, updated.producer_generation, updated.producer_claim_id) == (2, 2, "replacement-claim")
+            with pytest.raises(AIError) as stale:
+                await repository.state_store.mutate(lambda tx: repository.require_execution_producer_in_transaction(
+                    tx, current.execution_id, expected_producer_generation=1,
+                ))
+            assert stale.value.code is ErrorCode.STORAGE_CONFLICT
+            active, _stored = await repository.state_store.mutate(lambda tx: repository.require_execution_producer_in_transaction(
+                tx, current.execution_id, expected_producer_generation=2,
             ))
+            assert active == updated
+            records, _facts, _sequences = await _snapshot(repository.state_store)
+            assert [record.kind for record in records] == ["execution"]
             snapshots.append(await _snapshot(repository.state_store))
-            head = await repository.get_history_head(current.execution_id, tenant_id="tenant")
-            assert (head.revision, head.producer_generation, head.producer_claim_id) == (1, 1, "owner-claim")
         finally:
             await state.close()
-    _assert_semantic_snapshot(snapshots[0], snapshots[1], {"execution_history_head": 1})
+    _assert_semantic_snapshot(snapshots[0], snapshots[1], {})
 
 
-@pytest.mark.parametrize("member", ("execution_history_head", "execution", "idempotency"))
+@pytest.mark.parametrize("member", ("execution", "idempotency"))
 async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str,
 ) -> None:
     state = _storage("sqlite", tmp_path)
     state = Persistence(state)
     await state.initialize(namespace="owner-conflict", tenant_id="tenant")
-    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
+    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, producer_generation=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
@@ -164,7 +175,7 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
         original = _SqlTransaction.replace_records
         conflicts = []
         async def conflict(transaction, replacements):
-            if {item.record.kind for item in replacements} == {"execution_history_head", "execution", "idempotency"}:
+            if {item.record.kind for item in replacements} == {"execution", "idempotency"}:
                 target = next(item for item in replacements if item.record.kind == member)
                 table = transaction._table("ai_state_records")
                 await transaction._execute(update(table).where(
@@ -190,7 +201,7 @@ async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_
     state = _storage(backend, tmp_path)
     state = Persistence(state)
     await state.initialize(namespace="owner-rollback", tenant_id="tenant")
-    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
+    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, producer_generation=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
@@ -200,7 +211,7 @@ async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_
             identity = await repository.terminal_idempotency_in_transaction(transaction, commit)
             await repository.commit_closed_terminal_in_transaction(transaction, replace(commit, idempotency=identity))
             with pytest.raises(AIError) as fenced:
-                await repository.require_open_history_head_in_transaction(
+                await repository.require_execution_producer_in_transaction(
                     transaction, current.execution_id, expected_producer_generation=1,
                 )
             assert fenced.value.code is ErrorCode.STORAGE_CONFLICT
@@ -213,7 +224,7 @@ async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_
         await state.close()
 
 
-async def test_terminal_keeps_execution_first_when_dialect_updates_members_individually(
+async def test_terminal_updates_single_control_and_idempotency_without_extra_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from linktools.ai.storage import SQLiteDialect
@@ -222,13 +233,11 @@ async def test_terminal_keeps_execution_first_when_dialect_updates_members_indiv
     state = Persistence(state)
     await state.initialize(namespace="owner-lock-order", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), execution_id="execution-0", root_execution_id="execution-0",
-                      revision=1, durable_trace=False)
+                      revision=1, producer_generation=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
         execution_key = repository._key("execution", current.execution_id)
-        head_key = repository._key("execution_history_head", current.execution_id)
-        assert head_key < execution_key
         commands = StateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
         guard = _SqlTransaction.guard_record
         execute = _SqlTransaction._execute
@@ -249,11 +258,10 @@ async def test_terminal_keeps_execution_first_when_dialect_updates_members_indiv
             patch.setattr(_SqlTransaction, "guard_record", record_guard)
             patch.setattr(_SqlTransaction, "_execute", record_execute)
             await commands.commit_terminal_checkpoint(_commit(current), expected_execution=current)
-        assert writes[0] == ("guard", execution_key)
-        assert ("member", head_key) in writes
         assert ("member", execution_key) in writes
-        assert writes.index(("member", head_key)) < writes.index(("member", execution_key))
-        assert sum(kind == "guard" for kind, _key in writes) == 1
+        assert len(writes) == 2
+        assert all(kind == "member" for kind, _key in writes)
+        assert len({key for _kind, key in writes}) == 2
     finally:
         await state.close()
 
@@ -270,7 +278,7 @@ async def test_aborted_terminal_batch_retries_whole_owner_write_set(
     state = _storage("sqlite", tmp_path)
     state = Persistence(state)
     await state.initialize(namespace="owner-retry", tenant_id="tenant")
-    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
+    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, producer_generation=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
@@ -280,7 +288,7 @@ async def test_aborted_terminal_batch_retries_whole_owner_write_set(
 
         async def abort_once(transaction, replacements):
             result = await original(transaction, replacements)
-            if {item.record.kind for item in replacements} == {"execution_history_head", "execution", "idempotency"}:
+            if {item.record.kind for item in replacements} == {"execution", "idempotency"}:
                 attempts.append(transaction)
                 if len(attempts) == 1:
                     cause = AbortedTransaction("known aborted transaction")
@@ -295,14 +303,15 @@ async def test_aborted_terminal_batch_retries_whole_owner_write_set(
         assert result.execution.revision == current.revision + 1
         assert result.execution.event_seq == current.event_seq + 1
         records, facts, _sequences = await _snapshot(repository.state_store)
-        assert len(records) == 3 and len(facts) == 1
-        assert (await repository.get_history_head(current.execution_id, tenant_id="tenant")).state is ExecutionHistoryState.CLOSED
+        assert len(records) == 2 and len(facts) == 1
+        final = await repository.get_fresh(current.execution_id, tenant_id="tenant")
+        assert final.status is ExecutionStatus.FAILED and final.history_seal_digest is None
     finally:
         await state.close()
 
 
 @pytest.mark.parametrize("_server", ("postgresql", "mysql"), indirect=True)
-async def test_read_committed_terminal_and_tool_guard_share_execution_first_order(
+async def test_read_committed_terminal_and_tool_guard_contend_on_single_execution(
     _server: tuple[str, list[str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import asyncio
@@ -326,7 +335,7 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
     state = Persistence(state)
     await state.initialize(namespace="owner-lock-order", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), execution_id="execution-0", root_execution_id="execution-0",
-                      revision=1, durable_trace=False)
+                      revision=1, producer_generation=1, durable_trace=False)
     first = None
     terminal = None
     entered = asyncio.Event()
@@ -336,10 +345,14 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
         await _seed(state, current)
         repository = state.execution.executions
         execution_key = repository._key("execution", current.execution_id)
-        head_key = repository._key("execution_history_head", current.execution_id)
-        assert head_key < execution_key
         commands = StateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
         original = _SqlTransaction.guard_record
+        original_replace = _SqlTransaction.replace_records
+
+        async def replace_terminal(transaction, replacements):
+            if any(item.record.key_digest == execution_key for item in replacements):
+                terminal_guard_started.set()
+            return await original_replace(transaction, replacements)
 
         async def interleave(transaction, key, *, expected_storage_revision):
             if asyncio.current_task() is not first and key == execution_key:
@@ -351,12 +364,13 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
             return result
 
         async def tool_owner():
-            await repository.state_store.mutate(lambda tx: repository.require_open_history_head_in_transaction(
+            await repository.state_store.mutate(lambda tx: repository.require_execution_producer_in_transaction(
                 tx, current.execution_id, expected_producer_generation=1, allow_cancelling=False,
             ))
 
         with monkeypatch.context() as patch:
             patch.setattr(_SqlTransaction, "guard_record", interleave)
+            patch.setattr(_SqlTransaction, "replace_records", replace_terminal)
             first = asyncio.create_task(tool_owner())
             await asyncio.wait_for(entered.wait(), 5)
             terminal = asyncio.create_task(commands.commit_terminal_checkpoint(_commit(current), expected_execution=current))
@@ -369,8 +383,9 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
                 assert error.code is ErrorCode.STORAGE_CONFLICT
                 await commands.commit_terminal_checkpoint(_commit(current), expected_execution=current)
         records, facts, _sequences = await _snapshot(repository.state_store)
-        assert len(records) == 3 and len(facts) == 1
-        assert (await repository.get_history_head(current.execution_id, tenant_id="tenant")).state is ExecutionHistoryState.CLOSED
+        assert len(records) == 2 and len(facts) == 1
+        final = await repository.get_fresh(current.execution_id, tenant_id="tenant")
+        assert final.status is ExecutionStatus.FAILED and final.history_seal_digest is None
     finally:
         release.set()
         for task in (first, terminal):
@@ -390,7 +405,7 @@ async def test_closed_terminal_lost_ack_uses_complete_readback_without_reapplyin
     state = _storage(backend, tmp_path)
     state = Persistence(state)
     await state.initialize(namespace="owner-ack", tenant_id="tenant")
-    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
+    current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, producer_generation=1, durable_trace=False)
     try:
         await _seed(state, current)
         repository = state.execution.executions
@@ -413,9 +428,9 @@ async def test_closed_terminal_lost_ack_uses_complete_readback_without_reapplyin
         assert len(commits) == 1
         assert result.execution == commits[0].execution
         records, facts, _sequences = await _snapshot(repository.state_store)
-        assert len(records) == 3 and len(facts) == 1
+        assert len(records) == 2 and len(facts) == 1
         assert {record.kind: record.storage_revision for record in records} == {
-            "execution": 2, "execution_history_head": 2, "idempotency": 1,
+            "execution": 1, "idempotency": 1,
         }
     finally:
         await state.close()

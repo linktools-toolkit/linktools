@@ -106,7 +106,7 @@ class _Launcher:
         identity: object,
     ) -> ExecutionRecord:
         del request, identity
-        started = replace(execution, status=ExecutionStatus.STARTED)
+        started = replace(execution, status=ExecutionStatus.STARTED, revision=execution.revision + 1)
         repository = self._repository
         if repository is not None:
             await repository.compare_and_swap(

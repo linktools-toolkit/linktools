@@ -17,7 +17,9 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.history import History
 from linktools.ai.snapshot import Snapshot
 from linktools.ai.runtime import Runtime
@@ -50,8 +52,9 @@ class _Cache(InMemoryCacheBackend):
         await super().put(key, content)
 
 
+@pytest.mark.parametrize("checkpointed", (False, True))
 async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpointed: bool,
 ) -> None:
     root = tmp_path / "state"
     routes = {
@@ -60,7 +63,7 @@ async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
     }
     declarations = _features(
         ExecutionCapability(retain_history=True),
-        CheckpointCapability(),
+        *((native_checkpoint(),) if checkpointed else ()),
         TraceCapability(),
     )
     declarations.model("default", _FeatureModels())
@@ -88,7 +91,7 @@ async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
         pytest.fail("read-only history must not open a metric recorder or model")
 
     monkeypatch.setattr(TraceCapability, "before_run", unexpected_hook)
-    monkeypatch.setattr(CheckpointCapability, "before_model_request", unexpected_hook)
+    monkeypatch.setattr(StepPersistence, "before_model_request", unexpected_hook)
     monkeypatch.setattr(MetricsService, "__init__", unexpected_recording)
     monkeypatch.setattr(_FeatureModels, "materialize", unexpected_recording)
     reopened = root_storage()
@@ -104,6 +107,14 @@ async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
     limits = SnapshotLimits(max_entries=10000, max_bytes=16 * 1024 * 1024)
     targets = (InMemoryObjectStore("snapshot-first"), InMemoryObjectStore("snapshot-second"))
     snapshots = []
+    if checkpointed:
+        async with Persistence.open("module-routes", storage=root_storage(), tenant_id=principal.tenant_id,
+                                    read_only=True) as persistence:
+            with pytest.raises(AIError) as rejected:
+                await Snapshot.create(persistence=persistence, object_store=targets[0],
+                                      exclusive=_SnapshotGuard(), limits=limits)
+        assert rejected.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
+        return
     for target in targets:
         async with Persistence.open("module-routes", storage=root_storage(), tenant_id=principal.tenant_id, read_only=True) as persistence:
             snapshots.append(await Snapshot.create(
@@ -170,19 +181,37 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
                     assert (cache.reads, cache.writes) == counters
 
 
-@pytest.mark.parametrize("feature_type", (CheckpointCapability, TraceCapability))
-async def test_atomic_module_route_rejects_a_different_transaction_group(
-    tmp_path: Path, feature_type: type,
-) -> None:
+async def test_trace_route_rejects_a_different_transaction_group(tmp_path: Path) -> None:
     root = tmp_path / "state"
-    feature = feature_type()
-    domain = "checkpoint" if feature_type is CheckpointCapability else "trace"
-    storage = PersistenceStorage(replace(PersistenceStorage.from_root(root, exclusive_writer=True).plan,
-                                         **{domain: StorageRoute.sqlite(tmp_path / "separate.db", exclusive_writer=True)}))
+    storage = PersistenceStorage(replace(
+        PersistenceStorage.from_root(root, exclusive_writer=True).plan,
+        trace=StorageRoute.sqlite(tmp_path / "separate.db", exclusive_writer=True),
+    ))
     with pytest.raises(AIError) as invalid:
-        async with Persistence.open('different-group', storage=storage) as persistence_174, Runtime.attach(persistence=persistence_174, features=model_features(_FeatureModels(), _features(feature))):
-            pytest.fail("an atomic module cannot silently split its transactions")
+        async with Persistence.open("different-group", storage=storage) as persistence, Runtime.attach(
+            persistence=persistence, features=model_features(_FeatureModels(), _features(TraceCapability())),
+        ):
+            pytest.fail("Trace cannot silently split its source transaction")
     assert invalid.value.code in {ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, ErrorCode.STORAGE_DEPENDENCY_NOT_READY}
+
+
+async def test_native_checkpoint_accepts_an_independent_durable_store(tmp_path: Path) -> None:
+    from pydantic_ai_harness.step_persistence import SqliteStepStore
+
+    database = tmp_path / "independent-steps.db"
+    checkpoint = native_checkpoint(database=database)
+    storage = PersistenceStorage.sqlite(tmp_path / "control.db")
+    async with Persistence.open("independent-steps", storage=storage) as persistence, Runtime.attach(
+        persistence=persistence, features=model_features(_FeatureModels(), _features(checkpoint)),
+    ) as runtime:
+        execution = await runtime.agents.get().start("question")
+        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+        runs = await checkpoint.store.list_runs()
+        assert len(runs) == 1
+        expected = await checkpoint.store.latest_snapshot(run_id=runs[0].run_id)
+        assert expected is not None and expected.state == "complete"
+    cold = SqliteStepStore(database=database)
+    assert await cold.latest_snapshot(run_id=runs[0].run_id) == expected
 
 
 async def test_split_conversation_route_uses_durable_admission_with_shared_cache(tmp_path: Path) -> None:

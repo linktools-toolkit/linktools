@@ -20,7 +20,8 @@ def _backend():
     backend._tenant_id = "tenant"
     backend._pending_turns = _PendingExecutionTurns()
     backend._tasks = {}
-    backend._pending_renewals = {}
+    backend._turn_monitors = {}
+    backend._turn_owners = {}
     backend._execution_durable_tasks = {}
     backend._recovery_reconcile_tasks = {}
     backend._worker_failures = {"old": object()}
@@ -30,7 +31,6 @@ def _backend():
                                                 require_unsubmitted=lambda _id: None)
     backend._run_store = object.__new__(RuntimeAgentRunStore)
     backend._run_store.discard_unsubmitted_execution_staging = AsyncMock()
-    backend._release_pending_claim = AsyncMock()
     coordinator = SimpleNamespace(read_owner=AsyncMock(return_value=None))
     backend._pending_turns.coordination = coordinator
     turn = SimpleNamespace(
@@ -119,7 +119,7 @@ async def test_pending_cleanup_rechecks_submission_after_await(race: str) -> Non
         competitor = asyncio.create_task(competing())
         await entered.wait()
         if race == "renewal":
-            backend._pending_renewals["old"] = competitor
+            backend._turn_monitors["old"] = competitor
         else:
             backend._execution_durable_tasks["old"] = {competitor}
         cleanup = asyncio.create_task(backend._cleanup_failed_pending_turn(turn, forget=True))
@@ -150,14 +150,14 @@ async def test_cancelled_cleanup_keeps_renewal_identity_until_it_stops() -> None
             await release.wait()
 
     renewal = asyncio.create_task(renew())
-    backend._pending_renewals["old"] = renewal
+    backend._turn_monitors["old"] = renewal
     await entered.wait()
     cleanup = asyncio.create_task(backend._cleanup_failed_pending_turn(turn))
     await cancelled.wait()
     cleanup.cancel()
     with pytest.raises(asyncio.CancelledError):
         await cleanup
-    assert backend._pending_renewals["old"] is renewal and not renewal.done()
+    assert backend._turn_monitors["old"] is renewal and not renewal.done()
     backend._run_store.discard_unsubmitted_execution_staging.assert_not_awaited()
     release.set()
     await renewal
@@ -184,7 +184,7 @@ class _Lock:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guard", ("execution", "head", "read_error", "flight", "seal", "generation"))
+@pytest.mark.parametrize("guard", ("execution", "absent", "read_error", "flight", "seal", "generation"))
 async def test_run_owner_requires_fresh_absence_and_unsealed_generation(guard: str) -> None:
     store = object.__new__(RuntimeAgentRunStore)
     store._tenant_id = "tenant"
@@ -213,12 +213,16 @@ async def test_run_owner_requires_fresh_absence_and_unsealed_generation(guard: s
         assert in_read, "cleanup proof must bypass hot cache through a source transaction"
         return object() if guard == "execution" else None
 
-    async def get_head(*args, **kwargs):
-        assert in_read
-        return object() if guard == "head" else None
-
     store._execution_repository = SimpleNamespace(state_store=SimpleNamespace(read=read),
-                                                  get=get, get_history_head=get_head)
+                                                  get=get)
+    if guard == "absent":
+        await store._discard_unsubmitted_execution_staging("old")
+        store.trace_persistence.discard.assert_awaited_once_with("run")
+        store._release_staging_many.assert_awaited_once_with(
+            candidate_agent_run_ids=("run",), execution_id="old",
+        )
+        assert store.trace_persistence.dirty == set()
+        return
     with pytest.raises(OSError if guard == "read_error" else AIError):
         await store._discard_unsubmitted_execution_staging("old")
     store.trace_persistence.discard.assert_not_awaited()
@@ -236,7 +240,7 @@ async def test_pending_cleanup_rechecks_quiescence_after_owner_read(kind: str) -
         if kind == "source_task":
             backend._execution_durable_tasks["old"] = {task}
         else:
-            target = backend._recovery_reconcile_tasks if kind == "recovery" else backend._pending_renewals
+            target = backend._recovery_reconcile_tasks if kind == "recovery" else backend._turn_monitors
             target["old"] = task
         return None
 
@@ -295,18 +299,77 @@ async def test_unsubmitted_cache_append_uncertainty_keeps_exact_ack_identity() -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", (False, True))
-async def test_coordination_release_is_not_permission_to_discard_a_submitted_plan(unknown: bool) -> None:
+async def test_pending_cleanup_retains_submitted_plan_after_owner_stops(unknown: bool) -> None:
     backend, turn = _backend()
     turn.committing = True
     turn.reconcile = object()
     turn.uncertain = unknown
+    closed = asyncio.Event()
+    closed.set()
+    backend._turn_owners["old"] = SimpleNamespace(lifetime=None, closed=closed)
     await backend._cleanup_failed_pending_turn(turn, forget=True)
-    if unknown:
-        backend._release_pending_claim.assert_not_awaited()
-    else:
-        backend._release_pending_claim.assert_awaited_once_with(turn.coordination)
     backend._pending_turns.coordination.read_owner.assert_not_awaited()
     backend._run_store.discard_unsubmitted_execution_staging.assert_not_awaited()
     backend._execution_buffer.flush_cleanup.assert_not_awaited()
     assert backend._pending_turns.get("old", tenant_id="tenant") is turn
     assert "old" in backend._worker_failures
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard", (
+    "PENDING", "CLAIMED", "EFFECT_UNKNOWN", "source_commit_unknown", "worker", "owner", "recovery",
+    "new_source_task", "new_owner_during_proof",
+))
+async def test_revoked_recovery_cleanup_retains_unsettled_work(guard: str) -> None:
+    from linktools.ai.core import ExecutionStatus, ToolOperationStatus
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+    from linktools.ai.runtime._execution_buffer import _Entry, _ExecutionPayloadBuffer
+    from linktools.ai.storage import InMemoryCacheBackend
+
+    backend, turn = _backend()
+    backend._pending_turns.release(turn)
+    backend.load_execution = AsyncMock(return_value=SimpleNamespace(status=ExecutionStatus.RECOVERY_REQUIRED))
+    archive = object.__new__(ModelInteractionStateStepArchive)
+    archive.require_revoked_execution_producer = AsyncMock()
+    backend._run_stores = {PersistenceDomain.TRACE: archive}
+    backend._agent_run_lifecycle = SimpleNamespace(discard_revoked_producer_staging=AsyncMock())
+    cache = InMemoryCacheBackend(max_bytes=2**20)
+    buffer = backend._execution_buffer = _ExecutionPayloadBuffer(cache)
+    buffer.bind_producer("old", 2)
+    scope = buffer._scopes["old"]
+    content = b"capture whose source outcome is not settled"
+    assert await cache.append(scope.id, "capture-id", "old", content, wait=False)
+    scope.entries.append(_Entry("capture-id", "unused"))
+    scope.sealed = guard == "source_commit_unknown"
+    status = ToolOperationStatus(guard) if guard in {"PENDING", "CLAIMED", "EFFECT_UNKNOWN"} else ToolOperationStatus.COMPLETED
+    pending = None
+    if guard in {"worker", "recovery", "new_source_task"}:
+        pending = asyncio.create_task(asyncio.Event().wait())
+        if guard != "new_source_task":
+            target = backend._tasks if guard == "worker" else backend._recovery_reconcile_tasks
+            target["old"] = pending
+    elif guard == "owner":
+        backend._turn_owners["old"] = SimpleNamespace(closed=asyncio.Event())
+
+    async def operations(*args, **kwargs):
+        if guard == "new_source_task":
+            backend._execution_durable_tasks["old"] = {pending}
+        return (SimpleNamespace(status=status),)
+
+    backend._tool_operations = SimpleNamespace(list_by_execution=operations)
+    if guard == "new_owner_during_proof":
+        async def revoked(*args, **kwargs):
+            backend._turn_owners["old"] = SimpleNamespace(closed=asyncio.Event())
+        archive.require_revoked_execution_producer.side_effect = revoked
+    try:
+        await backend._release_revoked_failed_producers()
+        assert await cache.read_batch(scope.id, limit=10) == (("capture-id", "old", content),)
+        assert not scope.released
+        assert "old" in backend._worker_failures
+        assert backend._pending_audit_events["old"] == ["old"]
+        backend._agent_run_lifecycle.discard_revoked_producer_staging.assert_not_awaited()
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)

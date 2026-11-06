@@ -74,6 +74,7 @@ class _SessionExecutionService(ExecutionService, Protocol):
         session_id: str,
         request: ExecutionRequest,
         *,
+        session: SessionRecord | None = None,
         binding_contract: "AgentBindingContract | None" = None,
         resolved_binding: "AgentBinding | None" = None,
         dependency_hold_id: "str | None" = None,
@@ -104,10 +105,10 @@ class _SessionTranscriptStore(Protocol):
     async def load_conversation_model_context(
         self,
         *,
-        history_id: str | None,
         agent_run_id: str,
         tenant_id: str,
-        message_count: int | None = None,
+        checkpoint_sequence: int | None = None,
+        projection_digest: str | None = None,
     ) -> tuple[object, ...]: ...
 
 
@@ -117,6 +118,7 @@ class _SessionExecutionAdapter:
 
     async def start_for_session(self, agent_id: str, binding_digest: str, session_id: str,
                                 request: ResumeSessionRequest, *,
+                                session: SessionRecord | None = None,
                                 binding_contract: AgentBindingContract | None = None,
                                 resolved_binding: AgentBinding | None = None,
                                 dependency_hold_id: str | None = None,
@@ -130,6 +132,7 @@ class _SessionExecutionAdapter:
         )
         return await self._execution.start_for_session(
             agent_id, binding_digest, session_id, execution_request,
+            session=session,
             binding_contract=binding_contract, resolved_binding=resolved_binding, dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
@@ -530,12 +533,11 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if self._transcript_store is None or record.continuation is None:
                 return ()
-            history_id = record.continuation.history_id or record.history_id
             return await self._transcript_store.load_conversation_model_context(
-                history_id=history_id,
                 agent_run_id=record.continuation.agent_run_id,
                 tenant_id=self._runtime_conversation.sessions.tenant_id,
-                message_count=record.continuation.message_count,
+                checkpoint_sequence=record.continuation.checkpoint_sequence,
+                projection_digest=record.continuation.projection_digest,
             )
 
     async def _iter_session_messages(

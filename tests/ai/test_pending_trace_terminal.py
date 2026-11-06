@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pending Trace publication creates and seals only a reservation-owned head."""
+"""Pending Trace publication shares its terminal execution insertion."""
 
 from dataclasses import replace
 from pathlib import Path
@@ -11,7 +11,7 @@ from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._step_archive import PreparedExecutionProjection
-from linktools.ai.persistence.contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
+
 
 from .test_pending_turn_commit import _NAMESPACE, _pending_turn, _snapshot, _turn_state
 from .test_pending_turn_outcomes import _outcome
@@ -55,8 +55,6 @@ async def _publish(state, turn, projections):
         next_cursor=turn.cursor if successful and not sessionless else None,
         conversation_agent_run=turn.run if successful and not sessionless else None,
         conversation_checkpoint=turn.checkpoint if successful and not sessionless else None,
-        recovery_run=turn.run if successful and sessionless else None,
-        recovery_agent_run_checkpoint=turn.checkpoint if successful and sessionless else None,
         audit_events=turn.audit_events, execution_projections=projections,
     )
 
@@ -72,9 +70,9 @@ async def test_pending_trace_seals_the_atomic_terminal(tmp_path: Path, backend, 
         assert await state.storage.execution.executions.get("execution", tenant_id="tenant") is None
         result = await _publish(state, turn, projections)
         assert result.execution.status is status
-        head = await state.storage.execution.executions.get_history_head("execution", tenant_id="tenant")
+        head = await state.storage.execution.executions.get("execution", tenant_id="tenant")
         seal = await state.storage.execution.executions.get_history_seal("execution", tenant_id="tenant")
-        assert head.state is ExecutionHistoryState.SEALED and head.seal_digest == seal.seal_digest
+        assert (head.history_seal_digest is not None) and head.history_seal_digest == seal.seal_digest
         assert seal.execution_event_high_water == result.execution.event_seq
         assert seal.run_heads[0].agent_run_id == turn.run.agent_run_id
         assert await archive.verify_execution_projection_head(projections[0])
@@ -158,17 +156,16 @@ async def test_pending_trace_unknown_commit_uses_sealed_source_readback(tmp_path
         assert await _snapshot(state) == before
 
 
-@pytest.mark.parametrize("existing", ("execution_head", "run", "transcript_head"))
+@pytest.mark.parametrize("existing", ("execution", "run", "transcript_head"))
 async def test_pending_trace_does_not_adopt_existing_source_heads(tmp_path: Path, existing) -> None:
     async with _turn_state("memory", tmp_path) as state:
         turn, projections = await _trace_turn(state, ExecutionStatus.FAILED)
         repository = state.storage.execution.executions
         archive = state.storage.run_store.read_store(PersistenceDomain.TRACE)
-        if existing == "execution_head":
+        if existing == "execution":
             store = repository.state_store
-            record = repository._stored_history_head(ExecutionHistoryHeadRecord(
-                "execution", ExecutionHistoryState.OPEN, 0, None, producer_generation=2,
-            ))
+            record = repository._stored("execution", "execution", turn.reservation.execution,
+                                        state=turn.reservation.execution.status.value)
         else:
             store = archive.state_store
             record = (archive._stored_agent_run(turn.run) if existing == "run" else
@@ -178,7 +175,9 @@ async def test_pending_trace_does_not_adopt_existing_source_heads(tmp_path: Path
         with pytest.raises(AIError):
             await _publish(state, turn, projections)
         assert await _snapshot(state) == before
-        assert await repository.get("execution", tenant_id="tenant") is None
+        assert await repository.get("execution", tenant_id="tenant") == (
+            turn.reservation.execution if existing == "execution" else None
+        )
 
 
 @pytest.mark.parametrize("missing", ("seal", "trace_head"))
@@ -219,3 +218,42 @@ async def test_pending_trace_without_checkpoints_cannot_adopt_a_prior_projection
             await _publish(state, turn, (inherited,))
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await state.storage.execution.executions.get("execution", tenant_id="tenant") is None
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_terminal_insertion_receipt_cannot_be_reused_in_a_later_transaction(
+    tmp_path: Path, monkeypatch, backend: str,
+) -> None:
+    async with _turn_state(backend, tmp_path) as state:
+        turn, projections = await _trace_turn(state, ExecutionStatus.FAILED)
+        repository = state.storage.execution.executions
+        archive = state.storage.run_store.read_store(PersistenceDomain.TRACE)
+        original = type(repository).insert_pending_turn_in_transaction
+        receipts = []
+
+        async def insert(self, *args, **kwargs):
+            result, receipt = await original(self, *args, **kwargs)
+            receipts.append(receipt)
+            return result, receipt
+
+        with monkeypatch.context() as patch:
+            patch.setattr(type(repository), "insert_pending_turn_in_transaction", insert)
+            await _publish(state, turn, projections)
+        receipt = receipts[0]
+        before = await _snapshot(state)
+        projection = projections[0]
+
+        async def replay(group):
+            await archive.sync_projection_in_transaction(
+                group.transaction(archive.state_store), projection.run,
+                events=projection.events, checkpoints=projection.checkpoints,
+                execution_id=receipt.execution.execution_id,
+                producer_generation=projection.producer_generation,
+                execution_guard=(receipt.execution, receipt.record),
+                inserted_terminal=receipt,
+            )
+
+        with pytest.raises(AIError) as rejected:
+            await repository.state_store.storage_group.mutate(archive.transaction_stores, replay)
+        assert rejected.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await _snapshot(state) == before

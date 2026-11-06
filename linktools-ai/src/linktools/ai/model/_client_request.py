@@ -19,7 +19,6 @@ from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RequestUsage
-from linktools.core import environ
 
 from ..core import ImmutableJsonMapping, JsonValue
 from ._stream_attempt import ModelStreamAttempt
@@ -88,7 +87,7 @@ class ModelClientRequest:
     when not observed or decoding failed. HTTP version and a bounded
     protocol request ID (``http_version`` and ``request_id``) are the only
     additional response-header observations. Exception values contain only
-    redacted qualified types, never messages or request/response data.
+    qualified types, never messages or request/response data.
     """
 
     api: str
@@ -225,7 +224,7 @@ class ModelClientRequestRecorder:
         Events are entered, exhausted, cancel_requested, close_started,
         close_finished, and entry_error/iteration_error/exit_error/close_error.
         Each event writes ``sdk_<event>_ns``; errors also write
-        ``sdk_<event>_type``. Error observations retain only the redacted exception type. No dispatch
+        ``sdk_<event>_type``. Error observations retain only the exception type. No dispatch
         or a closed scope produces no observation, never a synthetic attempt.
         """
         if event not in {
@@ -327,7 +326,7 @@ class _ClientRequestEntry:
 
     @staticmethod
     def error_type(error: BaseException) -> str:
-        return environ.logging.redact(f"{type(error).__module__}.{type(error).__qualname__}")
+        return f"{type(error).__module__}.{type(error).__qualname__}"
 
     def record_observation(self, **values: JsonValue) -> None:
         if self.active:

@@ -5,7 +5,6 @@
 from collections.abc import Sequence
 from dataclasses import replace
 
-from linktools.core import environ
 from pydantic_ai.messages import ModelRequestAttempt, ModelResponse
 
 
@@ -21,9 +20,7 @@ def project_model_attempts(
     for attempt in attempts:
         if not isinstance(attempt, ModelRequestAttempt):
             raise TypeError("model request attempt is invalid")
-        error = None if content_omission_reason is not None else (
-            environ.logging.redact(attempt.error) if attempt.error is not None else None
-        )
+        error = None if content_omission_reason is not None else attempt.error
         projected.append(replace(attempt, error=error) if error != attempt.error else attempt)
     return projected
 

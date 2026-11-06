@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from dataclasses import dataclass, replace
@@ -40,7 +40,7 @@ from ..workspace import SupportsFileTools, ToolPermissionPolicy
 from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
 from ..model.messages import bind_tool_return_attachments
-from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
+from ._tool import ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
     ToolMetricContext,
@@ -372,51 +372,37 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         if decision.has_cached_result:
             return decision.cached_result
 
-        caller = asyncio.current_task()
-        if caller is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        stopping = False
-        leaf_active = True
-        heartbeat_error: BaseException | None = None
         observation: Observation | None = None
 
         def capture(value: Observation) -> None:
             nonlocal observation
             observation = value
 
-        async def renew() -> None:
-            nonlocal decision, heartbeat_error
-            try:
-                while not stopping:
-                    await asyncio.sleep(TOOL_OPERATION_LEASE_SECONDS / 3)
-                    decision = await bridge.renew(decision)
-            except BaseException as error:
-                if not stopping:
-                    heartbeat_error = error
-                    if leaf_active:
-                        caller.cancel()
-                raise
-
         async def unknown_after_leaf(error: BaseException) -> None:
             await bridge.unknown(decision, error)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
 
         async def invoke_and_settle() -> Any:
-            nonlocal leaf_active
+            entered = False
+            def entering() -> None:
+                nonlocal entered
+                entered = True
             try:
-                try:
-                    result = await self._invoke(
-                        call, tool.tool_def, final_args, invoke, capture=capture,
-                    )
-                finally:
-                    leaf_active = False
-                    # A leaf may suppress cancellation; loss still forbids its success.
-                    if heartbeat_error is not None:
-                        raise heartbeat_error
+                # A budget receipt accounts for usage, not fresh permission to
+                # enter a leaf after a suspending admission observes cancellation.
+                result = await self._invoke(
+                    call, tool.tool_def, final_args, invoke, capture=capture,
+                    preflight=(bridge.require_fresh_control
+                               if self._budget is not None or self._tool_metrics is not None else None),
+                    entering=entering,
+                )
             except (
                 ApprovalRequired,
                 CallDeferred,
             ) as error:
+                if not entered:
+                    await bridge.defer(decision)
+                    raise
                 if not replay_safe:
                     await unknown_after_leaf(error)
                 cancelled = await bridge.defer(decision)
@@ -424,11 +410,17 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     raise asyncio.CancelledError
                 raise
             except (ToolCallRetry, ToolCallFailed) as error:
+                if not entered:
+                    await bridge.defer(decision)
+                    raise
                 cancelled = await bridge.fail(decision, error)
                 if cancelled:
                     raise asyncio.CancelledError
                 raise
             except SkipToolExecution as error:
+                if not entered:
+                    await bridge.defer(decision)
+                    raise
                 if not replay_safe:
                     await unknown_after_leaf(error)
                 cancelled = await bridge.complete(decision, error.result)
@@ -436,60 +428,39 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     raise asyncio.CancelledError
                 raise
             except asyncio.CancelledError as error:
-                if isinstance(error, ToolEntryStopped):
+                if not entered or isinstance(error, ToolEntryStopped):
                     await bridge.defer(decision)
                 else:
                     await bridge.unknown(decision, error)
                 raise
             except BaseException as error:
+                if not entered:
+                    await bridge.defer(decision)
+                    raise
                 await unknown_after_leaf(error)
                 raise AssertionError("unreachable")
-            # Keep renewing through payload storage and commit. Fenced settlement and
-            # its readback, rather than a racing heartbeat, determine durable truth.
+            # Retain the actual outcome at its selected boundary before propagating cancellation or turn loss.
             cancelled = await bridge.complete(decision, result)
             if cancelled:
                 raise asyncio.CancelledError
             return result
 
-        heartbeat = asyncio.create_task(
-            renew(), name=f"tool-heartbeat-{decision.operation_id}"
-        )
         try:
-            if self._budget is not None:
-                try:
+            try:
+                if self._budget is not None and not decision.budget_admitted:
                     await self._budget.admit_tool(
                         call_id, operation_id=decision.operation_id, fence=decision.fence,
                     )
-                    if heartbeat_error is not None:
-                        raise heartbeat_error
-                    # Admission may outlast the lease before the heartbeat runs.
-                    # Renew synchronously so a stale owner cannot dispatch an effect.
-                    decision = await bridge.renew(decision)
-                    if heartbeat_error is not None:
-                        raise heartbeat_error
-                except BaseException:
-                    leaf_active = False
-                    cancelled = await bridge.defer(decision)
-                    if cancelled:
-                        raise asyncio.CancelledError
-                    raise
+                # Admission may suspend. Observe durable cancellation and
+                # producer loss after them; _invoke checks the scope at leaf entry.
+                await bridge.require_active()
+            except BaseException:
+                await bridge.defer(decision)
+                raise
             return await invoke_and_settle()
         finally:
-            stopping = True
-            heartbeat.cancel()
-            cleanup = asyncio.gather(heartbeat, return_exceptions=True)
-            cancelled = False
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    cancelled = True
-            # Settlement and its heartbeat cleanup own effect classification;
-            # a metric cancellation must never turn a committed effect unknown.
             if observation is not None and self._tool_metrics is not None:
                 await self._tool_metrics.record(observation)
-            if cancelled:
-                raise asyncio.CancelledError
 
     async def _raw_tool(
         self,
@@ -509,13 +480,19 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         handler: Any,
         *,
         capture: Callable[[Observation], None] | None = None,
+        preflight: Callable[[], Awaitable[None]] | None = None,
+        entering: Callable[[], None] | None = None,
     ) -> Any:
         scope = execution_handoff_scope.get()
         if scope is not None:
             scope.require_accepting()
         async def enter_leaf(arguments: dict[str, Any]) -> Any:
+            if preflight is not None:
+                await preflight()
             if scope is not None:
                 scope.require_accepting()
+            if entering is not None:
+                entering()
             return await handler(arguments)
 
         if self._tool_metrics is None:

@@ -26,12 +26,9 @@ async def _setup(tmp_path: Path, backend: str, cache: object | None = None, *, b
     else:
         state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", cache=cache))
     await state.initialize(namespace="projection-buffer", tenant_id="tenant")
-    execution = replace(_execution(), revision=1)
+    execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
     repository = state.execution.executions
-    await repository.create_with_history_head(execution)
-    await repository.state_store.mutate(
-        lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-    )
+    await repository.create_execution(execution)
     state.run_store.trace_persistence.configure("run", buffer=buffer, flush_interval=60.0)
     state.run_store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
     await state.run_store.register_agent_run(AgentRunRecord("run"), execution_id="execution")

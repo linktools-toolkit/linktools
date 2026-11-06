@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""Cached execution inspection never substitutes for producer dispatch authority."""
+
 from linktools.ai.persistence import Persistence
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.task import Task
-"""Model-boundary observations share one bounded execution/head snapshot."""
 from ._runtime_test_helpers import model_features
-
-from linktools.ai.persistence import Persistence
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -40,11 +39,9 @@ async def _state(backend: str, path: Path, cache=None):
 
 async def _seed(state, *, restart: bool = False):
     repository = state.execution.executions
-    execution = replace(_execution(), revision=1, restart_checkpoints=restart, durable_trace=False)
-    await repository.create_with_history_head(execution)
-    await repository.state_store.mutate(
-        lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-    )
+    execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim",
+                        restart_checkpoints=restart, durable_trace=False)
+    await repository.create_execution(execution)
     state.run_store.bind_execution_producer(
         "run", execution_id="execution", producer_generation=1,
         restart_checkpoints=restart, durable_trace=False,
@@ -53,9 +50,35 @@ async def _seed(state, *, restart: bool = False):
     return execution
 
 
+def _forbid_cached_dispatch_authority(monkeypatch):
+    from contextvars import ContextVar
+    from linktools.ai.persistence.runs import RuntimeAgentRunStore
+
+    checking = ContextVar("checking_dispatch", default=False)
+    checks = []
+    original_guard = RuntimeAgentRunStore.require_active_producer
+    original_get = ExecutionRepositoryImpl.get
+
+    async def require_active(self, agent_run_id, *, authoritative=False):
+        token = checking.set(True)
+        try:
+            await original_guard(self, agent_run_id, authoritative=authoritative)
+            checks.append(agent_run_id)
+        finally:
+            checking.reset(token)
+
+    async def get(self, *args, **kwargs):
+        assert not checking.get(), "dispatch authority cannot come from the ordinary read cache"
+        return await original_get(self, *args, **kwargs)
+
+    monkeypatch.setattr(RuntimeAgentRunStore, "require_active_producer", require_active)
+    monkeypatch.setattr(ExecutionRepositoryImpl, "get", get)
+    return checks
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_model_pair_uses_one_cached_source_capture(
+async def test_execution_inspection_reuses_one_cached_source_capture(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
@@ -71,32 +94,32 @@ async def test_model_pair_uses_one_cached_source_capture(
             return await original(callback)
 
         monkeypatch.setattr(source, "read", read)
-        pair = await repository.observe_execution_control("execution", tenant_id="tenant")
-        assert pair[0] == execution
-        assert pair[1].producer_generation == 1
-        assert await repository.observe_execution_control("execution", tenant_id="tenant") == pair
+        observed = await repository.get("execution", tenant_id="tenant")
+        assert observed == execution
+        assert observed.producer_generation == 1
+        assert await repository.get("execution", tenant_id="tenant") == observed
         assert reads == 1
 
 
-async def _advance_pair(repository):
+async def _advance_execution(repository, *, takeover: bool = True):
     async def mutate(tx):
         execution = await repository.get_in_transaction(tx, "execution", tenant_id="tenant")
-        head_record = await tx.get_record(repository._key("execution_history_head", "execution"))
-        head = await repository.get_history_head("execution", tenant_id="tenant")
-        changed = replace(execution, revision=execution.revision + 1, status=ExecutionStatus.CANCELLING)
-        await repository.compare_and_swap(
-            "execution", tenant_id="tenant", expected_revision=execution.revision, next_record=changed,
+        changed = replace(
+            execution, revision=execution.revision + 1,
+            status=ExecutionStatus.STARTED if takeover else ExecutionStatus.CANCELLING,
+            producer_generation=execution.producer_generation + int(takeover),
+            producer_claim_id="replacement-claim" if takeover else execution.producer_claim_id,
         )
-        changed_head = replace(head, revision=head.revision + 1, producer_generation=head.producer_generation + 1)
-        await repository.replace_history_head_in_transaction(tx, head_record, changed_head)
-        return changed, changed_head
+        return await repository.compare_and_swap_in_transaction(
+            tx, "execution", tenant_id="tenant", expected_revision=execution.revision, next_record=changed,
+        )
 
     return await repository.state_store.mutate(mutate)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_no_restart_model_boundaries_reuse_the_pair(
+async def test_unscoped_dispatch_reads_fresh_source_at_every_boundary(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
@@ -111,16 +134,14 @@ async def test_no_restart_model_boundaries_reuse_the_pair(
             return await original(callback)
 
         monkeypatch.setattr(source, "read", read)
-        for step in (1, 2):
-            await state.run_store.save_checkpoint(
-                AgentRunCheckpoint("run", step, []), execution_id="execution", producer_generation=1,
-            )
-        assert reads == 1
+        for _ in range(2):
+            await state.run_store.require_active_producer("run")
+        assert reads == 2
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_pair_without_cache_reads_source_each_time(
+async def test_execution_inspection_without_cache_reads_source_each_time(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _state(backend, tmp_path) as state:
@@ -135,31 +156,31 @@ async def test_pair_without_cache_reads_source_each_time(
             return await original(callback)
 
         monkeypatch.setattr(repository.state_store, "read", read)
-        first = await repository.observe_execution_control("execution", tenant_id="tenant")
-        assert await repository.observe_execution_control("execution", tenant_id="tenant") == first
+        first = await repository.get("execution", tenant_id="tenant")
+        assert await repository.get("execution", tenant_id="tenant") == first
         assert reads == 2
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_pair_inside_transaction_observes_source_not_cached_values(tmp_path: Path, backend: str) -> None:
+async def test_execution_inside_transaction_observes_source_not_cached_values(tmp_path: Path, backend: str) -> None:
     async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
         await _seed(state)
         repository = state.execution.executions
-        before = await repository.observe_execution_control("execution", tenant_id="tenant")
+        before = await repository.get("execution", tenant_id="tenant")
 
         async def mutate(tx):
-            changed = await _advance_pair(repository)
+            changed = await _advance_execution(repository)
             assert changed != before
-            assert await repository.observe_execution_control("execution", tenant_id="tenant") == changed
+            assert await repository.get("execution", tenant_id="tenant") == changed
             return changed
 
         changed = await repository.state_store.mutate(mutate)
-        assert await repository.observe_execution_control("execution", tenant_id="tenant") == changed
+        assert await repository.get("execution", tenant_id="tenant") == changed
 
 
 @pytest.mark.asyncio
-async def test_pair_late_fill_cannot_replace_newer_local_commit(tmp_path: Path) -> None:
+async def test_execution_late_cache_fill_cannot_replace_newer_local_commit(tmp_path: Path) -> None:
     started, release = asyncio.Event(), asyncio.Event()
 
     class Cache(InMemoryCacheBackend):
@@ -177,14 +198,14 @@ async def test_pair_late_fill_cannot_replace_newer_local_commit(tmp_path: Path) 
         await _seed(state)
         repository = state.execution.executions
         cache.blocked = True
-        reading = asyncio.create_task(repository.observe_execution_control("execution", tenant_id="tenant"))
+        reading = asyncio.create_task(repository.get("execution", tenant_id="tenant"))
         try:
             await asyncio.wait_for(started.wait(), 2)
-            changed = await _advance_pair(repository)
+            changed = await _advance_execution(repository)
             release.set()
             old = await reading
-            assert old[0].status is ExecutionStatus.STARTED and old[1].producer_generation == 1
-            assert await repository.observe_execution_control("execution", tenant_id="tenant") == changed
+            assert old.status is ExecutionStatus.STARTED and old.producer_generation == 1
+            assert await repository.get("execution", tenant_id="tenant") == changed
         finally:
             release.set()
             await reading
@@ -192,7 +213,7 @@ async def test_pair_late_fill_cannot_replace_newer_local_commit(tmp_path: Path) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("sqlite",))
-async def test_remote_pair_change_observed_by_original_capture_deadline(
+async def test_remote_inspection_change_observed_by_original_cache_capture_deadline(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = [100.0]
@@ -211,134 +232,228 @@ async def test_remote_pair_change_observed_by_original_capture_deadline(
     async with _state(backend, tmp_path, cache) as first:
         await _seed(first)
         repository = first.execution.executions
+        await asyncio.sleep(0)
         cache.delay = True
-        old = await repository.observe_execution_control("execution", tenant_id="tenant")
+        old = await repository.get_fresh("execution", tenant_id="tenant")
         assert clock[0] == 102.0
-        async with _state(backend, tmp_path, cache) as second:
-            changed = await _advance_pair(second.execution.executions)
-            assert await repository.observe_execution_control("execution", tenant_id="tenant") == old
+        async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as second:
+            changed = await _advance_execution(second.execution.executions)
+            assert await repository.get("execution", tenant_id="tenant") == old
             clock[0] = 103.0
-            assert await repository.observe_execution_control("execution", tenant_id="tenant") == changed
+            assert await repository.get("execution", tenant_id="tenant") == changed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ("execution", "execution_history_head"))
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("damage", ("missing", "identity", "kind"))
-async def test_missing_or_corrupt_pair_fails_closed(tmp_path: Path, kind: str, damage: str) -> None:
-    async with _state("memory", tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
+async def test_missing_or_corrupt_execution_fails_closed(tmp_path: Path, backend: str, damage: str) -> None:
+    async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
         await _seed(state)
         repository = state.execution.executions
 
         async def mutate(tx):
-            key = repository._key(kind, "execution")
+            key = repository._key("execution", "execution")
             stored = await tx.get_record(key)
             if damage == "missing":
                 await tx.delete_record(key)
+            elif damage == "kind":
+                await tx.delete_record(key)
+                await tx.insert_record(replace(stored, kind="unexpected"))
             else:
-                if damage == "kind":
-                    changed = replace(stored, kind="unexpected")
-                    await tx.delete_record(key)
-                    await tx.insert_record(changed)
-                    return
-                else:
-                    if kind == "execution":
-                        value = await repository.get_in_transaction(tx, "execution", tenant_id="tenant")
-                        value = replace(value, execution_id="foreign", root_execution_id="foreign")
-                    else:
-                        value = replace(await repository.get_history_head("execution", tenant_id="tenant"), execution_id="foreign")
-                    changed = replace(repository._stored(kind, "execution", value), storage_revision=stored.storage_revision + 1)
+                value = await repository.get_in_transaction(tx, "execution", tenant_id="tenant")
+                value = replace(value, execution_id="foreign", root_execution_id="foreign")
+                changed = replace(repository._stored("execution", "execution", value),
+                                  storage_revision=stored.storage_revision + 1)
                 assert await tx.replace_record(changed, expected_storage_revision=stored.storage_revision)
 
         await repository.state_store.mutate(mutate)
         with pytest.raises(AIError) as raised:
-            await state.run_store._require_active_execution_producer(
-                agent_run_id="run", execution_id="execution", producer_generation=1, allow_cancelling=False,
-            )
+            await state.run_store.require_active_producer("run")
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
-async def test_custom_repository_retains_original_strong_snapshot(tmp_path: Path) -> None:
+async def test_custom_repository_retains_fresh_source_authority(tmp_path: Path) -> None:
     async with _state("memory", tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
         await _seed(state)
         source = state.execution.executions.state_store
         calls = []
 
         class Custom(ExecutionRepositoryImpl):
-            async def observe_execution_control(self, *args, **kwargs):
-                raise AssertionError("custom owner is not optimized")
-
-            async def get_history_head(self, *args, **kwargs):
-                from linktools.ai.persistence.state import active_state_transaction
-                assert active_state_transaction(source) is not None
-                calls.append("head")
-                return await super().get_history_head(*args, **kwargs)
-
             async def get(self, *args, **kwargs):
-                from linktools.ai.persistence.state import active_state_transaction
-                assert active_state_transaction(source) is not None
+                raise AssertionError("ordinary cached reads cannot authorize dispatch")
+
+            async def get_fresh(self, *args, **kwargs):
                 calls.append("execution")
-                return await super().get(*args, **kwargs)
+                return await super().get_fresh(*args, **kwargs)
 
         state.run_store._execution_repository = Custom(source, namespace="model-control", tenant_id="tenant")
         for _ in range(2):
-            await state.run_store._require_active_execution_producer(agent_run_id="run", execution_id="execution", producer_generation=1)
-        assert calls == ["head", "execution", "head", "execution"]
+            await state.run_store.require_active_producer("run")
+        assert calls == ["execution", "execution"]
 
 
 @pytest.mark.asyncio
-async def test_next_model_boundary_sees_remote_cancellation_at_three_seconds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("takeover", (False, True), ids=("cancel", "takeover"))
+async def test_next_unscoped_dispatch_rejects_remote_change_without_cache_delay(
+    tmp_path: Path, takeover: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    clock = [100.0]
-    monkeypatch.setattr(_write_cache, "time", lambda: clock[0])
-    cache = InMemoryCacheBackend(max_bytes=1000000)
-    async with _state("sqlite", tmp_path, cache) as first:
+    monkeypatch.setattr(_write_cache, "time", lambda: 100.0)
+    async with _state("sqlite", tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as first:
         execution = await _seed(first)
-        await first.run_store.save_checkpoint(
-            AgentRunCheckpoint("run", 1, []), execution_id="execution", producer_generation=1,
-        )
-        async with _state("sqlite", tmp_path, cache) as second:
-            await second.execution.executions.compare_and_swap(
-                "execution", tenant_id="tenant", expected_revision=execution.revision,
-                next_record=replace(execution, revision=execution.revision + 1, status=ExecutionStatus.CANCELLING),
-            )
-            clock[0] = 102.9
-            await first.run_store.save_checkpoint(
-                AgentRunCheckpoint("run", 2, []), execution_id="execution", producer_generation=1,
-            )
-            clock[0] = 103.0
+        repository = first.execution.executions
+        assert await repository.get("execution", tenant_id="tenant") == execution
+        await first.run_store.require_active_producer("run")
+        async with _state("sqlite", tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as second:
+            changed = await _advance_execution(second.execution.executions, takeover=takeover)
+            assert await repository.get("execution", tenant_id="tenant") == execution
             with pytest.raises(AIError) as raised:
-                await first.run_store.save_checkpoint(
-                    AgentRunCheckpoint("run", 3, []), execution_id="execution", producer_generation=1,
-                )
-            assert raised.value.code is ErrorCode.EXECUTION_CANCELLED
+                await first.run_store.require_active_producer("run")
+            assert raised.value.code is (ErrorCode.STORAGE_CONFLICT if takeover else ErrorCode.EXECUTION_CANCELLED)
+            observed = await repository.get_observed("execution", tenant_id="tenant")
+            assert observed.value == changed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("changed", (False, True), ids=("dispatch-fence", "publish-boundary"))
+async def test_confirmed_execution_receipts_advance_without_source_reads(
+    tmp_path: Path, backend: str, changed: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import event
+
+    async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
+        await _seed(state)
+        repository = state.execution.executions
+        source = repository.state_store
+        observed = await repository.get_observed("execution", tenant_id="tenant")
+        statements = []
+
+        async def forbidden_read(callback):
+            raise AssertionError("confirmed boundary receipts do not need a preliminary source read")
+
+        def query(connection, cursor, statement, parameters, context, executemany):
+            statements.append(statement.lstrip().split()[0].upper())
+
+        engine = source.storage_group.context.engine.sync_engine if backend == "sqlite" else None
+        if engine is not None:
+            event.listen(engine, "before_cursor_execute", query)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(source, "read", forbidden_read)
+                for _ in range(2):
+                    previous = observed
+                    target = replace(previous.value, revision=previous.value.revision + 1) if changed else previous.value
+                    observed = await source.mutate(lambda tx: repository.commit_boundary_in_transaction(
+                        tx, previous, next_record=target, expected_producer_generation=1,
+                        expected_producer_claim_id="owner-claim",
+                    ))
+                    assert observed.value == target
+                    assert observed.storage_revision == previous.storage_revision + 1
+        finally:
+            if engine is not None:
+                event.remove(engine, "before_cursor_execute", query)
+        assert await repository.get_observed("execution", tenant_id="tenant") == observed
+        if backend == "sqlite":
+            assert statements.count("SELECT") == 0
+            assert statements.count("UPDATE") == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("takeover", (False, True), ids=("cancel", "takeover"))
+@pytest.mark.parametrize("changed", (False, True), ids=("dispatch-fence", "publish-boundary"))
+async def test_stale_boundary_receipt_rejects_remote_control_change(
+    tmp_path: Path, takeover: bool, changed: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_write_cache, "time", lambda: 100.0)
+    async with _state("sqlite", tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as first:
+        current = await _seed(first)
+        repository = first.execution.executions
+        observed = await repository.get_observed("execution", tenant_id="tenant")
+        assert await repository.get("execution", tenant_id="tenant") == current
+        async with _state("sqlite", tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as second:
+            changed_execution = await _advance_execution(second.execution.executions, takeover=takeover)
+            fresh = await second.execution.executions.get_observed("execution", tenant_id="tenant")
+            assert await repository.get("execution", tenant_id="tenant") == current
+            target = replace(current, revision=current.revision + 1) if changed else current
+            with pytest.raises(AIError) as raised:
+                await repository.state_store.mutate(lambda tx: repository.commit_boundary_in_transaction(
+                    tx, observed, next_record=target, expected_producer_generation=1,
+                    expected_producer_claim_id="owner-claim",
+                ))
+            assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+            assert await repository.get_observed("execution", tenant_id="tenant") == fresh
+            assert fresh.value == changed_execution
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("status", (ExecutionStatus.CANCELLING, ExecutionStatus.RECOVERY_REQUIRED))
+async def test_late_observation_tail_does_not_restore_revoked_dispatch(
+    tmp_path: Path, backend: str, status: ExecutionStatus,
+) -> None:
+    async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
+        current = await _seed(state)
+        repository = state.execution.executions
+        revoked = await repository.compare_and_swap(
+            "execution", tenant_id="tenant", expected_revision=current.revision,
+            next_record=replace(current, revision=current.revision + 1, status=status),
+        )
+        tail = AgentRunCheckpoint("run", 1, [], state="interrupted")
+        await state.run_store.save_checkpoint(tail, execution_id="execution", producer_generation=1)
+        assert await state.run_store.latest_checkpoint(agent_run_id="run", include_interrupted=True) == tail
+        assert await repository.get_fresh("execution", tenant_id="tenant") == revoked
+        with pytest.raises(AIError) as raised:
+            await state.run_store.require_active_producer("run")
+        assert raised.value.code is (ErrorCode.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLING
+                                     else ErrorCode.STORAGE_CONFLICT)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard", ("execution", "generation", "unbound", "sealed"))
+async def test_observation_staging_preserves_exact_local_owner_and_freeze(
+    tmp_path: Path, guard: str,
+) -> None:
+    async with _state("memory", tmp_path) as state:
+        await _seed(state)
+        store = state.run_store
+        execution_id, generation = "execution", 1
+        if guard == "execution":
+            execution_id = "foreign"
+        elif guard == "generation":
+            store.bind_execution_producer("run", execution_id="execution", producer_generation=2,
+                                         restart_checkpoints=False, durable_trace=False)
+        elif guard == "unbound":
+            store._execution_producers.pop("run")
+        else:
+            store._terminal_seals["run"] = object()
+        try:
+            with pytest.raises(AIError) as raised:
+                await store.save_checkpoint(AgentRunCheckpoint("run", 1, []),
+                                            execution_id=execution_id, producer_generation=generation)
+            assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+            assert await store.latest_checkpoint(agent_run_id="run", include_interrupted=True) is None
+        finally:
+            store._terminal_seals.pop("run", None)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delegated", (False, True), ids=("agent", "delegated-agent"))
-async def test_task_owned_model_boundaries_do_not_use_bounded_observation(
-    tmp_path: Path, delegated: bool, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("native_restart", (False, True))
+async def test_task_owned_model_boundaries_keep_source_or_receipt_authority(
+    tmp_path: Path, delegated: bool, native_restart: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from .test_task_agent_persistence import test_task_agent_trace_survives_terminal_release_and_reopen
-    from linktools.ai.persistence.state import active_state_transaction
-
     original = PersistenceStorage.sqlite
-    original_observe = ExecutionRepositoryImpl.observe_execution_control
+    checks = _forbid_cached_dispatch_authority(monkeypatch)
 
     def sqlite(*args, **kwargs):
         kwargs["cache"] = InMemoryCacheBackend(max_bytes=1000000)
         return original(*args, **kwargs)
 
-    async def observe(self, *args, **kwargs):
-        assert active_state_transaction(self.state_store) is not None, (
-            "Task-owned checkpoints require the durable recovery path"
-        )
-        return await original_observe(self, *args, **kwargs)
-
     monkeypatch.setattr(PersistenceStorage, "sqlite", sqlite)
-    monkeypatch.setattr(ExecutionRepositoryImpl, "observe_execution_control", observe)
-    await test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, delegated)
+    await test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, delegated, native_restart)
+    assert len(set(checks)) >= (2 if delegated else 1)
 
 
 @pytest.mark.asyncio
@@ -356,31 +471,27 @@ async def test_transient_route_uses_frozen_restart_guarantee(
     await state.initialize(namespace="model-control", tenant_id="tenant")
     try:
         repository = state.execution.executions
-        execution = replace(_execution(), revision=1, restart_checkpoints=restart, durable_trace=trace)
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim",
+                            restart_checkpoints=restart, durable_trace=trace)
+        await repository.create_execution(execution)
         state.run_store.bind_execution_producer(
             "run", execution_id="execution", producer_generation=1,
             restart_checkpoints=restart, durable_trace=trace,
         )
         await state.run_store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
-        original = repository.observe_execution_control
+        original = repository.get_fresh
         observations = 0
 
         async def observe(*args, **kwargs):
             nonlocal observations
             observations += 1
-            assert not restart
             return await original(*args, **kwargs)
 
-        monkeypatch.setattr(repository, "observe_execution_control", observe)
-        for step in (1, 2):
-            await state.run_store.save_checkpoint(
-                AgentRunCheckpoint("run", step, []), execution_id="execution", producer_generation=1,
-            )
-        assert observations == (0 if restart else 2)
+        monkeypatch.setattr(repository, "get_fresh", observe)
+        for _ in range(2):
+            await state.run_store.require_active_producer("run")
+        assert observations == 2
+        assert state.run_store.execution_persistence("run") == (True, restart, trace)
     finally:
         await state.close()
 
@@ -400,8 +511,7 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     from linktools.ai.task import TaskGraph, TaskNode
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
-    async def unexpected(*args, **kwargs):
-        raise AssertionError("volatile Task still retains strong model control")
+    checks = _forbid_cached_dispatch_authority(monkeypatch)
 
     async def model(messages, info):
         has_return = any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
@@ -411,7 +521,6 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
             )])
         return ModelResponse(parts=[TextPart("answer")])
 
-    monkeypatch.setattr(ExecutionRepositoryImpl, "observe_execution_control", unexpected)
     group = RuntimeFeatures("application")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",) if delegated else ())
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
@@ -423,11 +532,12 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
         definition = TaskGraph("graph", (TaskNode("answer", task=task, input=AgentTaskInput("question")),))
         graph = await engine.with_definitions(task).start(definition, idempotency_key="once")
         assert (await graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
+        assert len(set(checks)) >= (2 if delegated else 1)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_boundary", (False, True), ids=("expired-model-boundary", "unexpired-tool-boundary"))
-async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
+@pytest.mark.parametrize("tool_boundary", (False, True), ids=("output-boundary", "tool-boundary"))
+async def test_remote_cancel_is_seen_before_next_output_or_tool_boundary(
     tmp_path: Path, tool_boundary: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from pydantic import BaseModel
@@ -464,14 +574,13 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
     group.agent("default", model="default", allow_tools=("work",))
     database = tmp_path / "cancel.db"
     models = _Models(_UsageFunctionModel(model))
-    async with Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_466, Runtime.attach(persistence=persistence_466, features=model_features(models, group)) as owner, Persistence.open('model-pair-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_469, Runtime.attach(persistence=persistence_469, features=model_features(models, group)) as other:
+    async with Persistence.open('model-control-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_466, Runtime.attach(persistence=persistence_466, features=model_features(models, group)) as owner, Persistence.open('model-control-cancel', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))) as persistence_469, Runtime.attach(persistence=persistence_469, features=model_features(models, group)) as other:
         execution = await owner.agents.get().start("question", output=Answer, idempotency_key="once")
         try:
             await asyncio.wait_for(entered.wait(), 5)
             await other.executions.cancel(
                 execution.execution_id, CancelExecutionRequest(owner.default_principal, "remote-cancel"),
             )
-            clock[0] = 100.5 if tool_boundary else 103.0
             release.set()
             result = (await execution.wait(timeout_seconds=5)).result
             assert result.status is ExecutionStatus.CANCELLED
@@ -479,3 +588,45 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
             assert effects == []
         finally:
             release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_restart_producer_batches_control_without_using_cached_authority(
+    tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    cache = InMemoryCacheBackend(max_bytes=1000000)
+    async with _state(backend, tmp_path, cache) as state:
+        await _seed(state, restart=True)
+        repository = state.execution.executions
+        await repository.get("execution", tenant_id="tenant")
+        selects = []
+
+        cache_reads = []
+        original_get = cache.get
+
+        async def cache_read(key: bytes) -> bytes | None:
+            cache_reads.append(key)
+            return await original_get(key)
+
+        def query(connection, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                selects.append(statement)
+
+        monkeypatch.setattr(cache, "get", cache_read)
+        event.listen(Engine, "before_cursor_execute", query)
+        try:
+            await state.run_store.require_active_producer("run")
+        finally:
+            event.remove(Engine, "before_cursor_execute", query)
+        assert cache_reads == []
+        if backend == "sqlite":
+            assert len(selects) == 1
+        await _advance_execution(repository)
+        with pytest.raises(AIError) as raised:
+            await state.run_store.require_active_producer("run")
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        assert cache_reads == []

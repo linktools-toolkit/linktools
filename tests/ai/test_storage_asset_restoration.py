@@ -31,6 +31,7 @@ from linktools.ai.storage import (
     StorageLayer,
     StorageOperation,
     StorageOverlay,
+    SqlValue,
     build_object_sql_metadata,
     classify_sql_error,
     is_retryable_sql_transaction,
@@ -42,6 +43,7 @@ class _DialectSession:
     def __init__(self, name: str) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name=name, skip_autocommit_rollback=False))
         self.statements = []
+        self.parameters = []
         self.connection_options = []
 
     def get_bind(self) -> object:
@@ -55,8 +57,11 @@ class _DialectSession:
         self.connection_options.append(execution_options)
         return object()
 
-    async def execute(self, statement: object) -> "_DialectResult":
+    async def execute(
+        self, statement: object, parameters: list[dict[str, SqlValue]] | None = None,
+    ) -> "_DialectResult":
         self.statements.append(statement)
+        self.parameters.append(parameters)
         return _DialectResult()
 
 
@@ -427,7 +432,12 @@ async def test_sql_dialects_restore_batch_upsert_surface() -> None:
             set_columns=("value",),
             index_elements=("path",),
         )
-        assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
+        compiled = session.statements[0].compile(dialect=compiler_dialect)
+        assert marker in str(compiled)
+        bound = session.parameters[0] or [compiled.params]
+        assert {value for row in bound for value in row.values()} == {
+            "sample/one", "one", "sample/two", "two",
+        }
 
 
 @pytest.mark.asyncio

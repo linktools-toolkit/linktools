@@ -660,12 +660,12 @@ async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
     await state.initialize(namespace=namespace, tenant_id="tenant")
     other = None
     try:
-        await state.execution.executions.create_with_history_head(replace(_execution(), durable_trace=durable_trace))
+        await state.execution.executions.create_execution(replace(_execution(), durable_trace=durable_trace))
         if separate_owner:
             other = _storage("memory", tmp_path)
             other = Persistence(other)
             await other.initialize(namespace=namespace, tenant_id="tenant")
-            await other.execution.executions.create_with_history_head(_execution())
+            await other.execution.executions.create_execution(_execution())
         reader = _reader(state if other is None else other)
         reader._durable_history_available = durable_route
         history = History(_service(state, reader=reader), tenant_id="tenant")

@@ -38,16 +38,12 @@ class AuthorizationAction(str, Enum):
     EVALUATION_HUMAN_SCORE = "evaluation.human_score.submit"
     EVALUATION_RECONCILE = "evaluation.reconcile"
     EVALUATION_PURGE = "evaluation.purge"
-    APPROVAL_CREATE = "approval.create"
     APPROVAL_READ = "approval.read"
     APPROVAL_DECIDE = "approval.decide"
     EXTERNAL_READ = "external.read"
     EXTERNAL_SUPPLY = "external.supply"
     EVENT_READ = "event.read"
     ARTIFACT_READ = "artifact.read"
-    MEMORY_READ = "memory.read"
-    MEMORY_WRITE = "memory.write"
-    TOOL_EXECUTE = "tool.execute"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +79,7 @@ def service_principal(tenant_id: str, principal_id: str) -> Principal:
 
 
 class TenantAuthorizationPolicy:
-    """Default deny-by-tenant policy used by local and service composition roots."""
+    """Default tenant and resource-owner policy for local and service roots."""
 
     def __init__(self, tenant_id: "str | None" = None) -> None:
         if tenant_id is not None:
@@ -117,8 +113,6 @@ class TenantAuthorizationPolicy:
             AuthorizationAction.TASK_RUN,
             AuthorizationAction.TASK_READ,
             AuthorizationAction.TASK_CANCEL,
-            AuthorizationAction.APPROVAL_CREATE,
-            AuthorizationAction.TOOL_EXECUTE,
         }:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
@@ -26,6 +27,8 @@ from linktools.ai.persistence._snapshot_validation import (
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.storage import StoredPayload
+
+from .test_history_projection_conformance import _record
 
 
 def _running(sequence: int = 1) -> ModelInteractionRecord:
@@ -54,7 +57,7 @@ def _prepared(value: ModelInteractionRecord) -> ModelInteractionRecord:
         model={"route_id": "default", "model": "prepared-model"},
         request_context=ContextProjection(()),
         request_envelope=RuntimePayloadRef(
-            StoredPayload.inline_bytes(b"{}"), PersistenceDomain.CHECKPOINT,
+            StoredPayload.inline_bytes(b"{}"), PersistenceDomain.TRACE,
         ),
     )
 
@@ -126,13 +129,14 @@ async def test_interaction_identity_survives_preparation_and_completion(
     storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run = AgentRunRecord("run")
         admitted = _running()
         prepared = _prepared(admitted)
         terminal = _terminal(prepared)
         for value in (admitted, admitted, prepared, prepared, terminal, terminal):
-            await archive.sync_projection(run, events=(), checkpoints=(), interactions=(value,))
+            await archive.sync_projection(run, events=(), checkpoints=(), execution_id="execution", interactions=(value,))
             assert await archive.list_model_interactions(agent_run_id="run") == [value]
             assert await archive.model_interaction_count(agent_run_id="run") == 1
 
@@ -142,7 +146,7 @@ async def test_interaction_identity_survives_preparation_and_completion(
             replace(terminal, step_index=2),
         ):
             with pytest.raises(AIError) as raised:
-                await archive.sync_projection(run, events=(), checkpoints=(), interactions=(invalid,))
+                await archive.sync_projection(run, events=(), checkpoints=(), execution_id="execution", interactions=(invalid,))
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await archive.list_model_interactions(agent_run_id="run") == [terminal]
 
@@ -166,27 +170,28 @@ async def test_prepared_request_is_immutable_and_failed_preparation_is_visible(
     storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run = AgentRunRecord("run")
         first = _prepared(_running())
         failed = _terminal(_running(2), "FAILED")
-        await archive.sync_projection(run, events=(), checkpoints=(), interactions=(first, failed))
+        await archive.sync_projection(run, events=(), checkpoints=(), execution_id="execution", interactions=(first, failed))
         invalid = replace(first, request_envelope=RuntimePayloadRef(
-            StoredPayload.inline_bytes(b'{"changed":true}'), PersistenceDomain.CHECKPOINT,
+            StoredPayload.inline_bytes(b'{"changed":true}'), PersistenceDomain.TRACE,
         ))
         with pytest.raises(AIError) as raised:
-            await archive.sync_projection(run, events=(), checkpoints=(), interactions=(invalid,))
+            await archive.sync_projection(run, events=(), checkpoints=(), execution_id="execution", interactions=(invalid,))
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await archive.list_model_interactions(agent_run_id="run") == [first, failed]
         assert await archive.model_interaction_count(agent_run_id="run") == 2
         with pytest.raises(AIError):
             await archive.sync_projection(
-                run, events=(), checkpoints=(),
+                run, events=(), checkpoints=(), execution_id="execution",
                 interactions=(_terminal(first), replace(failed, duration_ns=24)),
             )
         assert await archive.list_model_interactions(agent_run_id="run") == [first, failed]
         await archive.sync_projection(
-            run, events=(), checkpoints=(), interactions=(_terminal(first),),
+            run, events=(), checkpoints=(), execution_id="execution", interactions=(_terminal(first),),
         )
         assert await archive.list_model_interactions(agent_run_id="run") == [_terminal(first), failed]
         assert await archive.model_interaction_count(agent_run_id="run") == 2
@@ -202,13 +207,14 @@ async def test_concurrent_completion_keeps_exactly_one_terminal_result(
     storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run = AgentRunRecord("run")
         prepared = _prepared(_running())
-        await archive.sync_projection(run, events=(), checkpoints=(), interactions=(prepared,))
+        await archive.sync_projection(run, events=(), checkpoints=(), execution_id="execution", interactions=(prepared,))
         terminals = (_terminal(prepared), _terminal(prepared, "FAILED"))
         outcomes = await asyncio.gather(*(
-            archive.sync_projection(run, events=(), checkpoints=(), interactions=(value,))
+            archive.sync_projection(run, events=(), checkpoints=(), execution_id="execution", interactions=(value,))
             for value in terminals
         ), return_exceptions=True)
         assert sum(value is None for value in outcomes) == 1
@@ -228,10 +234,11 @@ async def test_canonical_interaction_pages_and_snapshot_sequences_include_runnin
     storage = Persistence(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run = AgentRunRecord("run")
         values = tuple(_running(sequence) for sequence in range(1, 13))
-        await archive.sync_projection(run, events=(), checkpoints=(), interactions=values)
+        await archive.sync_projection(run, events=(), checkpoints=(), execution_id="execution", interactions=values)
         assert await archive.list_model_interactions(
             agent_run_id="run", after_model_request_seq=8, limit=3,
         ) == list(values[8:11])
@@ -240,14 +247,14 @@ async def test_canonical_interaction_pages_and_snapshot_sequences_include_runnin
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         operations = await archive.state_store.read(lambda tx: tx.scan_operations())
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=operations,
         )
         validate_snapshot_domain(
-            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
         )
-        await archive.release_agent_run("run")
+        await archive.release_agent_run("run", execution_id="execution")
         assert await archive.list_model_interactions(agent_run_id="run") == []
         assert await archive.model_interaction_count(agent_run_id="run") == 0
     finally:
@@ -267,10 +274,8 @@ async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_wri
     try:
         repository = storage.execution.executions
         execution = replace(_record(ExecutionStatus.STARTED, 1), revision=1)
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-        )
+        execution = replace(execution, producer_generation=1)
+        await repository.create_execution(execution)
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         run = AgentRunRecord("run")
         prepared = replace(
@@ -283,11 +288,9 @@ async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_wri
             run, events=(), checkpoints=(), interactions=(prepared,),
             execution_id="execution", producer_generation=1,
         )
-        await repository.state_store.mutate(
-            lambda tx: repository.admit_history_producer_in_transaction(
-                tx, replace(execution, revision=2),
-            )
-        )
+        current = await repository.get("execution", tenant_id="tenant")
+        await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=current.revision,
+                                          next_record=replace(current, revision=current.revision + 1, producer_generation=2))
         with pytest.raises(AIError) as raised:
             await archive.interrupt_model_interactions(
                 agent_run_id="run", execution_id="execution", producer_generation=1,
@@ -296,14 +299,14 @@ async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_wri
         await archive.interrupt_model_interactions(
             agent_run_id="run", execution_id="execution", producer_generation=2,
         )
-        head = await repository.get_history_head("execution", tenant_id="tenant")
+        head = await repository.get("execution", tenant_id="tenant")
         interrupted = replace(prepared, status="INTERRUPTED")
         assert await archive.list_model_interactions(agent_run_id="run") == [interrupted]
         assert interrupted.duration_ns is None and interrupted.finished_at is None
         await archive.interrupt_model_interactions(
             agent_run_id="run", execution_id="execution", producer_generation=2,
         )
-        assert await repository.get_history_head("execution", tenant_id="tenant") == head
+        assert await repository.get("execution", tenant_id="tenant") == head
         with pytest.raises(AIError) as raised:
             await archive.sync_prepared_projection(
                 run, events=(), checkpoints=(), interactions=(_terminal(prepared),),
@@ -324,7 +327,7 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
     storage = Persistence(_storage("sqlite", tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
-        await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
+        await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         await archive.sync_projection(
             AgentRunRecord("run"),

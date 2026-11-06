@@ -295,7 +295,7 @@ async def test_compaction_response_retains_independent_evidence(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite", "sql"))
-async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_and_cleanup(
+async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cleanup(
     tmp_path: Path, backend: str,
 ) -> None:
     from pydantic_ai.models import ModelRequestParameters
@@ -314,8 +314,10 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
     async with _storage(backend, tmp_path) as storage:
         state = Persistence(storage)
         await state.initialize(namespace="response-checkpoint", tenant_id="tenant")
+        from .test_step_projection import _execution
+        await state.execution.executions.create_execution(_execution())
         try:
-            capture = AgentRunRecorder(state.run_store, execution_id=None, agent_run_id="run")
+            capture = AgentRunRecorder(state.run_store, execution_id="execution", agent_run_id="run")
             await capture.register_agent_run(AgentRunRecord("run"))
             journal = ModelRequestJournal(
                 source_namespace="response-checkpoint", tenant_id="tenant",
@@ -339,14 +341,12 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
                     agent_run_id="run", step_index=sequence, messages=list(capture.transcript_messages()),
                     state="complete", transcript_message_count_before=0,
                 ))
-                await state.run_store.checkpoint_persistence.materialize_recovery_checkpoint(
-                    agent_run_id="run", require_complete=True,
-                )
+                await state.run_store.flush_execution_projection("run", execution_id="execution")
             if backend != "memory":
                 await state.close()
                 state = Persistence(storage)
                 await state.initialize(namespace="response-checkpoint", tenant_id="tenant")
-            archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+            archive = state.run_store.read_store(PersistenceDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id="run")
             assert [record.model_request_seq for record in records] == [1, 2]
             blocks = tuple(_archived_block(record.response_context) for record in records)
@@ -371,15 +371,15 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
             assert checkpoint.messages[1] == checkpoint.messages[3] == response
             resolved = await archive.resolve_model_interactions(records)
             assert [value[1] for value in resolved] == [(response,), (response,)]
-            objects = state.archive_object_store(PersistenceDomain.CHECKPOINT)
-            candidates = tuple([(PersistenceDomain.CHECKPOINT, ObjectRef(
+            objects = state.archive_object_store(PersistenceDomain.TRACE)
+            candidates = tuple([(PersistenceDomain.TRACE, ObjectRef(
                 objects.store_id, item.key, item.digest, item.size,
             )) async for item in objects.list_objects()])
             assert candidates
             protected = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
             assert set(protected.retained) == set(candidates)
             assert await archive.resolve_model_interactions(records) == resolved
-            await archive.release_agent_run("run")
+            await archive.release_agent_run("run", execution_id="execution")
             assert await archive.list_model_interactions(agent_run_id="run") == []
             assert await archive.latest_checkpoint(agent_run_id="run") is None
             retained = await state.purge_unreferenced_objects(candidates, exclusive=Offline())

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Checkpoint metadata snapshots keep fresh preparation and commit fences."""
+"""Trace and conversation metadata snapshots preserve preparation and commit fences."""
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -22,6 +22,18 @@ from linktools.ai.persistence.state import active_state_scope
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _trace_archive(state: Persistence) -> StateStepArchive:
+    from .test_step_projection import _execution
+
+    repository = state.execution.executions
+    execution = await repository.get("execution", tenant_id="tenant")
+    if execution is None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        execution = replace(_execution(), revision=1, producer_generation=1, created_at=now, updated_at=now)
+        await repository.create_execution(execution)
+    return state.run_store.read_store(PersistenceDomain.TRACE)
 
 
 def _checkpoint(count: int) -> AgentRunCheckpoint:
@@ -66,7 +78,7 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
 ) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements: list[str] = []
@@ -80,12 +92,6 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
     async def without_prefetch(transaction, keys):
         records = [await transaction.get_record(key) for key in keys]
         return {record.key_digest: record for record in records if record is not None}
-
-    load = archive.transcript_repository.load_message_span
-
-    async def without_observed_head(*args, **kwargs):
-        kwargs.pop("observed_head", None)
-        return await load(*args, **kwargs)
 
     # Resolve the shared scope once so neither side pays a one-time cold lookup.
     await archive.transcript_repository.content_archive(create=True)
@@ -110,127 +116,22 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
         assert domain_counts == [3, 1]
         assert counts == [4, 2]
 
-        await archive.materialize_checkpoint(run, _checkpoint(1))
-        results, counts, domain_counts = [], [], []
-        for baseline in (True, False):
-            statements.clear()
-            select_stores.clear()
-            with monkeypatch.context() as patch:
-                if baseline:
-                    patch.setattr(_SqlTransaction, "get_records", without_prefetch)
-                    patch.setattr(archive.transcript_repository, "load_message_span", without_observed_head)
-                event.listen(engine, "before_cursor_execute", capture)
-                try:
-                    results.append(await archive.relocate_run_checkpoint(run, _checkpoint(2)))
-                finally:
-                    event.remove(engine, "before_cursor_execute", capture)
-            assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
-            counts.append(statements.count("SELECT"))
-            domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
-        assert results[0] == results[1]
-        # Run/head metadata, chunk facts, immutable nodes and content; the
-        # unbatched path also rereads the head discarded by its wrapper.
-        assert domain_counts == [4, 2]
-        assert counts == [5, 3]
     finally:
         await state.close()
 
 
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-@pytest.mark.parametrize("failure", ("different_run", "missing_head", "short_prefix", "changed_prefix"))
-@pytest.mark.parametrize("composed", (False, True))
-async def test_checkpoint_relocation_keeps_integrity_failures(
-    tmp_path: Path, backend: str, failure: str, composed: bool,
-) -> None:
-    state = Persistence(_storage(backend, tmp_path))
-    await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-    run = AgentRunRecord("run")
-    checkpoint = _checkpoint(1)
-    try:
-        await archive.materialize_checkpoint(run, checkpoint)
-        if failure == "different_run":
-            run = replace(run, metadata={"changed": "yes"})
-        elif failure == "missing_head":
-            await archive.state_store.mutate(
-                lambda tx: tx.delete_record(archive.transcript_repository.head_key("run"))
-            )
-        elif failure == "short_prefix":
-            checkpoint = _checkpoint(0)
-        else:
-            checkpoint = replace(checkpoint, messages=[ModelRequest(parts=[UserPromptPart("different")])])
-        with pytest.raises(AIError) as raised:
-            if composed:
-                await archive.prepare_run_checkpoint(run, checkpoint)
-            else:
-                await archive.relocate_run_checkpoint(run, checkpoint)
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        if failure == "missing_head":
-            with pytest.raises(AIError) as raised:
-                await archive.prepare_checkpoints(run, (checkpoint,))
-            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        assert active_state_scope() is None
-    finally:
-        await state.close()
-
-
-@pytest.mark.parametrize("backend", ("memory", "sqlite",))
-@pytest.mark.parametrize("composed", (False, True))
-async def test_checkpoint_preparation_rereads_after_body_io_and_commit_rejects_stale_append(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, composed: bool,
-) -> None:
-    state = Persistence(_storage(backend, tmp_path))
-    await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
-    run = AgentRunRecord("run")
-    try:
-        await archive.materialize_checkpoint(run, _checkpoint(1))
-        load = archive.transcript_repository.load_message_span
-
-        async def append_during_body_read(*args, **kwargs):
-            assert active_state_scope() is None
-            await archive.materialize_checkpoint(run, _checkpoint(2))
-            return await load(*args, **kwargs)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(archive.transcript_repository, "load_message_span", append_during_body_read)
-            if composed:
-                prepared, = (await archive.prepare_run_checkpoint(run, _checkpoint(3)))[1].checkpoints
-            else:
-                relocated = await archive.relocate_run_checkpoint(run, _checkpoint(3))
-        if not composed:
-            assert relocated.transcript_message_count_before == 1
-            prepared, = (await archive.prepare_checkpoints(run, (relocated,))).checkpoints
-        assert prepared.chunks[0].first_message_index == 2
-        await archive.materialize_checkpoint(run, _checkpoint(4))
-        with pytest.raises(AIError) as raised:
-            await archive.state_store.mutate(
-                lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared)
-            )
-        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-        latest = await archive.latest_checkpoint(agent_run_id="run")
-        assert latest is not None and latest.step_index == 4
-        assert len(latest.messages) == 4
-        assert active_state_scope() is None
-    finally:
-        await state.close()
-
-
-@pytest.mark.parametrize("case", ("recovery_first", "recovery_next", "conversation", "execution"))
+@pytest.mark.parametrize("case", ("archive_first", "archive_next", "conversation", "execution"))
 async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
 ) -> None:
-    from .test_step_projection import _execution
-
     counts = []
     for baseline in (True, False):
         path = tmp_path / str(baseline)
         path.mkdir()
         state = Persistence(_storage("sqlite", path))
         await state.initialize(namespace="checkpoint-commit", tenant_id="tenant")
-        domain = (PersistenceDomain.CONVERSATION if case == "conversation" else
-                  PersistenceDomain.TRACE if case == "execution" else PersistenceDomain.CHECKPOINT)
-        archive = state.run_store.read_store(domain)
+        archive = (state.run_store.read_store(PersistenceDomain.CONVERSATION)
+                   if case == "conversation" else await _trace_archive(state))
         run = AgentRunRecord("run")
         engine = archive.state_store.storage_group.context.engine.sync_engine
         statements = []
@@ -246,26 +147,19 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             statements.append(statement.split()[0].upper())
 
         try:
-            if domain is PersistenceDomain.TRACE:
-                execution = replace(_execution(), revision=1)
-                repository = state.execution.executions
-                await repository.create_with_history_head(execution)
-                await repository.state_store.mutate(
-                    lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
-                )
-            if case == "recovery_next":
-                await archive.materialize_checkpoint(run, _checkpoint(0))
+            if case == "archive_next":
+                await archive.materialize_checkpoint(run, _checkpoint(0), execution_id="execution")
             prepared, = (await archive.prepare_checkpoints(run, (_checkpoint(1),))).checkpoints
 
             async def commit():
-                if domain is PersistenceDomain.TRACE:
+                if case == "execution":
                     await archive.sync_prepared_projection(
                         run, events=(), checkpoints=(prepared,), execution_id="execution",
                         producer_generation=1,
                     )
                 else:
-                    await archive.state_store.mutate(
-                        lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared)
+                    await archive._mutate(
+                        lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared, execution_id="execution")
                     )
 
             with monkeypatch.context() as patch:
@@ -279,14 +173,33 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             counts.append(statements.count("SELECT"))
             latest = await archive.latest_checkpoint(agent_run_id="run")
             assert latest is not None and latest.messages == _checkpoint(1).messages
-            if domain is not PersistenceDomain.TRACE:
+            if case != "execution":
+                from .test_checkpoint_write_batches import _snapshot
+
+                before = await _snapshot(archive.state_store)
                 statements.clear()
-                event.listen(engine, "before_cursor_execute", capture)
+                writes = []
+
+                def capture_replay(connection, cursor, statement, parameters, context, many):
+                    capture(connection, cursor, statement, parameters, context, many)
+                    if statement.split()[0] in {"INSERT", "UPDATE", "DELETE"}:
+                        writes.append((statement, parameters))
+
+                event.listen(engine, "before_cursor_execute", capture_replay)
                 try:
                     await commit()
                 finally:
-                    event.remove(engine, "before_cursor_execute", capture)
-                assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
+                    event.remove(engine, "before_cursor_execute", capture_replay)
+                assert await _snapshot(archive.state_store) == before
+                if case == "conversation":
+                    assert not writes
+                else:
+                    # Trace still fences its execution producer, but replay must
+                    # not rewrite transcript records, checkpoint facts or content.
+                    assert len(writes) == 1 and writes[0][0].startswith("UPDATE ai_state_records")
+                    repository = state.execution.executions
+                    assert repository.state_store.store_digest.hex() in writes[0][1]
+                    assert repository._key("execution", "execution").hex() in writes[0][1]
         finally:
             await state.close()
     assert counts[1] == counts[0] - 1
@@ -297,10 +210,10 @@ async def test_checkpoint_projection_stale_version_rolls_back_commit(
 ) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-stale-projection", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     try:
-        await archive.materialize_checkpoint(run, _checkpoint(1))
+        await archive.materialize_checkpoint(run, _checkpoint(1), execution_id="execution")
         prepared, = (await archive.prepare_checkpoints(run, (_checkpoint(2),))).checkpoints
         projection_key = archive.transcript_repository.projection_key("run")
         replace_records = _SqlTransaction.replace_records
@@ -318,8 +231,8 @@ async def test_checkpoint_projection_stale_version_rolls_back_commit(
         with monkeypatch.context() as patch:
             patch.setattr(_SqlTransaction, "replace_records", stale_projection)
             with pytest.raises(AIError) as raised:
-                await archive.state_store.mutate(
-                    lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared)
+                await archive._mutate(
+                    lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared, execution_id="execution")
                 )
         assert injected and raised.value.code is ErrorCode.STORAGE_CONFLICT
         latest = await archive.latest_checkpoint(agent_run_id="run")
@@ -334,7 +247,7 @@ async def test_run_admission_does_not_read_context_projection(
 ) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-admission", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     projection_key = archive.transcript_repository.projection_key("run")
     get_record, get_records = _SqlTransaction.get_record, _SqlTransaction.get_records
 
@@ -350,6 +263,6 @@ async def test_run_admission_does_not_read_context_projection(
         with monkeypatch.context() as patch:
             patch.setattr(_SqlTransaction, "get_record", read_one)
             patch.setattr(_SqlTransaction, "get_records", read_many)
-            await archive.register_agent_run(AgentRunRecord("run"))
+            await archive.register_agent_run(AgentRunRecord("run"), execution_id="execution")
     finally:
         await state.close()

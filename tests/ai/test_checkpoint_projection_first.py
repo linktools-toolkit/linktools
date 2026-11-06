@@ -10,11 +10,13 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
-from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.model.messages import SummaryPromptPart, encode_model_messages
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import InMemoryObjectStore
+
+from .test_checkpoint_metadata_snapshot_io import _trace_archive
 
 pytestmark = pytest.mark.asyncio
 
@@ -25,7 +27,7 @@ async def test_projection_first_keeps_raw_transcript_and_exact_projected_context
 ) -> None:
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db"))
     await state.initialize(namespace="projection-first", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     now = run.started_at
     first = ModelRequest(parts=[UserPromptPart("question", timestamp=now)])
@@ -41,9 +43,9 @@ async def test_projection_first_keeps_raw_transcript_and_exact_projected_context
     elif variant == "reordered":
         context = list(reversed(messages))
     try:
-        await archive.materialize_checkpoint(run, AgentRunCheckpoint("run", 1, [first], timestamp=now, transcript_message_count_before=0))
-        checkpoint = AgentRunCheckpoint("run", 2, messages, timestamp=now, context_messages=context)
-        _, batch = await archive.prepare_run_checkpoint(run, checkpoint)
+        await archive.materialize_checkpoint(run, AgentRunCheckpoint("run", 1, [first], timestamp=now, transcript_message_count_before=0), execution_id="execution")
+        checkpoint = AgentRunCheckpoint("run", 2, messages, timestamp=now, context_messages=context, transcript_message_count_before=1)
+        batch = await archive.prepare_checkpoints(run, (checkpoint,))
         prepared = batch[0]
         raw_delta = encode_model_messages(messages[1:])
         assert len(prepared.chunks) == 1
@@ -54,7 +56,7 @@ async def test_projection_first_keeps_raw_transcript_and_exact_projected_context
         # Preparing both roots does not advance the owner before its normal CAS.
         head = await archive.transcript_repository.get_head("run")
         assert head.message_count == 1
-        await archive.state_store.mutate(lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared))
+        await archive._mutate(lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared, execution_id="execution"))
         raw_messages = [value async for value in archive.transcript_repository.iter_messages("run")]
         assert encode_model_messages(raw_messages) == encode_model_messages(messages)
         loaded = await archive.transcript_repository.load_projected_context("run", prepared.projection)
@@ -69,7 +71,7 @@ async def test_cancel_between_projection_and_chunks_leaves_no_owner_publication_
     objects = InMemoryObjectStore("projection-first")
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "state.db", object_store=objects))
     await state.initialize(namespace="projection-first", tenant_id="tenant")
-    archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    archive = await _trace_archive(state)
     run = AgentRunRecord("run")
     body = "".join(random.Random(43).choices("abcdefghijklmnopqrstuvwxyz0123456789", k=32768))
     message = ModelRequest(parts=[UserPromptPart(body, timestamp=run.started_at)])
@@ -81,13 +83,13 @@ async def test_cancel_between_projection_and_chunks_leaves_no_owner_publication_
         with monkeypatch.context() as patch:
             patch.setattr(archive, "_prepare_captured_chunks", cancelled)
             with pytest.raises(asyncio.CancelledError):
-                await archive.prepare_run_checkpoint(run, checkpoint)
+                await archive.prepare_checkpoints(run, (checkpoint,))
         assert await archive.get_agent_run(agent_run_id="run") is None
         assert await archive.transcript_repository.get_head("run") is None
         assert len([value async for value in objects.list_objects()]) == 1
         # This is the existing content-addressed prepare-time orphan class; retry
         # uses the same object identity and still publishes through the owner.
-        await archive.materialize_checkpoint(run, checkpoint)
+        await archive.materialize_checkpoint(run, checkpoint, execution_id="execution")
         assert len([value async for value in objects.list_objects()]) == 1
         assert [value async for value in archive.transcript_repository.iter_messages("run")] == [message]
     finally:

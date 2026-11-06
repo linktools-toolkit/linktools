@@ -91,7 +91,7 @@ async def test_caught_insert_conflict_preserves_batch_atomicity(
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
-async def test_caught_replace_precondition_allows_unrelated_write(
+async def test_caught_replace_conflict_aborts_unrelated_write(
     backend: str, tmp_path: Path,
 ) -> None:
     records = tuple(sorted((_record(1), _record(2)), key=lambda r: r.key_digest))
@@ -111,8 +111,9 @@ async def test_caught_replace_precondition_allows_unrelated_write(
             )
             await transaction.insert_record(other)
 
-        await store.mutate(callback)
+        with pytest.raises(AIError):
+            await store.mutate(callback)
         assert await store.read(lambda tx: tx.get_records(tuple(r.key_digest for r in records))) == {
             record.key_digest: record for record in records
         }
-        assert await store.read(lambda tx: tx.get_record(other.key_digest)) == other
+        assert await store.read(lambda tx: tx.get_record(other.key_digest)) is None

@@ -56,6 +56,12 @@ class _Bridge:
         self.calls.append("begin")
         return self.decision
 
+    async def require_active(self) -> None:
+        return None
+
+    async def require_fresh_control(self) -> None:
+        await self.require_active()
+
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:
         del decision, result
         self.calls.append("complete")

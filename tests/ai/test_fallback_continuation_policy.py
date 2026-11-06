@@ -111,7 +111,9 @@ async def test_pinned_failure_uses_transport_budget_only_once(path: str, retries
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == "MODEL_UNAVAILABLE"
             assert "synthetic-continuation-secret" not in repr(result.safe_error_details)
-            assert "synthetic-continuation-secret" not in repr(result.error_diagnostics)
+            assert result.error_diagnostics.exception_message == str(primary.error)
+            assert str(primary.error) in result.error_diagnostics.traceback
+            assert result.error_diagnostics.content_omission_reason is None
     else:
         async with binding.materialize() as model:
             messages = [ModelRequest([UserPromptPart("synthetic")])]

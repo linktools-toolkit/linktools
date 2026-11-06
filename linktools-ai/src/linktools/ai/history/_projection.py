@@ -505,6 +505,16 @@ class StepExecutionHistoryReader:
             for source in current_sources
             if (source.record.execution_id, source.agent_run_seq) in cutoff_by_identity
         )
+        if agent_run_seq is None:
+            populated_executions = {
+                source.record.execution_id for source in sources
+                if cutoff_by_identity[(source.record.execution_id, source.agent_run_seq)][0]
+            }
+            for source in sources:
+                if (source.record.status is ExecutionStatus.SUCCEEDED
+                        and source.agent_run_seq == source.record.agent_run_seq
+                        and source.record.execution_id not in populated_executions):
+                    raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
         page = await self._history_page(
             sources,
             cursor_coordinate=cursor_coordinate,
@@ -1323,7 +1333,7 @@ class StepExecutionHistoryReader:
             )
             by_call: dict[str, ToolOperationRecord] = {}
             for operation in operations:
-                if operation.agent_run_id != agent_run_id or operation.execution_id != execution_id:
+                if operation.execution_id != execution_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if operation.tool_call_id in by_call:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1606,7 +1616,16 @@ class StepExecutionHistoryReader:
             and source.record.status is ExecutionStatus.SUCCEEDED
             and source.agent_run_seq == source.record.agent_run_seq
         ):
-            raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+            # Resuming a completed native snapshot can finish a new attempt
+            # without a model request. Its own Trace lifecycle remains evidence;
+            # native context is never substituted for missing Trace messages.
+            events = (() if not source.record.restart_checkpoints or source.agent_run_seq < 2
+                      or source.capture.model_interaction_count or event_high_water != 2
+                      else await self._store_for(source.record).list_event_range(
+                          agent_run_id=agent_run_id, start=0, end=event_high_water,
+                      ))
+            if tuple(event.event_type for event in events) != ("AGENT_RUN_STARTED", "AGENT_RUN_SUCCEEDED"):
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
 
     async def _message_range(
         self, agent_run_id: str, *, store: _ExecutionHistoryStore, start: int, end: int,

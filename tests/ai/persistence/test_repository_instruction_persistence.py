@@ -21,8 +21,8 @@ from linktools.ai.persistence.contracts import (
     ExecutionRecord,
     PendingDeferredCall,
     PendingToolContinuation,
-    ExecutionCheckpoint,
-    ExecutionCheckpointState,
+    ExecutionRecoveryDetail,
+    ExecutionRecoveryState,
     RecoveryHandoffPhase,
     RuntimePayloadRef,
     StoredUserInput,
@@ -100,23 +100,11 @@ def _continuation() -> PendingToolContinuation:
     )
 
 
-def _checkpoint(pending_tools: PendingToolContinuation | None) -> ExecutionCheckpoint:
-    now = datetime.now(timezone.utc)
-    waiting = pending_tools is not None
-    return ExecutionCheckpoint(
-        execution_id="execution",
-        agent_run_id="step-1" if waiting else None,
-        state=(
-            ExecutionCheckpointState.WAITING
-            if waiting
-            else ExecutionCheckpointState.ADMITTED
-        ),
-        revision=1,
-        created_at=now,
-        updated_at=now,
-        pending_tools=pending_tools,
-        handoff_phase=RecoveryHandoffPhase.NONE,
-    )
+def _checkpoint(pending_tools: PendingToolContinuation | None) -> ExecutionRecord:
+    return replace(_execution(None),
+                   status=ExecutionStatus.WAITING_DEFERRED if pending_tools is not None else ExecutionStatus.STARTED,
+                   recovery=ExecutionRecoveryDetail(agent_run_id="step-1" if pending_tools is not None else None,
+                                                    pending_tools=pending_tools))
 
 
 def test_instruction_aware_execution_round_trips_exact_pin() -> None:
@@ -175,8 +163,8 @@ def test_deferred_frontier_round_trips_current_contract() -> None:
     wire = encode_domain(current)
 
     assert isinstance(wire, dict)
-    assert wire["$dataclass"] == "recovery_checkpoint"
-    assert decode_domain(wire, ExecutionCheckpoint) == current
+    assert wire["$dataclass"] == "execution_record"
+    assert decode_domain(wire, ExecutionRecord) == current
 
 
 def test_object_ref_traversal_finds_repository_instruction_object() -> None:

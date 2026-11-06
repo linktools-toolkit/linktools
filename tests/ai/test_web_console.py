@@ -18,7 +18,9 @@ pytest.importorskip("uvicorn")
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.history import History
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
@@ -424,7 +426,7 @@ async def test_external_host_and_origin_preserve_peer_and_request_boundaries() -
 
 
 @pytest.mark.asyncio
-async def test_exception_diagnostics_never_serialize_provider_credentials() -> None:
+async def test_exception_diagnostics_preserve_original_provider_text() -> None:
     from dataclasses import dataclass
 
     @dataclass
@@ -444,18 +446,18 @@ async def test_exception_diagnostics_never_serialize_provider_credentials() -> N
     async with client(create_app(history=History())) as http:
         response = await http.get("/api/executions/example")
         assert response.status_code == 200
-        assert "secret-key-value" not in response.text
+        assert "secret-key-value" in response.text
         assert response.json()["error_diagnostics"]["exception_type"] == "ValueError"
         assert response.json()["error_diagnostics"]["cause_digest"]
         diagnostics = response.json()["error_diagnostics"]
-        assert "***" in diagnostics["exception_message"]
+        assert 'api_key="secret-key-value"' in diagnostics["exception_message"]
         assert diagnostics["exception_chain"][0]["exception_message"].endswith("END_DIAGNOSTIC")
         assert "END_DIAGNOSTIC" in diagnostics["traceback"]
         assert "in inspect_execution" in diagnostics["traceback"]
 
 
 @pytest.mark.asyncio
-async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_user_content() -> None:
+async def test_failed_execution_stream_preserves_diagnostics_and_user_content() -> None:
     from ._runtime_test_helpers import _UsageFunctionModel
     from .test_live_history_readback_integration import _Models
 
@@ -469,19 +471,19 @@ async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_use
         async with client(create_app(runtime=runtime)) as http:
             response = await http.get(f"/api/executions/{execution.execution_id}/events")
             assert response.status_code == 200
-            assert "provider-secret" not in response.text
+            assert "provider-secret" in response.text
             events = [json.loads(frame.split("data: ", 1)[1]) for frame in response.text.split("\n\n") if "data: " in frame]
             failed = next(item["item"]["event"] for item in events if item.get("type") == "event" and item["item"]["event"]["event_type"] == "EXECUTION_FAILED")
             assert failed["payload"]["error_diagnostics"]["exception_type"] == "ValueError"
             assert failed["payload"]["error_diagnostics"]["cause_digest"]
-            assert "***" in failed["payload"]["error_diagnostics"]["exception_message"]
+            assert failed["payload"]["error_diagnostics"]["exception_message"] == "api_key=provider-secret"
             assert failed["payload"]["error_diagnostics"]["exception_chain"]
             assert "in fail" in failed["payload"]["error_diagnostics"]["traceback"]
             history = await http.get(f"/api/executions/{execution.execution_id}/history?include_content=true")
             assert any(item["content"] == prompt for item in history.json()["items"])
 
 
-def test_historical_event_diagnostics_keep_full_text_after_current_redaction() -> None:
+def test_historical_event_diagnostics_preserve_original_full_text() -> None:
     from linktools.ai.execution import ExecutionStreamEvent
     from linktools.ai.web._app import _wire
 
@@ -494,7 +496,8 @@ def test_historical_event_diagnostics_keep_full_text_after_current_redaction() -
         },
     })
     value = _wire(event)["payload"]["error_diagnostics"]
-    assert "TAIL_SECRET" not in json.dumps(value)
+    assert value["exception_message"] == text
+    assert value["exception_chain"][0]["exception_message"] == text
     assert "401" in value["exception_message"]
     assert value["traceback"].endswith("END_STACK")
     assert len(value["traceback"]) > 4000
@@ -735,7 +738,7 @@ async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_r
         started=started, release=release,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('web-end-recovery', storage=PersistenceStorage.in_memory()) as persistence_670, Runtime.attach(persistence=persistence_670, features=model_features(_ToolModels(), application)) as runtime, client(create_app(runtime=runtime)) as http:
             session = await runtime.agents.get("default").create_session("session")

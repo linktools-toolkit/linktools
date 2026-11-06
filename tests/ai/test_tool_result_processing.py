@@ -26,10 +26,11 @@ from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
 from linktools.ai.capability import (
     AgentContext, AssetCapability, CapabilityContribution, CapabilityLoadContext,
-    CheckpointCapability, ExecutionCapability, ReferencedInputsCapability,
+    ExecutionCapability, ReferencedInputsCapability,
     ToolCallRetry, TraceCapability, ToolResultsCapability, FileSystem,
-    TOOL_MCP_SELECTOR_METADATA_KEY,
-)
+    TOOL_MCP_SELECTOR_METADATA_KEY)
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ReferencedContent
@@ -313,7 +314,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
     features = RuntimeFeatures("projection")
     features.model("default", _Binding(stream))
     features.capability(ExecutionCapability(retain_history=True))
-    features.capability(CheckpointCapability())
+    features.capability(native_checkpoint())
     features.capability(TraceCapability(record_http_bodies=True))
     features.capability(ReferencedInputsCapability(load), id=_SOURCE.id, scope="agent")
     features.capability(CombinedCapability([Project(), Observe(), ToolResultsCapability()]),
@@ -390,7 +391,7 @@ async def test_projection_failure_preserves_effect_classification(
 
     features = RuntimeFeatures("projection-failure")
     features.model("default", _Binding(stream))
-    features.capability(CheckpointCapability())
+    features.capability(native_checkpoint())
     features.capability(Fail(), id="projection", scope="agent")
     if kind == "mcp":
         features.mcp(_server(tmp_path))

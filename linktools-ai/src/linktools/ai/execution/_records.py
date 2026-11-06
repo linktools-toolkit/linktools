@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+from typing import TYPE_CHECKING
 from ..agent import AgentBindingContract
 from ..asset import AssetVersionRef
 from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionLineageKind,
@@ -16,6 +18,11 @@ from ..errors import ErrorDiagnostics
 from ..storage import StoredPayload
 from ..model import StoredUserInput
 from ..task import TaskBindingContract
+from ..session import ConversationCursor
+
+
+if TYPE_CHECKING:
+    from ..session import SessionRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +55,8 @@ class ExecutionRecord:
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
+    producer_generation: int = 0
+    producer_claim_id: str | None = None
     parent_invocation_id: str | None = None
     memory_scope: str | None = None
     conversation_agent_run_id: str | None = None
@@ -74,8 +83,18 @@ class ExecutionRecord:
     durable_trace: bool = False
     # Whether this execution retains conversation and fork context.
     conversation: bool = True
+    recovery: ExecutionRecoveryDetail | None = None
+    history_seal_digest: str | None = None
 
     def __post_init__(self) -> None:
+        if (isinstance(self.producer_generation, bool)
+                or not isinstance(self.producer_generation, int)
+                or self.producer_generation < 0):
+            raise ValueError("execution producer generation is invalid")
+        if self.producer_claim_id is not None and (
+                not isinstance(self.producer_claim_id, str) or not self.producer_claim_id
+                or self.producer_generation < 1):
+            raise ValueError("execution producer claim is invalid")
         if any(not isinstance(value, bool) for value in (
             self.restart_checkpoints, self.durable_trace, self.conversation,
         )):
@@ -90,11 +109,17 @@ class ExecutionRecord:
             raise TypeError("execution input context is invalid")
         if self.context_imported and (self.input_context is None or self.session_id is not None):
             raise ValueError("imported context must belong to an independent execution")
+        if self.recovery is not None and not isinstance(self.recovery, ExecutionRecoveryDetail):
+            raise TypeError("execution recovery detail is invalid")
+        if self.history_seal_digest is not None and (not self.durable_trace or not isinstance(self.history_seal_digest, str) or len(self.history_seal_digest) != 64):
+            raise ValueError("execution history seal reference is invalid")
         agent_binding = isinstance(self.binding, AgentBindingContract)
         task_binding = isinstance(self.binding, TaskBindingContract)
         if agent_binding == task_binding:
             raise TypeError("execution binding contract is invalid")
         if agent_binding:
+            if self.status is ExecutionStatus.WAITING_DEFERRED and (self.recovery is None or self.recovery.pending_tools is None):
+                raise ValueError("waiting agent execution requires deferred continuation")
             mode = normalize_execution_mode(self.mode)
             thinking = normalize_thinking(self.thinking)
             if not isinstance(self.planning, bool):
@@ -179,6 +204,21 @@ class ExecutionRecord:
             raise ValueError("only failed execution can carry error diagnostics")
 
     @property
+    def recovery_state(self) -> ExecutionRecoveryState | None:
+        detail = self.recovery
+        if detail is None:
+            return None
+        if detail.handoff_phase is RecoveryHandoffPhase.PREPARED:
+            return ExecutionRecoveryState.HANDOFF
+        if detail.handoff_phase is RecoveryHandoffPhase.COMPLETED or self.status in {
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        }:
+            return ExecutionRecoveryState.COMPLETED
+        if self.status is ExecutionStatus.WAITING_DEFERRED:
+            return ExecutionRecoveryState.WAITING
+        return ExecutionRecoveryState.ADMITTED if detail.agent_run_id is None else ExecutionRecoveryState.ACTIVE
+
+    @property
     def invalidates_session_history(self) -> bool:
         """A completed unretained turn supersedes any older session context."""
         return (
@@ -248,6 +288,16 @@ class ExecutionStartReservation:
     execution: ExecutionRecord
     idempotency: IdempotencyRecord
     budget: RunBudget | None = None
+    # Admission proof is transient; the parent execution owns the generation.
+    parent_producer_generation: int | None = None
+
+    def __post_init__(self) -> None:
+        generation = self.parent_producer_generation
+        if generation is not None and (
+            isinstance(generation, bool) or not isinstance(generation, int) or generation < 1
+            or self.execution.parent_execution_id is None
+        ):
+            raise ValueError("parent producer generation requires a subagent and a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +305,7 @@ class ExecutionStartReservationResult:
     execution: ExecutionRecord
     idempotency: IdempotencyRecord
     created: bool
+    session: SessionRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,4 +422,180 @@ class ExecutionTerminalCommitResult:
     result: ResultRecord
 
 
-__all__ = ['RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']
+@dataclass(frozen=True, slots=True)
+class PendingDeferredCall:
+    tool_call_id: str
+    tool_name: str
+    arguments_payload: StoredPayload
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.tool_call_id or not self.tool_name:
+            raise ValueError("deferred call identity is required")
+        try:
+            object.__setattr__(self, "metadata", dict(self.metadata))
+        except (TypeError, ValueError) as error:
+            raise ValueError("deferred call metadata is invalid") from error
+
+
+@dataclass(frozen=True, slots=True)
+class PendingToolContinuation:
+    source_agent_run_id: str
+    approvals: tuple[PendingDeferredCall, ...] = ()
+    calls: tuple[PendingDeferredCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.source_agent_run_id:
+            raise ValueError("deferred continuation identity is invalid")
+        values = (*self.approvals, *self.calls)
+        ids = tuple(item.tool_call_id for item in values)
+        if not values or len(ids) != len(set(ids)):
+            raise ValueError("deferred continuation calls must be unique")
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryInstructionBarrier:
+    agent_run_id: str
+    tool_call_id: str
+    arguments_digest: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                self.agent_run_id,
+                self.tool_call_id,
+                self.arguments_digest,
+            )
+        ) or not (len(self.arguments_digest) == 64 and all(value in "0123456789abcdef" for value in self.arguments_digest)):
+            raise ValueError("repository instruction barrier is invalid")
+
+
+class ExecutionRecoveryState(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
+    ADMITTED = "admitted"
+    ACTIVE = "active"
+    WAITING = "waiting"
+    HANDOFF = "handoff"
+    COMPLETED = "completed"
+
+
+class RecoveryHandoffPhase(str, Enum):
+    __str__ = str.__str__
+    __format__ = str.__format__
+    NONE = "none"
+    PREPARED = "prepared"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryTerminalOutcome:
+    terminal_status: ExecutionStatus
+    error_code: str | None
+    safe_error_details: Mapping[str, JsonValue]
+    stop_reason: StopReason
+    output: StoredPayload | None
+    object_source_domain: PersistenceDomain | None
+    usage: UsageMetrics
+    terminal_event_type: ExecutionEventType
+    terminal_event_payload: Mapping[str, JsonValue]
+    result_created_at: datetime
+    error_diagnostics: ErrorDiagnostics | None = None
+
+    def __post_init__(self) -> None:
+        if self.terminal_status is ExecutionStatus.SUCCEEDED and self.output is None:
+            raise ValueError("successful recovery outcome requires output")
+        if (
+            self.terminal_status is not ExecutionStatus.SUCCEEDED
+            and self.output is not None
+        ):
+            raise ValueError("failed terminal result cannot contain output")
+        if self.output is None and self.object_source_domain is not None:
+            raise ValueError("recovery object source requires output")
+        if (
+            self.output is not None
+            and self.output.kind == "inline"
+            and self.object_source_domain is not None
+        ):
+            raise ValueError("inline recovery output cannot have an object source")
+        if (
+            self.output is not None
+            and self.output.kind == "object"
+            and self.object_source_domain is None
+        ):
+            raise ValueError("object recovery output requires an object source")
+        if self.object_source_domain not in {
+            None,
+            PersistenceDomain.EXECUTION,
+            PersistenceDomain.CHECKPOINT,
+        }:
+            raise ValueError("recovery object source domain is invalid")
+        if self.result_created_at.tzinfo is None:
+            raise ValueError("recovery outcome requires an aware timestamp")
+        if self.error_diagnostics is not None and not isinstance(
+            self.error_diagnostics, ErrorDiagnostics
+        ):
+            raise TypeError("recovery error diagnostics are invalid")
+        if (
+            self.terminal_status is not ExecutionStatus.FAILED
+            and self.error_diagnostics is not None
+        ):
+            raise ValueError("only failed recovery outcome can carry error diagnostics")
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryConversationIntent:
+    session_id: str
+    expected_cursor: ConversationCursor | None
+    next_cursor: ConversationCursor
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryTerminalHandoff:
+    outcome: RecoveryTerminalOutcome
+    source_agent_run_id: str | None
+    conversation: RecoveryConversationIntent | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.outcome.terminal_status is ExecutionStatus.SUCCEEDED
+            and self.source_agent_run_id is None
+        ):
+            raise ValueError("successful recovery handoff requires a source attempt")
+        if self.conversation is not None and self.source_agent_run_id is None:
+            raise ValueError("conversation recovery intent requires a source attempt")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecoveryDetail:
+    """Recoverable execution details owned by the execution control revision."""
+
+    agent_run_id: str | None = None
+    source_agent_run_id: str | None = None
+    pending_tools: PendingToolContinuation | None = None
+    repository_instruction_overlay: RuntimePayloadRef | None = None
+    repository_instruction_barriers: tuple[RepositoryInstructionBarrier, ...] = ()
+    handoff_phase: RecoveryHandoffPhase = RecoveryHandoffPhase.NONE
+    terminal_handoff: RecoveryTerminalHandoff | None = None
+
+    def __post_init__(self) -> None:
+        for identity in (self.agent_run_id, self.source_agent_run_id):
+            if identity is not None and (not isinstance(identity, str) or not identity):
+                raise ValueError("recovery attempt identity cannot be empty")
+        if self.agent_run_id is None and (self.source_agent_run_id is not None or self.pending_tools is not None):
+            raise ValueError("recovery source requires an admitted attempt")
+        barriers = tuple(self.repository_instruction_barriers)
+        identities = tuple((item.agent_run_id, item.tool_call_id) for item in barriers)
+        if len(identities) != len(set(identities)):
+            raise ValueError("repository instruction barriers must be unique")
+        object.__setattr__(self, "repository_instruction_barriers", barriers)
+        if self.handoff_phase is RecoveryHandoffPhase.NONE and self.terminal_handoff is not None:
+            raise ValueError("unprepared recovery cannot contain a terminal handoff")
+        if self.handoff_phase is RecoveryHandoffPhase.PREPARED and self.terminal_handoff is None:
+            raise ValueError("prepared recovery requires a terminal handoff")
+        if self.handoff_phase is not RecoveryHandoffPhase.NONE and self.pending_tools is not None:
+            raise ValueError("terminal recovery cannot retain deferred continuation")
+
+
+__all__ = ['PendingDeferredCall', 'PendingToolContinuation', 'RepositoryInstructionBarrier', 'ExecutionRecoveryState', 'RecoveryHandoffPhase', 'RecoveryTerminalOutcome', 'RecoveryConversationIntent', 'RecoveryTerminalHandoff', 'ExecutionRecoveryDetail', 'RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']

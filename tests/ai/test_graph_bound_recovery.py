@@ -143,7 +143,7 @@ async def _graph_recovery(
                 status=status,
                 error_code=None if status is ExecutionStatus.STARTED else ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
             )
-            await runtime._state.execution.executions.create_with_history_head(record)
+            await runtime._state.execution.executions.create_execution(record)
             leases.append(await runtime._state.task.tasks.claim(
                 graph.graph_id, node_id, tenant_id="default",
                 owner="stopped-worker", lease_seconds=30,
@@ -361,7 +361,7 @@ async def test_explicit_graph_takeover_is_limited_to_durable_bindings(live_statu
             before, execution_id="unrelated-execution", root_execution_id="unrelated-execution",
             requires_task_invocation_capture=False,
         )
-        await storage.execution.executions.create_with_history_head(unrelated)
+        await storage.execution.executions.create_execution(unrelated)
         await service.recover("bound-graph", RecoverGraphRequest(_ACTOR, "take-over-bound-graph"))
         after = await storage.execution.executions.get("execution-live", tenant_id="default")
         assert after.revision > before.revision

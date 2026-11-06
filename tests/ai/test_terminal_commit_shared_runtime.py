@@ -15,7 +15,8 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionCancelRequestCommit, ExecutionRecord
-from linktools.ai.capability import CheckpointCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.execution import CancelExecutionRequest
@@ -24,6 +25,7 @@ from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from .test_runtime_turn_lifecycle import _ObservedCache
 
 
 def _group(terminal: bool = True):
@@ -32,7 +34,7 @@ def _group(terminal: bool = True):
     group.agent('default', model='default', allow_tools=())
     if not terminal:
         # Checkpoint guarantees force source admission even with shared cache.
-        group.capability(CheckpointCapability(), scope='runtime')
+        group.capability(native_checkpoint(), scope='runtime')
     return group
 
 
@@ -93,15 +95,6 @@ async def test_remote_cancel_signals_owner_then_confirms_source(
     from linktools.ai.runtime._local import LocalExecutionBackend
 
     owner_ready, release_owner = asyncio.Event(), asyncio.Event()
-    cancel = LocalExecutionBackend.cancel
-
-    async def held_owner_cancel(self, execution, *, force=False):
-        if execution.execution_id in self._tasks:
-            owner_ready.set()
-            await release_owner.wait()
-        return await cancel(self, execution, force=force)
-
-    monkeypatch.setattr(LocalExecutionBackend, 'cancel', held_owner_cancel)
     if concurrent_owner_checkpoint:
         reader_checkpoint_ready = asyncio.Event()
         commit_cancel_checkpoint = LocalExecutionBackend.commit_cancel_checkpoint
@@ -126,6 +119,12 @@ async def test_remote_cancel_signals_owner_then_confirms_source(
         try:
             await asyncio.Event().wait()
         finally:
+            owner_ready.set()
+            while not release_owner.is_set():
+                try:
+                    await release_owner.wait()
+                except asyncio.CancelledError:
+                    pass
             stopped.set()
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
@@ -196,11 +195,11 @@ async def test_shared_pending_early_preview_and_canonical_result(tmp_path: Path,
 async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
     from pydantic_ai.messages import ToolCallPart
     from linktools.ai.capability import AgentContext
-    class LostLeaseCache(InMemoryCacheBackend):
+    class LostLeaseCache(_ObservedCache):
         lost = False
         async def renew_turn(self, lease, *, lease_seconds):
             return None if self.lost else await super().renew_turn(lease, lease_seconds=lease_seconds)
-    cache = LostLeaseCache(max_bytes=2**20)
+    cache = LostLeaseCache()
     entered, finish = asyncio.Event(), asyncio.Event()
     effects = []
     async def effect(context: AgentContext[None]) -> str:
@@ -224,7 +223,15 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
         try:
             execution = await runtime.agents.get().start('question')
             await asyncio.wait_for(entered.wait(), 5)
+            backend = runtime._execution_service.runtime_backend()
+            owner = backend._turn_owners[execution.execution_id]
             cache.lost = True
+
+            async def wait_for_owner_loss():
+                while not owner.stopping:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_owner_loss(), 5)
             finish.set()
             with pytest.raises(AIError) as failed:
                 await execution.wait(timeout_seconds=5)
@@ -232,13 +239,14 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
             assert effects == []
             assert await runtime._state.execution.executions.state_store.read(lambda _: runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)) is None
         finally:
+            finish.set()
             await opened.__aexit__(None, None, None)
         assert effects == []
         assert not persistence._runtime_owners
         assert await persistence.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) is None
-        assert await persistence.execution.executions.get_history_head(
+        assert await persistence.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) is None
         assert not cache._turns
@@ -410,10 +418,13 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
     import uuid
     from dataclasses import replace
     from linktools.ai.runtime._local import LocalExecutionBackend
+    from linktools.ai.execution import ExecutionHandle
+    failed_releases = []
     class ReleaseFailure(InMemoryCacheBackend):
         fail_release = False
         async def release_turn(self, lease):
             if self.fail_release:
+                failed_releases.append(lease)
                 raise OSError('release unavailable')
             return await super().release_turn(lease)
     cache = ReleaseFailure(max_bytes=2**20)
@@ -434,13 +445,20 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
         identity = reservation.idempotency
         candidate = 'candidate-' + uuid.uuid4().hex
         proposal = replace(reservation, execution=replace(reservation.execution, execution_id=candidate, root_execution_id=candidate), idempotency=replace(identity, resource_id=candidate))
-        coordination = await backend._pending_turns.coordination.claim(
-            session_key=f'request:{identity.scope}:{identity.idempotency_key_digest}',
-            request_key=f'{identity.scope}:{identity.idempotency_key_digest}',
-            request_digest=identity.request_digest, execution_id=candidate,
-            owner_id=uuid.uuid4().hex, lease_seconds=30,
-        )
-        assert coordination is not None and coordination.lease is not None
+        previous_owner = backend._turn_owners.get(execution.execution_id)
+        if previous_owner is not None:
+            await asyncio.wait_for(previous_owner.closed.wait(), 5)
+        replay_owners = []
+
+        async def admit(coordination):
+            assert coordination is not None and coordination.lease is not None
+            replay_owners.append(backend._turn_owners[candidate])
+            replayed = await original(backend, request, proposal, None, coordination)
+            return ExecutionHandle(replayed)
+
         cache.fail_release = True
-        assert await original(backend, request, proposal, None, coordination) == execution.execution_id
+        replayed = await backend.run_turn(proposal, request.principal, admit)
+        assert replayed.execution_id == execution.execution_id
+        await asyncio.wait_for(replay_owners[0].closed.wait(), 5)
+        assert failed_releases
         assert len(calls) == 1

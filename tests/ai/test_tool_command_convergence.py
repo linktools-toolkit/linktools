@@ -4,22 +4,23 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.persistence import Persistence
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.persistence.commands import StateCommands
 from linktools.ai.persistence.contracts import ToolOperationAdmission
 from linktools.ai.storage import StoredPayload
+from linktools.ai.persistence.state import Observed
 
 
 class _CommandExecution:
     def __init__(self, state_store):
         self.state_store = state_store
+        self.tenant_id = "tenant"
 
     async def get(self, execution_id, *, tenant_id):
         return SimpleNamespace(status=ExecutionStatus.STARTED)
@@ -48,7 +49,6 @@ def _record(
         status,
         owner,
         fence,
-        now + timedelta(seconds=60) if status is ToolOperationStatus.CLAIMED else None,
         None,
         now,
         now,
@@ -68,7 +68,6 @@ def _admission() -> ToolOperationAdmission:
         binding_digest=canonical_sha256({"binding": True}),
         replay_safe=True,
         owner="owner",
-        lease_seconds=60,
     )
 
 
@@ -114,27 +113,31 @@ class _AdmissionTools:
         del tool_operation_id, tenant_id
         return self.current
 
+    async def observe_operation(self, tool_operation_id: str, *, tenant_id: str) -> Observed[ToolOperationRecord]:
+        return Observed(await self.get_operation(tool_operation_id, tenant_id=tenant_id), 0)
+
     async def admit_in_transaction(
         self,
         transaction: object,
         request: ToolOperationAdmission,
-    ) -> ToolOperationRecord:
+        *, observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
         del transaction, request
-        return self.current
+        return Observed(self.current, 0)
 
 
 @pytest.mark.asyncio
 async def test_tool_admission_conflict_reenters_fresh_repository_attempt() -> None:
     current = _record()
     tools = _AdmissionTools(current)
-    commands = object.__new__(StateCommands)
-    commands._tools = tools
-    commands._observe_cancellation = True
-    commands._execution = _CommandExecution(tools.state_store)
+    commands = StateCommands(
+        _CommandExecution(tools.state_store), namespace="tool-command-convergence",
+        events=SimpleNamespace(), tools=tools, background_tasks=set(),
+    )
 
     result = await commands.commit_tool_admission(_admission())
 
-    assert result == current
+    assert result.value == current
     assert tools.group.attempts == 2
 
 
@@ -183,6 +186,9 @@ class _TerminalTools:
         del tool_operation_id, tenant_id
         return self.current
 
+    async def observe_operation(self, tool_operation_id: str, *, tenant_id: str) -> Observed[ToolOperationRecord]:
+        return Observed(await self.get_operation(tool_operation_id, tenant_id=tenant_id), 0)
+
     async def complete_in_transaction(
         self,
         transaction: object,
@@ -192,17 +198,17 @@ class _TerminalTools:
         owner: str,
         fence: int,
         result_payload: StoredPayload,
-    ) -> ToolOperationRecord:
+        observed: Observed[ToolOperationRecord] | None = None,
+    ) -> Observed[ToolOperationRecord]:
         del transaction, tool_operation_id, tenant_id
         self.current = replace(
             self.current,
             status=ToolOperationStatus.COMPLETED,
             owner=owner,
             fence=fence,
-            lease_expires_at=None,
             result_payload=result_payload,
         )
-        return self.current
+        return Observed(self.current, 1)
 
     async def fail_in_transaction(self, *args, **kwargs) -> ToolOperationRecord:
         del args, kwargs
@@ -286,47 +292,3 @@ async def test_tool_terminal_command_rejects_malformed_failure_payload() -> None
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert tools.group.attempts == 0
-
-
-@pytest.mark.asyncio
-async def test_superseded_history_producer_cannot_admit_a_tool_but_owned_effect_can_settle() -> None:
-    from linktools.ai.core import ExecutionStatus
-    from linktools.ai.persistence import PersistenceStorage
-    from linktools.ai.persistence.codec import decode_domain, encode_domain
-    from .test_execution_recovery_commands import _commands, _execution
-
-    state = Persistence(PersistenceStorage.in_memory())
-    await state.initialize(namespace="tool-producer-fence", tenant_id="tenant")
-    try:
-        execution = replace(_execution(datetime.now(timezone.utc)), revision=1)
-        repository = state.execution.executions
-        await repository.create_with_history_head(execution)
-        await repository.state_store.mutate(
-            lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
-        )
-        resumed = await _commands(state).commit_resumed(execution)
-        commands = StateCommands(
-            repository, namespace="tool-producer-fence", events=state.execution.events,
-            tools=state.checkpoint.tools, background_tasks=set(),
-        )
-        stale = replace(_admission(), producer_generation=execution.revision)
-        assert decode_domain(encode_domain(stale), ToolOperationAdmission) == stale
-        with pytest.raises(AIError) as caught:
-            await asyncio.wait_for(commands.commit_tool_admission(stale), 2)
-        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
-        assert caught.value.retryable is False
-        assert await state.checkpoint.tools.get_operation(stale.tool_operation_id, tenant_id="tenant") is None
-        admitted = await commands.commit_tool_admission(
-            replace(stale, producer_generation=resumed.revision)
-        )
-        assert admitted.status is ToolOperationStatus.CLAIMED
-        successor = await _commands(state).commit_resumed(resumed)
-        assert successor.status is ExecutionStatus.STARTED
-        settled, cancellation_requested = await commands.commit_tool_terminal(
-            admitted.tool_operation_id, tenant_id="tenant", owner=admitted.owner,
-            fence=admitted.fence, result_payload=StoredPayload.inline_bytes(b"result"),
-        )
-        assert settled.status is ToolOperationStatus.COMPLETED
-        assert not cancellation_requested
-    finally:
-        await state.close()

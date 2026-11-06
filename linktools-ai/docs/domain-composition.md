@@ -68,10 +68,26 @@ forwarding facade just to reduce the number of `service` references.
   registers that coordinator with Runtime's existing close sequence. The
   example supplies an explicit service principal for evaluation control; it
   does not weaken the authorization policy.
+- Session and Execution management authorize the record read for that external
+  operation. The default policy checks both tenant and resource owner; storage
+  tenant scoping alone does not isolate callers within one tenant. Hosts can
+  supply a custom policy, including Evaluation actions. Policy decisions are
+  never cached across operations. Mutations retain revision and immutable-owner
+  checks after awaited hooks. Tool filesystem and shell permissions remain a
+  separate execution and sandbox boundary.
 - `Metrics.record(metric, value, *, observation_id=..., ...)` settles an
   explicit source write. Automatic producer recording is a separate recorder
   lifetime. A host can supply a different `MetricRecorderProvider`; a dropped
   metric must not become a different execution outcome.
+- Agent recovery uses the official
+  `pydantic_ai_harness.step_persistence.StepPersistence(store=steps,
+  capture_frontier=True)` capability. Register it at Runtime scope alongside
+  `TraceCapability()` when both native checkpoints and execution evidence are
+  needed. Its StepStore is caller-owned and must outlive Runtime. The example's
+  `SqliteStepStore(database=path)` opens and closes short-lived connections per
+  operation; it has no store-level close/context API. A caller-supplied
+  `connection=...` must instead be closed by that caller after Runtime closes.
+  Native snapshots are not copied into a second Runtime checkpoint archive.
 
 ## Failure, cancellation, and recovery boundaries
 

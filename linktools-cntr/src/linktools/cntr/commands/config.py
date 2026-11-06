@@ -48,7 +48,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand_argument("-d", "--with-dependencies", action="store_true", default=False,
                          help="include configs from dependency containers")
     @subcommand_argument("--show-secret", action="store_true", default=False,
-                         help="show secret values in plain text instead of the logger's automatic ***-redaction")
+                         help="show secret field values in plain text instead of ***")
     def on_command_list(self, names: "list[str]", with_dependencies: bool = False, show_secret: bool = False) -> None:
         manager = _shared.manager
         config = manager.config
@@ -72,7 +72,6 @@ class ConfigCommand(BaseCommandGroup):
             except ConfigNotFoundError:
                 continue
             if show_secret:
-                # Explicit disclosure bypasses the logger's secret-name redaction.
                 print(f"{key}={value}")
             else:
                 shown = redact_config_value(config.schema.get(key), value)
@@ -81,7 +80,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand("get", order=CONFIG_COMMAND_ORDER["get"], help="read one or more resolved config values")
     @subcommand_argument("keys", metavar="KEY", nargs="+", help="config key(s)")
     @subcommand_argument("--show-secret", action="store_true", default=False,
-                         help="show secret values in plain text instead of the logger's automatic ***-redaction")
+                         help="show secret field values in plain text instead of ***")
     def on_command_get(self, keys: "list[str]", show_secret: bool = False) -> None:
         _shared.manager.load_installed_config_metadata()
         config = _shared.manager.config

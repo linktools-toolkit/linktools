@@ -11,7 +11,9 @@ import httpx2
 import pytest
 from pydantic_ai.capabilities import CombinedCapability, WrapperCapability
 
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
@@ -125,7 +127,7 @@ async def test_runtime_policy_survives_checkpoint_and_cold_trace_read(
     features = RuntimeFeatures('body-policy')
     features.agent('default', model='default')
     features.capability(WrapperCapability(TraceCapability(record_http_bodies=enabled), id='wrapped-trace'))
-    features.capability(CheckpointCapability())
+    features.capability(native_checkpoint())
     root = tmp_path / 'state'
     async with Persistence.open('body-policy', storage=PersistenceStorage.from_root(root, exclusive_writer=True)) as persistence_126, Runtime.attach(persistence=persistence_126, features=model_features(models, features)) as runtime:
         execution = await runtime.agents.get().start('question')

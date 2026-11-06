@@ -22,7 +22,8 @@ async def test_local_execution_close_surfaces_recorded_worker_failure() -> None:
     backend._accepting = True
     backend._live_broker = LiveExecutionEventBroker()
     backend._pending_turns = _PendingExecutionTurns()
-    backend._pending_renewals = {}
+    backend._turn_monitors = {}
+    backend._turn_owners = {}
     backend._tasks = {}
     backend._executor = SimpleNamespace(pending_background_tasks=())
     backend._subagent_dispatcher = None

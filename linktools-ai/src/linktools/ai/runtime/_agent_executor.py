@@ -125,6 +125,7 @@ from ._harness import (
     ReinjectRuntimeSystemPrompt, SummaryProviderModel,
     FallbackProviderModel,
 )
+from ..capability.steps import StepBoundaryCapabilities
 from ..model.messages import without_history_system_prompts
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
@@ -693,6 +694,7 @@ class AgentExecutor:
                                 if scope.replace_history_system_prompt else scope.history
                             ) or None,
                             conversation_id=scope.agent_conversation_id,
+                            run_id=scope.agent_run_id,
                             usage_limits=usage_limits,
                             usage=run_usage,
                             capabilities=capabilities,
@@ -706,7 +708,10 @@ class AgentExecutor:
                             _validate_deferred_requests(output)
                             return output
                         run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
-                        checkpoint = await scope.run_store.latest_checkpoint(agent_run_id=scope.agent_run_id)
+                        checkpoint = (await scope.run_store.checkpoint_persistence.reader.latest_snapshot(run_id=scope.agent_run_id)
+                                      if isinstance(scope.run_store, RuntimeAgentRunStore)
+                                      and scope.run_store.execution_persistence(scope.agent_run_id)[1]
+                                      else await scope.run_store.latest_checkpoint(agent_run_id=scope.agent_run_id))
                         operations = (
                             ()
                             if scope.tool_operations is None
@@ -936,6 +941,25 @@ def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
         normalize_json_value(requests.metadata)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT) from error
+
+
+class _RunCapabilities(StepBoundaryCapabilities[AgentContext[object]]):
+    """Place Runtime boundaries around the resolved native capability instances."""
+
+    async def for_run(
+        self, ctx: PydanticRunContext[AgentContext[object]],
+    ) -> AbstractCapability[AgentContext[object]]:
+        resolved = await super().for_run(ctx)
+
+        def bind(capability: AbstractCapability[AgentContext[object]]) -> AbstractCapability[AgentContext[object]]:
+            if isinstance(capability, ModelObservationCapability):
+                return capability.with_request_ordering((resolved,))
+            return capability
+
+        rebound = resolved.visit_and_replace(bind)
+        if rebound is None:
+            raise RuntimeError("native run composition removed its capabilities")
+        return rebound
 
 
 async def _materialize_agent(
@@ -1183,8 +1207,14 @@ async def _materialize_agent(
         else ModelObservationCapability(metrics, **model_observation_kwargs)
     )
     capabilities.append(model_observation)
+    initial_history_count = len(without_history_system_prompts(scope.history)
+                                if scope.replace_history_system_prompt else scope.history)
     platform = await compose_platform_capabilities(
         runtime_capabilities=bound_runtime_capabilities,
+        transcript_start=(scope.run_store.checkpoint_transcript_start(
+            scope.agent_run_id, initial_history_count=initial_history_count,
+        ) if isinstance(scope.run_store, RuntimeAgentRunStore) else initial_history_count),
+        tool_operations=scope.tool_operations,
         agent_id=compiled_agent.spec.id,
         agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
@@ -1246,7 +1276,7 @@ async def _materialize_agent(
             scope.event_sink, run_recorder, scope.agent_run_seq, scope.tool_operations,
         )
     )
-    return agent, tuple(capabilities)
+    return agent, (_RunCapabilities(capabilities),)
 
 
 def _bound_tool_metadata(

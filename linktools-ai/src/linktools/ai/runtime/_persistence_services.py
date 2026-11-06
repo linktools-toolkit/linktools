@@ -8,15 +8,11 @@ import asyncio
 from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import (
     AbstractCapability,
-    AgentNode,
     CapabilityOrdering,
-    NodeResult,
 )
-from pydantic_ai.messages import ModelResponse, ToolCallPart
-from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -34,98 +30,6 @@ if TYPE_CHECKING:
     from ._run_hooks import AgentRunCapture
 
 AppT = TypeVar("AppT")
-
-
-class CheckpointService(AbstractCapability[AgentContext[AppT]]):
-    """Confirm recovery context at model and tool safety boundaries.
-
-    Register at Runtime scope. Runtime owns checkpoint transactions and producer
-    fencing; each run binds its own capture without modifying the declaration.
-    """
-
-    def __init__(self, capture: "AgentRunCapture") -> None:
-        self._capture = capture
-
-    id: str | None = "runtime.checkpoint"
-    _capture: AgentRunCapture | None = None
-
-    def _bound_capture(self) -> AgentRunCapture:
-        if self._capture is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self._capture
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position="innermost")
-
-    async def before_model_request(
-        self,
-        ctx: PydanticRunContext[AgentContext[AppT]],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        capture = self._bound_capture()
-        await capture.context.save_checkpoint(
-            ctx, messages=ctx.messages, state="complete"
-        )
-        return request_context
-
-    async def after_node_run(
-        self,
-        ctx: PydanticRunContext[AgentContext[AppT]],
-        *,
-        node: AgentNode[AgentContext[AppT]],
-        result: NodeResult[AgentContext[AppT]],
-    ) -> NodeResult[AgentContext[AppT]]:
-        if isinstance(node, ModelRequestNode):
-            response = None
-            if isinstance(result, CallToolsNode):
-                response = result.model_response
-            elif ctx.messages and isinstance(ctx.messages[-1], ModelResponse):
-                response = ctx.messages[-1]
-            if response is not None:
-                # The recorder captured this response with its request identity.
-                # It must be recoverable before any tool effect.
-                await self._bound_capture().context.save_checkpoint(
-                    ctx, messages=ctx.messages, state="complete"
-                )
-        if isinstance(node, CallToolsNode):
-            pending = result.request if isinstance(result, ModelRequestNode) else None
-            await self._bound_capture().context.save_checkpoint(
-                ctx,
-                messages=ctx.messages,
-                pending=pending,
-                state="complete",
-            )
-        return result
-
-    async def after_run(
-        self,
-        ctx: PydanticRunContext[AgentContext[AppT]],
-        *,
-        result: AgentRunResult[Any],
-    ) -> AgentRunResult[Any]:
-        capture = self._bound_capture()
-        await capture.after_run(ctx, result=result)
-        await capture.context.save_checkpoint(
-            ctx,
-            messages=result.all_messages(),
-            state="interrupted"
-            if isinstance(result.output, DeferredToolRequests)
-            else "complete",
-        )
-        return result
-
-    async def on_run_error(
-        self,
-        ctx: PydanticRunContext[AgentContext[AppT]],
-        *,
-        error: BaseException,
-    ) -> AgentRunResult[Any]:
-        capture = self._bound_capture()
-        capture.recorder.finish_transcript(interrupted=True)
-        await capture.context.save_checkpoint(
-            ctx, messages=capture.live_messages or ctx.messages, state="interrupted"
-        )
-        raise error
 
 
 class TraceService(AbstractCapability[AgentContext[AppT]]):
@@ -276,4 +180,4 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
         raise error
 
 
-__all__ = ["CheckpointService", "TraceService"]
+__all__ = ["TraceService"]

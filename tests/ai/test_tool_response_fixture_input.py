@@ -11,8 +11,13 @@ import json
 import sqlite3
 import zlib
 from dataclasses import replace
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+
+import asyncio
+
+from pydantic_ai import RunContext
+from pydantic_ai.capabilities import AbstractCapability
 
 import pytest
 
@@ -150,26 +155,49 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
             assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
     assert await assets.read_versions((first,))
 
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class ParentBarrier(AbstractCapability):
+        id = "test.parent-barrier"
+
+        async def before_run(self, ctx: RunContext) -> None:
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+
     features = RuntimeFeatures("fixture-conversation")
+    features.capability(ParentBarrier(), scope="runtime")
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(second, assets)), scope="runtime")
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('fixture-input', storage=storage) as persistence_145, Runtime.attach(persistence=persistence_145, features=model_features(RuntimeUsageModels(), features)) as runtime:
         original = await runtime.executions.get(execution.execution_id, principal=principal)
-        for derived in (await original.retry("retry"), await original.fork("fork")):
+        parent = await original.retry("retry")
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            parent_record = await runtime._state.execution.executions.get(parent.execution_id, tenant_id=runtime.tenant_id)
+            assert parent_record.status is ExecutionStatus.STARTED
+            assert parent_record.tool_response_ref == first
+            head = await runtime._state.execution.executions.get(parent.execution_id, tenant_id=runtime.tenant_id)
+            assert head is not None
+            request = ExecutionRequest("child", principal, "child", None, "run", False, False,
+                                       tool_response_ref=second)
+            handle = await runtime._execution_service.start_subagent(record.binding_digest, request,
+                parent_execution_id=parent.execution_id, root_execution_id=parent_record.root_execution_id,
+                parent_producer_generation=head.producer_generation,
+                parent_invocation_id="child-call", binding_contract=record.binding)
+            child = await runtime.executions.get(handle.execution_id, principal=principal)
+            assert (await child.wait()).result.status is ExecutionStatus.SUCCEEDED
+            accepted = await runtime._state.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
+            assert accepted.tool_response_ref == first
+            assert accepted.context_imported is False
+        finally:
+            release.set()
+        for derived in (parent, await original.fork("fork")):
             assert (await derived.wait()).result.status is ExecutionStatus.SUCCEEDED
             accepted = await runtime._state.execution.executions.get(derived.execution_id, tenant_id=runtime.tenant_id)
             assert accepted.tool_response_ref == first
-        request = ExecutionRequest("child", principal, "child", None, "run", False, False,
-                                   tool_response_ref=second)
-        handle = await runtime._execution_service.start_subagent(record.binding_digest, request,
-            parent_execution_id=record.execution_id, root_execution_id=record.root_execution_id,
-            parent_invocation_id="child-call", binding_contract=record.binding)
-        child = await runtime.executions.get(handle.execution_id, principal=principal)
-        assert (await child.wait()).result.status is ExecutionStatus.SUCCEEDED
-        accepted = await runtime._state.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
-        assert accepted.tool_response_ref == first
-        assert accepted.context_imported is False
         restored = await runtime._execution_service._request_for_execution(request, record)
         assert restored.tool_response_ref == first
         legacy = await runtime._execution_service._request_for_execution(request, replace(record, tool_response_ref=None))
@@ -269,7 +297,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
     from linktools.ai.core import ExternalCallStatus
     from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
     from linktools.ai.persistence.contracts import (
-        PendingDeferredCall, PendingToolContinuation, ExecutionCheckpoint, ExecutionCheckpointState,
+        PendingDeferredCall, PendingToolContinuation, ExecutionRecoveryDetail, ExecutionRecoveryState,
     )
     from linktools.ai.storage import StoredPayload
 
@@ -282,26 +310,31 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
         "cancel_recovery": ExecutionStatus.CANCELLING,
         "terminal_cleanup": ExecutionStatus.SUCCEEDED,
     }.get(path, ExecutionStatus.STARTED)
-    state = (ExecutionCheckpointState.ADMITTED if path in {"pending_admission", "admitted_first_attempt"}
-             else ExecutionCheckpointState.WAITING if path in {"ready_deferred", "pending_deferred"}
-             else ExecutionCheckpointState.ACTIVE)
-    execution = replace(accepted, session_id=None, status=status, tool_response_ref=_reference())
+    state = (ExecutionRecoveryState.ADMITTED if path in {"pending_admission", "admitted_first_attempt"}
+             else ExecutionRecoveryState.WAITING if path in {"ready_deferred", "pending_deferred"}
+             else ExecutionRecoveryState.ACTIVE)
     pending = (PendingToolContinuation("run", calls=(
         PendingDeferredCall("call", "lookup", StoredPayload.inline_json({})),
-    )) if state is ExecutionCheckpointState.WAITING else None)
-    checkpoint = ExecutionCheckpoint(execution.execution_id,
-        None if state is ExecutionCheckpointState.ADMITTED else "run", state, 0,
-        execution.created_at, execution.updated_at, pending_tools=pending)
+    )) if state is ExecutionRecoveryState.WAITING else None)
+    execution = replace(accepted, session_id=None, status=status, tool_response_ref=_reference(),
+                        recovery=ExecutionRecoveryDetail(agent_run_id=None if state is ExecutionRecoveryState.ADMITTED else "run",
+                                                         pending_tools=pending))
+    checkpoint = execution
     checked = []
     mutations = []
 
     class Port:
         tenant_id = "default"
 
+        async def run_recovery_turn(
+            self, execution_id: str, action: Callable[[], Awaitable[object]],
+        ) -> object:
+            return await action()
+
         async def load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
             return execution
 
-        async def load_recovery_checkpoint(self, execution_id: str, *, tenant_id: str) -> ExecutionCheckpoint:
+        async def load_recovery_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
             return checkpoint
 
         def validate_binding(self, value: ExecutionRecord, *, binding: object = None) -> None:
@@ -310,6 +343,9 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
         async def validate_recovery_inputs(self, value: ExecutionRecord, *, binding: object = None) -> None:
             checked.append(value.tool_response_ref)
             raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+
+        async def _reconcile_cancelled_tool_claims(self, execution: ExecutionRecord) -> None:
+            return None
 
         async def _reconcile_tool_effects(self, *args: object, **kwargs: object) -> tuple[tuple[object, ...], int]:
             return (), 0
@@ -338,7 +374,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
             mutations.append("cancel")
             return replace(execution, status=ExecutionStatus.CANCELLED)
 
-        async def _finish_checkpoint(self, value: ExecutionCheckpoint) -> None:
+        async def _finish_execution_recovery(self, value: ExecutionRecord) -> None:
             mutations.append("terminal-cleanup")
 
         async def load_external_call(self, *args: object, **kwargs: object) -> object:
@@ -347,23 +383,26 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
                 result_payload=StoredPayload.inline_text("answer"), resolution_kind="succeeded", resolution_metadata={},
             )
 
+        async def settle_external_tool_result(self, *args: object) -> None:
+            return None
+
         async def read_deferred_payload(self, payload: StoredPayload) -> object:
             return payload.decode()
 
-        async def load_interrupted_messages(self, agent_run_id: str) -> tuple[object, ...]:
+        async def load_interrupted_messages(self, agent_run_id: str, *, execution: ExecutionRecord) -> tuple[object, ...]:
             return ()
 
     coordinator = _RecoveryCoordinator(Port(), None)
     if path == "terminal_cleanup":
-        assert await coordinator.reconcile_checkpoint(checkpoint) is False
-        assert checked == [] and mutations == ["terminal-cleanup"]
+        assert await coordinator.reconcile_execution(checkpoint) is False
+        assert checked == [] and mutations == []
     elif path == "cancel_recovery":
         result, launched = await coordinator.recover_execution(execution.execution_id,
             tenant_id="default", expected_revision=execution.revision)
         assert result.status is ExecutionStatus.CANCELLED and launched is False
         assert checked == [] and mutations == ["cancel"]
     elif path == "pending_deferred":
-        assert await coordinator.reconcile_waiting_deferred(checkpoint, execution) is None
+        assert await coordinator.reconcile_waiting_deferred(execution) is None
         assert checked == [] and mutations == []
     else:
         with pytest.raises(AIError) as unavailable:
@@ -371,9 +410,9 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
                 await coordinator.recover_execution(execution.execution_id,
                     tenant_id="default", expected_revision=execution.revision)
             elif path == "ready_deferred":
-                await coordinator.reconcile_waiting_deferred(checkpoint, execution)
+                await coordinator.reconcile_waiting_deferred(execution)
             else:
-                await coordinator.reconcile_checkpoint(checkpoint)
+                await coordinator.reconcile_execution(checkpoint)
         assert unavailable.value.code is ErrorCode.ASSET_VERSION_NOT_FOUND
         assert checked == [execution.tool_response_ref] and mutations == []
 

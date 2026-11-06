@@ -8,7 +8,6 @@ from ._runtime_test_helpers import model_features
 from linktools.ai.persistence import Persistence
 import asyncio
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,9 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
+from pydantic_ai_harness.step_persistence import StepPersistence
+from tests.ai._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 from linktools.ai.runtime import Runtime
 from linktools.ai.execution import ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
@@ -150,7 +151,7 @@ async def test_session_tool_turn_commits_terminal_and_history(
     calls: list[str] = []
     application = _application(calls)
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-terminal', storage=state) as persistence_151, Runtime.attach(persistence=persistence_151, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -305,7 +306,7 @@ async def test_rejected_session_start_cleans_only_its_admission(
         release=release_tool,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-admission-cleanup', storage=state) as persistence_310, Runtime.attach(persistence=persistence_310, features=model_features(_ToolModels(), application)) as runtime:
             try:
@@ -320,6 +321,8 @@ async def test_rejected_session_start_cleans_only_its_admission(
                     )
                     await asyncio.wait_for(tool_started.wait(), timeout=10)
                 else:
+                    # Race a source transition after independent reservation.
+                    runtime._execution_service._runtime_bridge.prepare_reserved_start = None
                     original_prepare_start = LocalExecutionBackend.prepare_start
 
                     async def conflict_after_reservation(
@@ -396,19 +399,17 @@ async def test_rejected_session_start_cleans_only_its_admission(
                 assert len(identities) == 1
                 assert identities[0].status.value == "FAILED"
 
-                checkpoint = await runtime._state.checkpoint.checkpoints.get(
+                checkpoint = await runtime._state.execution.executions.get(
                     rejected.execution_id,
                     tenant_id=runtime.default_principal.tenant_id,
                 )
-                if storage_mode == "same_group":
-                    assert checkpoint is None
-                else:
-                    assert checkpoint is not None
-                    assert checkpoint.state.value == "completed"
+                assert checkpoint is not None and checkpoint.status is ExecutionStatus.FAILED
+                assert checkpoint.recovery is None
+                if storage_mode != "same_group":
                     await runtime._execution_service.runtime_backend().abort_start(
                         rejected
                     )
-                    assert await runtime._state.checkpoint.checkpoints.get(
+                    assert await runtime._state.execution.executions.get(
                         rejected.execution_id,
                         tenant_id=runtime.default_principal.tenant_id,
                     ) == checkpoint
@@ -445,7 +446,7 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
     execution_id: str | None = None
     try:
         application = _application(calls)
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('start-cleanup-restart', storage=state) as persistence_454, Runtime.attach(persistence=persistence_454, features=model_features(_ToolModels(), application)) as runtime:
             original_mutate = runtime._state.conversation.sessions.state_store.mutate
@@ -499,13 +500,15 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
                 execution_id = failed.execution_id
                 assert failed.status is ExecutionStatus.FAILED
                 assert failed.started_at is None
-                checkpoint = await runtime._state.checkpoint.checkpoints.get(
+                checkpoint = await runtime._state.execution.executions.get(
                     execution_id,
                     tenant_id=runtime.default_principal.tenant_id,
                 )
                 assert checkpoint is not None
-                assert checkpoint.state.value == ("completed" if release_committed else "admitted")
-                recoverable = await runtime._state.checkpoint.checkpoints.list_recoverable_page(
+                assert checkpoint.status is ExecutionStatus.FAILED
+                assert checkpoint.recovery is not None
+                assert checkpoint.recovery_state.value == ("completed" if release_committed else "handoff")
+                recoverable = await runtime._state.execution.executions.list_recoverable_page(
                     tenant_id=runtime.default_principal.tenant_id,
                     cursor=None,
                     limit=10,
@@ -527,15 +530,15 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
     reopened = _split_sqlite_storage(database)
     try:
         application = _application(calls)
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('start-cleanup-restart', storage=reopened) as persistence_540, Runtime.attach(persistence=persistence_540, features=model_features(_ToolModels(), application)) as runtime:
-            checkpoint = await runtime._state.checkpoint.checkpoints.get(
+            checkpoint = await runtime._state.execution.executions.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert checkpoint is not None
-            assert checkpoint.state.value == "completed"
+            assert checkpoint.recovery_state.value == "completed"
             session_record = await runtime._state.conversation.sessions.get(
                 "session",
                 tenant_id=runtime.default_principal.tenant_id,
@@ -560,23 +563,15 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
     original_run = LocalExecutionBackend._run
 
     async def pause_worker(
-        backend: LocalExecutionBackend,
-        request: Any,
-        execution_record: Any,
-        resume: Any,
-        *,
-        producer_generation: int | None = None,
+        backend: LocalExecutionBackend, *args: Any, **kwargs: Any,
     ) -> None:
         worker_entered.set()
         await release_worker.wait()
-        await original_run(
-            backend, request, execution_record, resume,
-            producer_generation=producer_generation,
-        )
+        await original_run(backend, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", pause_worker)
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-start-cancel-before-run', storage=state) as persistence_593, Runtime.attach(persistence=persistence_593, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -667,6 +662,8 @@ async def test_pending_start_cancel_commits_terminal_before_admission(
     monkeypatch: pytest.MonkeyPatch,
     storage_mode: str,
 ) -> None:
+    from linktools.ai.persistence.contracts import ExecutionRecoveryState
+
     state = (
         PersistenceStorage.sqlite(tmp_path / "pending-start-cancel.db")
         if storage_mode == "same_group"
@@ -690,71 +687,84 @@ async def test_pending_start_cancel_commits_terminal_before_admission(
     monkeypatch.setattr(LocalExecutionBackend, "prepare_start", pause_prepare)
     try:
         application = _application(calls)
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open(f'pending-start-cancel-{storage_mode}', storage=state) as persistence_711, Runtime.attach(persistence=persistence_711, features=model_features(_ToolModels(), application)) as runtime:
-            await runtime.agents.get("default").create_session("session")
-            session = runtime.agents.get("default").session("session")
-            start_task = asyncio.create_task(
-                session.start("inspect", idempotency_key="turn-pending-start")
-            )
-            await asyncio.wait_for(preparing.wait(), timeout=10)
-
-            pending = await runtime._state.execution.executions.list_by_session(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert len(pending) == 1
-            execution_record = pending[0]
-            assert execution_record.status is ExecutionStatus.PENDING_START
-            assert execution_record.started_at is None
-
-            cancellation = await runtime.executions.cancel(
-                execution_record.execution_id,
-                CancelExecutionRequest(
-                    runtime.default_principal,
-                    "cancel-pending-start",
-                ),
-            )
-            assert cancellation.cancelled is True
-            terminal = await runtime._state.execution.executions.get(
-                execution_record.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert terminal is not None
-            assert terminal.status is ExecutionStatus.CANCELLED
-            assert terminal.started_at is None
-            assert await runtime._state.execution.executions.get_result(
-                execution_record.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            ) is not None
-            checkpoint = await runtime._state.checkpoint.checkpoints.get(
-                execution_record.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert checkpoint is None
-            session_record = await runtime._state.conversation.sessions.get(
-                "session",
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert session_record is not None
-            assert session_record.active_execution_id is None
-            assert calls == []
-
-            release_prepare.set()
+            start_task = None
             try:
-                started = await start_task
-            except AIError:
-                pass
-            else:
-                assert started.execution_id == execution_record.execution_id
-            final = await runtime._state.execution.executions.get(
-                execution_record.execution_id,
-                tenant_id=runtime.default_principal.tenant_id,
-            )
-            assert final is not None
-            assert final.status is ExecutionStatus.CANCELLED
-            assert calls == []
+                # PENDING_START remains observable when combined admission is unavailable.
+                runtime._execution_service._runtime_bridge.prepare_reserved_start = None
+                await runtime.agents.get("default").create_session("session")
+                session = runtime.agents.get("default").session("session")
+                start_task = asyncio.create_task(
+                    session.start("inspect", idempotency_key="turn-pending-start")
+                )
+                await asyncio.wait_for(preparing.wait(), timeout=10)
+
+                pending = await runtime._state.execution.executions.list_by_session(
+                    "session",
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert len(pending) == 1
+                execution_record = pending[0]
+                assert execution_record.status is ExecutionStatus.PENDING_START
+                assert execution_record.started_at is None
+
+                cancellation = await runtime.executions.cancel(
+                    execution_record.execution_id,
+                    CancelExecutionRequest(
+                        runtime.default_principal,
+                        "cancel-pending-start",
+                    ),
+                )
+                assert cancellation.cancelled is True
+                terminal = await runtime._state.execution.executions.get(
+                    execution_record.execution_id,
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert terminal is not None
+                assert terminal.status is ExecutionStatus.CANCELLED
+                assert terminal.started_at is None
+                assert await runtime._state.execution.executions.get_result(
+                    execution_record.execution_id,
+                    tenant_id=runtime.default_principal.tenant_id,
+                ) is not None
+                checkpoint = await runtime._state.execution.executions.get(
+                    execution_record.execution_id,
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert checkpoint is not None
+                if storage_mode == "same_group":
+                    assert checkpoint.recovery is None
+                else:
+                    assert checkpoint.recovery_state is ExecutionRecoveryState.COMPLETED
+                    assert checkpoint.recovery.agent_run_id is None
+                session_record = await runtime._state.conversation.sessions.get(
+                    "session",
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert session_record is not None
+                assert session_record.active_execution_id is None
+                assert calls == []
+
+                release_prepare.set()
+                try:
+                    started = await start_task
+                except AIError:
+                    pass
+                else:
+                    assert started.execution_id == execution_record.execution_id
+                final = await runtime._state.execution.executions.get(
+                    execution_record.execution_id,
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert final is not None
+                assert final.status is ExecutionStatus.CANCELLED
+                assert calls == []
+            finally:
+                release_prepare.set()
+                if start_task is not None:
+                    await asyncio.gather(start_task, return_exceptions=True)
     finally:
         release_prepare.set()
         await runtime._state.close()
@@ -776,7 +786,7 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
         release=release_tool,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('cancel-unknown-tool-effect', storage=state) as persistence_801, Runtime.attach(persistence=persistence_801, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -874,7 +884,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
     )
     cancel_key = "cancel-probe"
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('cancel-intent-readback', storage=state) as persistence_903, Runtime.attach(persistence=persistence_903, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -1171,7 +1181,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         release=release_tool,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1204, Runtime.attach(persistence=persistence_1204, features=model_features(_RecoveryToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -1213,16 +1223,16 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             effects = await execution.recovery_effects()
             assert len(effects) == 1
             cancel_key = "cancel-after-effect-recovery"
-            checkpoint_before = await runtime._state.checkpoint.checkpoints.get(
+            checkpoint_before = await runtime._state.execution.executions.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert checkpoint_before is not None
-            assert checkpoint_before.agent_run_id is not None
-            agent_run_id = checkpoint_before.agent_run_id
+            assert checkpoint_before.recovery is not None and checkpoint_before.recovery.agent_run_id is not None
+            agent_run_id = checkpoint_before.recovery.agent_run_id
             if with_cancel:
-                checkpoint_archive = runtime._run_store.read_store(PersistenceDomain.CHECKPOINT)
-                durable_interaction_count = await checkpoint_archive.model_interaction_count(
+                trace_archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
+                durable_interaction_count = await trace_archive.model_interaction_count(
                     agent_run_id=agent_run_id
                 )
             operation_id = effects[0].operation_id
@@ -1236,7 +1246,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             effect_policy="non_replay_safe",
             effect_log=effect_log,
         )
-        reopened_application.capability(CheckpointCapability(), scope="runtime")
+        reopened_application.capability(native_checkpoint(), scope="runtime")
         reopened_application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-recovery-resolution', storage=state) as persistence_1273, Runtime.attach(persistence=persistence_1273, features=model_features(_RecoveryToolModels(), reopened_application)) as runtime:
             execution = await runtime.executions.get(execution_id)
@@ -1282,16 +1292,16 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             )
             assert session_record is not None
             assert session_record.active_execution_id is None
-            checkpoint = await runtime._state.checkpoint.checkpoints.get(
+            checkpoint = await runtime._state.execution.executions.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert checkpoint is not None
-            assert checkpoint.state.value == "completed"
+            assert checkpoint.recovery_state.value == "completed"
 
             if with_cancel:
                 interactions_after = await runtime._run_store.read_store(
-                    PersistenceDomain.CHECKPOINT
+                    PersistenceDomain.TRACE
                 ).model_interaction_count(
                     agent_run_id=agent_run_id,
                 )
@@ -1333,7 +1343,7 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
     )
     cancel_key = "cancel-while-worker-absent"
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('recovery-no-worker-cancel', storage=state) as persistence_1374, Runtime.attach(persistence=persistence_1374, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -1428,7 +1438,7 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
         release=release_tool,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open(f'cancel-unknown-boundary-{boundary}', storage=state) as persistence_1473, Runtime.attach(persistence=persistence_1473, features=model_features(_ToolModels(), application)) as runtime:
             if boundary == "unknown_write":
@@ -1584,7 +1594,7 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
     )
     close_failure_expected = False
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open(f'unknown-write-{readback}', storage=state) as persistence_1633, Runtime.attach(persistence=persistence_1633, features=model_features(_ToolModels(), application)) as runtime:
             source_group = persistence_1633.execution.executions.state_store.storage_group
@@ -1605,18 +1615,22 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
                     raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 return await original_get(operation_id, tenant_id=tenant_id)
 
+            async def fail_cancel_reconciliation(*args: Any, **kwargs: Any) -> Any:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
             monkeypatch.setattr(repository, "mark_effect_unknown", fail_unknown_write)
+            monkeypatch.setattr(repository, "reconcile_turn_claim_in_transaction", fail_cancel_reconciliation)
             monkeypatch.setattr(repository, "get_operation", read_unknown_write)
 
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
             await asyncio.wait_for(tool_started.wait(), timeout=10)
-            cancelled = await asyncio.wait_for(
-                execution.cancel(idempotency_key="cancel-unverified-write"),
-                timeout=10,
-            )
-            assert cancelled.cancelled is False
+            with pytest.raises(AIError) as cancel_error:
+                await asyncio.wait_for(
+                    execution.cancel(idempotency_key="cancel-unverified-write"), timeout=10,
+                )
+            assert cancel_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
             assert write_attempted.is_set()
 
             current = await runtime._state.execution.executions.get(
@@ -1698,7 +1712,7 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
         fail_finalize,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-terminal-finalize', storage=state) as persistence_1740, Runtime.attach(persistence=persistence_1740, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -1778,7 +1792,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
         "commit_terminal_checkpoint",
         fail_success_once,
     )
-    application.capability(CheckpointCapability(), scope="runtime")
+    application.capability(native_checkpoint(), scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
     async with Persistence.open('session-tool-terminal-failure', storage=PersistenceStorage.in_memory()) as persistence_1824, Runtime.attach(persistence=persistence_1824, features=model_features(_ToolModels(), application)) as runtime:
         await runtime.agents.get("default").create_session("session")
@@ -1909,7 +1923,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
 
 
 @pytest.mark.asyncio
-async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
+async def test_abandoned_tool_claim_waits_for_explicit_recovery_after_restart(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "active-claim-restart.db"
@@ -1918,7 +1932,7 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
         database,
         effect_log,
         "sqlite",
-        "effect_unconfirmed_live_lease",
+        "effect_unconfirmed",
     )
     committed_effects = effect_log.read_text().splitlines()
     assert len(committed_effects) == 1
@@ -1931,7 +1945,7 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
         effect_log=effect_log,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_1981, Runtime.attach(persistence=persistence_1981, features=model_features(_ToolModels(), application)) as runtime:
             current = await runtime._state.execution.executions.get(
@@ -1948,14 +1962,13 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
             assert tools[0].status is ToolOperationStatus.CLAIMED
 
             execution = await runtime.executions.get(execution_id)
-            assert tools[0].lease_expires_at is not None
-            await asyncio.sleep(max(0.0, (tools[0].lease_expires_at - datetime.now(timezone.utc)).total_seconds()) + 0.01)
             assert (await runtime.executions.inspect(
                 execution_id, principal=runtime.default_principal,
             )).status is ExecutionStatus.STARTED
             assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
             with pytest.raises(AIError) as raised:
                 await execution.recover()
+                await execution.wait(timeout_seconds=10)
 
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
             recovered = await runtime._state.execution.executions.get(
@@ -1972,7 +1985,7 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
 
 @pytest.mark.asyncio
 async def test_idempotent_replay_does_not_claim_active_tool_execution(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     database = tmp_path / "active-claim-replay.db"
     effect_log = tmp_path / "active-claim-replay-effects.txt"
@@ -1980,7 +1993,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         database,
         effect_log,
         "sqlite",
-        "effect_unconfirmed_live_lease",
+        "effect_unconfirmed",
     )
     committed_effects = effect_log.read_text().splitlines()
     assert len(committed_effects) == 1
@@ -1993,7 +2006,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         effect_log=effect_log,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_2047, Runtime.attach(persistence=persistence_2047, features=model_features(_ToolModels(), application)) as runtime:
             tools = await runtime._state.checkpoint.tools.list_by_execution(
@@ -2005,7 +2018,7 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
             before_replay = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
-            before_head = await runtime._state.execution.executions.get_history_head(
+            before_head = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
 
@@ -2018,24 +2031,13 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
             assert await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             ) == before_replay
-            assert await runtime._state.execution.executions.get_history_head(
+            assert await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             ) == before_head
             assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
-            assert tools[0].lease_expires_at is not None
-            # Keep real expiry coverage in the dedicated restart test; this
-            # case exercises the replay-then-recover sequence at the same boundary.
-            async def after_lease_expiry(session):
-                del session
-                return tools[0].lease_expires_at + timedelta(seconds=1)
-
-            with monkeypatch.context() as clock:
-                clock.setattr(
-                    runtime._state.checkpoint.tools.state_store.context.dialect,
-                    "database_now", after_lease_expiry,
-                )
-                with pytest.raises(AIError) as raised:
-                    await same.recover()
+            with pytest.raises(AIError) as raised:
+                await same.recover()
+                await same.wait(timeout_seconds=10)
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
 
             recovered = await runtime._state.execution.executions.get(
@@ -2084,15 +2086,15 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
         execution_id,
         tenant_id="default",
     )
-    checkpoint = await inspection.checkpoint.checkpoints.get(
+    checkpoint = await inspection.execution.executions.get(
         execution_id,
         tenant_id="default",
     )
     assert current is not None
     assert current.status is expected_status
     assert checkpoint is not None
-    assert checkpoint.state.value == "handoff"
-    assert checkpoint.handoff_phase.value == "prepared"
+    assert checkpoint.recovery_state.value == "handoff"
+    assert checkpoint.recovery.handoff_phase.value == "prepared"
     await inspection.close()
 
     state = _split_sqlite_storage(database)
@@ -2103,7 +2105,7 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
         effect_log=effect_log,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-tool-crash', storage=state) as persistence_2161, Runtime.attach(persistence=persistence_2161, features=model_features(_ToolModels(), application)) as runtime:
             session = runtime.agents.get("default").session("session")
@@ -2113,13 +2115,13 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == []
             assert effect_log.read_text().splitlines() == committed_effects
-            completed = await runtime._state.checkpoint.checkpoints.get(
+            completed = await runtime._state.execution.executions.get(
                 execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert completed is not None
-            assert completed.state.value == "completed"
-            assert completed.handoff_phase.value == "completed"
+            assert completed.recovery_state.value == "completed"
+            assert completed.recovery.handoff_phase.value == "completed"
             session_record = await runtime._state.conversation.sessions.get(
                 "session",
                 tenant_id=runtime.default_principal.tenant_id,
@@ -2164,12 +2166,12 @@ async def test_split_storage_success_handoff_wins_cancel_race(
         pause_handoff,
     )
     try:
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('split-storage-handoff-cancel-race', storage=state) as persistence_2226, Runtime.attach(persistence=persistence_2226, features=model_features(_ToolModels(), application)) as runtime:
             assert (
                 runtime._state.execution.executions.state_store.storage_group
-                is runtime._state.checkpoint.checkpoints.state_store.storage_group
+                is runtime._state.execution.executions.state_store.storage_group
             )
             assert (
                 runtime._state.execution.executions.state_store.storage_group
@@ -2180,12 +2182,12 @@ async def test_split_storage_success_handoff_wins_cancel_race(
             execution = await session.start("inspect", idempotency_key="turn-1")
             await asyncio.wait_for(handoff_started.wait(), timeout=10)
 
-            prepared = await runtime._state.checkpoint.checkpoints.get(
+            prepared = await runtime._state.execution.executions.get(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert prepared is not None
-            assert prepared.handoff_phase.value == "prepared"
+            assert prepared.recovery.handoff_phase.value == "prepared"
             current = await runtime._state.execution.executions.get(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
@@ -2211,13 +2213,13 @@ async def test_split_storage_success_handoff_wins_cancel_race(
             )
             assert final_execution is not None
             assert final_execution.status is ExecutionStatus.SUCCEEDED
-            completed = await runtime._state.checkpoint.checkpoints.get(
+            completed = await runtime._state.execution.executions.get(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert completed is not None
-            assert completed.state.value == "completed"
-            assert completed.handoff_phase.value == "completed"
+            assert completed.recovery_state.value == "completed"
+            assert completed.recovery.handoff_phase.value == "completed"
             events = await execution.list_events(limit=100)
             terminal_types = [
                 item.event_type
@@ -2251,30 +2253,36 @@ async def test_split_storage_success_handoff_wins_cancel_race(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
+async def test_trace_checkpoint_readback_ignores_transient_before_coordinate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
     await state.initialize(namespace="checkpoint-readback", tenant_id="tenant")
-    recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    recovery = state.run_store.read_store(PersistenceDomain.TRACE)
     assert isinstance(recovery, StateStepArchive)
-    original = recovery.state_store.mutate
+    group = recovery.state_store.storage_group
+    original = group.mutate
     injected = False
 
-    async def commit_then_fail(callback: Any) -> Any:
-        nonlocal injected
-        result = await original(callback)
-        if not injected:
-            injected = True
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        return result
+    depth = 0
 
-    monkeypatch.setattr(
-        recovery.state_store,
-        "mutate",
-        commit_then_fail,
-    )
+    async def commit_then_fail(stores: Any, callback: Any) -> Any:
+        nonlocal injected, depth
+        outer = depth == 0
+        depth += 1
+        try:
+            result = await original(stores, callback)
+            if outer and not injected:
+                injected = True
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+            return result
+        finally:
+            depth -= 1
+
+    from .test_step_projection import _execution
+    await state.execution.executions.create_execution(_execution())
+    monkeypatch.setattr(group, "mutate", commit_then_fail)
     try:
         run = AgentRunRecord("run", agent_conversation_id="conversation", agent_id="default")
         checkpoint = AgentRunCheckpoint(
@@ -2289,9 +2297,10 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
         )
         await state.run_store.register_agent_run(run)
         await state.run_store.save_checkpoint(checkpoint)
+        await state.run_store.flush_execution_projection("run", execution_id="execution")
         assert injected
 
-        recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        recovery = state.run_store.read_store(PersistenceDomain.TRACE)
         assert isinstance(recovery, StateStepArchive)
         assert await recovery.transcript_message_count_for_run(run) == len(
             checkpoint.messages
@@ -2308,24 +2317,26 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
 
 
 @pytest.mark.asyncio
-async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() -> None:
+async def test_conversation_checkpoint_relocation_is_idempotent_and_validates_prefix() -> None:
+    from dataclasses import replace
+
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
     await state.initialize(namespace="run-checkpoint-relocation", tenant_id="tenant")
     try:
-        recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        recovery = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         assert isinstance(recovery, StateStepArchive)
         run = AgentRunRecord("run", agent_conversation_id="conversation", agent_id="default")
         await recovery.register_agent_run(run)
         first = AgentRunCheckpoint(
-            agent_run_id="run",
+            agent_run_id="run", agent_conversation_id="conversation", agent_id="default",
             step_index=1,
             messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
             state="active",
             transcript_message_count_before=0,
         )
         final = AgentRunCheckpoint(
-            agent_run_id="run",
+            agent_run_id="run", agent_conversation_id="conversation", agent_id="default",
             step_index=2,
             messages=[
                 *first.messages,
@@ -2338,7 +2349,7 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
         await recovery.materialize_checkpoint(run, final)
         before = await recovery.transcript_message_count_for_run(run)
 
-        relocated = await recovery.relocate_run_checkpoint(run, final)
+        relocated = await recovery.relocate_conversation_checkpoint(run, final)
         assert relocated.transcript_message_count_before == len(final.messages)
         await recovery.materialize_checkpoint(run, relocated)
         assert await recovery.transcript_message_count_for_run(run) == before
@@ -2348,30 +2359,18 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
             agent_conversation_id="conversation",
             agent_id="default",
         )
-        await recovery.register_agent_run(bad_run)
-        await recovery.materialize_checkpoint(
-            bad_run,
-            AgentRunCheckpoint(
-                agent_run_id="bad-run",
-                step_index=1,
-                messages=[ModelRequest(parts=[UserPromptPart("stored")])],
-                state="active",
-                transcript_message_count_before=0,
-            ),
+        bad_checkpoint = AgentRunCheckpoint(
+            agent_run_id="bad-run", agent_conversation_id="conversation", agent_id="default",
+            step_index=2,
+            messages=[ModelRequest(parts=[UserPromptPart("stored")]), ModelResponse(parts=[TextPart("done")])],
+            state="complete", transcript_message_count_before=0,
         )
+        await recovery.materialize_checkpoint(bad_run, bad_checkpoint)
         with pytest.raises(AIError) as raised:
-            await recovery.relocate_run_checkpoint(
-                bad_run,
-                AgentRunCheckpoint(
-                    agent_run_id="bad-run",
-                    step_index=2,
-                    messages=[
-                        ModelRequest(parts=[UserPromptPart("different")]),
-                        ModelResponse(parts=[TextPart("done")]),
-                    ],
-                    state="complete",
-                    transcript_message_count_before=1,
-                ),
+            await recovery.relocate_conversation_checkpoint(
+                bad_run, replace(bad_checkpoint, messages=[
+                    ModelRequest(parts=[UserPromptPart("different")]), bad_checkpoint.messages[1],
+                ]),
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
@@ -2379,14 +2378,17 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
 
 
 @pytest.mark.asyncio
-async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> None:
+async def test_conversation_rebases_cumulative_native_tool_checkpoint() -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
     await state.initialize(namespace="session-tool-recovery", tenant_id="tenant")
     try:
-        recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        native = native_checkpoint().store
+        state.run_store.bind_step_store(native)
+        state.run_store.bind_execution_persistence(
+            "run", conversation=True, restart_checkpoints=True, durable_trace=False,
+        )
         conversation = state.run_store.read_store(PersistenceDomain.CONVERSATION)
-        assert isinstance(recovery, StateStepArchive)
         assert isinstance(conversation, StateStepArchive)
 
         run = AgentRunRecord(
@@ -2395,7 +2397,7 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> 
             agent_id="default",
             metadata={"history_id": "history"},
         )
-        await recovery.register_agent_run(run)
+        await state.run_store.register_agent_run(run)
         first_messages = [
             ModelRequest(parts=[UserPromptPart("inspect")]),
             ModelResponse(
@@ -2421,35 +2423,23 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> 
             ),
             ModelResponse(parts=[TextPart("done")]),
         ]
-        await recovery.materialize_checkpoint(
-            run,
-            AgentRunCheckpoint(
-                agent_run_id=run.agent_run_id,
-                step_index=1,
-                messages=first_messages,
-                state="active",
-                transcript_message_count_before=0,
-            ),
-        )
-        await recovery.materialize_checkpoint(
-            run,
-            AgentRunCheckpoint(
-                agent_run_id=run.agent_run_id,
-                step_index=2,
-                messages=final_messages,
-                state="complete",
-                transcript_message_count_before=len(first_messages),
-            ),
-        )
-
-        await state.run_store.materialize_from_recovery(
-            target=PersistenceDomain.CONVERSATION,
-            agent_run_id=run.agent_run_id,
-        )
-        await state.run_store.materialize_from_recovery(
-            target=PersistenceDomain.CONVERSATION,
-            agent_run_id=run.agent_run_id,
-        )
+        for message in final_messages:
+            message.run_id = run.agent_run_id
+        for index, messages in enumerate((first_messages, final_messages), 1):
+            await seed_native_snapshot(
+                native, run_id=run.agent_run_id, messages=messages, step_index=index,
+                conversation_id=run.agent_conversation_id, agent_name=run.agent_id,
+                metadata=dict(run.metadata),
+            )
+            await state.run_store.save_checkpoint(AgentRunCheckpoint(
+                agent_run_id=run.agent_run_id, step_index=index, messages=messages,
+                context_messages=messages, state="complete", transcript_message_count_before=0,
+            ))
+        for _ in range(2):
+            await state.run_store.materialize_conversation(agent_run_id=run.agent_run_id)
+            await state.run_store.materialize_from_recovery(
+                target=PersistenceDomain.CONVERSATION, agent_run_id=run.agent_run_id,
+            )
 
         stored = await conversation.latest_checkpoint(agent_run_id=run.agent_run_id)
         assert stored is not None
@@ -2479,11 +2469,9 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
     if phase == "recovered_before_terminal":
         await _exit_at_boundary(database, effect_log, "sqlite", "tool_completed")
     await _exit_at_boundary(database, effect_log, "sqlite", phase)
-    if phase == "effect_unconfirmed":
-        await asyncio.sleep(1.1)
     calls: list[str] = []
     application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
-    application.capability(CheckpointCapability(), scope="runtime")
+    application.capability(native_checkpoint(), scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
     async with Persistence.open('session-tool-crash', storage=PersistenceStorage.sqlite(database)) as persistence_2549, Runtime.attach(persistence=persistence_2549, features=model_features(_ToolModels(), application)) as runtime:
         session = runtime.agents.get("default").session("session")
@@ -2491,6 +2479,7 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
             with pytest.raises(AIError) as raised:
                 same = await session.start("inspect", idempotency_key="turn-1")
                 await same.recover()
+                await same.wait(timeout_seconds=10)
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
             assert calls == []
         else:
@@ -2513,35 +2502,24 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
 async def test_tool_effect_waits_for_durable_response_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.persistence._step_archive import PreparedAgentRunCheckpoint
-    from linktools.ai.persistence.state import StateTransaction
-
-    original = StateStepArchive.materialize_checkpoint_in_transaction
+    checkpoint = native_checkpoint()
+    original = checkpoint.store.save_snapshot
     calls: list[str] = []
     rejected = False
 
-    async def reject_response(
-        self: StateStepArchive,
-        transaction: StateTransaction,
-        run: AgentRunRecord,
-        checkpoint: PreparedAgentRunCheckpoint,
-        **kwargs: Any,
-    ) -> None:
+    async def reject_response(snapshot) -> None:
         nonlocal rejected
-        if self.runtime_domain is PersistenceDomain.CHECKPOINT:
-            messages = [message for chunk in checkpoint.chunks
-                        for message in await self.transcript_repository._decode_chunk_messages(chunk)]
-            if any(isinstance(message, ModelResponse)
-                   and any(isinstance(part, ToolCallPart) for part in message.parts)
-                   for message in messages):
-                rejected = True
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        return await original(self, transaction, run, checkpoint, **kwargs)
+        if any(isinstance(message, ModelResponse)
+               and any(isinstance(part, ToolCallPart) for part in message.parts)
+               for message in snapshot.messages):
+            rejected = True
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        await original(snapshot)
 
-    monkeypatch.setattr(StateStepArchive, "materialize_checkpoint_in_transaction", reject_response)
+    monkeypatch.setattr(checkpoint.store, "save_snapshot", reject_response)
     with pytest.raises(AIError) as raised:
         application = _application(calls)
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(checkpoint, scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('pre-effect-checkpoint', storage=PersistenceStorage.in_memory()) as persistence_2611, Runtime.attach(persistence=persistence_2611, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -2585,7 +2563,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
     calls: list[str] = []
     try:
         application = _application(calls)
-        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(native_checkpoint(), scope="runtime")
         application.capability(TraceCapability(), scope="runtime")
         async with Persistence.open('session-atomic-terminal', storage=state) as persistence_2659, Runtime.attach(persistence=persistence_2659, features=model_features(_ToolModels(), application)) as runtime:
             await runtime.agents.get("default").create_session("session")
@@ -2617,40 +2595,94 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
 
 
 @pytest.mark.asyncio
-async def test_recovery_preparation_failure_releases_its_owned_flight(
+async def test_conversation_preparation_failure_keeps_owner_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = PersistenceStorage.in_memory()
-    state = Persistence(state)
-    await state.initialize(namespace="recovery-preparation", tenant_id="tenant")
-    recovery = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+    state = Persistence(PersistenceStorage.in_memory())
+    await state.initialize(namespace="conversation-preparation", tenant_id="tenant")
+    native = native_checkpoint().store
+    state.run_store.bind_step_store(native)
+    state.run_store.bind_execution_persistence(
+        "run", conversation=True, restart_checkpoints=True, durable_trace=False,
+    )
     run = AgentRunRecord(
-        "run",
-        agent_conversation_id="conversation",
-        agent_id="default",
+        "run", agent_conversation_id="conversation", agent_id="default",
         metadata={"history_id": "history"},
     )
-    checkpoint = AgentRunCheckpoint(
-        agent_run_id="run",
-        step_index=1,
-        agent_conversation_id=run.agent_conversation_id,
-        agent_id=run.agent_id,
-        messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
-        transcript_message_count_before=0,
+    messages = [ModelRequest(parts=[UserPromptPart("inspect")], run_id="run")]
+    await seed_native_snapshot(
+        native, run_id="run", messages=messages, conversation_id="conversation",
+        agent_name="default", metadata=dict(run.metadata),
     )
-    await recovery.materialize_checkpoint(run, checkpoint)
+    await state.run_store.register_agent_run(run)
+    await state.run_store.save_checkpoint(AgentRunCheckpoint(
+        "run", 1, messages, context_messages=messages, transcript_message_count_before=0,
+    ))
+    conversation = state.run_store.read_store(PersistenceDomain.CONVERSATION)
 
-    async def fail_resolution(
-        _interactions: Any, *, include_client_requests: bool = False,
-        include_content: bool = True,
-    ) -> Any:
-        del include_client_requests, include_content
+    async def fail_resolution(*args: Any, **kwargs: Any) -> Any:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
-    monkeypatch.setattr(recovery, "resolve_model_interactions", fail_resolution)
-    with pytest.raises(AIError) as raised:
-        await state.run_store.materialize_from_recovery(
-            target=PersistenceDomain.CONVERSATION, agent_run_id="run"
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(conversation, "relocate_conversation_checkpoint", fail_resolution)
+            with pytest.raises(AIError) as raised:
+                await state.run_store.materialize_conversation(agent_run_id="run")
+            assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+        assert await conversation.latest_checkpoint(agent_run_id="run") is None
+        assert (await native.latest_snapshot(run_id="run")).messages == messages
+        await state.run_store.materialize_conversation(agent_run_id="run")
+        assert (await conversation.latest_checkpoint(agent_run_id="run")).messages == messages
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_cold_cancel_preserves_unconfirmed_tool_effect_after_process_exit(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "cold-cancel.db"
+    effect_log = tmp_path / "cold-cancel-effects.txt"
+    await _exit_at_boundary(database, effect_log, "sqlite", "effect_unconfirmed")
+    effects = effect_log.read_text().splitlines()
+    execution_id, = effects
+    calls: list[str] = []
+    application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
+    application.capability(native_checkpoint(), scope="runtime")
+    application.capability(TraceCapability(), scope="runtime")
+    async with Persistence.open(
+        "session-tool-crash", storage=PersistenceStorage.sqlite(database),
+    ) as state, Runtime.attach(
+        persistence=state, features=model_features(_ToolModels(), application),
+    ) as runtime:
+        before, = await state.checkpoint.tools.list_by_execution(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
         )
-    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
-    await state.close()
+        assert before.status is ToolOperationStatus.CLAIMED
+        execution = await runtime.executions.get(execution_id)
+        outcome = await execution.cancel(idempotency_key="cold-cancel")
+        assert outcome.cancelled is False
+        current = await state.execution.executions.get(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert current.status is ExecutionStatus.CANCELLING
+        still_claimed, = await state.checkpoint.tools.list_by_execution(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert still_claimed == before
+        with pytest.raises(AIError) as recovering:
+            await execution.recover()
+        assert recovering.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+        current = await state.execution.executions.get(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert current.status is ExecutionStatus.RECOVERY_REQUIRED
+        operation, = await state.checkpoint.tools.list_by_execution(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
+        )
+        assert operation.status is ToolOperationStatus.EFFECT_UNKNOWN
+        assert (operation.owner, operation.fence, operation.producer_generation) == (
+            before.owner, before.fence, before.producer_generation,
+        )
+        assert calls == []
+        assert effect_log.read_text().splitlines() == effects

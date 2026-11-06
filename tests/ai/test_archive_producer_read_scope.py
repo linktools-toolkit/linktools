@@ -13,9 +13,7 @@ from sqlalchemy import event
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
-from linktools.ai.persistence.contracts import (
-    ExecutionHistoryHeadRecord, ExecutionHistorySealRecord, ExecutionHistoryState,
-)
+from linktools.ai.persistence.contracts import ExecutionHistorySealRecord
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence.state import active_state_scope, active_state_transaction
 from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
@@ -30,7 +28,7 @@ from .test_step_projection import _execution
     ("closed", None),
     ("cancelled", None),
     ("missing_execution", ErrorCode.STORAGE_CONFLICT),
-    ("missing_head", ErrorCode.STORAGE_CONFLICT),
+    ("missing_seal_reference", ErrorCode.STORAGE_INTEGRITY_ERROR),
     ("new_generation", None),
     ("same_generation", ErrorCode.STORAGE_CONFLICT),
     ("active", ErrorCode.STORAGE_CONFLICT),
@@ -47,22 +45,17 @@ async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
     seal = ExecutionHistorySealRecord("execution", (), 0)
     open_head = outcome in {"new_generation", "same_generation"}
     closed = outcome in {"closed", "cancelled"}
-    head = ExecutionHistoryHeadRecord(
-        "execution", ExecutionHistoryState.OPEN if open_head else ExecutionHistoryState.CLOSED if closed else ExecutionHistoryState.SEALED,
-        0, None if open_head or closed else "incorrect" if outcome == "wrong_seal" else seal.seal_digest,
-        2 if outcome == "new_generation" else 1,
-    )
     execution = replace(
         _execution(), durable_trace=not closed,
-        status=ExecutionStatus.STARTED if outcome == "active" else ExecutionStatus.CANCELLED if outcome == "cancelled" else ExecutionStatus.SUCCEEDED,
+        history_seal_digest=None if open_head or closed or outcome == "missing_seal_reference" else "f" * 64 if outcome == "wrong_seal" else seal.seal_digest,
+        producer_generation=2 if outcome == "new_generation" else 1,
+        status=ExecutionStatus.STARTED if outcome in {"active", "same_generation", "new_generation"} else ExecutionStatus.CANCELLED if outcome == "cancelled" else ExecutionStatus.SUCCEEDED,
     )
     if outcome != "missing_execution":
         await repository.create(execution)
     hint = replace(execution, status=ExecutionStatus.SUCCEEDED) if terminal_hint else None
 
     async def seed(transaction):
-        if outcome != "missing_head":
-            await repository.insert_history_head_in_transaction(transaction, head)
         if not open_head and not closed and outcome != "missing_seal":
             await repository.put_history_seal_in_transaction(transaction, seal)
 
@@ -91,20 +84,18 @@ async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body_size", (32768, 1048576))
 @pytest.mark.parametrize("hint_kind", ("none", "wrong_id", "active"))
-async def test_newer_producer_keeps_head_only_read(
+async def test_newer_producer_reads_only_execution_control(
     tmp_path: Path, body_size: int, hint_kind: str,
 ) -> None:
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "newer.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
     archive = state.run_store.read_store(PersistenceDomain.TRACE)
-    execution = _execution()
+    execution = replace(_execution(), producer_generation=2)
     execution = replace(execution, stored_user_input=replace(
         execution.stored_user_input, payload=StoredPayload.inline_text("x" * body_size),
     ))
     await repository.create(execution)
-    head = ExecutionHistoryHeadRecord("execution", ExecutionHistoryState.OPEN, 0, None, 2)
-    await repository.state_store.mutate(lambda tx: repository.insert_history_head_in_transaction(tx, head))
     hint = None if hint_kind == "none" else execution if hint_kind == "active" else replace(
         execution, execution_id="different", status=ExecutionStatus.SUCCEEDED,
     )
@@ -124,7 +115,7 @@ async def test_newer_producer_keeps_head_only_read(
             execution_id="execution", producer_generation=1, terminal_execution=hint,
         )
         assert len(selects) == 1
-        assert returned_kinds == ["execution_history_head"]
+        assert returned_kinds == ["execution"]
     finally:
         event.remove(engine, "after_cursor_execute", after)
         await state.close()
@@ -138,7 +129,7 @@ async def test_terminal_hint_cannot_replace_current_tenant_proof(tmp_path: Path,
     async with _state(backend, tmp_path, InMemoryCacheBackend(max_bytes=1000000)) as state:
         repository = state.execution.executions
         actual = _execution()
-        await repository.create_with_history_head(actual)
+        await repository.create_execution(actual)
         # A same-ID terminal record from elsewhere is only a fetch hint.
         foreign = Persistence(PersistenceStorage.in_memory())
         await foreign.initialize(namespace="model-control", tenant_id="other")
@@ -146,7 +137,7 @@ async def test_terminal_hint_cannot_replace_current_tenant_proof(tmp_path: Path,
             hint = replace(actual, status=ExecutionStatus.SUCCEEDED, durable_trace=False)
             await foreign.execution.executions.create(hint)
             hint = await foreign.execution.executions.get("execution", tenant_id="other")
-            await repository.observe_execution_control("execution", tenant_id="tenant")
+            await repository.get("execution", tenant_id="tenant")
             archive = state.run_store.read_store(PersistenceDomain.TRACE)
             with pytest.raises(AIError) as raised:
                 await archive.require_revoked_execution_producer(
@@ -159,38 +150,28 @@ async def test_terminal_hint_cannot_replace_current_tenant_proof(tmp_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_custom_repository_keeps_head_first_with_terminal_hint(tmp_path: Path) -> None:
+async def test_custom_repository_checks_execution_then_actual_history(tmp_path: Path) -> None:
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "custom.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     source = state.execution.executions.state_store
     calls = []
 
     class Custom(ExecutionRepositoryImpl):
-        async def observe_execution_control(self, *args, **kwargs):
-            raise AssertionError("custom owner must keep its original reads")
-
-        async def get_history_head(self, *args, **kwargs):
-            assert active_state_transaction(source) is not None
-            calls.append("head")
-            return await super().get_history_head(*args, **kwargs)
-
         async def get(self, *args, **kwargs):
             assert active_state_transaction(source) is not None
             calls.append("execution")
             return await super().get(*args, **kwargs)
 
     repository = Custom(source, namespace="producer-read", tenant_id="tenant")
-    execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False)
+    execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False, producer_generation=1)
     await repository.create(execution)
-    head = ExecutionHistoryHeadRecord("execution", ExecutionHistoryState.CLOSED, 0, None, 1)
-    await source.mutate(lambda tx: repository.insert_history_head_in_transaction(tx, head))
     archive = state.run_store.read_store(PersistenceDomain.TRACE)
     archive._execution_repository = repository
     try:
         await archive.require_revoked_execution_producer(
             execution_id="execution", producer_generation=1, terminal_execution=execution,
         )
-        assert calls == ["head", "execution"]
+        assert calls == ["execution"]
     finally:
         await state.close()
 
@@ -202,11 +183,9 @@ async def test_cancelled_control_observation_does_not_grant_proof(
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "cancel.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
-    execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False)
+    execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False, producer_generation=1)
     await repository.create(execution)
-    head = ExecutionHistoryHeadRecord("execution", ExecutionHistoryState.CLOSED, 0, None, 1)
-    await repository.state_store.mutate(lambda tx: repository.insert_history_head_in_transaction(tx, head))
-    original = repository.observe_execution_control
+    original = repository.get
     entered = asyncio.Event()
 
     async def observe(*args, **kwargs):
@@ -215,7 +194,7 @@ async def test_cancelled_control_observation_does_not_grant_proof(
         entered.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(repository, "observe_execution_control", observe)
+    monkeypatch.setattr(repository, "get", observe)
     archive = state.run_store.read_store(PersistenceDomain.TRACE)
     task = asyncio.create_task(archive.require_revoked_execution_producer(
         execution_id="execution", producer_generation=1, terminal_execution=execution,
@@ -226,7 +205,7 @@ async def test_cancelled_control_observation_does_not_grant_proof(
         with pytest.raises(asyncio.CancelledError):
             await task
         assert active_state_scope() is None
-        monkeypatch.setattr(repository, "observe_execution_control", original)
+        monkeypatch.setattr(repository, "get", original)
         await archive.require_revoked_execution_producer(
             execution_id="execution", producer_generation=1, terminal_execution=execution,
         )
@@ -242,11 +221,9 @@ async def test_terminal_hint_and_cached_pair_do_not_hide_missing_source(tmp_path
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     await remote.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
-    execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False)
+    execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False, producer_generation=1)
     await repository.create(execution)
-    head = ExecutionHistoryHeadRecord("execution", ExecutionHistoryState.CLOSED, 0, None, 1)
-    await repository.state_store.mutate(lambda tx: repository.insert_history_head_in_transaction(tx, head))
-    assert await repository.observe_execution_control("execution", tenant_id="tenant") == (execution, head)
+    assert await repository.get("execution", tenant_id="tenant") == execution
     source = remote.execution.executions
     await source.state_store.mutate(lambda tx: tx.delete_record(source._key("execution", "execution")))
     archive = state.run_store.read_store(PersistenceDomain.TRACE)

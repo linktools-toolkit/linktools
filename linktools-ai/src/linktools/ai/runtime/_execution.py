@@ -133,6 +133,7 @@ from ..execution import (
     ExecutionRecord,
     ExecutionStartClaim,
     ExecutionStartReservation,
+    ExecutionStartReservationResult,
     ExecutionStartUnknownCommit,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
@@ -142,7 +143,7 @@ from ..execution import (
     ResultRecord,
     StoredUserInput,
 )
-from ..persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository
+from ..persistence.contracts import ExecutionRepositories, SessionRepository, TaskAdmissionRepository, ExecutionTerminalPublication
 
 if TYPE_CHECKING:
     from ..persistence.state import StateTransaction
@@ -188,6 +189,7 @@ class ExecutionStartIdentity:
     scope: str
     idempotency_key_digest: str
     request_digest: str
+    expected_session: "SessionRecord | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,10 +285,22 @@ class _ExecutionRuntimeBridge:
     def __init__(self) -> None:
         self._port: _ExecutionRuntimePort | None = None
         self.pending_turns = _PendingExecutionTurns()
+        self.prepare_reserved_start: Callable[
+            [ExecutionRequest, ExecutionStartReservation, "SessionRecord | None"],
+            Awaitable[ExecutionStartReservationResult | None],
+        ] | None = None
         self.pending_start: Callable[
             [ExecutionRequest, ExecutionStartReservation, "SessionRecord | None", TurnCoordination | None],
             Awaitable[str | None],
         ] | None = None
+        self.run_turn: Callable[
+            [ExecutionStartReservation, Principal, Callable[[TurnCoordination | None], Awaitable[ExecutionHandle]]],
+            Awaitable[ExecutionHandle],
+        ] | None = None
+        self.run_existing_turn: Callable[
+            [ExecutionRecord, int | None, Callable[[], Awaitable[None]]], Awaitable[None],
+        ] | None = None
+        self.resume_subagent: Callable[[ExecutionRecord, int], Awaitable[None]] | None = None
         self.pending_promote: Callable[[str], Awaitable[None]] | None = None
         self.pending_cancel_promote: Callable[[str], Awaitable[None]] | None = None
 
@@ -332,10 +346,9 @@ class _ExecutionManagementAdapter(StoredExecutionManagementAdapter):
                   else await service._state.executions.get_header(execution_id, tenant_id=tenant_id))
         if header is None:
             record = await service._runtime_bridge.pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
-            if record is not None:
+            header = await service.load_source_header(execution_id, tenant_id=tenant_id)
+            if header is None and record is not None:
                 header = ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, record.principal_id)
-            else:
-                header = await service.load_source_header(execution_id, tenant_id=tenant_id)
         return header
 
     def has_local_pending(self, execution_id: str, *, tenant_id: str) -> bool:
@@ -379,12 +392,15 @@ class DefaultExecutionService(TaskExecutionService):
         conversation: bool = False,
         commit: CommitPolicy = CommitPolicy.sync(),
         context_archive: ExecutionContextArchive | None = None,
+        retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
+        retained_publication: Callable[..., ExecutionTerminalPublication | None] | None = None,
     ) -> None:
         if any(not isinstance(value, bool) for value in (
             restart_checkpoints, durable_trace, conversation,
         )):
             raise TypeError("execution persistence guarantees must be bool")
         self._state = state
+        self._retained_publication = retained_publication
         self._object_store = object_store
         self._authorization = authorization
         self._object_key_factory = object_key_factory
@@ -397,6 +413,7 @@ class DefaultExecutionService(TaskExecutionService):
             state, authorization, port=_ExecutionManagementAdapter(self), sessions=sessions,
             task_admissions=task_admissions, operation_ids=operation_ids,
             release_terminal=release_terminal, payload_policy=payload_policy,
+            retained_turn_confirmed=retained_turn_confirmed,
         )
         self._restart_checkpoints = restart_checkpoints
         self._durable_trace = durable_trace
@@ -816,6 +833,7 @@ class DefaultExecutionService(TaskExecutionService):
         session_id: str,
         request: ExecutionRequest,
         *,
+        session: "SessionRecord | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
         resolved_binding: AgentBinding | None = None,
         dependency_hold_id: "str | None" = None,
@@ -834,6 +852,7 @@ class DefaultExecutionService(TaskExecutionService):
             request,
             session_id=session_id,
             session_agent_id=agent_id,
+            session=session,
             scope="session.resume",
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
@@ -849,6 +868,7 @@ class DefaultExecutionService(TaskExecutionService):
         request: ExecutionRequest,
         *,
         parent_execution_id: str,
+        parent_producer_generation: int,
         root_execution_id: str,
         parent_invocation_id: str,
         binding_contract: "AgentBindingContract | None" = None,
@@ -858,6 +878,7 @@ class DefaultExecutionService(TaskExecutionService):
             binding_digest,
             request,
             parent_execution_id=parent_execution_id,
+            parent_producer_generation=parent_producer_generation,
             root_execution_id=root_execution_id,
             parent_invocation_id=parent_invocation_id,
             lineage_kind=ExecutionLineageKind.SUBAGENT,
@@ -877,6 +898,7 @@ class DefaultExecutionService(TaskExecutionService):
         memory_scope: "str | None",
         mode: ExecutionMode,
         parent_execution_id: str,
+        parent_producer_generation: int,
         root_execution_id: str,
         parent_invocation_id: str,
     ) -> "ExecutionHandle | None":
@@ -917,14 +939,18 @@ class DefaultExecutionService(TaskExecutionService):
             files=files,
             tool_response_ref=execution.tool_response_ref,
         )
-        return await self.start_subagent(
+        handle = await self.start_subagent(
             execution.binding_digest,
             request,
             parent_execution_id=parent_execution_id,
+            parent_producer_generation=parent_producer_generation,
             root_execution_id=root_execution_id,
             parent_invocation_id=parent_invocation_id,
             binding_contract=execution.binding,
         )
+        if self._runtime_bridge.resume_subagent is not None:
+            await self._runtime_bridge.resume_subagent(execution, parent_producer_generation)
+        return handle
 
     async def list_children(
         self, execution_id: str, *, principal: Principal
@@ -1000,10 +1026,12 @@ class DefaultExecutionService(TaskExecutionService):
         *,
         session_id: "str | None" = None,
         session_agent_id: "str | None" = None,
+        session: "SessionRecord | None" = None,
         previous_execution_id: "str | None" = None,
         fork_base_execution_id: "str | None" = None,
         conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
+        parent_producer_generation: int | None = None,
         root_execution_id: "str | None" = None,
         parent_invocation_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
@@ -1031,10 +1059,12 @@ class DefaultExecutionService(TaskExecutionService):
                     request,
                     session_id=session_id,
                     session_agent_id=session_agent_id,
+                    session=session,
                     previous_execution_id=previous_execution_id,
                     fork_base_execution_id=fork_base_execution_id,
                     conversation_agent_run_id=conversation_agent_run_id,
                     parent_execution_id=parent_execution_id,
+                    parent_producer_generation=parent_producer_generation,
                     root_execution_id=root_execution_id,
                     parent_invocation_id=parent_invocation_id,
                     lineage_kind=lineage_kind,
@@ -1053,10 +1083,12 @@ class DefaultExecutionService(TaskExecutionService):
                     request,
                     session_id=session_id,
                     session_agent_id=session_agent_id,
+                    session=session,
                     previous_execution_id=previous_execution_id,
                     fork_base_execution_id=fork_base_execution_id,
                     conversation_agent_run_id=conversation_agent_run_id,
                     parent_execution_id=parent_execution_id,
+                    parent_producer_generation=parent_producer_generation,
                     root_execution_id=root_execution_id,
                     parent_invocation_id=parent_invocation_id,
                     lineage_kind=lineage_kind,
@@ -1082,10 +1114,12 @@ class DefaultExecutionService(TaskExecutionService):
         *,
         session_id: "str | None" = None,
         session_agent_id: "str | None" = None,
+        session: "SessionRecord | None" = None,
         previous_execution_id: "str | None" = None,
         fork_base_execution_id: "str | None" = None,
         conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
+        parent_producer_generation: int | None = None,
         root_execution_id: "str | None" = None,
         parent_invocation_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
@@ -1136,16 +1170,22 @@ class DefaultExecutionService(TaskExecutionService):
             request = replace(request, correlation=parent.correlation, tool_response_ref=parent.tool_response_ref)
             context = replace(context, request=request)
         conversation_agent_run_id = conversation_agent_run_id
-        session = None
         if session_id is not None and previous_execution_id is None:
-            await self._runtime_bridge.pending_turns.settle_session(
+            settled = await self._runtime_bridge.pending_turns.settle_session(
                 session_id, tenant_id=request.principal.tenant_id,
             )
-            session = await self._load_session(
-                session_id, tenant_id=request.principal.tenant_id
-            )
+            if session is None or settled:
+                current_session = await self._load_session(
+                    session_id, tenant_id=request.principal.tenant_id
+                )
+                if (session is not None and current_session is not None
+                        and current_session.owner_principal_id != session.owner_principal_id):
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                session = current_session
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
+            if session.session_id != session_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
             if session.history_quality == "unavailable":
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
@@ -1237,6 +1277,7 @@ class DefaultExecutionService(TaskExecutionService):
                         idempotency_key_digest=idempotency_key_digest,
                         prepare_local_stream=prepare_local_stream,
                         dependency_hold_id=dependency_hold_id,
+                        parent_producer_generation=parent_producer_generation,
                     )
                     return ExecutionHandle(existing.resource_id)
                 if (
@@ -1254,6 +1295,8 @@ class DefaultExecutionService(TaskExecutionService):
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     capture_metric=capture_metric,
+                    parent_producer_generation=parent_producer_generation,
+                    expected_session=session,
                 )
                 return ExecutionHandle(existing.resource_id)
             if existing.status in {
@@ -1355,6 +1398,7 @@ class DefaultExecutionService(TaskExecutionService):
                 idempotency_key_digest=idempotency_key_digest,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
+                parent_producer_generation=parent_producer_generation,
             )
             return ExecutionHandle(existing.resource_id)
 
@@ -1476,7 +1520,7 @@ class DefaultExecutionService(TaskExecutionService):
             stored_user_input=context.stored_user_input,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id or (None if request.budget is None else "execution:" + execution_id),
-            restart_checkpoints=(self._restart_checkpoints or requires_task_invocation_capture
+            restart_checkpoints=(self._restart_checkpoints
                                  or parent is not None and parent.restart_checkpoints),
             durable_trace=(self._durable_trace or requires_task_invocation_capture
                            or parent is not None and parent.durable_trace),
@@ -1497,6 +1541,7 @@ class DefaultExecutionService(TaskExecutionService):
                     updated_at=now,
                 ),
                 budget=request.budget,
+                parent_producer_generation=parent_producer_generation,
         )
         return await self._admit_execution_start(
             request, proposed_reservation, binding, session,
@@ -1525,69 +1570,46 @@ class DefaultExecutionService(TaskExecutionService):
         # Source-first and deferred writers must observe the same admission owner.
         coordinator = self._runtime_bridge.pending_turns.coordination
         execution = proposed_reservation.execution
-        identity = proposed_reservation.idempotency
 
-        async def admit() -> ExecutionHandle:
+        async def admit(coordination: TurnCoordination | None) -> ExecutionHandle:
             if not self._accepting:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            coordination = None
-            if coordinator is not None:
-                coordination = await coordinator.claim(
-                    session_key=(f"session:{execution.session_id}" if execution.session_id is not None else
-                                 f"request:{identity.scope}:{identity.idempotency_key_digest}"),
-                    request_key=f"{identity.scope}:{identity.idempotency_key_digest}",
-                    request_digest=identity.request_digest,
-                    execution_id=execution.execution_id,
-                    owner_id=uuid.uuid4().hex,
-                    lease_seconds=30,
-                )
-                if coordination is None:
-                    raise AIError(ErrorCode.SESSION_BUSY)
-                if coordination.lease is None:
-                    return await self._join_coordinated_start(
-                        coordinator, coordination, request, binding,
-                        requires_task_invocation_capture=requires_task_invocation_capture,
-                        budget_scope_id=budget_scope_id,
-                    )
-            transferred = False
-            try:
-                if (self._commit.mode == "terminal" and execution.conversation
-                        and dependency_hold_id is None
-                        and self._runtime_bridge.pending_start is not None):
-                    pending_id = await ConversationService.prepare_turn(
-                        request, proposed_reservation, session, coordination,
-                        start_pending=self._runtime_bridge.pending_start,
-                        dependency_hold_id=dependency_hold_id,
-                    )
-                    if pending_id is not None:
-                        transferred = True
-                        return ExecutionHandle(pending_id)
-                return await self._reserve_and_launch_start(
-                    request, proposed_reservation, binding,
-                    prepare_local_stream=prepare_local_stream,
-                    dependency_hold_id=dependency_hold_id,
+            if coordination is not None and coordination.lease is None:
+                if coordinator is None:
+                    raise RuntimeError("duplicate turn admission requires coordination")
+                return await self._join_coordinated_start(
+                    coordinator, coordination, request, binding,
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
-                    capture_metric=capture_metric,
                 )
-            finally:
-                if (coordinator is not None and coordination is not None
-                        and coordination.lease is not None and not transferred):
-                    try:
-                        await coordinator.release(coordination.lease)
-                    except Exception:
-                        # Admission already has a source result or a known
-                        # failure. Cleanup failure cannot change that outcome;
-                        # the conditional claim expires on its own.
-                        _logger.warning(
-                            "execution admission claim cleanup failed: execution=%s",
-                            execution.execution_id,
-                            exc_info=environ.debug,
-                        )
+            if (self._commit.mode == "terminal" and execution.conversation
+                    and dependency_hold_id is None
+                    and self._runtime_bridge.pending_start is not None):
+                pending_id = await ConversationService.prepare_turn(
+                    request, proposed_reservation, session, coordination,
+                    start_pending=self._runtime_bridge.pending_start,
+                    dependency_hold_id=dependency_hold_id,
+                )
+                if pending_id is not None:
+                    return ExecutionHandle(pending_id)
+            return await self._reserve_and_launch_start(
+                request, proposed_reservation, binding, session,
+                prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
+                capture_metric=capture_metric,
+            )
 
-        if coordinator is None:
-            return await admit()
-        task = asyncio.create_task(admit(), name=f"execution-admission-{execution.execution_id}")
+        run_turn = self._runtime_bridge.run_turn
+        if run_turn is None:
+            if coordinator is not None:
+                raise RuntimeError("coordinated admission requires a turn lifecycle owner")
+            return await admit(None)
+        task = asyncio.create_task(
+            run_turn(proposed_reservation, request.principal, admit),
+            name=f"execution-admission-{execution.execution_id}",
+        )
         self._admission_tasks.add(task)
         task.add_done_callback(self._admission_tasks.discard)
         cancellation: asyncio.CancelledError | None = None
@@ -1657,6 +1679,7 @@ class DefaultExecutionService(TaskExecutionService):
         request: ExecutionRequest,
         proposed_reservation: ExecutionStartReservation,
         binding: AgentBinding,
+        session: "SessionRecord | None",
         *,
         prepare_local_stream: bool,
         dependency_hold_id: str | None,
@@ -1684,7 +1707,12 @@ class DefaultExecutionService(TaskExecutionService):
         scope = identity.scope
         idempotency_key_digest = identity.idempotency_key_digest
         request_digest = identity.request_digest
-        if prepared_context is None:
+        reservation = None
+        if prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
+            reservation = await self._runtime_bridge.prepare_reserved_start(request, proposed_reservation, session)
+        if reservation is not None:
+            pass
+        elif prepared_context is None:
             reservation = await self._state.executions.reserve_start(proposed_reservation)
         else:
             reservation = await self._state.executions.reserve_start(
@@ -1714,7 +1742,9 @@ class DefaultExecutionService(TaskExecutionService):
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
+                    parent_producer_generation=proposed_reservation.parent_producer_generation,
                     capture_metric=capture_metric,
+                    expected_session=session,
                 )
             elif (
                 reservation.idempotency.status is IdempotencyStatus.STARTED
@@ -1751,6 +1781,7 @@ class DefaultExecutionService(TaskExecutionService):
                     idempotency_key_digest=idempotency_key_digest,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
+                    parent_producer_generation=proposed_reservation.parent_producer_generation,
                 )
             elif (
                 reservation.execution.status is ExecutionStatus.START_UNKNOWN
@@ -1761,6 +1792,16 @@ class DefaultExecutionService(TaskExecutionService):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(reservation.execution.execution_id)
         execution_id = reservation.execution.execution_id
+        if reservation.execution.status is ExecutionStatus.STARTED:
+            await self._launch_started(
+                request, reservation.execution, scope=scope,
+                idempotency_key_digest=idempotency_key_digest,
+                prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id,
+                parent_producer_generation=proposed_reservation.parent_producer_generation,
+                confirmed_start=True,
+            )
+            return ExecutionHandle(execution_id)
         if not reservation.created:
             request = await self._request_for_execution(request, reservation.execution)
         await self._prepare_and_launch(
@@ -1772,6 +1813,8 @@ class DefaultExecutionService(TaskExecutionService):
             prepare_local_stream=prepare_local_stream,
             dependency_hold_id=dependency_hold_id,
             capture_metric=capture_metric,
+            parent_producer_generation=proposed_reservation.parent_producer_generation,
+            expected_session=session,
         )
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
@@ -1809,37 +1852,53 @@ class DefaultExecutionService(TaskExecutionService):
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
+        parent_producer_generation: int | None = None,
+        expected_session: "SessionRecord | None" = None,
     ) -> None:
-        if self._backend is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if execution.budget_scope_id is not None:
-            await self._state.budgets.read(execution.budget_scope_id)
-        identity = ExecutionStartIdentity(scope, idempotency_key_digest, request_digest)
-        try:
-            started = await self._backend.prepare_start(
-                request,
-                execution,
-                identity,
+        async def prepare() -> None:
+            if self._backend is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            if execution.budget_scope_id is not None:
+                await self._state.budgets.read(execution.budget_scope_id)
+            identity = ExecutionStartIdentity(
+                scope, idempotency_key_digest, request_digest,
+                expected_session,
             )
-        except AIError as error:
-            if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
-                await self._reject_pending_start(
+            try:
+                started = await self._backend.prepare_start(
+                    request,
                     execution,
-                    identity=identity,
-                    error=error,
-                    capture_metric=capture_metric,
+                    identity,
                 )
-            raise
-        if started is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._launch_started(
-            request,
-            started,
-            scope=scope,
-            idempotency_key_digest=idempotency_key_digest,
-            prepare_local_stream=prepare_local_stream,
-            dependency_hold_id=dependency_hold_id,
-        )
+            except AIError as error:
+                if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
+                    await self._reject_pending_start(
+                        execution,
+                        identity=identity,
+                        error=error,
+                        capture_metric=capture_metric,
+                    )
+                raise
+            if started is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._launch_started(
+                request,
+                started,
+                scope=scope,
+                idempotency_key_digest=idempotency_key_digest,
+                prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id,
+                parent_producer_generation=parent_producer_generation,
+                confirmed_start=True,
+            )
+
+        if self._runtime_bridge.run_existing_turn is None:
+            if (self._runtime_bridge.pending_turns.coordination is not None
+                    and self._runtime_bridge.run_turn is None):
+                raise RuntimeError("coordinated admission requires a turn lifecycle owner")
+            await prepare()
+        else:
+            await self._runtime_bridge.run_existing_turn(execution, parent_producer_generation, prepare)
 
     async def _acquire_start_dependency_hold(
         self,
@@ -2031,27 +2090,45 @@ class DefaultExecutionService(TaskExecutionService):
         idempotency_key_digest: str,
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
+        parent_producer_generation: int | None = None,
+        confirmed_start: bool = False,
     ) -> None:
-        hold_acquired = await self._acquire_start_dependency_hold(
-            execution,
-            dependency_hold_id,
-        )
-        try:
-            await self._launch_started_impl(
-                request,
+        async def launch() -> None:
+            hold_acquired = await self._acquire_start_dependency_hold(
                 execution,
-                scope=scope,
-                idempotency_key_digest=idempotency_key_digest,
-                prepare_local_stream=prepare_local_stream,
+                dependency_hold_id,
             )
-        except BaseException:
-            if hold_acquired:
-                await self.release_dependency_hold(
-                    execution.execution_id,
-                    tenant_id=self._state.executions.tenant_id,
-                    hold_id=dependency_hold_id or "",
+            try:
+                await self._launch_started_impl(
+                    request,
+                    execution,
+                    scope=scope,
+                    idempotency_key_digest=idempotency_key_digest,
+                    prepare_local_stream=prepare_local_stream,
+                    # The hold is now confirmed in the source. If the start
+                    # capture predates it, refresh before claiming that revision.
+                    confirmed_start=(confirmed_start and (
+                        not hold_acquired
+                        or dependency_hold_id in execution.dependency_hold_ids
+                    )),
                 )
-            raise
+            except BaseException:
+                if hold_acquired:
+                    await self.release_dependency_hold(
+                        execution.execution_id,
+                        tenant_id=self._state.executions.tenant_id,
+                        hold_id=dependency_hold_id or "",
+                    )
+                raise
+
+        if execution.status is ExecutionStatus.STARTED and execution.agent_run_seq == 0:
+            if self._runtime_bridge.run_existing_turn is not None:
+                await self._runtime_bridge.run_existing_turn(execution, parent_producer_generation, launch)
+                return
+            if (self._runtime_bridge.pending_turns.coordination is not None
+                    and self._runtime_bridge.run_turn is None):
+                raise RuntimeError("coordinated admission requires a turn lifecycle owner")
+        await launch()
 
     async def _launch_started_impl(
         self,
@@ -2061,10 +2138,11 @@ class DefaultExecutionService(TaskExecutionService):
         scope: str,
         idempotency_key_digest: str,
         prepare_local_stream: bool = False,
+        confirmed_start: bool = False,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        launch_record = await self.load_execution(
+        launch_record = execution if confirmed_start else await self.load_execution(
             execution.execution_id,
             tenant_id=self._state.executions.tenant_id,
         )
@@ -2198,6 +2276,16 @@ class DefaultExecutionService(TaskExecutionService):
         if timeout_seconds is not None and timeout_seconds < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
+        async def load_confirmed_terminal() -> ExecutionRecord:
+            publication = (None if self._retained_publication is None else
+                self._retained_publication(execution_id, tenant_id=principal.tenant_id))
+            if publication is None:
+                return await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+            await self.authorize_loaded_execution(
+                publication.execution, principal, AuthorizationAction.EXECUTION_READ, owner_principal_id=None,
+            )
+            return publication.execution
+
         async def wait_once() -> ExecutionResult:
             execution = await self.load_authorized(
                 execution_id,
@@ -2229,11 +2317,7 @@ class DefaultExecutionService(TaskExecutionService):
                             execution_id,
                             tenant_id=principal.tenant_id,
                         )
-                        execution = await self.load_authorized(
-                            execution_id,
-                            principal,
-                            AuthorizationAction.EXECUTION_READ,
-                        )
+                        execution = await load_confirmed_terminal()
                         status = execution.status
                         continue
                     if self._backend is not None:
@@ -2262,11 +2346,7 @@ class DefaultExecutionService(TaskExecutionService):
                 else:
                     await asyncio.sleep(poll_backoff)
                     poll_backoff = min(30.0, poll_backoff * 2)
-                execution = await self.load_authorized(
-                    execution_id,
-                    principal,
-                    AuthorizationAction.EXECUTION_READ,
-                )
+                execution = await load_confirmed_terminal()
                 if execution.status is not status:
                     poll_backoff = 1.0
                 status = execution.status
@@ -2739,10 +2819,9 @@ class DefaultExecutionService(TaskExecutionService):
         pending = await self._runtime_bridge.pending_turns.read_remote_execution(
             execution_id, tenant_id=tenant_id,
         )
-        if pending is not None:
-            return pending
-        # Publication can disappear after the source read when its owner commits.
-        return await self.load_source_execution(execution_id, tenant_id=tenant_id)
+        # Remote publication can outlive the source commit observed during this await.
+        record = await self.load_source_execution(execution_id, tenant_id=tenant_id)
+        return record if record is not None else pending
 
 
     async def load_observed_authorized(
@@ -2757,14 +2836,15 @@ class DefaultExecutionService(TaskExecutionService):
                 execution_id, tenant_id=principal.tenant_id,
             )
         if record is None:
-            record = await self._runtime_bridge.pending_turns.read_remote_execution(
+            pending = await self._runtime_bridge.pending_turns.read_remote_execution(
                 execution_id, tenant_id=principal.tenant_id,
             )
-        if record is None:
             # Ordinary reads may retain a pre-commit miss after the owner releases.
             record = await self.load_source_execution(
                 execution_id, tenant_id=principal.tenant_id,
             )
+            if record is None:
+                record = pending
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self.authorize_loaded_execution(

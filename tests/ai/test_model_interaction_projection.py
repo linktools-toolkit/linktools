@@ -586,6 +586,8 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
 async def test_parent_tool_result_round_trip_materializes_two_model_requests() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="interaction-tool-roundtrip", tenant_id="tenant")
+    from .test_step_projection import _execution
+    await state.execution.executions.create_execution(_execution())
     try:
         capture = AgentRunRecorder(
             state.run_store,
@@ -715,11 +717,8 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             )
         )
 
-        await state.run_store.checkpoint_persistence.materialize_recovery_checkpoint(
-            agent_run_id="run",
-            require_complete=True,
-        )
-        archive = state.run_store.read_store(PersistenceDomain.CHECKPOINT)
+        await state.run_store.flush_execution_projection("run", execution_id="execution")
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
         interactions = await archive.list_model_interactions(agent_run_id="run")
         assert [value.model_request_seq for value in interactions] == [1, 2]
         resolved = await archive.resolve_model_interactions(interactions)

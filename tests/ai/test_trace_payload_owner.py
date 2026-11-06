@@ -244,11 +244,11 @@ async def test_trace_ack_failure_releases_source_and_retries_cleanup_without_rea
     store = state.run_store
     await _observe(store, 1)
     await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-    before = await state.execution.executions.get_history_head("execution", tenant_id="tenant")
+    before = await state.execution.executions.get("execution", tenant_id="tenant")
     reads = backend.reads
     assert not store.trace_persistence._buffers and store.trace_persistence._cleanup
     await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-    assert await state.execution.executions.get_history_head("execution", tenant_id="tenant") == before
+    assert await state.execution.executions.get("execution", tenant_id="tenant") == before
     assert backend.reads == reads
     with pytest.raises(RuntimeError, match="ack unavailable"):
         await state.close()
@@ -527,7 +527,7 @@ async def test_rejected_trace_tail_cannot_reenter_through_checkpoint_relocation(
         assert await store.get_agent_run(agent_run_id="run") is None
         assert await store.latest_checkpoint(agent_run_id="run", include_interrupted=True) is None
         checkpoint_owner = store.checkpoint_persistence
-        assert await checkpoint_owner.terminal_staged_interactions(agent_run_id="run") == ()
+        assert await store.read_store(PersistenceDomain.TRACE).list_model_interactions(agent_run_id="run") == []
         await checkpoint_owner.materialize_recovery_checkpoint(agent_run_id="run", require_complete=False)
         assert await store.read_store(PersistenceDomain.CHECKPOINT).get_agent_run(agent_run_id="run") is None
         plan = await store.prepare_execution_terminal_seal(
