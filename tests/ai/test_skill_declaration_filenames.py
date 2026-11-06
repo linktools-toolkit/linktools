@@ -59,7 +59,7 @@ async def test_skill_aliases_capture_exact_keys_and_frozen_resources(
     await asset_store.put(resource, b"changed guide")
     skill = SkillCapability(
         (SkillDefinition.from_contract(definition.contract),),
-        SkillSourceRegistry((AssetSkillSource("skills", reader),)),
+        SkillSourceRegistry((AssetSkillSource(definition.source_ref.source_id, reader),)),
     )
     loaded = await skill.load_skill(_ROOT)
     assert loaded["resources"] == ["Guide.md"]
@@ -131,7 +131,7 @@ async def test_directory_skill_aliases_use_logical_declaration_paths(
         reader = capture.asset_reader
         assert reader is not None
         assert await reader.get(AssetKey("skill", f"{_ROOT}/{filename}")) == _DECLARATION
-        source = AssetSkillSource("skills", reader)
+        source = AssetSkillSource(definition.source_ref.source_id, reader)
         view = await source.inspect(definition.source_ref)
         assert view.resources == ("Guide.md",)
         assert view.location.kind == ("virtual" if mapped else "local")

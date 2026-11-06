@@ -76,6 +76,8 @@ from ..capability import (
     PydanticToolControlCapability,
     ReferencedInputsCapability,
     SkillCapability,
+    SkillDefinition,
+    AssetSkillSource,
     SkillSourceRegistry,
     SubagentCapability,
     SubagentDelegate,
@@ -208,6 +210,7 @@ class _AgentRunScope:
     ) = None
     workspace_backend: "WorkspaceBackend | None" = None
     skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
+    initial_skills: tuple[SkillDefinition, ...] | None = None
     mcp_bindings: Mapping[str, _MCPBinding] = field(
         default_factory=dict
     )
@@ -253,6 +256,7 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
+        skill_resolver: Callable[[CompiledAgent], Awaitable[Sequence[SkillDefinition]]] | None = None,
         runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]] = (),
         asset_sources: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
@@ -262,6 +266,7 @@ class AgentExecutor:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
+        self._skill_resolver = skill_resolver
         self._runtime_capabilities = tuple(runtime_capabilities)
         self._asset_sources = dict(asset_sources or {})
         self._metrics = metrics
@@ -482,6 +487,18 @@ class AgentExecutor:
             server.transport == "stdio"
             for server in live_mcp_servers
         )
+        current_skills = (
+            scope.binding.compiled_agent.skill_definitions
+            if self._skill_resolver is None
+            else tuple(await self._skill_resolver(scope.binding.compiled_agent))
+        )
+        scope = replace(scope, initial_skills=current_skills)
+        skill_asset_readers = dict(self._asset_sources)
+        for skill in current_skills:
+            if skill.source_ref is not None:
+                source = skill_sources.resolve(skill.source_ref.source_id)
+                if isinstance(source, AssetSkillSource) and source.dynamic:
+                    skill_asset_readers[source.source_id] = source.asset_reader
         materializer = AssetMaterializer()
         session: WorkspaceBackend | None = None
         primary_error: BaseException | None = None
@@ -490,12 +507,12 @@ class AgentExecutor:
                 skill_resources: tuple[WorkspaceResource, ...] = ()
                 resource_keys: Mapping[str, "str | None"] = {
                     skill.id: None
-                    for skill in scope.binding.compiled_agent.skill_definitions
+                    for skill in current_skills
                 }
             else:
                 skill_resources, resource_keys = await _skill_sandbox_resources(
-                    scope.binding.compiled_agent,
-                    self._asset_sources,
+                    current_skills,
+                    skill_asset_readers,
                 )
             mcp_projections: dict[str, _MCPProjection] = {}
             if live_mcp_servers:
@@ -524,7 +541,7 @@ class AgentExecutor:
                         scope,
                         skill_resource_paths={
                             skill.id: None
-                            for skill in scope.binding.compiled_agent.skill_definitions
+                            for skill in current_skills
                         },
                         mcp_bindings=mcp_bindings,
                         mcp_projections=mcp_projections,
@@ -654,6 +671,7 @@ class AgentExecutor:
                         scope,
                         model=model,
                         skill_sources=skill_sources,
+                        skill_resolver=self._skill_resolver,
                         deferred_pause_sink=record_deferred_step,
                         metrics=self._metrics,
                         runtime_capabilities=self._runtime_capabilities,
@@ -845,7 +863,7 @@ async def _close_workspace_backend(session: WorkspaceBackend) -> None:
 
 
 async def _skill_sandbox_resources(
-    compiled_agent: CompiledAgent,
+    skills: Sequence[SkillDefinition],
     asset_readers: Mapping[str, AssetStoreReader],
 ) -> tuple[
     tuple[WorkspaceResource, ...],
@@ -853,7 +871,7 @@ async def _skill_sandbox_resources(
 ]:
     resources: dict[str, WorkspaceResource] = {}
     resource_keys: dict[str, str | None] = {}
-    for skill in compiled_agent.skill_definitions:
+    for skill in skills:
         source_ref = skill.source_ref
         if source_ref is None:
             continue
@@ -972,6 +990,7 @@ async def _materialize_agent(
     callbacks: RunCallbacks,
     runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]],
     model_journal: ModelRequestJournal,
+    skill_resolver: Callable[[CompiledAgent], Awaitable[Sequence[SkillDefinition]]] | None = None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -1016,11 +1035,18 @@ async def _materialize_agent(
         capabilities.append(bind_run_callbacks(
             candidate.value, CapabilityRef("capability", candidate.id, candidate.revision), callbacks,
         ))
-    if compiled_agent.skill_definitions:
+    if compiled_agent.spec.allow_skills and (skill_resolver is not None or compiled_agent.skill_definitions):
+        initial_skills = compiled_agent.skill_definitions if scope.initial_skills is None else scope.initial_skills
         skill_capability = SkillCapability(
-            compiled_agent.skill_definitions,
+            initial_skills,
             skill_sources,
             resource_paths=scope.skill_resource_paths,
+            discover=None if skill_resolver is None else lambda: skill_resolver(compiled_agent),
+            mounted_resources={
+                skill.id: skill.source_ref
+                for skill in initial_skills
+                if skill.source_ref is not None
+            },
         )
         capabilities.append(skill_capability)
 

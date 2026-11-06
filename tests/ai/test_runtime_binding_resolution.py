@@ -207,7 +207,7 @@ async def _read_skill(
     fixture: _BindingFixture,
     ref: SkillSourceRef,
 ) -> bytes:
-    source = AssetSkillSource("application", fixture.assets)
+    source = AssetSkillSource(ref.source_id, fixture.assets)
     return await source.read(ref, "guide.txt")
 
 

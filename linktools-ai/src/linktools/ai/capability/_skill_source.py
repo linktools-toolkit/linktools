@@ -3,11 +3,11 @@
 """Vendor-neutral Skill package resource sources."""
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import (
@@ -16,6 +16,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ._resource_path import require_resource_path
+
+if TYPE_CHECKING:
+    from ._skill import SkillDefinition
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,15 +97,30 @@ class SkillSource(Protocol):
 
 
 class AssetSkillSource:
-    """Read Skill resources through version references captured in SkillSourceRef."""
+    """Read explicit Skill versions or discover editable packages on demand."""
 
-    def __init__(self, source_id: str, asset_reader: AssetStoreReader) -> None:
+    def __init__(
+        self, source_id: str, asset_reader: AssetStoreReader, *,
+        discover: "Callable[[], Awaitable[Sequence[SkillDefinition]]] | None" = None,
+    ) -> None:
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError("skill source id must be non-empty")
         if not isinstance(asset_reader, AssetStoreReader):
             raise TypeError("asset_reader must provide AssetStoreReader operations")
         self._source_id = source_id
         self._asset_reader = asset_reader
+        self._discover = discover
+
+    @property
+    def dynamic(self) -> bool:
+        """Whether this source reads current packages rather than fixed versions."""
+        return self._discover is not None
+
+    async def discover(self) -> "tuple[SkillDefinition, ...]":
+        """Read current declarations without retaining a catalog between calls."""
+        if self._discover is None:
+            return ()
+        return tuple(await self._discover())
 
     @property
     def source_id(self) -> str:

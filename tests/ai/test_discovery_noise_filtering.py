@@ -206,7 +206,7 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
         assert capture.asset_reader is not None
-        source = AssetSkillSource("local", capture.asset_reader)
+        source = AssetSkillSource(definition.source_ref.source_id, capture.asset_reader)
         capability = SkillCapability((definition,), SkillSourceRegistry((source,)))
         root = await capability.load_skill("review")
         assert root["resources"] == ["assets/payload.bin", "references/rules.md"]

@@ -248,7 +248,7 @@ class AgentCompiler:
         )
         binding_contract = AgentBindingContract(
             agent_spec=AgentSpecCodec().from_payload(
-                AgentSpecCodec().to_contract_payload(compiled_agent.spec)
+                AgentSpecCodec().to_wire_payload(compiled_agent.spec)
             ),
             model_contract=dict(compiled_agent.model.contract),
             selected=_compiled_agent_selected_pins(compiled_agent),
@@ -443,7 +443,7 @@ class AgentCompiler:
         }
         select_all = "*" in selectors
         selected_ids = set(selectors).difference({"*"})
-        if not selected_ids.issubset(values):
+        if kind != "skill" and not selected_ids.issubset(values):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         selected = tuple(
             candidate

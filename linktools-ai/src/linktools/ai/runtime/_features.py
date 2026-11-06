@@ -34,6 +34,7 @@ from ..workspace import LocalWorkspaceBackend, Workspace
 from ..capability import (
     AgentContext,
     AssetCapability,
+    AssetSkillSource,
     CapabilityContribution,
     CapabilityLoadContext,
     ToolEffectPolicy,
@@ -74,6 +75,8 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
         default=None, repr=False, compare=False,
     )
+
+    skill_source: AssetSkillSource | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
@@ -378,7 +381,9 @@ class RuntimeFeatures(Generic[AppT]):
         context: CapabilityLoadContext | None = None
         source_revision: StorageRevision | None = None
         asset_reader: AssetStoreReader | None = None
+        skill_source: AssetSkillSource | None = None
         if self._asset_capability is not None:
+            skill_source = self._asset_capability.skill_source(self._id)
             context, loaded = await self._asset_capability.capture(self._id)
             for value in loaded:
                 if isinstance(value, RepositoryInstructionDocument):
@@ -400,6 +405,7 @@ class RuntimeFeatures(Generic[AppT]):
             limits=limits,
             defaults=self._defaults,
             filter=self._filter,
+            skill_source=skill_source,
         )
         _logger.info(
             "capability group captured: group=%s contributions=%d instructions=%d "

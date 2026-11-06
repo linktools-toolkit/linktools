@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Offline capability composition, captured resources and admitted Memory reuse.
+"""Offline capability composition, current Skill reads and admitted Memory reuse.
 
 All LinkTools imports are public. The model scripts call real capability tools;
 they do not connect to a model provider. Temporary state is not a deployment
@@ -120,11 +120,11 @@ async def captured_assets_and_workspace(root: Path) -> None:
             await store.put(resource, b"new authoring resource")
             assert capture.asset_reader is not None
             assert await capture.asset_reader.get(resource) == b"captured resource"
-            execution = await runtime.agents.get().start("inspect captured resources")
+            execution = await runtime.agents.get().start("inspect current resources")
             outcome = await execution.wait(timeout_seconds=30)
             assert outcome.result.status is ExecutionStatus.SUCCEEDED
             assert "Captured instructions" in str(returned["skill"])
-            assert "captured resource" in str(returned["reference"])
+            assert "new authoring resource" in str(returned["reference"])
             assert "hello.txt" in str(returned["files"])
             assert "capability-example" in str(returned["command"])
             assert runs == [execution.execution_id]
@@ -133,7 +133,7 @@ async def captured_assets_and_workspace(root: Path) -> None:
     finally:
         await store.close()
     assert not store.ready
-    print("Captured Skill resources, wrapped FileSystem, Shell and native hook passed")
+    print("Current Skill resources, wrapped FileSystem, Shell and native hook passed")
 
 
 async def admitted_memory_after_reopen(root: Path) -> None:

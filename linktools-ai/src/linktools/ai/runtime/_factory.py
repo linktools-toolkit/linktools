@@ -15,7 +15,7 @@ from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
-from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler
+from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler, CompiledAgent
 from ..capability import (
     ToolResponsesCapability,
     SessionCapability,
@@ -27,6 +27,7 @@ from ..capability import (
     AssetSkillSource,
     CapabilityContribution,
     SkillSourceRegistry,
+    SkillDefinition,
     tool_class_from_metadata,
 )
 from ._lifecycle import _RuntimeCloseCoordinator
@@ -346,9 +347,26 @@ async def compose_runtime_components(
             tuple((capability.id or "", capability) for capability in runtime_capabilities),
         )
         candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
+        live_skill_source = None if captured is None else captured.skill_source
         skill_sources = SkillSourceRegistry(
-            tuple(AssetSkillSource(group_id, reader) for group_id, reader in asset_sources.items())
+            (*tuple(AssetSkillSource(group_id, reader) for group_id, reader in asset_sources.items()),
+             *((live_skill_source,) if live_skill_source is not None else ()))
         )
+
+        async def resolve_skills(compiled: CompiledAgent) -> tuple[SkillDefinition, ...]:
+            selectors = compiled.spec.allow_skills
+            if not selectors:
+                return ()
+            definitions = () if live_skill_source is None else await live_skill_source.discover()
+            visible = AgentCompiler.filter_capabilities(
+                compiled.spec,
+                tuple(CapabilityContribution.from_declaration(item) for item in definitions),
+                capability_filter=None if captured is None else captured.filter,
+            )
+            return (*compiled.skill_definitions, *(
+                item.value for item in visible
+                if "*" in selectors or item.id in selectors
+            ))
         rules = RepositoryInstructions(() if captured is None else captured.instructions.documents)
         agents = {
             candidate.id: candidate.value
@@ -358,7 +376,15 @@ async def compose_runtime_components(
         models = {} if captured is None else captured.models
         if "default" not in agents and "default" in models:
             agents["default"] = AgentSpec("default")
-        compile_candidates = tuple(candidate for candidate in candidates if candidate.kind != "agent")
+        compile_candidates = tuple(
+            candidate for candidate in candidates
+            if candidate.kind != "agent" and not (
+                candidate.kind == "skill"
+                and live_skill_source is not None
+                and candidate.value.source_ref is not None
+                and candidate.value.source_ref.source_id == live_skill_source.source_id
+            )
+        )
         compiler_options = dict(defaults=None if captured is None else captured.defaults,
                                 models=models, agents=agents, capability_filter=None if captured is None else captured.filter)
 
@@ -496,6 +522,7 @@ async def compose_runtime_components(
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
+            skill_resolver=resolve_skills if live_skill_source is not None else None,
             runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
             runtime_token_seed=runtime_token_seed,
@@ -657,6 +684,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
+    skill_resolver: Callable[[CompiledAgent], Awaitable[Sequence[SkillDefinition]]] | None,
     runtime_capabilities: Sequence[AbstractCapability[AgentContext[AppT]]],
     asset_sources: Mapping[str, AssetStoreReader],
     runtime_token_seed: bytes,
@@ -786,6 +814,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
+            skill_resolver=skill_resolver,
             runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
             metrics=metric_buffer,

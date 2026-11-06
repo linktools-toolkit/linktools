@@ -50,7 +50,7 @@ async def _captured_local_skill(
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
         assert capture.asset_reader is not None
-        yield AssetSkillSource("local", capture.asset_reader), definition.source_ref
+        yield AssetSkillSource(definition.source_ref.source_id, capture.asset_reader), definition.source_ref
     finally:
         await store.close()
 
@@ -324,7 +324,7 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
             ("skill", "review"),
             ("capability", "runtime.assets"),
         }
-        source = AssetSkillSource("workspace", store)
+        source = snapshot.skill_source
         definition = next(
             item.value for item in snapshot.contributions if item.kind == "skill"
         )
@@ -421,7 +421,7 @@ async def test_captured_local_skill_keeps_resources_from_distinct_overlay_roots(
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
         assert capture.asset_reader is not None
-        source = AssetSkillSource("local", capture.asset_reader)
+        source = AssetSkillSource(definition.source_ref.source_id, capture.asset_reader)
         view = await source.inspect(definition.source_ref)
         assert view.resources == ("guide.md", "run.py")
         assert view.location.kind == "virtual"

@@ -16,9 +16,9 @@ The main ownership rules are:
 - `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.attach(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.
 - `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
-- `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide project Workspace configuration or an execution workspace factory independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
+- `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide project Workspace configuration or an execution workspace factory independently and captures direct registrations and the initial Asset declaration view. Skills from the Asset skill-loader slot are rediscovered on demand; other declarations retain their captured Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
-- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
+- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates. Runtime applies the same Skill selectors and filter to current Skills from the Asset skill-loader slot on each discovery/read.
 - `Runtime` composes Agent, Task and Evaluation execution through one application lifecycle. `features=None` leaves Agent execution disabled; Task-only applications need no model declarations. TaskEngine, History, Snapshot and Evaluations retain independent advanced entry points.
 - `runtime.agents.get(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
@@ -95,20 +95,21 @@ keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
 separate prompt-limit or tool-response arguments.
 
 With no callback, existing selection behavior is unchanged. Wildcard selectors
-expand the remaining candidates; explicit unavailable selections fail.
+expand the remaining candidates; explicit unavailable selections fail except for Skill selectors, which may name a Skill created later.
 Callback exceptions propagate and non-boolean results are rejected. Use a pure,
-deterministic callback over the captured declarations and stable application inputs.
+deterministic callback over declarations and stable application inputs. Asset skill-loader candidates are current at each list/load call.
 This is applicability filtering, not an authorization or OS isolation boundary.
 MCP filtering is per server; existing tool selectors still restrict its dynamic
 tools. Generic capabilities are filtered as whole contributions. Repository rules,
 Task definitions and DAG nodes are separate domains, not capability candidates.
 
-The final compiled selection feeds instructions, toolsets, Skill loading and
-Subagent delegation. Binding pins and Asset version references retain that exact
-selection. Historical restoration does not execute the current callback; new
-compilations do. An asset-only snapshot freezes declarations, not application
+The compiled selection feeds static instructions, toolsets and Subagent
+delegation. Binding pins retain static Skills and other selected capabilities;
+editable Skills from the Asset skill-loader slot are discovered on demand instead
+of persisting their startup bodies or resource lists as execution selections.
+Historical restoration does not reselect saved static contracts. New Skill reads apply the current filter using the admitted Agent metadata; they do not rewrite previously retained tool results. An asset-only snapshot freezes declarations, not application
 callback code. Reuse captured execution bindings when historical selection must
-remain fixed. Ordinary metadata and binding digest projections are unchanged.
+remain fixed for other capability kinds. Agent metadata is retained in the binding for later Skill filtering; it does not enter the semantic binding digest.
 
 ## Shared run budgets
 
@@ -662,7 +663,7 @@ MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: register
 `AssetCapability(store)` with `features.capability(...)`. Runtime initializes the
-declared store, captures once, and closes it after all producers stop. A declaration
+declared store, captures the initial composition, and closes it after all producers stop. A declaration
 and its store belong to one Runtime lifetime; wrapping the same store in another
 declaration does not make an independent resource. This transfers lifecycle even
 if the store is already initialized; readiness does not select a borrowing mode.
@@ -670,9 +671,7 @@ if the store is already initialized; readiness does not select a borrowing mode.
 AssetStore before `features.capture()` and keeps it open through every use, then
 closes it. Passing a prebuilt capture borrows its Asset reader; it does not transfer
 the source store's lifetime. A store-backed group
-captures the declaration metadata visible when capture begins. Assets added
-afterward are ignored for that capture; assets actually read by a loader must
-still match their captured metadata through verification. Conflicting
+captures the declaration metadata visible when capture begins. Agent, MCP and Rule declarations stay captured. Skills from the Asset skill-loader slot are rediscovered by `list_skills` and every `load_skill` call, including new Skills in a source that started empty. Each call uses the current Skill loader outputs and applies `allow_skills` plus the capability filter. `("*",)` permits new names, explicit IDs permit only those names even if created later, and `()` disables Skill tools. Deleting or editing a Skill affects the next read without restarting Runtime. Assets actually read by a loader must match the metadata of that read. Conflicting
 identities or layouts fail closed. Omitting `AssetCapability` contributes no Asset declarations.
 
 ```python
@@ -688,7 +687,7 @@ async with Runtime.open("application", storage=storage, features=features) as ru
 
 Every Asset kind uses `AssetVersionRef` for byte-version reads through
 `AssetStore.resolve_versions()` and `read_versions()`. Agent, Skill, MCP, and
-Rule declarations are read from the versions captured by the group. Writable
+Rule declarations initially use the versions captured by the group. Later Skill reads resolve fresh versions for that call, rather than requiring the source to remain unchanged. Writable
 Asset backends retain historical versions; `DirectoryAssetBackend` is a
 read-only view of local files and ignores the requested revision by default.
 For that backend, `AssetStore` verifies the current bytes against the captured
@@ -772,9 +771,7 @@ does not fall back from one remote transport to another.
 capture to `Runtime.open()` when the host also needs to inspect the same
 captured contributions; this avoids parsing the source declarations twice.
 The capture contains the group id, contributions, captured Rule instructions,
-source revision, and Workspace association. A changed source revision fails
-Runtime admission. Runtime reads captured resources through `AssetStoreReader`,
-a read-only view that does not expose the mutable `AssetStore`.
+source revision, Workspace association and a live Skill source. A changed source revision still rejects reuse of a stale capture for a new Runtime; a running Runtime does not require a new capture for Skill edits. Runtime reads other captured resources through `AssetStoreReader`, a read-only view that does not expose the mutable `AssetStore`. The Skill loader registered at capture remains selected; changing Python capability registrations or loader slots requires new composition.
 
 Directory-backed Skill packages retain a native absolute package path when
 all effective Skill assets under the declared resource root map to one
@@ -784,14 +781,12 @@ absolute path without letting a single file symlink redefine the package root.
 If an overlay mixes resource origins, the declaration view is virtual rather
 than claiming a single native package directory. Bubblewrap can still bind
 its local files individually; LocalWorkspaceBackend requires one matching native tree.
-Durable executions pin Asset version
-references for Skill resources and read them through AssetStore when needed.
+New Skill reads resolve current definitions and resource references. A tool result already retained in Conversation/checkpoint history keeps its original content; an uncommitted or new read may observe current content. Skill reads do not introduce a separate durable receipt or promise recovery without the configured persistence guarantees.
 The workspace provider exposes existing local resource files by path after verifying their
 bound Asset versions and executable bits. Resources without native file paths
 remain available through `load_skill` but cannot be executed by file path.
 Skill resource bytes are not copied to a temporary directory or Runtime ObjectStore.
-Because the paths point to original files, external edits after verification
-can be observed by an already running process.
+Because the paths point to original files, external edits after verification can be observed by an already running process. A Skill or resource added during a run does not expand its sandbox mounts: `load_skill` exposes it as virtual when no matching path is available. Files already under the authorized Workspace remain usable through ordinary FileSystem/Shell tools. The next run prepares its resources from the current allowed Skills.
 
 For a stdio MCP package, the package directory supplies the default resource
 root when `resource` is omitted; an explicit resource root takes precedence.
@@ -1079,15 +1074,14 @@ spec = AgentSpec(
 )
 ```
 
-The compiler resolves these selectors once from the captured candidate universe.
-Missing or conflicting required candidates fail closed. MCP selectors use
+The compiler resolves non-Skill selectors from the captured candidate universe. Skill selectors are also applied to current candidates on list/load; missing explicit Skill names can become available later without widening the selector. Missing or conflicting required non-Skill candidates fail closed. MCP selectors use
 `mcp:<encoded-server>:<encoded-tool>` or `mcp:<encoded-server>:*`; use
 `mcp_server_selector()` and `mcp_tool_selector()` to encode logical ids and
 upstream tool names. For example, `security/audit` and `scan:file` become
 `mcp:security%2Faudit:scan%3Afile`. The `mcp__` prefix is reserved for
 model-visible transport names and is not an authoring selector.
 
-Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
+Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, an initial Skill catalog hint, and Workspace guidance form the most stable prefix. `list_skills` provides the current Skill catalog; updates do not rewrite the standing prompt. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
 
 Sessions remember discovered repository instruction scopes, not instruction text.
 Before a new Execution's first model request, its current cwd and remembered

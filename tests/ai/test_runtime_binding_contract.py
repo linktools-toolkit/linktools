@@ -488,7 +488,8 @@ def test_catalog_reuses_binding_for_unchanged_compiled_semantics() -> None:
         compiler.compile(AgentSpec("agent", description="second label"))
     )
 
-    assert first.binding_contract == second.binding_contract
+    assert first.binding_contract.agent_spec.description == "first label"
+    assert second.binding_contract.agent_spec.description == "second label"
     assert first.binding_digest == second.binding_digest
 
     catalog = AgentCatalog({"agent": first.compiled_agent})

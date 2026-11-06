@@ -651,9 +651,9 @@ class Runtime(Generic[AppT]):
         }
         if not derived_tools.issubset(root_tools):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if not {
-            item.id for item in derived.selected_skills
-        }.issubset({item.id for item in root.selected_skills}):
+        if "*" not in root.spec.allow_skills and not set(
+            derived.spec.allow_skills
+        ).issubset(root.spec.allow_skills):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return Agent(self, derived.spec.id, derived.spec.revision, derived)
 

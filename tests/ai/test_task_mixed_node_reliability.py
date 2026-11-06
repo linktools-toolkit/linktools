@@ -4177,6 +4177,7 @@ async def test_task_execution_scope_survives_unknown_and_bound_recovery(
             assert dict(restored.nodes[0].input) == source_input
             # A concurrent launcher finalizer can own the handoff cleanup. Check
             # its durable closing result after all owned work has quiesced.
+            await runtime_engine.close()
             await runtime.close()
             repository = persistence.execution.executions
             closed = await repository.state_store.read(lambda transaction: repository.get_in_transaction(

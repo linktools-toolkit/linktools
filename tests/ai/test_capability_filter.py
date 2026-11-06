@@ -89,7 +89,6 @@ async def test_filter_narrows_every_supported_kind_without_filtering_root(contri
 @pytest.mark.parametrize("options", [
     {"allow_tools": ("business",)},
     {"allow_tools": ("mcp:server:*",)},
-    {"allow_skills": ("guide",)},
     {"allow_subagents": ("child",)},
     {"allow_capabilities": ("extra",)},
 ])
@@ -161,9 +160,7 @@ async def test_runtime_wires_filter_into_roots_and_derived_agents(tmp_path):
     async with Persistence.open('capability-filter-test', storage=PersistenceStorage.from_root(tmp_path)) as persistence_153, Runtime.attach(persistence=persistence_153, features=capture) as runtime:
         root = runtime.agents.get("root")
         assert root.derive(allow_skills=("*",)).compiled.skill_definitions == ()
-        with pytest.raises(AIError) as error:
-            root.derive(allow_skills=("guide",))
-        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        assert root.derive(allow_skills=("guide",)).compiled.skill_definitions == ()
 
 
 @pytest.mark.asyncio

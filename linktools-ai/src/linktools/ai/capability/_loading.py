@@ -172,6 +172,33 @@ class CapabilityLoadContext:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @classmethod
+    async def read_current(
+        cls, group_id: str, store: AssetStore,
+    ) -> "CapabilityLoadContext":
+        """Read current loader inputs without freezing later source reads.
+
+        Version references validate the bytes read by this loader call. They do
+        not require unrelated Assets to stop changing or pin later Skill reads.
+        """
+        if not store.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        revision = await store.current_revision()
+        metadata = await store.capture_metadata()
+        versions = await store.resolve_versions(tuple(info.key for info in metadata))
+        if len(versions) != len(metadata) or any(
+            not ref.matches_info(info)
+            for info, ref in zip(metadata, versions, strict=True)
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        entries = tuple(
+            CapabilityLoadEntry(info.key, info.digest, info.size, info.metadata)
+            for info in metadata
+        )
+        version_by_key = {ref.key: ref for ref in versions}
+        reader = _CapabilityAssetReader(store, revision, version_by_key, tuple(metadata))
+        return cls(group_id, store, revision, entries, version_by_key, reader)
+
+    @classmethod
     async def capture(
         cls,
         group_id: str,

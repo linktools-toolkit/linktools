@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Asset-backed declarations captured before Agent compilation."""
 
+from dataclasses import replace
 from typing import Generic, TypeVar
 
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
@@ -14,6 +15,7 @@ from ._contribution import CapabilityContribution
 from ._declaration import BuiltinDeclarationLoader
 from ._loading import CapabilityLoadContext, CapabilityLoader
 from ._skill import SkillDefinition
+from ._skill_source import AssetSkillSource, SkillSourceRef
 
 AppT = TypeVar("AppT")
 
@@ -70,16 +72,45 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
         self._loaders[kind] = loader
         return loader
 
+    def skill_source(self, group_id: str) -> AssetSkillSource:
+        """Bind current Skill reads to the declared loader and owned store."""
+        loader = self._loaders["skill"]
+
+        async def discover() -> tuple[SkillDefinition, ...]:
+            context = await CapabilityLoadContext.read_current(group_id, self._store)
+            skills: list[SkillDefinition] = []
+            for value in await loader.load(context):
+                _validate_skill_source(value, context)
+                if isinstance(value, CapabilityContribution):
+                    if value.kind != "skill":
+                        continue
+                    value = value.value
+                elif isinstance(value, (AgentSpec, MCPServerSpec, RepositoryInstructionDocument)):
+                    continue
+                if not isinstance(value, SkillDefinition):
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                skills.append(_bind_skill_source(value, f"{group_id}/skills"))
+            return tuple(skills)
+
+        return AssetSkillSource(f"{group_id}/skills", self._store, discover=discover)
+
     async def capture(
         self, group_id: str,
     ) -> tuple[CapabilityLoadContext, tuple[CapabilityContribution[AppT] | RepositoryInstructionDocument, ...]]:
         """Capture all loader outputs against the same source revision."""
-        loaders = tuple(self._loaders.values())
+        loaders = tuple(self._loaders.items())
         context = await CapabilityLoadContext.capture(group_id, self._store)
         entries: list[CapabilityContribution[AppT] | RepositoryInstructionDocument] = []
-        for loader in loaders:
+        for kind, loader in loaders:
             for value in await loader.load(context):
                 _validate_skill_source(value, context)
+                if kind == "skill":
+                    if isinstance(value, SkillDefinition):
+                        value = _bind_skill_source(value, f"{group_id}/skills")
+                    elif isinstance(value, CapabilityContribution) and value.kind == "skill":
+                        value = CapabilityContribution.from_declaration(
+                            _bind_skill_source(value.value, f"{group_id}/skills")
+                        )
                 if isinstance(value, (AgentSpec, SkillDefinition, MCPServerSpec)):
                     entries.append(CapabilityContribution.from_declaration(value))
                 elif isinstance(value, (CapabilityContribution, RepositoryInstructionDocument)):
@@ -101,6 +132,14 @@ class AssetCapability(AbstractCapability[AgentContext[AppT]], Generic[AppT]):
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         await context.verify_source_revision()
         return context, tuple(entries)
+
+
+def _bind_skill_source(definition: SkillDefinition, group_id: str) -> SkillDefinition:
+    source = definition.source_ref
+    return replace(
+        definition,
+        source_ref=SkillSourceRef(group_id, definition.id) if source is None else replace(source, source_id=group_id),
+    )
 
 
 def _validate_skill_source(

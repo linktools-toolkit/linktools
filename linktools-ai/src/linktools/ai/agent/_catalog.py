@@ -73,7 +73,11 @@ def _same_runtime_compiled_agent(
     left: CompiledAgent,
     right: CompiledAgent,
 ) -> bool:
-    if not _same_compiled_agent(left, right) or left.model is not right.model:
+    if (
+        not _same_compiled_agent(left, right)
+        or left.model is not right.model
+        or left.spec.metadata != right.spec.metadata
+    ):
         return False
     for left_values, right_values in (
         (left.selected_tools, right.selected_tools),

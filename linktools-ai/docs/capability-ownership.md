@@ -26,6 +26,7 @@ is complete. In particular, the Task integration decisions below remain open.
    `AssetCapability` contributes declarations and a reader tied to one source
    revision. Asset versions, not copies in execution storage, retain resources.
    The host may supply this same capture to Runtime and inspect it directly.
+   Asset skill-loader reads are an explicit live source within this composition: each list/load resolves current declarations; other kinds remain captured.
 3. `AgentCompiler.compile` applies Agent selection and authoring defaults.
    `bind` creates the resolved `AgentBindingContract`, including the full
    selected contracts and explicit named revisions. It is the execution
@@ -35,7 +36,7 @@ is complete. In particular, the Task integration decisions below remain open.
    run-local services and tool wrappers. This composition must preserve the SDK
    effective run instance, wrapper hooks and ordering.
 5. Restore validates saved contracts and materializes their retained meaning.
-   It does not expand historical wildcards using today's declarations. Current
+   It does not rewrite historical selections or retained tool results. New Asset skill-loader reads apply the admitted selectors and current filter to today's source. Current
    Runtime policy and admitted behavior have different owners and lifetimes.
 6. The producer drains and settles its execution before releasing owned
    resources. Closing Task, an observer or a metric recorder is not equivalent
@@ -48,7 +49,7 @@ existing owners and the boundary to retain, rather than prescribing file moves.
 
 | Area | Declaration / capture | Binding and execution | Durable fact / close owner | Remaining boundary work |
 | --- | --- | --- | --- | --- |
-| Asset / Skill | `capability/_asset.py`, `_declaration.py`, `_skill_source.py` capture one source revision; `agent/_compiler.py` pins selected contracts | `capability/_skill.py` owns discovery and resource-read tools; execution materializes pinned resources through Workspace | Runtime initializes and closes the store declared by `AssetCapability(store)`; a prebuilt capture borrows its source from the external owner | Preserve the captured source; do not introduce a second frozen-resource lifecycle |
+| Asset / Skill | `capability/_asset.py`, `_declaration.py`, `_skill_source.py` capture initial declarations and retain a live Skill source; `agent/_compiler.py` owns selectors | `capability/_skill.py` discovers current allowed Skills and reads each selected version; Workspace mounts are prepared at run start | Runtime initializes and closes the store declared by `AssetCapability(store)`; a prebuilt capture borrows its source from the external owner | Keep current reads separate from retained tool observations; do not add a second frozen-resource lifecycle or expand sandbox access during discovery |
 | FileSystem / Shell | `capability/_filesystem.py`, `_shell.py` supply tool declarations; Runtime captures Workspace and selected names | Capabilities own tool arguments/results and retry feedback; `runtime/_agent_executor.py` binds the shared Boundary and backend | Workspace owns logical paths, physical deployment, process trees and quiescent close; execution owns authorization and effect facts | Audit contribution/binding adapters together; do not move OS isolation or effect authority into a tool capability |
 | Memory | `capability/_memory.py` declares native tools; Runtime captures the host scope | Capability owns model tools and SDK adaptation; `runtime/_memory.py` adapts admitted scope, versions, capture/seed and mutation receipts | Persistence owns record/object transactions; the execution retains admitted Memory even if a new host omits the declaration | Memory-specific restore still lives in `runtime/_factory.py`; consolidate that responsibility without replacing current admission with historical defaults |
 | Planning | Agent/invocation `planning` enables the tool separately from `allow_tools` | `capability/planning.py` owns the supported `write_plan` surface; `runtime/_harness.py` translates the native store contract | `runtime/_plan.py` owns the session/execution plan and optimistic transaction; `_local.py` selects its owner | Co-locate capability-specific projection only after defining its public store boundary; do not confuse model plans, execution plan mode and Task DAGs |
@@ -67,7 +68,7 @@ existing owners and the boundary to retain, rather than prescribing file moves.
 | Call | Meaning, defaults and result | Ownership / failure |
 | --- | --- | --- |
 | `AssetCapability(store)` | Declare the Asset source in `RuntimeFeatures` | Runtime initializes and closes the store. For an externally shared capture, its owner initializes the store before capture and closes it after every borrower finishes |
-| `features.capture()` | Async result is `RuntimeFeaturesCapture`; `asset_reader` can be absent when no Asset source is registered | Reads one source revision. `verify_source_revision()` detects later authoring drift; fixed version reads remain pinned |
+| `features.capture()` | Async result is `RuntimeFeaturesCapture`; `asset_reader` can be absent when no Asset source is registered | Reads initial composition at one source revision. Reusing it for new Runtime admission checks authoring drift; current Skill reads do not require recapture |
 | `FileSystem(workspace).prefix_tools("files")` | Native SDK wrapping changes model-visible names, not logical Workspace path or original tool policy | Runtime binds the backend and closes its owned resources; the declaration is reusable |
 | `MemoryCapability(scope="default")` | Host declaration supplies Memory tools for ordinary new runs; selected tools still follow the Agent's tool policy | Runtime resolves the admitted scope. Per-call `memory_scope` is not a user parameter |
 | `ExecutionCapability(retain_history=True)` | Retains committed model context used by retries and later turns | It does not enable all Checkpoint/Trace guarantees implicitly |
@@ -79,7 +80,7 @@ existing owners and the boundary to retain, rather than prescribing file moves.
 
 The resource scenario actually invokes `load_skill`, wrapped `list_files` and a
 local `run_command`. It changes an authoring resource only after Runtime has
-accepted the capture, then proves that the running Skill sees the pinned bytes.
+accepted the capture, then proves that the captured reader retains old bytes while later Skill reads see current bytes.
 The native host hook remains active even when Agent-selected capabilities are
 empty. The Memory scenario writes real state, closes Runtime, opens a host with
 no Memory declaration, checks a fresh run has no Memory tools, and retries the
