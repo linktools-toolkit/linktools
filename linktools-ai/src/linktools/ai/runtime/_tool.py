@@ -717,6 +717,9 @@ class RuntimeToolOperationBridge:
         for run_id in dict.fromkeys((self._agent_run_id, self._recovery_agent_run_id)):
             if run_id is not None:
                 known |= await self._repository.existing_call_ids(run_id, missing, tenant_id=self._tenant_id)
+                missing = tuple(call_id for call_id in missing if call_id not in known)
+                if not missing:
+                    break
         return known
 
     def confirmed_terminal_operations(
