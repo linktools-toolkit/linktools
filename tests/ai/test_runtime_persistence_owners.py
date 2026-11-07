@@ -204,16 +204,16 @@ async def test_composition_cancellation_releases_only_its_own_runtime_permission
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
-    original = RuntimeFeatures.capture
+    original = RuntimeFeatures.resolve
     features = model_features(_FeatureModels())
 
-    async def capture(current: RuntimeFeatures):
+    async def resolve(current: RuntimeFeatures):
         if current is features:
             entered.set()
             await release.wait()
         return await original(current)
 
-    monkeypatch.setattr(RuntimeFeatures, "capture", capture)
+    monkeypatch.setattr(RuntimeFeatures, "resolve", resolve)
     async with Persistence.open("cancel-compose", storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence:
         async with Runtime.attach(persistence=persistence):
             runtime = Runtime.attach(persistence=persistence, features=features)

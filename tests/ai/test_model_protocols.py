@@ -135,7 +135,7 @@ async def test_public_registration_matches_model_type_and_restores(kind, api, mo
     binding = create_model(api=api, model=model_name)
     features = RuntimeFeatures()
     features.model("selected", binding)
-    sources = (await features.capture()).models
+    sources = (await features.resolve()).models
     resolver = _ModelResolver(sources)
     actual = sources["selected"].contract
     assert actual == binding.contract

@@ -21,6 +21,7 @@ class CompiledAgent:
     selected_subagents: "tuple[str, ...]"
     tool_policy: "tuple[str, ...]"
     mcp_policy: "tuple[str, ...]"
+    runtime_contributions: "tuple[CapabilityContribution[object], ...]" = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.spec, AgentSpec):
@@ -44,6 +45,8 @@ class CompiledAgent:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
                 identities.add(identity)
                 previous = value.id
+        if any(item.scope != "runtime" for item in self.runtime_contributions):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if tuple(sorted(set(self.selected_subagents))) != self.selected_subagents:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 

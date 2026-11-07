@@ -66,7 +66,7 @@ def _port(admission: _TurnAdmission) -> SimpleNamespace:
         load_recovery_execution=AsyncMock(return_value=execution),
         _reconcile_tool_effects=AsyncMock(return_value=((), 0)),
         _pending_cancel_operations=AsyncMock(return_value=()),
-        validate_binding=Mock(return_value=None),
+        validate_binding=AsyncMock(return_value=None),
         validate_recovery_inputs=AsyncMock(return_value=None),
         _reconcile_session_recovery=AsyncMock(return_value=True),
         _recovery_idempotency=AsyncMock(return_value=None),

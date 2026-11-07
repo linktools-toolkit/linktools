@@ -4038,9 +4038,9 @@ async def test_task_execution_port_replay_rejects_changed_runtime_memory_scope()
             admitted = await port.start("return a result", **start)
             replayed = await port.start("return a result", **start)
             assert replayed.execution_id == admitted.execution_id
-            changed = replace(port, memory_scope="other-memory")
+            features.capability(MemoryCapability(scope="other-memory"))
             with pytest.raises(AIError) as conflict:
-                await changed.start("return a result", **start)
+                await port.start("return a result", **start)
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             record = await persistence.execution.executions.get(
                 admitted.execution_id, tenant_id=runtime.tenant_id,
@@ -4177,6 +4177,7 @@ async def test_task_execution_scope_survives_unknown_and_bound_recovery(
             assert dict(restored.nodes[0].input) == source_input
             # A concurrent launcher finalizer can own the handoff cleanup. Check
             # its durable closing result after all owned work has quiesced.
+            await runtime_engine.close()
             await runtime.close()
             repository = persistence.execution.executions
             closed = await repository.state_store.read(lambda transaction: repository.get_in_transaction(

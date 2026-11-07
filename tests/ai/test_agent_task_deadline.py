@@ -336,7 +336,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
             return
         task = Task.from_agent("deadline.agent", runtime.agents.get())
         run = await engine.with_definitions(task).get("deadline-recovery", principal=runtime.default_principal)
-        if change in {"prompt", "tool", "revision"}:
+        if change in {"prompt", "revision"}:
             with pytest.raises(AIError) as caught:
                 await run.recover(idempotency_key="recover")
             assert caught.value.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.AGENT_BINDING_UNAVAILABLE}
@@ -354,7 +354,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         assert node.status is TaskStatus.RECOVERY_REQUIRED
         assert node.error_code == ErrorCode.STORAGE_RECOVERY_REQUIRED.value
     finally:
-        if subagent and change in {"none", "metadata"}:
+        if subagent and change in {"none", "metadata", "tool"}:
             # The interrupted delegated effect remains unknown on close too.
             with pytest.raises(AIError) as caught:
                 await owners.aclose()

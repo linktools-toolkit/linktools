@@ -46,7 +46,7 @@ async def test_group_agent_skill_requirements_survive_capture(
         selections = ["guide", "guide"]
         declared = group.agent("agent", allow_skills=selections)
         selections.clear()
-        capture = await group.capture()
+        capture = await group.resolve()
         captured = next(item.value for item in capture.contributions if item.kind == "agent")
         assert isinstance(captured, AgentSpec)
         assert captured.allow_skills == declared.allow_skills == ("guide",)
@@ -55,14 +55,9 @@ async def test_group_agent_skill_requirements_survive_capture(
             candidates=capture.contributions,
             agents={captured.id: captured},
         )
-        if available:
-            compiled = compiler.compile(captured)
-            assert compiled.spec.allow_skills == ("guide",)
-            assert tuple(skill.id for skill in compiled.skill_definitions) == ("guide",)
-        else:
-            with pytest.raises(AIError) as raised:
-                compiler.compile(captured)
-            assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        compiled = compiler.compile(captured)
+        assert compiled.spec.allow_skills == ("guide",)
+        assert tuple(skill.id for skill in compiled.skill_definitions) == (("guide",) if available else ())
     finally:
         await store.close()
 
@@ -93,6 +88,7 @@ async def test_skill_catalog_defers_instruction_bodies_until_requested() -> None
     instructions = capability.get_instructions()
     assert instructions is not None
     assert "load_skill" in instructions
+    assert "added or edited" not in instructions
     assert instructions.index("- a:") < instructions.index("- z:")
     assert "a-content" not in instructions
     assert "z-content" not in instructions

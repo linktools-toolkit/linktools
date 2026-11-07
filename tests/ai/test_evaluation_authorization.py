@@ -129,7 +129,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     group = RuntimeFeatures[None]("shared-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.model("default", models)
-    captured = await group.capture()
+    captured = group.borrow()
     ref = DatasetRef("system-data", 1)
     case_ref = CaseRef(ref.id, "one", 1)
     spec = DatasetSpec(ref, (

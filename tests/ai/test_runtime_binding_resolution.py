@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression coverage for execution-owned Asset version bindings."""
+"""Current resources and durable Agent contracts keep separate ownership."""
 from linktools.ai.model import create_model
 
 import asyncio
@@ -18,7 +18,6 @@ from linktools.ai.agent import (
     AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
-    CapabilityPin,
 )
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
@@ -195,9 +194,9 @@ def _resolved_child(binding_contract: AgentBindingContract) -> AgentBindingContr
     return child
 
 
-def _skill_ref(child: AgentBindingContract) -> SkillSourceRef:
-    pin = next(item for item in child.selected if item.kind == "skill")
-    skill = SkillDefinition.from_contract(pin.contract)
+def _skill_ref(child: AgentBindingContract, compiler: AgentCompiler) -> SkillSourceRef:
+    assert not any(pin.kind == "skill" for pin in child.selected)
+    skill = compiler.restore(child).compiled_agent.skill_definitions[0]
     assert skill.source_ref is not None
     assert skill.source_ref.resources
     return skill.source_ref
@@ -207,16 +206,16 @@ async def _read_skill(
     fixture: _BindingFixture,
     ref: SkillSourceRef,
 ) -> bytes:
-    source = AssetSkillSource("application", fixture.assets)
+    source = AssetSkillSource(ref.source_id, fixture.assets)
     return await source.read(ref, "guide.txt")
 
 
 @pytest.mark.asyncio
-async def test_binding_resolution_preserves_direct_child_asset_versions() -> None:
+async def test_binding_resolution_resolves_child_resources_without_durable_catalog_pins() -> None:
     fixture = await _fixture()
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
-        ref = _skill_ref(_resolved_child(resolved.binding_contract))
+        ref = _skill_ref(_resolved_child(resolved.binding_contract), fixture.compiler)
 
         assert [item.path for item in ref.resources] == ["guide.txt"]
         await fixture.assets.put(
@@ -410,19 +409,19 @@ async def test_runtime_start_admits_resolved_binding(monkeypatch: pytest.MonkeyP
             assert execution.resolved_binding is not None
             assert execution.resolved_binding.binding_contract == execution.binding_contract
             assert execution.requires_task_invocation_capture is False
-            assert _skill_ref(_resolved_child(execution.binding_contract)).resources
+            assert _skill_ref(_resolved_child(execution.binding_contract), fixture.compiler).resources
     finally:
         await fixture.assets.close()
 
 
 @pytest.mark.asyncio
-async def test_execution_binding_uses_selected_child_asset_versions() -> None:
+async def test_execution_binding_preserves_child_spec_and_resolves_current_resources() -> None:
     fixture = await _fixture()
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
 
         assert resolved.binding_contract != fixture.binding.binding_contract
-        assert _skill_ref(_resolved_child(resolved.binding_contract)).resources
+        assert _skill_ref(_resolved_child(resolved.binding_contract), fixture.compiler).resources
     finally:
         await fixture.assets.close()
 
@@ -452,36 +451,23 @@ async def test_binding_resolution_restores_mcp_execution_contract(tmp_path: Path
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
-        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
     resolved = await resolver.resolve(
         compiler.bind(catalog.root_agent(specification.id))
     )
 
-    pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
+    from linktools.ai.runtime._current_toolsets import _candidate_mcp_binding
+
     selected = resolved.compiled_agent.selected_mcp
-    assert pin.contract["execution_policy"] == {
-        "version": 1,
-        "boundary": "host-stdio",
-        "tool_effect_policy": "replay_safe",
-    }
-    resource_versions = MCPServerSpecCodec().decode_binding_payload(
-        pin.contract,
-        declaration=server,
-    )
-    assert server.args == ("resource:literal-value",)
-    assert resource_versions is None
+    assert not any(pin.kind == "mcp" for pin in resolved.binding_contract.selected)
     assert len(selected) == 1
-    assert (
-        selected[0].id,
-        selected[0].revision,
-        selected[0].contract,
-    ) == (
-        pin.id,
-        pin.revision,
-        dict(pin.contract),
-    )
+    binding = _candidate_mcp_binding(selected[0], LocalWorkspaceBackend(tmp_path), None)
+    assert binding.execution_policy == {
+        "version": 1, "boundary": "host-stdio", "tool_effect_policy": "replay_safe",
+    }
+    assert server.args == ("resource:literal-value",)
+    assert binding.versions is None
 
 
 @pytest.mark.asyncio
@@ -514,23 +500,21 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
-        workspace_backend=sandbox(tmp_path),
     )
 
     resolved = await resolver.resolve(
         compiler.bind(catalog.root_agent(specification.id))
     )
 
-    pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
-    assert pin.contract["execution_policy"] == {
-        **sandbox(tmp_path).stdio_execution_policy(),
-        "tool_effect_policy": "replay_safe",
+    from linktools.ai.runtime._current_toolsets import _candidate_mcp_binding
+
+    binding = _candidate_mcp_binding(resolved.compiled_agent.selected_mcp[0], sandbox(tmp_path), None)
+    assert binding.execution_policy == {
+        **sandbox(tmp_path).stdio_execution_policy(), "tool_effect_policy": "replay_safe",
     }
     if backend != "bubblewrap":
-        assert pin.contract["execution_policy"] == {
-            "version": 1,
-            "boundary": "host-stdio",
-            "tool_effect_policy": "replay_safe",
+        assert binding.execution_policy == {
+            "version": 1, "boundary": "host-stdio", "tool_effect_policy": "replay_safe",
         }
 
 
@@ -594,13 +578,14 @@ async def test_existing_child_mcp_resolves_asset_versions(
                 for agent_id, spec in specs.items()
             }
         )
-        resolver = _AgentBindingResolver(catalog, compiler, workspace_backend=LocalWorkspaceBackend(tmp_path))
+        resolver = _AgentBindingResolver(catalog, compiler)
         binding = compiler.bind(catalog.root_agent("parent")).binding_contract
 
         await store.put(resource, b"print('updated')")
         resolved = await resolver.resolve_contract(binding)
         child = resolved.subagent_bindings[0]
-        pin = next(item for item in child.selected if item.kind == "mcp")
+        assert not any(pin.kind == "mcp" for pin in child.selected)
+        pin = (await resolver.restore(child)).compiled_agent.selected_mcp[0]
         current = child.agent_spec
         assert current.id == "child"
         resolved_versions = codec.decode_binding_payload(
@@ -616,7 +601,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
 
 
 @pytest.mark.asyncio
-async def test_runtime_storage_snapshot_preserves_asset_version_refs(
+async def test_runtime_storage_snapshot_preserves_agent_and_child_contracts(
     tmp_path: Path,
 ) -> None:
     fixture = await _fixture()
@@ -655,7 +640,7 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
                 ),
             )
         )
-        resolved_ref = _skill_ref(_resolved_child(resolved.binding_contract))
+        assert not _resolved_child(resolved.binding_contract).selected
     finally:
         await state.close()
 
@@ -698,9 +683,8 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
             tenant_id="tenant",
         )
         assert execution is not None
-        restored_ref = _skill_ref(_resolved_child(execution.binding))
-        assert restored_ref == resolved_ref
-        assert await _read_skill(fixture, restored_ref) == b"original"
+        assert execution.binding == resolved.binding_contract
+        assert not _resolved_child(execution.binding).selected
     finally:
         await restored.close()
         await fixture.assets.close()

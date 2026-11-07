@@ -605,10 +605,19 @@ class StateCommands:
         expected_agent_run_seq: int,
         expected_pending_tools: PendingToolContinuation,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
+        recovery_operation: OperationLedgerInput | None = None,
     ) -> ExecutionRecord:
-        stores = (self._execution.state_store,)
+        stores = [self._execution.state_store]
+        operations = self._operations
+        if recovery_operation is not None:
+            if operations is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            stores.append(operations.state_store)
+        stores = list(_dedupe_stores(stores))
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         next_sequence = expected_agent_run_seq + 1
-        producer_claim_id = uuid4().hex
+        producer_claim_id = recovery_operation.result_ref if recovery_operation is not None else uuid4().hex
         producer_generation = expected_execution_revision + 1
         next_agent_run_id = agent_run_id(
             namespace=self._namespace,
@@ -627,6 +636,21 @@ class StateCommands:
                     execution_id,
                     tenant_id=tenant_id,
                 )
+                if recovery_operation is not None:
+                    existing = await operations.get_in_transaction(
+                        group.transaction(operations.state_store),
+                        recovery_operation.operation_id, tenant_id=tenant_id,
+                    )
+                    if existing is not None:
+                        if not operation_identity_matches(existing, recovery_operation):
+                            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                        if execution is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        return execution
+                    validate_recovery_operation(
+                        recovery_operation, execution_id=execution_id,
+                        tenant_id=tenant_id, producer=True,
+                    )
                 checkpoint = execution
                 if (
                     execution is None
@@ -653,11 +677,28 @@ class StateCommands:
                                          source_agent_run_id=expected_pending_tools.source_agent_run_id),
                     )
                 )
+                if recovery_operation is not None:
+                    await operations.append_in_transaction(
+                        group.transaction(operations.state_store), recovery_operation,
+                    )
                 return updated_execution
 
             return await stores[0].storage_group.mutate(stores, mutate)
 
         async def readback() -> CommitObservation[ExecutionRecord]:
+            if recovery_operation is not None:
+                existing = await operations.get(recovery_operation.operation_id, tenant_id=tenant_id)
+                if existing is None:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if not operation_identity_matches(existing, recovery_operation):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                    )
+                current = await self._load_execution(execution_id, tenant_id=tenant_id)
+                if current is None:
+                    return _partial_integrity()
+                return CommitObservation(DurableCommitState.COMMITTED, value=current)
             execution = await self._load_execution(execution_id, tenant_id=tenant_id)
             checkpoint = execution
             if execution is None or checkpoint is None or checkpoint.recovery is None:

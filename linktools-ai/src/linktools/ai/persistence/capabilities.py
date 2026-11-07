@@ -7,6 +7,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import TypeVar
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -18,6 +19,7 @@ from .durability import CommitObservation, DurableCommitState, run_durable_commi
 from ._capability_marker import ensure_capability_partition_marker, has_capability_partition_marker
 
 _Persist = Callable[[StateTransaction, Mapping[str, JsonValue]], Awaitable[None]]
+_AdaptedT = TypeVar("_AdaptedT")
 
 
 @dataclass
@@ -435,10 +437,22 @@ class RuntimeCapabilityWrites:
         self._sealed: set[str] = set()
         self._closing = False
 
+    def register_store(self, capability_id: str, store: StateStore, *, durable: bool) -> None:
+        """Add a current declaration's partition without replacing active writers."""
+        if self._closing:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        previous = self.stores.get(capability_id)
+        if previous is not None and previous is not store:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self.stores[capability_id] = store
+        if durable:
+            self._durable_capability_ids = self._durable_capability_ids | {capability_id}
+
     def bind(
         self, capability_id: str, run_id: str, execution_id: str,
         capability: CapabilityPersistence, *, revision: int = 1,
-    ) -> CapabilityPersistence:
+        adapt: Callable[[CapabilityPersistence, Callable[[CapabilityPersistence], None]], _AdaptedT] | None = None,
+    ) -> CapabilityPersistence | _AdaptedT:
         self._require_active_run(run_id, execution_id)
         if self._closing or execution_id in self._sealed:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -455,13 +469,17 @@ class RuntimeCapabilityWrites:
         bound = capability.bind_persistence(writer)
         if bound is capability or id(bound) in self._bound:
             raise ValueError("bind_persistence must return an independent run-local capability")
-        if not isinstance(bound, CapabilityPersistence) or not callable(bound.persist_in_transaction):
-            raise TypeError("bound capability must implement CapabilityPersistence")
-        if bound.commit != capability.commit or bound.commit.buffer is not capability.commit.buffer:
-            raise ValueError("binding cannot change capability commit policy")
-        writer.persist = bound.persist_in_transaction
+        def replace_owner(effective: CapabilityPersistence) -> None:
+            if not isinstance(effective, CapabilityPersistence) or not callable(effective.persist_in_transaction):
+                raise TypeError("bound capability must implement CapabilityPersistence")
+            if effective.commit != scope.policy or effective.commit.buffer is not scope.policy.buffer:
+                raise ValueError("binding cannot change capability commit policy")
+            # Each accepted write already holds the callback selected at submission.
+            writer.persist = effective.persist_in_transaction
+
+        replace_owner(bound)
         self._bound[id(bound)] = bound
-        return bound
+        return bound if adapt is None else adapt(bound, replace_owner)
 
     def is_buffer_rejection(
         self, agent_run_id: str, *, execution_id: str, error: BaseException,

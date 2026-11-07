@@ -12,7 +12,7 @@ from contextlib import aclosing, asynccontextmanager
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from ...execution.handle import ExecutionBinding
-from ...core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits,
+from ...core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits, ToolEffects,
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
 from ...persistence import Persistence, PersistenceDomain
 from ...observe import MetricRecorderProvider, MetricsControl, MetricFlushResult, MetricRecorderStatus
@@ -428,11 +428,12 @@ class TaskEngine(Generic[AppT]):
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
         budget: RunBudget | None = None,
+        tool_effects: ToolEffects = "live",
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphRun[AppT]:
         submission = await self.prepare_submission(
             graph, principal=principal, idempotency_key=idempotency_key,
-            limits=limits, budget=budget, correlation=correlation,
+            limits=limits, budget=budget, tool_effects=tool_effects, correlation=correlation,
         )
         result = await self.start_prepared(submission)
         if not result.admitted:
@@ -450,10 +451,11 @@ class TaskEngine(Generic[AppT]):
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
         budget: RunBudget | None = None,
+        tool_effects: ToolEffects = "live",
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphSubmission:
         return await self._prepare_submission(graph, idempotency_key=idempotency_key,
-            principal=principal, limits=limits, budget=budget, correlation=correlation, describe=False)
+            principal=principal, limits=limits, budget=budget, tool_effects=tool_effects, correlation=correlation, describe=False)
 
     async def describe_submission(
         self,
@@ -463,11 +465,12 @@ class TaskEngine(Generic[AppT]):
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
         budget: RunBudget | None = None,
+        tool_effects: ToolEffects = "live",
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphSubmission:
         """Resolve submission identity without storing input or launching work."""
         return await self._prepare_submission(graph, idempotency_key=idempotency_key,
-            principal=principal, limits=limits, budget=budget, correlation=correlation, describe=True)
+            principal=principal, limits=limits, budget=budget, tool_effects=tool_effects, correlation=correlation, describe=True)
 
     async def _prepare_submission(
         self,
@@ -477,13 +480,14 @@ class TaskEngine(Generic[AppT]):
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
         budget: RunBudget | None = None,
+        tool_effects: ToolEffects = "live",
         correlation: Mapping[str, object] | None = None,
         describe: bool,
     ) -> TaskGraphSubmission:
         runtime = self
         request = await runtime._admit_graph(
             graph, principal=principal, idempotency_key=idempotency_key,
-            limits=limits, budget=budget, correlation=correlation,
+            limits=limits, budget=budget, tool_effects=tool_effects, correlation=correlation,
         )
         task_runtime = runtime._require_task_node_runtime()
         activation = await task_runtime.activate_graph(
@@ -787,6 +791,7 @@ class TaskEngine(Generic[AppT]):
         idempotency_key: str,
         limits: "TaskGraphLimits | None",
         budget: RunBudget | None = None,
+        tool_effects: ToolEffects = "live",
         correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphRequest:
         self._ensure_open()
@@ -811,6 +816,7 @@ class TaskEngine(Generic[AppT]):
             selected_limits,
             effective_correlation,
             budget,
+            tool_effects,
         )
 
 

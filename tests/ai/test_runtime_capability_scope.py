@@ -9,8 +9,7 @@ from linktools.ai.task.engine import TaskEngine
 from ._runtime_test_helpers import model_features
 
 import asyncio
-from dataclasses import replace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -30,8 +29,9 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.capability import AgentContext
+from linktools.ai.capability import AgentContext, CapabilityContribution
 from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.spec import AgentSpec
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model._binding import _RetryingModel
@@ -115,8 +115,8 @@ class _Unselected(AbstractCapability[AgentContext[None]]):
         raise AssertionError("Agent-selectable capability must remain excluded")
 
 
-def _group() -> RuntimeFeatures[None]:
-    group: RuntimeFeatures[None] = RuntimeFeatures("application")
+def _group(*, filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None) -> RuntimeFeatures[None]:
+    group: RuntimeFeatures[None] = RuntimeFeatures("application", filter=filter)
     for name in ("default", "worker"):
         group.agent(name, model="default", allow_tools=(), allow_skills=(),
                     allow_subagents=(), allow_capabilities=())
@@ -148,12 +148,18 @@ async def test_runtime_capability_shares_backend_across_agents_and_agent_tasks_w
         ordinary_ran.set()
         return "ordinary"
 
-    policies = _policies(_group(), _GlobalPolicy(backend))
+    policies = _policies(_group(filter=lambda _agent, item: item.kind != "capability"), _GlobalPolicy(backend))
     policies.model("default", _Models(FunctionModel(stream_function=chunks)))
-    async with Persistence.open('runtime_capability', storage=PersistenceStorage.in_memory()) as persistence_143, Runtime.attach(persistence=persistence_143, features=replace(await policies.capture(), filter=lambda _agent, item: item.kind != 'capability')) as runtime, TaskEngine.open(persistence=persistence_143) as engine:
-        late = _Unselected()
-        late.id = "host.late"
-        policies.capability(late, scope="runtime")
+    async with Persistence.open('runtime_capability', storage=PersistenceStorage.in_memory()) as persistence_143, Runtime.attach(persistence=persistence_143, features=policies) as runtime, TaskEngine.open(persistence=persistence_143) as engine:
+        late_runs: list[str] = []
+
+        class LatePolicy(AbstractCapability[AgentContext[None]]):
+            id = "host.late"
+
+            async def before_run(self, ctx: RunContext[AgentContext[None]]) -> None:
+                late_runs.append(ctx.deps.execution_id)
+
+        policies.capability(LatePolicy(), scope="runtime")
         first = await runtime.agents.get().start("first")
         await asyncio.wait_for(streamed.wait(), 3)
         agent_task = Task.from_agent("test.worker", runtime.agents.get("worker"))
@@ -174,6 +180,7 @@ async def test_runtime_capability_shares_backend_across_agents_and_agent_tasks_w
         assert backend.entered == [first.execution_id, second.execution_id]
         assert backend.entered == backend.released and backend.peak == 1
         assert {context.execution_id for context in backend.runs} == set(backend.entered)
+        assert set(late_runs) == set(backend.entered)
 
 
 @pytest.mark.parametrize("outcome", ("complete", "cancel", "error"))
@@ -312,7 +319,7 @@ async def test_runtime_capability_rejects_invalid_or_not_always_on_entries(kind:
         runtime_capability = CombinedCapability([runtime_capability])
     elif kind == "container_id":
         runtime_capability = CombinedCapability([runtime_capability], id="linktools.reserved")
-    entries = (runtime_capability, runtime_capability) if kind == "duplicate" else (runtime_capability,)
+    entries = (CombinedCapability([runtime_capability, runtime_capability], id="duplicate.bundle"),) if kind == "duplicate" else (runtime_capability,)
     with pytest.raises((TypeError, AIError)):
         async with Persistence.open('runtime-policy-invalid', storage=PersistenceStorage.in_memory()) as persistence_330, Runtime.attach(persistence=persistence_330, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(_group(), *entries))):
             raise AssertionError("invalid runtime capability was accepted")
@@ -324,10 +331,10 @@ async def test_selected_capability_cannot_silently_replace_runtime_capability_wi
     group.capability(_GlobalPolicy(_Backend()), scope="agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=(), allow_capabilities=("host.runtime_capability",))
-    with pytest.raises(AIError) as raised:
-        async with Persistence.open('runtime-policy-collision', storage=PersistenceStorage.in_memory()) as persistence_344, Runtime.attach(persistence=persistence_344, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(group, _GlobalPolicy(backend)))):
-            raise AssertionError("conflicting runtime capability was accepted")
-    assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
+    async with Persistence.open('runtime-policy-collision', storage=PersistenceStorage.in_memory()) as persistence_344, Runtime.attach(persistence=persistence_344, features=model_features(_Models(_UsageFunctionModel(_immediate)), _policies(group, CombinedCapability([_GlobalPolicy(backend)], id="host.bundle")))) as runtime:
+        result = (await runtime.agents.get().run("question")).result
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error_code == ErrorCode.CAPABILITY_CONFLICT.value
     assert backend.requests == []
 
 

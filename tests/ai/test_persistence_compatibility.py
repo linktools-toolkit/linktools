@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin, bind_output, restore_output
+from linktools.ai.agent import AgentBindingContract, AgentCompiler, bind_output, restore_output
 from linktools.ai.capability import filesystem_capabilities
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
@@ -35,16 +35,15 @@ from linktools.ai.persistence.contracts import (
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
 )
-from linktools.ai.spec import AgentSpec
+from linktools.ai.spec import CapabilityRef, AgentSpec
 from linktools.ai.task import TaskNode, TaskRef
 from linktools.ai.workspace import Workspace
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 
-def _workspace_tool_contributions(workspace: Workspace):
-    return tuple(
-        workspace_features("workspace", workspace=workspace)._contributions
-    )
+async def _workspace_tool_contributions(workspace: Workspace):
+    resolution = await workspace_features("workspace", workspace=workspace).resolve()
+    return tuple(item for item in resolution.contributions if item.kind == "tool")
 
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "persistence"
@@ -262,17 +261,14 @@ def test_generic_v1_envelope_round_trips_current_shape() -> None:
     assert decoded == value
 
 
-def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
-    contribution = _workspace_tool_contributions(Workspace.load(tmp_path))[0]
-    pin = CapabilityPin(
-        "tool",
-        contribution.id,
-        contribution.contract,
-    )
-    payload = pin.to_payload()
-    assert set(payload) == {"kind", "id", "contract"}
-    assert cast(Mapping[str, object], payload["contract"])["version"] == 1
-    assert "capability_id" not in cast(Mapping[str, object], payload["contract"])
+@pytest.mark.asyncio
+async def test_workspace_tool_reference_contains_only_named_identity(tmp_path: Path) -> None:
+    contribution = (await _workspace_tool_contributions(Workspace.load(tmp_path)))[0]
+    reference = CapabilityRef(contribution.kind, contribution.id, contribution.revision)
+    assert reference.to_payload() == {
+        "kind": "tool", "id": contribution.id, "revision": contribution.revision,
+    }
+    assert CapabilityRef.from_payload(reference.to_payload()) == reference
 
 
 @pytest.mark.asyncio
@@ -280,7 +276,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    candidates = _workspace_tool_contributions(workspace)
+    candidates = await _workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",
         model="default",
@@ -295,15 +291,8 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         agents={spec.id: spec},
     )
     binding = compiler.bind(compiler.compile(spec))
-    baseline = {
-        contribution.id: contribution.contract
-        for contribution in candidates
-    }
-    assert len(binding.binding_contract.selected) == 1
-    pin = binding.binding_contract.selected[0]
-    assert pin.kind == "tool"
-    assert pin.id == "read_file"
-    assert dict(pin.contract) == baseline["read_file"]
+    assert binding.binding_contract.selected == ()
+    assert [item.id for item in binding.compiled_agent.selected_tools] == ["read_file"]
 
     restored = AgentCompiler(
         models=models,
@@ -311,6 +300,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         agents={spec.id: spec},
     ).restore(binding.binding_contract)
     assert restored.binding_contract == binding.binding_contract
+    assert restored.compiled_agent.selected_tools == binding.compiled_agent.selected_tools
     selected = tuple(candidate.id for candidate in restored.compiled_agent.selected_tools)
     with pytest.raises(AIError) as missing_session:
         filesystem_capabilities(workspace, selected)

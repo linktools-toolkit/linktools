@@ -73,7 +73,7 @@ def test_shell_metadata_declares_effect_certainty() -> None:
 async def test_shell_only_features_capture_tools_before_runtime_binding() -> None:
     features = RuntimeFeatures("native-shell")
     features.capability(ShellCapability())
-    capture = await features.capture()
+    capture = await features.resolve()
     tools = [item for item in capture.contributions if item.kind == "tool"]
     assert {tool.id for tool in tools} == {"run_command", "start_command", "check_command", "stop_command"}
     assert tools[0].contract["metadata"]["linktools.ai.tool_class"] == "shell"

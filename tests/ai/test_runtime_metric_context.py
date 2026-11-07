@@ -178,7 +178,7 @@ async def test_runtime_recorder_reports_later_source_failure_after_enrichment_fa
 async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> None:
 
     metrics = Metrics.in_memory()
-    features = await RuntimeFeatures("shared-metrics").capture()
+    features = RuntimeFeatures("shared-metrics").borrow()
     async with Persistence.open('first', storage=PersistenceStorage.in_memory()) as persistence_187, Runtime.attach(persistence=persistence_187, metrics=metrics, features=features) as first:
         async with Persistence.open('second', storage=PersistenceStorage.in_memory()) as persistence_190, Runtime.attach(persistence=persistence_190, metrics=metrics, features=features) as second:
             observation = Observation(
@@ -263,10 +263,10 @@ async def test_metrics_resources_do_not_enter_captured_agent_binding_identity() 
     features.agent("default")
     models = create_model(api="openai", model="unused-offline-model")
     features.model("default", models)
-    capture = await features.capture()
+    capture = await features.resolve()
     bindings = []
     for metrics in (None, Metrics.in_memory(), Metrics.in_memory()):
-        async with Persistence.open('metric-resource-identity', storage=PersistenceStorage.in_memory()) as persistence_290, Runtime.attach(persistence=persistence_290, features=capture, metrics=metrics) as runtime:
+        async with Persistence.open('metric-resource-identity', storage=PersistenceStorage.in_memory()) as persistence_290, Runtime.attach(persistence=persistence_290, features=features.borrow(), metrics=metrics) as runtime:
             compiled = runtime.agents.get().derive(instructions=("fixed binding",)).compiled
             assert compiled is not None
             compiler = AgentCompiler(

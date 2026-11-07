@@ -18,9 +18,11 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
   Explicit values always undergo normal validation and are never replaced by defaults.
   Protocol discriminators and durable correlation identities remain explicit;
   an authoring constructor's generated identity is not a persisted identity.
-- Capture a RuntimeFeatures declaration once and reuse it for host
-  inspection and Runtime composition. Bind cross-source reads to the captured
-  revision or an immutable reference.
+- RuntimeFeatures is a live declaration source for every capability kind.
+  Resolve current declarations at their execution boundary; do not freeze the
+  source or reject later resolution solely because its revision changed.
+  One resolution retains Asset version references for byte integrity, while
+  admitted calls and durable receipts retain their original execution identity.
 - Resource immutability belongs to AssetStore/AssetVersionRef. Skill and MCP contracts may carry Asset version references plus their own execution semantics, but must not define a separate frozen lifecycle or duplicate Asset ownership.
 - AssetKey.id is an opaque logical identity. Only the owning path adapter or capability contract may interpret it hierarchically; Workspace paths and host filesystem paths must not become Asset identity.
 - Workspace tool/input paths are canonical Workspace-relative POSIX strings. Workspace.root plus host and sandbox guest paths are physical deployment details and must not become logical path or durable semantic identity.

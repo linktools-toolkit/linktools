@@ -199,8 +199,9 @@ async def test_unified_file_selection_keeps_scenarios_minimal(tmp_path: Path) ->
         await session.close()
 
 
-def test_workspace_tools_use_initial_behavior_revision(tmp_path: Path) -> None:
-    contributions = workspace_features("workspace", workspace=Workspace.load(tmp_path))._contributions
+@pytest.mark.asyncio
+async def test_workspace_tools_use_initial_behavior_revision(tmp_path: Path) -> None:
+    contributions = (await workspace_features("workspace", workspace=Workspace.load(tmp_path)).resolve()).contributions
     revisions = {item.id: item.revision for item in contributions}
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
         "read_file": 1, "write_file": 1, "search_files": 1,

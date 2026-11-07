@@ -6,7 +6,6 @@ from linktools.ai.model import create_model
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated
 
@@ -16,7 +15,6 @@ from linktools.ai.agent import (
     AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
-    CapabilityPin,
 )
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetKey, AssetVersionRef
@@ -33,7 +31,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence import codec as runtime_codec
 from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
-from linktools.ai.spec import AgentSpec, SkillSpec
+from linktools.ai.spec import CapabilityRef, AgentSpec, SkillSpec
 from linktools.ai.storage import StorageEntryRevision, StoredPayload
 from pydantic_ai import Tool
 from pydantic import (
@@ -190,8 +188,8 @@ def test_skill_asset_version_locator_is_not_named_identity() -> None:
     second = _versioned_skill(layer_id="source-b", revision=9, size=99)
 
     assert first.contract != second.contract
-    first_pin = CapabilityPin("skill", "review", first.contract)
-    second_pin = CapabilityPin("skill", "review", second.contract)
+    first_pin = CapabilityContribution.from_declaration(first)
+    second_pin = CapabilityContribution.from_declaration(second)
     assert first_pin.revision == second_pin.revision
 
     restored = SkillDefinition.from_contract(first.contract)
@@ -230,9 +228,9 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
         changed.source_ref,
     )
 
-    first_pin = CapabilityPin("skill", "review", first.contract)
-    changed_pin = CapabilityPin("skill", "review", changed.contract)
-    revised_pin = CapabilityPin("skill", "review", revised.contract)
+    first_pin = CapabilityContribution.from_declaration(first)
+    changed_pin = CapabilityContribution.from_declaration(changed)
+    revised_pin = CapabilityContribution.from_declaration(revised)
     assert first.contract != changed.contract
     assert first_pin.revision == changed_pin.revision
     assert first_pin.revision != revised_pin.revision
@@ -287,16 +285,12 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
 
 
 def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
-    pin = CapabilityPin(
-        "skill",
-        "review",
-        _versioned_skill(
-            layer_id="source",
-            revision=1,
-            size=1,
-        ).contract,
-    )
-    binding_contract = replace(_binding_contract(), selected=(pin,))
+    skill = _versioned_skill(layer_id="source", revision=1, size=1)
+    compiler = _contribution_compiler(CapabilityContribution.from_declaration(skill))
+    binding = compiler.bind(compiler.compile_registered("agent"))
+    binding_contract = binding.binding_contract
+    assert binding.compiled_agent.skill_definitions == (skill,)
+    assert binding_contract.selected == ()
 
     assert tuple(
         runtime_codec.iter_runtime_object_refs(
@@ -351,14 +345,14 @@ async def test_feature_capture_keeps_replaced_model_connection() -> None:
         api="openai", model="gpt-test",
         base_url="https://first.example/v1", api_key="first-key",
     ))
-    first_capture = await features.capture()
+    first_capture = await features.resolve()
     first = first_capture.models["default"]
 
     features.model("default", create_model(
         api="openai", model="gpt-test",
         base_url="https://second.example/v1", api_key="second-key",
     ))
-    second = (await features.capture()).models["default"]
+    second = (await features.resolve()).models["default"]
 
     assert second is not first
     assert dict(second.contract) == dict(first.contract)
@@ -488,7 +482,8 @@ def test_catalog_reuses_binding_for_unchanged_compiled_semantics() -> None:
         compiler.compile(AgentSpec("agent", description="second label"))
     )
 
-    assert first.binding_contract == second.binding_contract
+    assert first.binding_contract.agent_spec.description == "first label"
+    assert second.binding_contract.agent_spec.description == "second label"
     assert first.binding_digest == second.binding_digest
 
     catalog = AgentCatalog({"agent": first.compiled_agent})
@@ -525,16 +520,16 @@ def test_restored_binding_uses_only_contract_semantics() -> None:
     assert restored.output_type is not _SchemaTwinA
 
 
-def test_binding_rejects_selected_compiled_agent_contract_mismatch() -> None:
+def test_binding_rejects_selected_compiled_agent_identity_mismatch() -> None:
     compiler = _compiler()
     binding = compiler.bind(compiler.compile(AgentSpec("agent")))
     mismatched_compiled_agent = replace(
         binding.compiled_agent,
-        selected_tools=(
+        selected_capabilities=(
             SimpleNamespace(
-                kind="tool",
-                id="unexpected-tool",
-                contract={"version": 1},
+                kind="capability",
+                id="unexpected-capability",
+                revision=1,
             ),
         ),
     )
@@ -548,26 +543,13 @@ def test_binding_rejects_selected_compiled_agent_contract_mismatch() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_binding_preserves_selected_pin_version_error() -> None:
-    compiler = _compiler()
-    binding = compiler.bind(compiler.compile(AgentSpec("agent")))
-    invalid_compiled_agent = replace(
-        binding.compiled_agent,
-        selected_tools=(
-            SimpleNamespace(
-                kind="tool",
-                id="future-tool",
-                contract={"version": 2},
-            ),
-        ),
+def test_contribution_rejects_unsupported_contract_version() -> None:
+    contribution = replace(
+        _configured_contribution("capability", "future-capability", 1, "value"),
+        _contract={"version": 2, "revision": 1},
     )
-
     with pytest.raises(AIError) as raised:
-        AgentBinding(
-            invalid_compiled_agent,
-            binding.output_binding,
-            binding.binding_contract,
-        )
+        _ = contribution.revision
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
@@ -592,7 +574,7 @@ def test_model_diagnostics_do_not_affect_contract_equality_or_other_guards() -> 
     assert original.to_payload() != current.to_payload()
     assert original != replace(current, agent_spec=replace(current.agent_spec, model="other-route"))
     assert original != replace(current, agent_spec=replace(current.agent_spec, instructions=("changed",)))
-    assert original != replace(current, selected=(CapabilityPin("tool", "different", {"version": 1, "revision": 1}),))
+    assert original != replace(current, selected=(CapabilityRef("capability", "different", 1),))
     assert original != replace(current, output_mode="structured", output_schema={"type": "object"})
 
 
@@ -620,31 +602,40 @@ def test_binding_reader_rejects_malformed_known_fields(field: str, value: object
     ("field", "value"),
     (
         ("kind", []),
+        ("kind", "unknown"),
         ("id", 1),
-        ("contract", []),
-        ("contract", {"version": 1, "revision": True}),
-        ("contract", {"version": 1, "revision": 0}),
-        ("contract", {"version": 1, "extra": object()}),
+        ("id", " "),
+        ("revision", True),
+        ("revision", 0),
+        ("revision", "2"),
     ),
 )
-def test_capability_pin_reader_rejects_malformed_known_fields(field: str, value: object) -> None:
-    payload = {"kind": "tool", "id": "sample", "contract": {"version": 1, "revision": 2}}
+def test_capability_ref_reader_rejects_malformed_known_fields(field: str, value: object) -> None:
+    payload = {"kind": "tool", "id": "sample", "revision": 2}
     payload[field] = value
     with pytest.raises(AIError) as raised:
-        CapabilityPin.from_payload(payload)
+        CapabilityRef.from_payload(payload)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("field", ("kind", "id", "revision"))
+def test_capability_ref_reader_requires_complete_identity(field: str) -> None:
+    payload = {"kind": "capability", "id": "sample", "revision": 2}
+    del payload[field]
+    with pytest.raises(AIError) as raised:
+        CapabilityRef.from_payload(payload)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_binding_reader_detaches_mutable_contract_inputs() -> None:
     payload = _binding_contract().to_payload()
     payload["model_contract"] = {"diagnostic": ["original"]}
-    payload["selected"] = [{"kind": "tool", "id": "sample", "contract": {"version": 1, "revision": 2, "metadata": ["original"]}}]
+    payload["selected"] = [{"kind": "capability", "id": "sample", "revision": 2}]
     restored = AgentBindingContract.from_payload(payload)
     payload["model_contract"]["diagnostic"].append("changed")
-    payload["selected"][0]["contract"]["metadata"].append("changed")
+    payload["selected"][0]["revision"] = 3
     assert restored.model_contract["diagnostic"] == ["original"]
-    assert restored.selected[0].contract["metadata"] == ["original"]
-    assert restored.selected[0].revision == 2
+    assert restored.selected == (CapabilityRef("capability", "sample", 2),)
 
 
 def test_subagent_reader_preserves_description_validation() -> None:
@@ -696,7 +687,7 @@ def _contribution_compiler(candidate: CapabilityContribution[object]) -> AgentCo
 
 
 @pytest.mark.parametrize("kind", ("tool", "skill", "mcp", "capability"))
-def test_capability_binding_identity_ignores_configuration_but_preserves_named_reference(kind: str) -> None:
+def test_run_hook_identity_and_live_directory_identity_have_separate_owners(kind: str) -> None:
     original_candidate = _configured_contribution(kind, "sample", 1, "original")
     changed_candidate = _configured_contribution(kind, "sample", 1, "changed")
     original_compiler = _contribution_compiler(original_candidate)
@@ -712,27 +703,32 @@ def test_capability_binding_identity_ignores_configuration_but_preserves_named_r
     assert restored.binding_contract is original.binding_contract
     assert restored.binding_digest == original.binding_digest
     if kind == "skill":
-        assert restored.compiled_agent.selected_skills[0].contract == original_candidate.contract
+        assert restored.compiled_agent.selected_skills[0].contract == changed_candidate.contract
 
     for identity, revision in (("different", 1), ("sample", 2)):
         other_compiler = _contribution_compiler(_configured_contribution(kind, identity, revision, "changed"))
         other = other_compiler.bind(other_compiler.compile(spec))
-        assert other.binding_digest != original.binding_digest
-        with pytest.raises(AIError) as raised:
-            AgentBinding(other.compiled_agent, original.output_binding, original.binding_contract)
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        if kind != "skill":
+        if kind == "capability":
+            assert other.binding_digest != original.binding_digest
+            with pytest.raises(AIError) as raised:
+                AgentBinding(other.compiled_agent, original.output_binding, original.binding_contract)
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
             with pytest.raises(AIError) as raised:
                 other_compiler.restore(original.binding_contract)
             assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+        else:
+            assert other.binding_digest == original.binding_digest
+            rebound = AgentBinding(other.compiled_agent, original.output_binding, original.binding_contract)
+            assert rebound.binding_contract == original.binding_contract
+            dynamic = other_compiler.restore(original.binding_contract).compiled_agent
+            candidates = (*dynamic.selected_tools, *dynamic.selected_skills, *dynamic.selected_mcp)
+            assert [(item.id, item.revision) for item in candidates] == [(identity, revision)]
+
 
 
 @pytest.mark.asyncio
-async def test_mcp_resolution_keeps_historical_contract_when_current_arguments_change(tmp_path: Path) -> None:
+async def test_mcp_resolution_uses_current_arguments_without_changing_run_contract() -> None:
     from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
-    from linktools.ai.workspace import LocalWorkspaceBackend
-
-    workspace_backend = LocalWorkspaceBackend(tmp_path)
 
     original_compiler = _contribution_compiler(_configured_contribution("mcp", "sample", 1, "original"))
     changed_compiler = _contribution_compiler(_configured_contribution("mcp", "sample", 1, "changed"))
@@ -740,11 +736,11 @@ async def test_mcp_resolution_keeps_historical_contract_when_current_arguments_c
     original_catalog = AgentCatalog({"agent": original_compiler.compile(spec)})
     changed_catalog = AgentCatalog({"agent": changed_compiler.compile(spec)})
     original = await _AgentBindingResolver(
-        original_catalog, original_compiler, workspace_backend=workspace_backend,
+        original_catalog, original_compiler,
     ).resolve_root("agent")
     resolved = await _AgentBindingResolver(
-        changed_catalog, changed_compiler, workspace_backend=workspace_backend,
+        changed_catalog, changed_compiler,
     ).resolve_contract(original)
     assert resolved == original
-    assert resolved.selected[0].contract["args"] == ["original"]
+    assert resolved.selected == ()
     assert changed_compiler.restore(resolved).compiled_agent.mcp_servers[0].args == ("changed",)

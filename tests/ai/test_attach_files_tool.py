@@ -29,9 +29,9 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.workspace import Workspace
 
 
-def _workspace_tool_contributions(workspace: Workspace):
+async def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        workspace_features("workspace", workspace=workspace)._contributions
+        (await workspace_features("workspace", workspace=workspace).resolve()).contributions
     )
 
 
@@ -120,8 +120,9 @@ async def _boundary(
     return boundary, tools["read_file"]
 
 
-def test_whole_file_read_declares_multi_path_workspace_metadata(tmp_path: Path) -> None:
-    contributions = _workspace_tool_contributions(
+@pytest.mark.asyncio
+async def test_whole_file_read_declares_multi_path_workspace_metadata(tmp_path: Path) -> None:
+    contributions = await _workspace_tool_contributions(
         Workspace.load(tmp_path)
     )
     tool = next(item.value for item in contributions if item.id == "read_file")

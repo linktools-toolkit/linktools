@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Existing checkpoint recovery can retry default idempotent tool calls."""
+"""Checkpoint recovery preserves admitted calls and resolves unstarted calls live."""
 
 import os
 import subprocess
@@ -11,10 +11,12 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("legacy_stage", ("fresh", "unstarted", "completed", "budget"))
-def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_path: Path, legacy_stage: str) -> None:
+@pytest.mark.parametrize("crash_stage", ("fresh", "unstarted", "completed", "budget"))
+def test_checkpoint_recovery_preserves_admitted_calls_and_resolves_unstarted_calls_live(
+    tmp_path: Path, crash_stage: str,
+) -> None:
     script = textwrap.dedent('''
-        import asyncio, json, os, sys
+        import asyncio, os, sys
         from pathlib import Path
         from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
         from linktools.ai.capability import ExecutionCapability, AgentContext
@@ -23,11 +25,13 @@ def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_pat
         from linktools.ai.core import CommitPolicy, ExecutionStatus, ToolOperationStatus, RunBudget
         from linktools.ai.persistence import Persistence, PersistenceStorage
         from linktools.ai.runtime import Runtime, RuntimeFeatures
+        from linktools.ai.spec import CapabilityRef
         from tests.ai._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
         root, mode = Path(sys.argv[1]), sys.argv[2]
-        legacy_stage = sys.argv[3]
-        legacy_strict = legacy_stage in {"unstarted", "completed"}
+        crash_stage = sys.argv[3]
+        original_strict = crash_stage in {"unstarted", "completed"}
+        current_revision = 2 if original_strict and mode == "resume" else 1
         entered = asyncio.Event()
         async def model(messages, info):
             returned = any(isinstance(part, ToolReturnPart) and part.tool_call_id == "original-call"
@@ -35,22 +39,22 @@ def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_pat
             with (root / "model-calls").open("a") as stream:
                 stream.write(mode + (":result" if returned else ":request") + "\\n")
             if returned:
-                if mode == "create" and legacy_stage == "completed":
+                if mode == "create" and crash_stage == "completed":
                     entered.set()
                     await asyncio.Event().wait()
                 assert any(isinstance(part, ToolReturnPart) and part.content == "stored 7"
                     for message in messages for part in message.parts)
                 return ModelResponse([TextPart("done")])
-            if legacy_stage == "unstarted" and mode == "create":
+            if crash_stage == "unstarted" and mode == "create":
                 entered.set()
                 await asyncio.Event().wait()
-            assert mode == "create" or legacy_strict, "recovery must not regenerate the tool call"
+            assert mode == "create" or crash_stage == "unstarted", "recovery must not regenerate the tool call"
             return ModelResponse([ToolCallPart("write", {"value": 7}, "original-call")])
         async def write(ctx: AgentContext[None], value: int) -> str:
             with (root / "tool-calls").open("a") as stream:
                 stream.write(str(value) + "\\n")
             (root / "business-effect").write_text(str(value))
-            if mode == "create" and not legacy_strict:
+            if mode == "create" and not original_strict:
                 entered.set()
                 await asyncio.Event().wait()
             return "stored " + str(value)
@@ -58,8 +62,8 @@ def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_pat
             group = RuntimeFeatures("checkpoint-replacement")
             group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
             group.capability(native_checkpoint())
-            group.tool(write, **({"effect_policy": "non_replay_safe"}
-                if legacy_strict and mode == "create" else {}))
+            group.tool(write, revision=current_revision, **({"effect_policy": "non_replay_safe"}
+                if original_strict and mode == "create" else {}))
             group.agent("default", allow_tools=("write",))
             storage = PersistenceStorage.sqlite(root / "source.db")
             async with Persistence.open("checkpoint-replacement", storage=storage) as state, Runtime.attach(
@@ -69,18 +73,21 @@ def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_pat
                 if mode == "create":
                     session = await runtime.agents.get().create_session("session")
                     handle = await session.start("original", idempotency_key="one",
-                        budget=RunBudget(tool_calls=2) if legacy_stage == "budget" else None)
+                        budget=RunBudget(tool_calls=2) if crash_stage == "budget" else None)
                     await asyncio.wait_for(entered.wait(), 5)
                     record = await state.execution.executions.get(handle.execution_id, tenant_id=runtime.tenant_id)
                     assert record is not None and record.restart_checkpoints
                     operations = await state.checkpoint.tools.list_by_execution(handle.execution_id, tenant_id=runtime.tenant_id)
-                    if legacy_stage == "completed":
+                    if crash_stage == "completed":
                         assert len(operations) == 1 and operations[0].replay_safe is False
                         assert operations[0].status is ToolOperationStatus.COMPLETED
-                    elif legacy_stage == "unstarted":
+                    elif crash_stage == "unstarted":
                         assert not operations
                     else:
                         assert len(operations) == 1 and operations[0].replay_safe is True
+                    if operations:
+                        assert operations[0].capability_ref == CapabilityRef("tool", "write", 1)
+                        (root / "original-operation").write_text(operations[0].tool_operation_id)
                     (root / "execution").write_text(handle.execution_id)
                     print("CRASH_ORIGINAL_EXECUTION", handle.execution_id, flush=True)
                     os._exit(73)
@@ -90,30 +97,35 @@ def test_idempotent_tool_retries_original_call_after_worker_process_exit(tmp_pat
                 handle = await runtime.executions.get(execution_id)
                 result = await handle.wait(timeout_seconds=10)
                 assert result.result.status is ExecutionStatus.SUCCEEDED, result
-                if legacy_stage == "budget":
+                if crash_stage == "budget":
                     assert (await handle.budget_usage()).tool_calls == 2
                 operations = await state.checkpoint.tools.list_by_execution(execution_id, tenant_id=runtime.tenant_id)
-                if legacy_strict:
-                    assert len(operations) == 1 and operations[0].replay_safe is False
-                else:
-                    assert len(operations) == 1 and operations[0].replay_safe is True
+                operation, = operations
+                assert operation.tool_call_id == "original-call"
+                assert operation.status is ToolOperationStatus.COMPLETED
+                assert operation.replay_safe is (crash_stage != "completed")
+                # A never-issued call resolves live; an existing receipt keeps its admitted identity.
+                expected_revision = 2 if crash_stage == "unstarted" else 1
+                assert operation.capability_ref == CapabilityRef("tool", "write", expected_revision)
+                if crash_stage != "unstarted":
+                    assert operation.tool_operation_id == (root / "original-operation").read_text()
                 assert (root / "model-calls").read_text().splitlines() == {
                     "fresh": ["create:request", "resume:result"],
                     "budget": ["create:request", "resume:result"],
                     "unstarted": ["create:request", "resume:request", "resume:result"],
                     "completed": ["create:request", "create:result", "resume:result"],
-                }[legacy_stage]
-                assert (root / "tool-calls").read_text().splitlines() == (["7"] if legacy_strict else ["7", "7"])
+                }[crash_stage]
+                assert (root / "tool-calls").read_text().splitlines() == (["7"] if original_strict else ["7", "7"])
                 assert (root / "business-effect").read_text() == "7"
                 print("SAME_EXECUTION_CHECKPOINT_RECEIPT_RECOVERY", execution_id, flush=True)
         asyncio.run(main())
     ''')
     env = dict(os.environ)
-    created = subprocess.run([sys.executable, "-c", script, str(tmp_path), "create", legacy_stage],
+    created = subprocess.run([sys.executable, "-c", script, str(tmp_path), "create", crash_stage],
         env=env, capture_output=True, text=True, timeout=20)
     print(created.stdout, created.stderr, flush=True)
     assert created.returncode == 73
-    resumed = subprocess.run([sys.executable, "-c", script, str(tmp_path), "resume", legacy_stage],
+    resumed = subprocess.run([sys.executable, "-c", script, str(tmp_path), "resume", crash_stage],
         env=env, capture_output=True, text=True, timeout=20)
     print(resumed.stdout, resumed.stderr, flush=True)
     assert resumed.returncode == 0

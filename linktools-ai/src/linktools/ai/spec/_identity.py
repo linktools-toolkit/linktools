@@ -21,12 +21,31 @@ class CapabilityRef:
     id: str
     revision: int
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.kind, str)
+            or self.kind not in _CONTRIBUTION_KINDS
+            or not isinstance(self.id, str)
+            or not self.id.strip()
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _positive_int(self.revision)
+
+    def to_payload(self) -> "dict[str, JsonValue]":
+        return {"kind": self.kind, "id": self.id, "revision": self.revision}
+
+    @classmethod
+    def from_payload(cls, value: object) -> "CapabilityRef":
+        if not isinstance(value, Mapping) or not {"kind", "id", "revision"}.issubset(value):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return cls(value["kind"], value["id"], value["revision"])
+
 
 def agent_ref_payload(
     contract: Mapping[str, JsonValue],
 ) -> "dict[str, JsonValue]":
     _require_format_v1(contract)
-    return _ref_payload("agent", _text(contract.get("id")), _revision(contract))
+    return CapabilityRef("agent", _text(contract.get("id")), _revision(contract)).to_payload()
 
 
 def capability_ref_payload(
@@ -34,14 +53,13 @@ def capability_ref_payload(
     identity: str,
     contract: Mapping[str, JsonValue],
 ) -> "dict[str, JsonValue]":
-    if kind not in _CONTRIBUTION_KINDS or not isinstance(identity, str) or not identity:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not isinstance(contract, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _require_format_v1(contract)
-    if kind in {"agent", "skill", "mcp"} and contract.get("id") != identity:
+    reference = CapabilityRef(kind, identity, _revision(contract))
+    if reference.kind in {"agent", "skill", "mcp"} and contract.get("id") != reference.id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _ref_payload(kind, identity, _revision(contract))
+    return reference.to_payload()
 
 
 def binding_digest_payload(
@@ -68,25 +86,9 @@ def binding_digest_payload(
     if not isinstance(selected, list) or not isinstance(subagents, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    selected_refs: list[JsonValue] = []
-    for item in selected:
-        value = _mapping(item)
-        kind = value.get("kind")
-        identity = value.get("id")
-        contract = value.get("contract")
-        if (
-            not isinstance(kind, str)
-            or not isinstance(identity, str)
-            or not isinstance(contract, Mapping)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        selected_refs.append(
-            capability_ref_payload(
-                kind,
-                identity,
-                contract,
-            )
-        )
+    selected_refs: list[JsonValue] = [
+        CapabilityRef.from_payload(item).to_payload() for item in selected
+    ]
 
     subagent_refs: list[JsonValue] = []
     for item in subagents:
@@ -94,11 +96,11 @@ def binding_digest_payload(
         if value.get("kind") != "agent":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         subagent_refs.append(
-            _ref_payload(
+            CapabilityRef(
                 "agent",
                 _text(value.get("id")),
                 _positive_int(value.get("revision", 1)),
-            )
+            ).to_payload()
         )
 
     output_mode = payload["output_mode"]
@@ -138,14 +140,6 @@ def binding_digest_payload(
         child_refs.sort(key=lambda value: value["agent"]["id"])
         result["subagent_bindings"] = child_refs
     return result
-
-
-def _ref_payload(kind: str, identity: str, revision: int) -> "dict[str, JsonValue]":
-    return {
-        "kind": kind,
-        "id": identity,
-        "revision": revision,
-    }
 
 
 def _require_format_v1(value: Mapping[str, JsonValue]) -> None:

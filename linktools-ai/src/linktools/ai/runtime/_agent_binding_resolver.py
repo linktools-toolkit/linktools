@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Resolve execution-owned Agent binding dependencies to immutable Asset versions."""
+"""Resolve current Agent admissions and execution-owned hook and child contracts."""
 
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -10,26 +11,25 @@ from ..agent import (
     AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
-    CapabilityPin,
+    OutputBinding,
 )
-from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
-from ..spec import MCPServerSpecCodec
+from ..errors import AIError, ErrorCode
 
 
 if TYPE_CHECKING:
-    from pydantic_ai.workspaces import WorkspaceBackend
+    from pydantic import BaseModel
 
 
 class _AgentBindingResolver:
-    """Resolve execution-owned MCP resources and direct child bindings."""
+    """Use one current declaration observation for an admission or restore."""
 
     def __init__(
         self,
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         *,
-        workspace_backend: "WorkspaceBackend | None" = None,
+        current_compiler: Callable[[], Awaitable[AgentCompiler]] | None = None,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -37,109 +37,97 @@ class _AgentBindingResolver:
             raise TypeError("compiler must be AgentCompiler")
         self._catalog = catalog
         self._compiler = compiler
-        self._workspace_backend = workspace_backend
+        if current_compiler is not None and not callable(current_compiler):
+            raise TypeError("current_compiler must be callable or None")
+        self._current_compiler = current_compiler
 
     @property
     def root_ids(self) -> tuple[str, ...]:
         return self._catalog.root_ids
 
+    async def _compiler_for_resolution(self) -> AgentCompiler:
+        compiler = (
+            self._compiler
+            if self._current_compiler is None
+            else await self._current_compiler()
+        )
+        if not isinstance(compiler, AgentCompiler):
+            raise TypeError("current_compiler must return AgentCompiler")
+        return compiler
+
+    async def resolve_agent(
+        self,
+        agent_id: str,
+        derivations: Sequence[Mapping[str, object]] = (),
+        output: "type[BaseModel] | OutputBinding | None" = None,
+    ) -> AgentBinding:
+        """Resolve one new admission from a single current source observation."""
+        compiler = await self._compiler_for_resolution()
+        compiled = compiler.compile_registered(agent_id, derivations)
+        binding = compiler.bind(compiled, output=output)
+        return await self._resolve_binding(binding, compiler)
+
     async def resolve(self, binding: AgentBinding) -> AgentBinding:
-        """Resolve one current binding before its first durable admission."""
+        """Resolve dependencies without reinterpreting an existing declaration."""
         if not isinstance(binding, AgentBinding):
             raise TypeError("binding must be AgentBinding")
-        binding_contract = await self.resolve_contract(
-            binding.binding_contract, model=binding.compiled_agent.model,
+        compiler = await self._compiler_for_resolution()
+        return await self._resolve_binding(binding, compiler)
+
+    async def _resolve_binding(
+        self, binding: AgentBinding, compiler: AgentCompiler,
+    ) -> AgentBinding:
+        contract = await self._resolve_contract(
+            binding.binding_contract, compiler,
         )
-        if binding_contract == binding.binding_contract:
-            return binding
-        return self._compiler.restore(binding_contract, model=binding.compiled_agent.model)
+        # Resolution adds dependency facts; it does not replace admitted metadata
+        # or Python output validation with a decoded copy of its durable schema.
+        return binding if contract == binding.binding_contract else replace(
+            binding, binding_contract=contract,
+        )
+
+    async def restore(
+        self, contract: AgentBindingContract, *, model: ModelBinding | None = None,
+    ) -> AgentBinding:
+        """Keep admitted Agent facts and hooks while resolving the current directory."""
+        compiler = await self._compiler_for_resolution()
+        binding = compiler.restore(contract, model=model)
+        return await self._resolve_binding(binding, compiler)
 
     async def resolve_root(self, agent_id: str) -> AgentBindingContract:
-        """Resolve one Agent as a root execution target and its direct children."""
-        compiled_agent = self._catalog.root_agent(agent_id)
-        binding = self._compiler.bind(compiled_agent, output=None)
-        return await self.resolve_contract(binding.binding_contract, model=binding.compiled_agent.model)
+        """Resolve one current Agent as a root execution target and its children."""
+        return (await self.resolve_agent(agent_id)).binding_contract
 
     async def resolve_contract(
         self,
         binding_contract: AgentBindingContract,
-        *,
-        model: ModelBinding | None = None,
     ) -> AgentBindingContract:
-        """Resolve MCP Asset versions and direct child bindings for one contract."""
-        if not isinstance(binding_contract, AgentBindingContract):
-            raise TypeError("binding_contract must be AgentBindingContract")
-        resolved = await self._resolve_mcp(binding_contract, model=model)
-        if resolved.subagent_bindings:
-            children = tuple(
-                [await self._resolve_mcp(child) for child in resolved.subagent_bindings]
-            )
-        else:
-            children = tuple(
-                [await self._resolve_child(child_id) for child_id in resolved.subagent_ids]
-            )
-        return replace(resolved, subagent_bindings=children)
+        """Resolve declared dependencies while retaining admitted contract facts."""
+        compiler = await self._compiler_for_resolution()
+        return await self._resolve_contract(binding_contract, compiler)
 
-    async def _resolve_child(self, agent_id: str) -> AgentBindingContract:
-        compiled_agent = self._catalog.root_agent(agent_id)
-        binding = self._compiler.bind_subagent(compiled_agent)
-        return await self._resolve_mcp(binding.binding_contract, model=binding.compiled_agent.model)
-
-    async def _resolve_mcp(
+    async def _resolve_contract(
         self,
         binding_contract: AgentBindingContract,
-        *,
-        model: ModelBinding | None = None,
+        compiler: AgentCompiler,
     ) -> AgentBindingContract:
-        if not any(pin.kind == "mcp" for pin in binding_contract.selected):
+        if not isinstance(binding_contract, AgentBindingContract):
+            raise TypeError("binding_contract must be AgentBindingContract")
+        if binding_contract.subagent_bindings:
             return binding_contract
-        current_binding = self._compiler.restore(binding_contract, model=model)
-        current_servers = {
-            server.id: server
-            for server in current_binding.compiled_agent.mcp_servers
-        }
-        selected: list[CapabilityPin] = []
-        codec = MCPServerSpecCodec()
-        for pin in binding_contract.selected:
-            if pin.kind != "mcp":
-                selected.append(pin)
-                continue
-            server = current_servers.get(pin.id)
-            if server is None:
-                raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
-            resource_versions = codec.decode_binding_payload(
-                pin.contract,
-                declaration=server,
-            )
-            from ._mcp import _mcp_execution_policy
+        children = tuple(
+            [await self._resolve_child(ref.id, ref.revision, compiler) for ref in binding_contract.subagents]
+        )
+        return replace(binding_contract, subagent_bindings=children)
 
-            current_policy = dict(_mcp_execution_policy(server, self._workspace_backend))
-            bound_policy = pin.contract.get("execution_policy")
-            if bound_policy is not None:
-                execution_policy = dict(bound_policy)
-                if {key: value for key, value in execution_policy.items()
-                    if key != "tool_effect_policy"} != current_policy:
-                    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            else:
-                execution_policy = {**current_policy, "tool_effect_policy": "replay_safe"}
-            asset_source_id = pin.contract.get("asset_source_id")
-            if server.resource is None:
-                if resource_versions is not None or asset_source_id is not None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            elif (
-                resource_versions is None
-                or not isinstance(asset_source_id, str)
-                or not asset_source_id
-            ):
-                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-            selected.append(
-                CapabilityPin(
-                    "mcp",
-                    pin.id,
-                    {**pin.contract, "execution_policy": execution_policy},
-                )
-            )
-        return replace(binding_contract, selected=tuple(selected))
+    async def _resolve_child(
+        self, agent_id: str, revision: int, compiler: AgentCompiler,
+    ) -> AgentBindingContract:
+        compiled = compiler.compile_registered(agent_id)
+        if compiled.spec.revision != revision:
+            raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE, safe_details={"agent_id": agent_id})
+        binding = compiler.bind_subagent(compiled)
+        return binding.binding_contract
 
 
 __all__ = ["_AgentBindingResolver"]

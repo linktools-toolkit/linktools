@@ -50,6 +50,9 @@ class _Bridge:
         self.calls.append("begin")
         return self.decision
 
+    async def existing_call_ids(self, tool_call_ids) -> frozenset[str]:
+        return frozenset()
+
     async def require_active(self) -> None:
         return None
 

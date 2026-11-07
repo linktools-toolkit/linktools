@@ -93,11 +93,13 @@ from ._value import (
     TaskStatus,
     ThinkingEffort,
     ThinkingValue,
+    ToolEffects,
     ToolOperationStatus,
     WorkspaceFileInput,
     canonical_string_tuple,
     normalize_execution_mode,
     normalize_thinking,
+    normalize_tool_effects,
 )
 
 from ._handoff import HandoffGate, HandoffState
@@ -165,6 +167,7 @@ __all__ = [
     "TenantAuthorizationPolicy",
     "ThinkingEffort",
     "ThinkingValue",
+    "ToolEffects",
     "ToolOperationStatus",
     "WorkspaceFileInput",
     "UsageMetrics",
@@ -177,6 +180,7 @@ __all__ = [
     "normalize_json_value",
     "normalize_correlation",
     "normalize_thinking",
+    "normalize_tool_effects",
     "operation_cas_immutable_matches",
     "operation_replay_matches",
     "overlay_correlation",

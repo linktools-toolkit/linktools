@@ -28,7 +28,7 @@ async def test_nested_defaults_are_detached_from_inputs_and_reads():
     original["agent"]["tool_retries"] = 99
     original["custom.search"]["options"].append(3)
     features.defaults["agent"]["tool_retries"] = 88
-    capture = await features.capture()
+    capture = await features.resolve()
     capture.defaults["custom.search"]["options"].append(4)
     assert dict(capture.defaults) == {
         "agent": {"tool_retries": 5}, "custom.search": {"options": [1, 2]},
@@ -76,7 +76,7 @@ async def test_custom_consumer_resolves_same_named_setting_into_existing_contrac
     })
     settings = SearchSettings(**features.defaults["custom.search"])
     features.capability(SearchCapability(settings), scope="agent", config={"tool_retries": settings.tool_retries})
-    capture = await features.capture()
+    capture = await features.resolve()
     compiler = _compiler(capture.defaults, capture.contributions)
     saved = compiler.bind(compiler.compile(AgentSpec("agent"))).binding_contract
     assert saved.agent_spec.tool_retries == 5

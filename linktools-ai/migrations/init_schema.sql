@@ -201,7 +201,7 @@ CREATE TABLE ai_step_events (
 	error LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary error text.',
 	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
-	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical lookup digest of the boundary replay key.',
+	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id)
@@ -209,15 +209,14 @@ CREATE TABLE ai_step_events (
 
 CREATE INDEX ix_created_at ON ai_step_events (created_at);
 
-CREATE INDEX ix_store_digest_run_digest_id ON ai_step_events (store_digest, run_digest, id);
+CREATE INDEX ix_store_digest_run_digest ON ai_step_events (store_digest, run_digest);
 
 CREATE INDEX ix_updated_at ON ai_step_events (updated_at);
 
-CREATE UNIQUE INDEX uk_store_digest_run_digest_key_digest ON ai_step_events (store_digest, run_digest, key_digest);
+CREATE UNIQUE INDEX uk_key_digest ON ai_step_events (key_digest);
 
 CREATE TABLE ai_step_message_refs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
 	snapshot_id BIGINT NOT NULL COMMENT 'Physical snapshot row identifier.',
 	position BIGINT NOT NULL COMMENT 'Zero-based position in the upstream message history.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
@@ -230,7 +229,7 @@ CREATE INDEX ix_created_at ON ai_step_message_refs (created_at);
 
 CREATE INDEX ix_updated_at ON ai_step_message_refs (updated_at);
 
-CREATE UNIQUE INDEX uk_store_digest_snapshot_id_position ON ai_step_message_refs (store_digest, snapshot_id, position);
+CREATE UNIQUE INDEX uk_snapshot_id_position ON ai_step_message_refs (snapshot_id, position);
 
 CREATE TABLE ai_step_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -289,7 +288,7 @@ CREATE TABLE ai_step_snapshots (
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
 	messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream stored_messages count for the ordered references.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
-	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical lookup digest of the snapshot replay key.',
+	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	pruned BOOL NOT NULL COMMENT 'Retired snapshot identity without retained message references.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
@@ -298,8 +297,8 @@ CREATE TABLE ai_step_snapshots (
 
 CREATE INDEX ix_created_at ON ai_step_snapshots (created_at);
 
-CREATE INDEX ix_store_digest_run_digest_id ON ai_step_snapshots (store_digest, run_digest, id);
+CREATE INDEX ix_store_digest_run_digest ON ai_step_snapshots (store_digest, run_digest);
 
 CREATE INDEX ix_updated_at ON ai_step_snapshots (updated_at);
 
-CREATE UNIQUE INDEX uk_store_digest_run_digest_key_digest ON ai_step_snapshots (store_digest, run_digest, key_digest);
+CREATE UNIQUE INDEX uk_key_digest ON ai_step_snapshots (key_digest);

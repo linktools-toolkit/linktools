@@ -181,7 +181,7 @@ async def test_asset_digest_binds_metadata_receipts_versions_and_snapshot(asset_
         key=key, layer_id=ref.layer_id, revision=info.revision,
         digest=digest, size=len(value),
     ).matches_info(info)
-    context = await CapabilityLoadContext.capture("application", asset_store)
+    context = await CapabilityLoadContext.read_current("application", asset_store)
     assert context.list() == (CapabilityLoadEntry(key=key, digest=digest, size=len(value)),)
     assert await context.read(key) == value
 

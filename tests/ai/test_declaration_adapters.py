@@ -277,7 +277,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     group.capability(group_assets, scope="runtime")
     group_assets.loader("worker", loader)
 
-    snapshot = await group.capture()
+    snapshot = await group.resolve()
 
     assert [(item.kind, item.id) for item in snapshot.contributions] == [("agent", "team"), ("capability", "runtime.assets")]
     spec = snapshot.contributions[0].value
@@ -321,7 +321,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
     group.capability(group_assets, scope="runtime")
     group_assets.loader("worker", WorkerLoader())
 
-    snapshot = await group.capture()
+    snapshot = await group.resolve()
 
     assert [item.id for item in snapshot.contributions] == ["security/audit", "runtime.assets"]
     assert isinstance(snapshot.contributions[0].value, AgentSpec)
@@ -360,7 +360,7 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
     group.capability(group_assets, scope="runtime")
     group_assets.loader("worker", WorkerLoader())
     try:
-        capture = await group.capture()
+        capture = await group.resolve()
         assert [(item.kind, item.id) for item in capture.contributions] == [("skill", "audit"), ("capability", "runtime.assets")]
         skill = capture.contributions[0].value
         assert isinstance(skill, SkillDefinition)
@@ -403,7 +403,7 @@ async def test_custom_mcp_loader_binds_resource_versions() -> None:
     group.capability(group_assets, scope="runtime")
     group_assets.loader("worker", WorkerLoader())
     try:
-        capture = await group.capture()
+        capture = await group.resolve()
         assert [(item.kind, item.id) for item in capture.contributions] == [("mcp", "server"), ("capability", "runtime.assets")]
         contribution = capture.contributions[0]
         assert contribution.kind == "mcp"
@@ -465,7 +465,7 @@ async def test_prebound_mcp_loader_preserves_resources_and_execution_policy() ->
     group.capability(group_assets, scope="runtime")
     group_assets.loader("worker", WorkerLoader())
     try:
-        capture = await group.capture()
+        capture = await group.resolve()
         bound = capture.contributions[0]
         assert bound.contract == contract
         assert (
@@ -526,7 +526,7 @@ async def test_prebound_mcp_loader_rejects_wrong_source_or_resource(
     group_assets.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
-            await group.capture()
+            await group.resolve()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
@@ -572,14 +572,14 @@ async def test_prebound_mcp_loader_rejects_stale_resource_versions() -> None:
     group_assets.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
-            await group.capture()
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+            await group.resolve()
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_prebound_mcp_loader_reports_deleted_resource_as_snapshot_conflict() -> None:
+async def test_prebound_mcp_loader_rejects_deleted_resource_reference() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -618,8 +618,8 @@ async def test_prebound_mcp_loader_reports_deleted_resource_as_snapshot_conflict
     group_assets.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
-            await group.capture()
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+            await group.resolve()
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
 
@@ -651,7 +651,7 @@ async def test_prebound_mcp_without_resources_keeps_execution_policy() -> None:
     group.capability(group_assets, scope="runtime")
     group_assets.loader("worker", WorkerLoader())
     try:
-        capture = await group.capture()
+        capture = await group.resolve()
         assert capture.contributions[0].contract == contribution.contract
         assert capture.contributions[0].contract["execution_policy"] == policy
     finally:
@@ -659,7 +659,7 @@ async def test_prebound_mcp_without_resources_keeps_execution_policy() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capture_rejects_asset_change_during_loader() -> None:
+async def test_resolution_keeps_read_versions_when_unrelated_assets_change_during_load() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -683,15 +683,18 @@ async def test_capture_rejects_asset_change_during_loader() -> None:
     group.capability(group_assets, scope="runtime")
     group_assets.loader("worker", WorkerLoader())
     try:
-        with pytest.raises(AIError) as error:
-            await group.capture()
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+        resolution = await group.resolve()
+        assert resolution.contributions[0].id == "team"
+        assert await resolution.asset_reader.get(declaration) == b"worker"
+        assert await resolution.asset_reader.get(late) is None
+        current = await group.resolve()
+        assert await current.asset_reader.get(late) == b"late"
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_capture_reports_directory_file_change_as_snapshot_conflict(
+async def test_read_current_rejects_changed_directory_bytes_for_selected_version(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "captured-assets"
@@ -702,17 +705,13 @@ async def test_capture_reports_directory_file_change_as_snapshot_conflict(
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        context = await CapabilityLoadContext.capture("application", store)
-        await context.verify_source_revision()
+        context = await CapabilityLoadContext.read_current("application", store)
         target.write_bytes(b"second")
-
-        with pytest.raises(AIError) as verification_error:
-            await context.verify_source_revision()
-        assert verification_error.value.code is ErrorCode.SNAPSHOT_CONFLICT
-
         with pytest.raises(AIError) as error:
             await context.read(AssetKey("worker", "team"))
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        current = await CapabilityLoadContext.read_current("application", store)
+        assert await current.read(AssetKey("worker", "team")) == b"second"
     finally:
         await store.close()
 
@@ -732,7 +731,7 @@ async def test_snapshot_local_paths_ignore_unrelated_directory_revision(
     try:
         asset_features = RuntimeFeatures("application")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        snapshot = await asset_features.capture()
+        snapshot = await asset_features.resolve()
         reader = snapshot.asset_reader
         assert reader is not None
         refs = await reader.resolve_versions((key,))
@@ -742,9 +741,9 @@ async def test_snapshot_local_paths_ignore_unrelated_directory_revision(
 
         assert await reader.local_paths((key,)) == (target.resolve(),)
         assert await reader.read_versions(refs) == (b"value",)
-        with pytest.raises(AIError) as error:
-            await snapshot.verify_source_revision()
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+        current = await asset_features.resolve()
+        assert await current.asset_reader.get(AssetKey("audit", "late.bin")) == b"late"
+        assert await reader.get(AssetKey("audit", "late.bin")) is None
     finally:
         await store.close()
 
@@ -833,7 +832,7 @@ async def test_declaration_loaders_are_backend_agnostic(
         for store, _engine in stores:
             asset_features = RuntimeFeatures("assets")
             asset_features.capability(AssetCapability(store), scope="runtime")
-            snapshot = await asset_features.capture()
+            snapshot = await asset_features.resolve()
             results.append(
                 tuple(
                     (item.kind, item.id, item.value)
@@ -868,7 +867,7 @@ async def test_mcp_package_resource_reserves_declaration_filename() -> None:
         with pytest.raises(AIError) as error:
             asset_features = RuntimeFeatures("application")
             asset_features.capability(AssetCapability(store), scope="runtime")
-            await asset_features.capture()
+            await asset_features.resolve()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
@@ -887,6 +886,6 @@ async def test_builtin_loader_rejects_multiple_mcp_package_declarations() -> Non
     with pytest.raises(AIError) as error:
         asset_features = RuntimeFeatures("application")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        await asset_features.capture()
+        await asset_features.resolve()
     assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
     await store.close()

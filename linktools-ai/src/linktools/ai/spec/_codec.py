@@ -313,6 +313,10 @@ class MCPServerSpecCodec:
             payload["resource"] = {"kind": value.resource.kind, "id": value.resource.id}
         return payload
 
+    def normalize_execution_policy(self, value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """Validate the execution policy without retaining connection configuration."""
+        return _execution_policy_payload(value)
+
     def to_binding_payload(
         self,
         value: MCPServerSpec,

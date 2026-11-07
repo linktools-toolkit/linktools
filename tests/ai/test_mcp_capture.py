@@ -67,7 +67,7 @@ async def test_resource_free_registration_needs_no_asset_store(
     )
 
     assert group.mcp(server) is server
-    capture = await group.capture()
+    capture = await group.resolve()
 
     assert capture.asset_reader is None
     assert capture.source_revision is None
@@ -90,7 +90,7 @@ async def test_resource_registration_requires_an_explicit_asset_store() -> None:
     )
 
     with pytest.raises(AIError) as error:
-        await group.capture()
+        await group.resolve()
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
 
@@ -115,7 +115,7 @@ async def test_mcp_entries_share_the_captured_resource_binding(entry: str) -> No
         await store.put(declaration, codec.encode(server))
         asset_features = RuntimeFeatures("application")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        loaded = await asset_features.capture()
+        loaded = await asset_features.resolve()
         group = RuntimeFeatures("application")
         group_assets = AssetCapability(store)
         group.capability(group_assets, scope="runtime")
@@ -132,7 +132,7 @@ async def test_mcp_entries_share_the_captured_resource_binding(entry: str) -> No
                 ),
             )
 
-        capture = await group.capture()
+        capture = await group.resolve()
         contribution = capture.contributions[0]
         loaded_contribution = loaded.contributions[0]
         assert contribution.contract == loaded_contribution.contract
@@ -148,7 +148,7 @@ async def test_mcp_entries_share_the_captured_resource_binding(entry: str) -> No
         await store.put(resource, b"updated resource")
         assert capture.asset_reader is not None
         assert await capture.asset_reader.read_versions(versions) == (b"original resource",)
-        refreshed = await group.capture()
+        refreshed = await group.resolve()
         assert refreshed.contributions[0].contract != contribution.contract
     finally:
         await store.close()
@@ -168,7 +168,7 @@ async def test_registered_resource_arguments_are_validated_during_capture() -> N
         )
 
         with pytest.raises(AIError) as error:
-            await group.capture()
+            await group.resolve()
 
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
@@ -177,7 +177,7 @@ async def test_registered_resource_arguments_are_validated_during_capture() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("duplicate_source", ("registration", "loader"))
-async def test_duplicate_mcp_registration_preserves_conflict_semantics(
+async def test_mcp_registration_replaces_same_source_but_loader_collision_still_fails(
     duplicate_source: str,
 ) -> None:
     store = await _memory_store()
@@ -190,14 +190,16 @@ async def test_duplicate_mcp_registration_preserves_conflict_semantics(
         group.capability(group_assets, scope="runtime")
         group.mcp(server)
         if duplicate_source == "registration":
-            group.mcp(server)
+            replacement = MCPServerSpec("server", transport="streamable-http", url="https://example.test/current")
+            group.mcp(replacement)
+            current = await group.resolve()
+            servers = [item.value for item in current.contributions if item.kind == "mcp"]
+            assert servers == [replacement]
         else:
             group_assets.loader("mcp", _MCPLoader(server))
-
-        with pytest.raises(AIError) as error:
-            await group.capture()
-
-        assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
+            with pytest.raises(AIError) as error:
+                await group.resolve()
+            assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
     finally:
         await store.close()
 
@@ -257,7 +259,7 @@ async def test_remote_packages_do_not_bind_or_read_sibling_resources(
 
         asset_features = RuntimeFeatures("application")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
 
         assert [(item.kind, item.id) for item in capture.contributions] == [("mcp", "server"), ("capability", "runtime.assets")]
         contribution = capture.contributions[0]
@@ -292,7 +294,7 @@ async def test_shared_config_registration_freezes_expanded_connections(
     for server in MCPServerSpecAdapter().decode_config(config):
         group.mcp(server)
 
-    capture = await group.capture()
+    capture = await group.resolve()
     monkeypatch.setenv("LINKTOOLS_MCP_CAPTURE_TOKEN", "rotated-token")
     captured = capture.contributions[0].value
     assert isinstance(captured, MCPServerSpec)
@@ -303,7 +305,7 @@ async def test_shared_config_registration_freezes_expanded_connections(
     refreshed = RuntimeFeatures("application")
     for server in MCPServerSpecAdapter().decode_config(config):
         refreshed.mcp(server)
-    refreshed_capture = await refreshed.capture()
+    refreshed_capture = await refreshed.resolve()
     rotated = refreshed_capture.contributions[0].value
     assert isinstance(rotated, MCPServerSpec)
     assert dict(rotated.headers) == {"Authorization": "Bearer rotated-token"}

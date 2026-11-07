@@ -43,7 +43,7 @@ async def test_skill_aliases_capture_exact_keys_and_frozen_resources(
     await asset_store.put(resource, b"original guide")
     asset_features = RuntimeFeatures("skills")
     asset_features.capability(AssetCapability(asset_store), scope="runtime")
-    capture = await asset_features.capture()
+    capture = await asset_features.resolve()
     definition = capture.contributions[0].value
     assert isinstance(definition, SkillDefinition)
     assert definition.id == _ROOT
@@ -59,7 +59,7 @@ async def test_skill_aliases_capture_exact_keys_and_frozen_resources(
     await asset_store.put(resource, b"changed guide")
     skill = SkillCapability(
         (SkillDefinition.from_contract(definition.contract),),
-        SkillSourceRegistry((AssetSkillSource("skills", reader),)),
+        SkillSourceRegistry((AssetSkillSource(definition.source_ref.source_id, reader),)),
     )
     loaded = await skill.load_skill(_ROOT)
     assert loaded["resources"] == ["Guide.md"]
@@ -78,7 +78,7 @@ async def test_skill_aliases_capture_exact_keys_and_frozen_resources(
     try:
         asset_features_2 = RuntimeFeatures("skills")
         asset_features_2.capability(AssetCapability(restored), scope="runtime")
-        restored_capture = await asset_features_2.capture()
+        restored_capture = await asset_features_2.resolve()
         restored_definition = restored_capture.contributions[0].value
         assert isinstance(restored_definition, SkillDefinition)
         assert restored_definition.spec == definition.spec
@@ -124,14 +124,14 @@ async def test_directory_skill_aliases_use_logical_declaration_paths(
     try:
         asset_features = RuntimeFeatures("skills")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
         reader = capture.asset_reader
         assert reader is not None
         assert await reader.get(AssetKey("skill", f"{_ROOT}/{filename}")) == _DECLARATION
-        source = AssetSkillSource("skills", reader)
+        source = AssetSkillSource(definition.source_ref.source_id, reader)
         view = await source.inspect(definition.source_ref)
         assert view.resources == ("Guide.md",)
         assert view.location.kind == ("virtual" if mapped else "local")
@@ -152,7 +152,7 @@ async def test_skill_aliases_preserve_ambiguous_package_rejection(second: str) -
         with pytest.raises(AIError) as error:
             asset_features = RuntimeFeatures("skills")
             asset_features.capability(AssetCapability(store), scope="runtime")
-            await asset_features.capture()
+            await asset_features.resolve()
         assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
     finally:
         await store.close()
@@ -176,7 +176,7 @@ async def test_filename_aliases_do_not_case_fold_other_declarations_or_flat_path
             await store.put(AssetKey(kind, identifier), b"not a declaration")
         asset_features = RuntimeFeatures("skills")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         assert [(item.kind, item.id) for item in capture.contributions] == [("capability", "runtime.assets")]
         assert capture.instructions.documents == ()
     finally:

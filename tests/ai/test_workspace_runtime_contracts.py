@@ -202,7 +202,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
 
     asset_features = RuntimeFeatures("workspace")
     asset_features.capability(AssetCapability(store), scope="runtime")
-    snapshot = await asset_features.capture()
+    snapshot = await asset_features.resolve()
 
     assert [(item.kind, item.id) for item in snapshot.contributions] == [
         ("agent", "default"),

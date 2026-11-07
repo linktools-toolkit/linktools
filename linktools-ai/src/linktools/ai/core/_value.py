@@ -18,6 +18,7 @@ from ._validation import (
 
 
 ExecutionMode: TypeAlias = Literal["run", "plan"]
+ToolEffects: TypeAlias = Literal["deny", "read_only", "live"]
 ThinkingEffort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
 ThinkingValue: TypeAlias = bool | ThinkingEffort | None
 _THINKING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
@@ -50,6 +51,12 @@ def normalize_execution_mode(value: JsonValue) -> ExecutionMode:
     if value in {"run", "plan"}:
         return value  # type: ignore[return-value]
     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "execution mode is invalid")
+
+
+def normalize_tool_effects(value: object) -> ToolEffects:
+    if isinstance(value, str) and value in {"deny", "read_only", "live"}:
+        return value  # type: ignore[return-value]
+    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "tool effects restriction is invalid")
 
 
 def normalize_thinking(value: JsonValue) -> ThinkingValue:
@@ -299,5 +306,5 @@ __all__ = [
     "IdempotencyStatus", "OperationKind", "OperationStatus", "Page", "Principal",
     "PrincipalKind", "ResourceKind", "SessionStatus", "StopReason", "TaskStatus",
     "ThinkingEffort", "ThinkingValue", "ToolOperationStatus",
-    "normalize_execution_mode", "normalize_thinking",
+    "normalize_execution_mode", "normalize_thinking", "normalize_tool_effects", "ToolEffects",
 ]

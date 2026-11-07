@@ -67,7 +67,7 @@ async def test_module_sqlite_routes_reopen_history_without_models_or_hooks(
         TraceCapability(),
     )
     declarations.model("default", _FeatureModels())
-    features = await declarations.capture()
+    features = declarations.borrow()
     def root_storage() -> PersistenceStorage:
         return PersistenceStorage(replace(PersistenceStorage.from_root(root, exclusive_writer=True).plan, conversation=routes[PersistenceDomain.CONVERSATION], trace=routes[PersistenceDomain.TRACE], checkpoint=routes[PersistenceDomain.CHECKPOINT]))
 

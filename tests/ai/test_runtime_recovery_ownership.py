@@ -442,13 +442,13 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     claims = 0
     original_claim = LocalExecutionBackend.claim_deferred_resume
 
-    async def synchronized_claim(backend, current):
+    async def synchronized_claim(backend, current, **kwargs):
         nonlocal claims
         claims += 1
         if claims == 2:
             both_claiming.set()
         await asyncio.wait_for(both_claiming.wait(), 10)
-        return await original_claim(backend, current)
+        return await original_claim(backend, current, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "claim_deferred_resume", synchronized_claim)
     states = [PersistenceStorage.sqlite(tmp_path / "runtime.db") for _ in range(2)]

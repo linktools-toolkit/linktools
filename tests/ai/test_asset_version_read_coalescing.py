@@ -189,8 +189,8 @@ async def test_close_drains_every_reference_of_an_admitted_read() -> None:
 @pytest.mark.asyncio
 async def test_capture_memo_coalesces_late_first_reads_without_cross_capture_reuse() -> None:
     backend, store, (ref, _) = await make_store()
-    first_capture = await CapabilityLoadContext.capture("first", store)
-    second_capture = await CapabilityLoadContext.capture("second", store)
+    first_capture = await CapabilityLoadContext.read_current("first", store)
+    second_capture = await CapabilityLoadContext.read_current("second", store)
     first = asyncio.create_task(first_capture.read(ref.key))
     await backend.started.get()
     late_same = asyncio.create_task(first_capture.read_many((ref.key, ref.key)))
@@ -212,7 +212,7 @@ async def test_capture_memo_coalesces_late_first_reads_without_cross_capture_reu
 @pytest.mark.asyncio
 async def test_disjoint_capture_keys_can_load_concurrently() -> None:
     backend, store, (one, two) = await make_store()
-    capture = await CapabilityLoadContext.capture("capture", store)
+    capture = await CapabilityLoadContext.read_current("capture", store)
     first = asyncio.create_task(capture.read(one.key))
     await backend.started.get()
     second = asyncio.create_task(capture.read(two.key))
@@ -227,7 +227,7 @@ async def test_disjoint_capture_keys_can_load_concurrently() -> None:
 @pytest.mark.asyncio
 async def test_failed_capture_fill_is_retried_and_not_memoized() -> None:
     backend, store, (ref, _) = await make_store()
-    capture = await CapabilityLoadContext.capture("capture", store)
+    capture = await CapabilityLoadContext.read_current("capture", store)
     failure = RuntimeError("history unavailable")
     backend.failure = failure
     backend.release.set()
@@ -285,7 +285,7 @@ async def test_last_reader_preserves_source_cleanup_failure_over_cancellation() 
 @pytest.mark.asyncio
 async def test_cancelling_queued_capture_reader_does_not_cancel_memo_fill() -> None:
     backend, store, (ref, _) = await make_store()
-    capture = await CapabilityLoadContext.capture("capture", store)
+    capture = await CapabilityLoadContext.read_current("capture", store)
     first = asyncio.create_task(capture.read(ref.key))
     await backend.started.get()
     queued = asyncio.create_task(capture.read(ref.key))

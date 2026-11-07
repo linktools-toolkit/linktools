@@ -1351,10 +1351,11 @@ class TaskNodeExecutor(Generic[AppT]):
                 or execution.execution_id != execution_id
                 or execution.principal_id != admission.principal.principal_id
                 or execution.principal_kind != admission.principal.kind
+                or execution.tool_effects != admission.tool_effects
                 or not execution.requires_task_invocation_capture
                 or not isinstance(execution.binding, AgentBindingContract)
                 or execution.binding.binding_digest != expected_binding.binding_digest
-                or execution.binding != expected_binding
+                or not execution.binding.matches_declaration(expected_binding)
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.status not in {

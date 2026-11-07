@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from pydantic import BaseModel
 from linktools.core import environ
 from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledAgent, OutputBinding, bind_output
-from ..core import (OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, normalize_execution_mode,
+from ..capability import MemoryCapability
+from ._capabilities import runtime_feature_leaves
+from ..core import (OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
                     normalize_thinking, overlay_correlation, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
 from ..execution import Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest
@@ -28,7 +30,7 @@ _logger = environ.get_logger("ai.agent")
 @dataclass(frozen=True, slots=True)
 class AgentExecutionPort(Generic[AppT]):
     persistence: Persistence
-    compiled: CompiledAgent
+    compiled: CompiledAgent | None
     _binding_contract: AgentBindingContract | None
     compiler: AgentCompiler
     service: DefaultExecutionService
@@ -41,15 +43,47 @@ class AgentExecutionPort(Generic[AppT]):
     captures: InputCaptures | None
     memory_scope: str | None = None
     captured: bool = False
+    agent_id: str | None = None
+    derivations: tuple[Mapping[str, object], ...] = ()
+    resolve_current: Callable[
+        [str, Sequence[Mapping[str, object]], type[BaseModel] | OutputBinding | None],
+        Awaitable[AgentBinding],
+    ] | None = None
+    restore_binding: Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None = None
+    observed_binding: AgentBinding | None = None
 
     @property
     def binding_contract(self) -> AgentBindingContract:
         """Capture declaration semantics without resolving models for ordinary starts."""
         contract = self._binding_contract
+        if contract is None and self.observed_binding is not None:
+            contract = self.observed_binding.binding_contract
         if contract is None:
+            if self.compiled is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                              safe_details={"reason": "agent_definition_unresolved"})
             contract = self.compiler.bind(self.compiled).binding_contract
             object.__setattr__(self, "_binding_contract", contract)
         return contract
+
+    async def resolve_definition(self) -> AgentBinding:
+        """Read the current declaration for inspection, without changing this port."""
+        self.operations.ensure_open()
+        if self.captured:
+            return (
+                await self.restore_binding(self.binding_contract)
+                if self.restore_binding is not None
+                else self.compiler.restore(self.binding_contract,
+                                           model=None if self.compiled is None else self.compiled.model)
+            )
+        if self.resolve_current is None:
+            if self.compiled is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return self.compiler.bind(self.compiled)
+        agent_id = self.agent_id if self.compiled is None else self.compiled.spec.id
+        if agent_id is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self.resolve_current(agent_id, self.derivations, None)
 
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
         self.operations.ensure_open()
@@ -65,7 +99,11 @@ class AgentExecutionPort(Generic[AppT]):
 
     async def resolve_contract(self, contract: AgentBindingContract) -> AgentBindingContract:
         self.operations.ensure_open()
-        restored = self.compiler.restore(contract, model=self.compiled.model)
+        if self.restore_binding is not None:
+            return (await self.restore_binding(contract)).binding_contract
+        restored = self.compiler.restore(
+            contract, model=None if self.compiled is None else self.compiled.model,
+        )
         return (await self.resolve_binding(restored)).binding_contract
 
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
@@ -76,11 +114,12 @@ class AgentExecutionPort(Generic[AppT]):
     ) -> ExecutionRecord:
         """Resume the producer after its task owner validates and authorizes the binding."""
         self.operations.ensure_open()
+        spec = self.binding_contract.agent_spec
         if (
             not execution.requires_task_invocation_capture
             or not isinstance(execution.binding, AgentBindingContract)
-            or execution.binding.agent_spec.id != self.compiled.spec.id
-            or execution.binding.agent_spec.revision != self.compiled.spec.revision
+            or execution.binding.agent_spec.id != spec.id
+            or execution.binding.agent_spec.revision != spec.revision
             or recovery_operation.tenant_id != self.persistence.tenant_id
             or recovery_operation.execution_id != execution.execution_id
             or recovery_operation.resource_id != execution.execution_id
@@ -119,6 +158,7 @@ class AgentExecutionPort(Generic[AppT]):
         input_context: ExecutionInputContext | None = None,
         budget: RunBudget | None = None,
         budget_scope_id: str | None = None,
+        tool_effects: ToolEffects = "live",
     ) -> "Execution[AppT]":
         self.operations.ensure_open()
         key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
@@ -128,8 +168,39 @@ class AgentExecutionPort(Generic[AppT]):
         resolved_principal = self.default_principal if principal is None else principal
         effective_correlation = overlay_correlation(self.correlation, correlation)
         resolved_files = normalize_input_files(files)
-        compiled_agent = self.compiled
-        binding_contract = self.binding_contract if self.captured else None
+        captured = self.captured or requires_task_invocation_capture
+        if not captured and self.resolve_current is not None:
+            agent_id = self.agent_id if self.compiled is None else self.compiled.spec.id
+            if agent_id is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            binding = await self.resolve_current(agent_id, self.derivations, output)
+        else:
+            compiled_agent = self.compiled
+            if not captured:
+                if compiled_agent is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                binding = self.compiler.bind(compiled_agent, output=output)
+            else:
+                binding = (
+                    await self.restore_binding(self.binding_contract)
+                    if self.restore_binding is not None
+                    else self.compiler.restore(self.binding_contract,
+                                               model=None if compiled_agent is None else compiled_agent.model)
+                )
+                if output is not None:
+                    output_binding = output if isinstance(output, OutputBinding) else bind_output(output)
+                    binding = replace(
+                        binding,
+                        output_binding=output_binding,
+                        binding_contract=replace(
+                            binding.binding_contract,
+                            output_mode=output_binding.mode,
+                            output_schema=output_binding.schema_definition,
+                        ),
+                    )
+            if not captured or self.restore_binding is None:
+                binding = await self.resolve_binding(binding)
+        compiled_agent = binding.compiled_agent
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             compiled_agent,
             mode=mode,
@@ -140,7 +211,7 @@ class AgentExecutionPort(Generic[AppT]):
             user_prompt=user_prompt,
             principal=resolved_principal,
             idempotency_key=key,
-            memory_scope=self.memory_scope if input_context is None else None,
+            memory_scope=_memory_scope(compiled_agent) if input_context is None else None,
             mode=resolved_mode,
             planning=resolved_planning,
             thinking=resolved_thinking,
@@ -148,25 +219,10 @@ class AgentExecutionPort(Generic[AppT]):
             files=resolved_files,
             input_context=input_context,
             budget=budget,
+            tool_effects=tool_effects,
         )
         if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if binding_contract is None:
-            binding = self.compiler.bind(compiled_agent, output=output)
-        else:
-            binding = self.compiler.restore(binding_contract, model=compiled_agent.model)
-            if output is not None:
-                output_binding = output if isinstance(output, OutputBinding) else bind_output(output)
-                binding = replace(
-                    binding,
-                    output_binding=output_binding,
-                    binding_contract=replace(
-                        binding.binding_contract,
-                        output_mode=output_binding.mode,
-                        output_schema=output_binding.schema_definition,
-                    ),
-                )
-        binding = await self.resolve_binding(binding)
         if session_id is None:
             handle = await self.service.start(
                 binding.binding_digest,
@@ -189,6 +245,7 @@ class AgentExecutionPort(Generic[AppT]):
                 correlation=effective_correlation,
                 files=request.files,
                 budget=request.budget,
+                tool_effects=request.tool_effects,
             )
             handle = await self.sessions.resume(
                 compiled_agent.spec.id,
@@ -217,6 +274,19 @@ class AgentExecutionPort(Generic[AppT]):
             self.watch_tree,
         )
 
+
+
+
+def _memory_scope(compiled_agent: CompiledAgent) -> str | None:
+    scopes = [
+        capability.scope
+        for contribution in compiled_agent.runtime_contributions
+        for capability in runtime_feature_leaves(contribution.value)
+        if isinstance(capability, MemoryCapability)
+    ]
+    if len(scopes) > 1:
+        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+    return scopes[0] if scopes else None
 
 
 def _execution_policy(

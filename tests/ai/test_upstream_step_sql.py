@@ -68,10 +68,11 @@ async def test_run_lineage_filters_sort_by_instant_and_keep_original_records(sto
 
 
 @pytest.mark.asyncio
-async def test_boundary_events_are_append_only_and_keyed_retries_are_suppressed(store: StepStore) -> None:
+@pytest.mark.parametrize("key", ("same-key", ""))
+async def test_boundary_events_are_append_only_and_keyed_retries_are_suppressed(store: StepStore, key: str) -> None:
     first = StepEvent(run_id="run", kind="run_started", step_index=4,
                       conversation_id="conversation", agent_name="agent",
-                      metadata={"test": "value"}, idempotency_key="same-key")
+                      metadata={"test": "value"}, idempotency_key=key)
     second = StepEvent(run_id="run", kind="tool_call_failed", step_index=0,
                        tool_call_id="call", tool_name="tool", error="failed")
     await store.append_event(first)
@@ -80,6 +81,22 @@ async def test_boundary_events_are_append_only_and_keyed_retries_are_suppressed(
     await store.append_event(second)
     assert await store.list_events(run_id="run") == [first, second, second]
     assert await store.list_events(run_id="missing") == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_missing_replay_key_appends_and_empty_key_deduplicates(store: StepStore) -> None:
+    snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[])
+    await store.save_snapshot(snapshot)
+    appended = replace(snapshot, step_index=1)
+    await store.save_snapshot(appended)
+    assert await store.latest_snapshot(run_id="run") == appended
+    keyed = replace(snapshot, step_index=2, idempotency_key="")
+    await store.save_snapshot(keyed)
+    await store.save_snapshot(replace(keyed, step_index=3))
+    assert await store.latest_snapshot(run_id="run") == keyed
+    other_run = replace(keyed, run_id="other")
+    await store.save_snapshot(other_run)
+    assert await store.latest_snapshot(run_id="other") == other_run
 
 
 @pytest.mark.asyncio
@@ -169,6 +186,34 @@ async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_rep
         if event.contains(engine.sync_engine, "before_cursor_execute", fail_reference):
             event.remove(engine.sync_engine, "before_cursor_execute", fail_reference)
         await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_pruning_and_body_lookup_stay_in_their_partition(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scoped-refs.db'}")
+    stores = [SqlStepStore(engine, namespace="steps", tenant_id=tenant, max_snapshots_per_run=1)
+              for tenant in ("one", "two")]
+    first = ContinuableSnapshot(run_id="run", step_index=0, idempotency_key="first",
+                                messages=[ModelRequest([UserPromptPart("shared")])])
+    second = replace(first, step_index=1, idempotency_key="second",
+                     messages=[ModelRequest([UserPromptPart("new shared")])])
+    try:
+        await stores[0].initialize(local=True)
+        for store in stores:
+            await store.save_snapshot(first)
+        await stores[0].save_snapshot(second)
+        assert await stores[1].latest_snapshot(run_id="run") == first
+        await stores[1].save_snapshot(second)
+        async with engine.begin() as connection:
+            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_digest = :scope"),
+                                     {"scope": stores[0]._store_digest})
+        with pytest.raises(ValueError, match="missing or corrupt"):
+            await stores[0].latest_snapshot(run_id="run")
+        assert await stores[1].latest_snapshot(run_id="run") == second
+    finally:
+        for store in stores:
+            await store.close()
         await engine.dispose()
 
 
@@ -364,6 +409,10 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
         assert {"ix_updated_at", "ix_created_at"}.issubset({index.name for index in indexes})
         for index in indexes:
             assert len(index.columns) <= 3
+            if index.unique:
+                assert all(not column.nullable for column in index.columns)
+            else:
+                assert not any(column.primary_key for column in index.columns)
             assert index.name == ("uk_" if index.unique else "ix_") + "_".join(column.name for column in index.columns)
             assert "(" in str(CreateIndex(index).compile(dialect=dialect))
         for column in table.c:

@@ -12,6 +12,7 @@ from dataclasses import replace
 from typing import Protocol
 
 
+from ._feature_policy import _RuntimeFeaturePolicy
 from ..session import SessionPendingExecutionLookup, SessionReleaseCallback, SessionManager
 from ..agent import AgentBinding, AgentBindingContract
 from ..core import (
@@ -129,6 +130,7 @@ class _SessionExecutionAdapter:
             idempotency_key=request.idempotency_key, memory_scope=request.memory_scope,
             mode=request.mode, planning=request.planning, thinking=request.thinking,
             correlation=request.correlation, files=request.files, budget=request.budget,
+            tool_effects=request.tool_effects,
         )
         return await self._execution.start_for_session(
             agent_id, binding_digest, session_id, execution_request,
@@ -147,6 +149,12 @@ class _SessionExecutionAdapter:
 
 class RuntimeSessionService(SessionManager[ExecutionHandle]):
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
+
+    async def require_available(self) -> None:
+        if self._current_policy is None:
+            await super().require_available()
+        elif not (await self._current_policy()).session.enabled:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled")
 
     async def _prepare_resume_session(
         self, agent_id: str, session_id: str, principal: Principal,
@@ -177,7 +185,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
     async def lookup_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,
     ) -> SessionAdmission | None:
-        self.require_available()
+        await self.require_available()
         await self.read_authorized(session_id, principal, AuthorizationAction.SESSION_READ)
         return await self._admission_execution.lookup_session_admission(
             session_id, principal=principal, idempotency_key=idempotency_key,
@@ -193,6 +201,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         *,
         history_reader: SessionHistoryReader,
         enabled: bool = True,
+        current_policy: Callable[[], Awaitable[_RuntimeFeaturePolicy]] | None = None,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: SessionReleaseCallback | None = None,
         workspace_access: InputFileSource | None = None,
@@ -202,6 +211,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         read_session_owner: Callable[..., Awaitable[TurnCoordination | None]] | None = None,
         local_waiter: LocalExecutionWaiter | None = None,
     ) -> None:
+        self._current_policy = current_policy
         self._admission_execution = execution
         self._runtime_conversation = conversation
         self._runtime_executions = executions
@@ -240,7 +250,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
         The optional observation budget excludes passive waits and raises
         TimeoutError rather than the overall deadline's WAIT_TIMEOUT.
         """
-        self.require_available()
+        await self.require_available()
         if (timeout_seconds is not None and (
             isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
             or not math.isfinite(timeout_seconds) or timeout_seconds < 0

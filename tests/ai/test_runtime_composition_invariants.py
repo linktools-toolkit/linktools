@@ -207,7 +207,7 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_runtime_rejects_source_change_during_assembly(
+async def test_runtime_allows_source_change_during_assembly_and_later_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = InMemoryAssetBackend()
@@ -217,7 +217,7 @@ async def test_runtime_rejects_source_change_during_assembly(
 
     async def build_then_change_source(**kwargs: object):
         components = await original_build(**kwargs)  # type: ignore[arg-type]
-        await store.put(AssetKey("agent", "late"), b"changed")
+        await store.put(AssetKey("rule", "late.md"), b"current instructions")
         return components
 
     monkeypatch.setattr(
@@ -226,16 +226,16 @@ async def test_runtime_rejects_source_change_during_assembly(
         build_then_change_source,
     )
     try:
-        with pytest.raises(AIError) as error:
-            asset_features = RuntimeFeatures("workspace")
-            asset_features.capability(AssetCapability(store), scope="runtime")
-            async with Persistence.open("workspace", storage=PersistenceStorage.in_memory()) as persistence:
-                await compose_runtime_components(
-                    persistence=persistence,
-                    features=model_features(RuntimeUsageModels(), asset_features),
-                )
-
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+        asset_features = RuntimeFeatures("workspace")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        source = model_features(RuntimeUsageModels(), asset_features).borrow()
+        async with Persistence.open("workspace", storage=PersistenceStorage.in_memory()) as persistence:
+            components = await compose_runtime_components(persistence=persistence, features=source)
+            try:
+                current = await source.resolve()
+                assert current.instructions.documents[0].content == "current instructions"
+            finally:
+                await components.close_callback()
         assert store.ready
     finally:
         await store.close()

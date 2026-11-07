@@ -27,11 +27,14 @@ from pydantic_ai.tools import (
 
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
-from ..spec import RepositoryInstructionResolver, RepositoryInstructions
+from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
 from ..workspace import (
     Workspace,
 )
 from ..inputs import ExecutionContextArchive
+from ._feature_policy import _runtime_feature_policy
+from ._capabilities import runtime_feature_leaves
+from ..capability import TraceCapability
 from ._agent_executor import (
     AgentExecutor,
     _AgentRunScope,
@@ -297,7 +300,7 @@ class LocalExecutionBackend:
         *,
         archive_objects: ObjectStore | None = None,
         archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
-        restore_binding: "Callable[[AgentBindingContract], AgentBinding] | None" = None,
+        restore_binding: "Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None" = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
         execution_cwd: "str | None",
@@ -429,22 +432,22 @@ class LocalExecutionBackend:
     def tenant_id(self) -> str:
         return self._tenant_id
 
-    def _execution_binding(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> AgentBinding:
+    async def _execution_binding(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> AgentBinding:
         if binding is None:
             binding = (
                 self._catalog.binding(execution.binding_digest)
                 if self._restore_binding is None
-                else self._restore_binding(execution.binding)
+                else await self._restore_binding(execution.binding)
             )
         if binding.binding_digest != execution.binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 
-    def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
-        return self._execution_binding(execution, binding)
+    async def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
+        return await self._execution_binding(execution, binding)
 
     async def validate_recovery_inputs(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
-        binding = self._execution_binding(execution, binding)
+        binding = await self._execution_binding(execution, binding)
         await self._executor.validate_recovery_inputs(binding, execution.tool_response_ref)
         return binding
 
@@ -666,12 +669,13 @@ class LocalExecutionBackend:
                 self._tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        self._execution_binding(execution, request.resolved_binding)
+        await self._execution_binding(execution, request.resolved_binding)
         if (
             request.mode != execution.mode
             or request.planning is not execution.planning
             or request.thinking != execution.thinking
             or request.tool_response_ref != execution.tool_response_ref
+            or request.tool_effects != execution.tool_effects
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -993,11 +997,15 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._input_materializer.restore(execution.stored_user_input)
 
-    def _can_prepare_initial_attempt(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> bool:
+    async def _can_prepare_initial_attempt(self, execution: ExecutionRecord, binding: AgentBinding | None = None) -> bool:
+        binding = await self._execution_binding(execution, binding)
+        policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
+        trace_commit = next((leaf.commit for feature in policy.capabilities for leaf in runtime_feature_leaves(feature)
+                             if isinstance(leaf, TraceCapability)), None)
         if (type(self) is not LocalExecutionBackend
                 or execution.durable_trace and (
-                    self._trace_commit is None or self._trace_commit.mode != "terminal"
-                    or self._execution_buffer is None and self._trace_commit.buffer is None)
+                    trace_commit is None or trace_commit.mode != "terminal"
+                    or self._execution_buffer is None and trace_commit.buffer is None)
                 or execution.binding_kind != "agent"
                 or execution.parent_execution_id is not None
                 or execution.requires_task_invocation_capture
@@ -1009,7 +1017,7 @@ class LocalExecutionBackend:
                   self._conversation.sessions.state_store, self._execution.executions.state_store)
         if any(store.storage_group is not stores[0].storage_group for store in stores):
             return False
-        binding = self._execution_binding(execution, binding)
+        binding = await self._execution_binding(execution, binding)
         return not (execution.memory_scope is not None
                     and any(tool_class_from_metadata(tool.contract.get("metadata")) == "memory"
                             for tool in binding.compiled_agent.selected_tools))
@@ -1043,10 +1051,11 @@ class LocalExecutionBackend:
         session: SessionRecord | None, coordination: TurnCoordination | None,
     ) -> str | None:
         execution = reservation.execution
-        if (self._commit.mode != "terminal" or execution.restart_checkpoints
+        binding = await self._execution_binding(execution, request.resolved_binding)
+        if (_runtime_feature_policy(binding.compiled_agent.runtime_contributions).execution.commit.mode != "terminal" or execution.restart_checkpoints
                 or coordination is None or self._pending_turns.coordination is None
                 or not self._pending_turns.coordination.supports_pending_views
-                or not execution.conversation or not self._can_prepare_initial_attempt(execution, request.resolved_binding)
+                or not execution.conversation or not await self._can_prepare_initial_attempt(execution, request.resolved_binding)
                 or execution.budget_scope_id is not None or execution.memory_scope is not None
                 or not self._conversation_durable or not self._execution_objects_durable
                 or not isinstance(self._run_store, RuntimeAgentRunStore)):
@@ -1459,8 +1468,7 @@ class LocalExecutionBackend:
         try:
             while self._turn_owners.get(execution_id) is owner:
                 # Promotion is an upstream cache control hint, not lease policy.
-                if (promotion is None and self._commit.mode == "terminal"
-                        and owner.reservation.execution.conversation
+                if (promotion is None and owner.reservation.execution.conversation
                         and self._pending_turns.coordination.supports_pending_views):
                     promotion = asyncio.create_task(self._watch_pending_promotion(owner))
                 signal = await owner.scope.wait_signal()
@@ -1760,7 +1768,7 @@ class LocalExecutionBackend:
         await self._validate_start(request, execution)
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._execution_binding(execution, request.resolved_binding)
+        await self._execution_binding(execution, request.resolved_binding)
         now = datetime.now(timezone.utc)
         expected = (
             await self._expected_session_cursor(execution)
@@ -1883,7 +1891,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                 safe_details={"phase": "recovery_launch_rejected"})
         if request.resolved_binding is None:
-            request = replace(request, resolved_binding=self._execution_binding(execution))
+            request = replace(request, resolved_binding=await self._execution_binding(execution))
         await self._validate_start(request, execution)
         captured = (None if owner is None or resume is not None
                     or producer_generation is not None or recovery_operation is not None
@@ -1911,6 +1919,7 @@ class LocalExecutionBackend:
             or current.binding != execution.binding
             or current.correlation != execution.correlation
             or current.tool_response_ref != execution.tool_response_ref
+            or current.tool_effects != execution.tool_effects
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.status in {
@@ -2425,6 +2434,7 @@ class LocalExecutionBackend:
             thinking=current.thinking,
             correlation=current.correlation,
             tool_response_ref=current.tool_response_ref,
+            tool_effects=current.tool_effects,
             resolved_binding=decision.binding,
         )
         if not self._prepare_recovery_relaunch(current.execution_id):
@@ -2443,6 +2453,7 @@ class LocalExecutionBackend:
         metadata: Mapping[str, object],
         *,
         repository_instruction_frontier: str | None = None,
+        capability_ref: CapabilityRef | None = None,
     ) -> PendingDeferredCall:
         try:
             arguments = normalize_json_value(call.args_as_dict())
@@ -2503,6 +2514,7 @@ class LocalExecutionBackend:
             call.tool_name,
             arguments_payload,
             raw_metadata,
+            capability_ref=capability_ref,
         )
 
     async def commit_deferred_frontier(
@@ -2633,10 +2645,11 @@ class LocalExecutionBackend:
     async def claim_deferred_resume(
         self,
         execution: ExecutionRecord,
+        *, recovery_operation: OperationLedgerInput | None = None,
     ) -> ExecutionRecord:
         if execution.recovery is None or execution.recovery.pending_tools is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await self._runtime_commands.claim_deferred_resume_checkpoint(
+        resumed = await self._runtime_commands.claim_deferred_resume_checkpoint(
             execution_id=execution.execution_id,
             tenant_id=self._tenant_id,
             expected_execution_revision=execution.revision,
@@ -2644,7 +2657,15 @@ class LocalExecutionBackend:
             expected_agent_run_seq=execution.agent_run_seq,
             expected_pending_tools=execution.recovery.pending_tools,
             background_tasks=self._execution_task_set(execution.execution_id),
+            recovery_operation=recovery_operation,
         )
+        if recovery_operation is not None:
+            receipt = await self._recovery_receipt(recovery_operation)
+            if receipt is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if receipt.result_ref != recovery_operation.result_ref:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return resumed
 
     async def read_deferred_payload(self, payload: StoredPayload) -> JsonValue:
         if payload.kind == "inline":
@@ -3645,6 +3666,27 @@ class LocalExecutionBackend:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    def preflight_handoff(self) -> None:
+        if any(owner.admitting or any(not task.done() for task in owner.admissions)
+               for owner in self._turn_owners.values()):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=True,
+                safe_details={"phase": "runtime_handoff", "reason": "admission_in_progress"})
+        if self._pending_turns.has_pending:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={"phase": "runtime_handoff", "reason": "nonrecoverable_active_execution"})
+        for execution_id, task in self._tasks.items():
+            if task.done():
+                continue
+            owner = self._turn_owners.get(execution_id)
+            if owner is None or not owner.reservation.execution.restart_checkpoints:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                    safe_details={"phase": "runtime_handoff", "execution_id": execution_id,
+                                  "reason": ("unknown_active_execution" if owner is None
+                                             else "nonrecoverable_active_execution")})
+        # Validation and admission stop share one event-loop turn. A rejected
+        # handoff must leave every existing producer and admission flag intact.
+        self._accepting = False
+
     async def handoff(self) -> None:
         self._accepting = False
         self._handoff_requested = True
@@ -4146,7 +4188,7 @@ class LocalExecutionBackend:
 
                     expected_recovery_state=checkpoint.recovery_state,
                 )
-                if self._can_prepare_initial_attempt(current, request.resolved_binding):
+                if await self._can_prepare_initial_attempt(current, request.resolved_binding):
                     prepared_admission = admission_claim
                 else:
                     try:
@@ -4193,7 +4235,7 @@ class LocalExecutionBackend:
                 or (checkpoint.recovery.agent_run_id is None and prepared_admission is None)
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            binding = self._execution_binding(current, request.resolved_binding)
+            binding = await self._execution_binding(current, request.resolved_binding)
             compiled_agent = binding.compiled_agent
             initial_repository_instructions = await self.load_repository_instructions(
                 current.repository_instructions
@@ -4608,6 +4650,7 @@ class LocalExecutionBackend:
                 owner_kind="session" if current.session_id is not None else "execution",
                 owner_id=current.session_id or current.execution_id,
             )
+            deferred_capability_refs: dict[str, CapabilityRef] = {}
             try:
                 result = await self._executor.execute(
                     _AgentRunScope(
@@ -4664,6 +4707,7 @@ class LocalExecutionBackend:
                         ),
                         tool_operations=tool_operations,
                         tool_response_ref=current.tool_response_ref,
+                        tool_effects=current.tool_effects,
                         budget=(None if current.budget_scope_id is None else RunBudgetContext(
                             self._execution.budgets, current.budget_scope_id,
                             current.execution_id, agent_run_id,
@@ -4674,6 +4718,11 @@ class LocalExecutionBackend:
                         repository_instructions=initial_repository_instructions,
                         repository_instruction_boundary=repository_boundary,
                         deferred_tool_results=deferred_tool_results,
+                        deferred_capability_refs=deferred_capability_refs,
+                        deferred_approvals=(
+                            () if checkpoint.recovery.pending_tools is None
+                            else checkpoint.recovery.pending_tools.approvals
+                        ),
                     )
                 )
             except Exception as error:
@@ -4797,6 +4846,7 @@ class LocalExecutionBackend:
                         result,
                         agent_run_id=agent_run_id,
                         paused_at=datetime.now(timezone.utc),
+                        capability_refs=deferred_capability_refs,
                         producer_generation=producer_generation,
                         repository_instruction_frontiers=repository_boundary.approval_frontiers(result.approvals),
                     )
@@ -6095,6 +6145,8 @@ class LocalExecutionBackend:
             raise
         receipt = await self._recovery_receipt(operation)
         if receipt is None:
+            if not launched and result.status is ExecutionStatus.WAITING_DEFERRED:
+                return result
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if launched or result.status is ExecutionStatus.SUCCEEDED:
             status = OperationStatus.SUCCEEDED

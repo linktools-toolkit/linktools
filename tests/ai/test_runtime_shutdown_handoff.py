@@ -112,16 +112,166 @@ async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_sto
 
 
 @pytest.mark.asyncio
-async def test_handoff_requires_checkpoint_capability_without_closing_runtime(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pending", [False, True])
+async def test_handoff_rejects_nonrecoverable_execution_without_closing_runtime(tmp_path: Path, pending: bool) -> None:
+    from pydantic_ai.capabilities import CombinedCapability
+    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+    from linktools.ai.core import CommitPolicy
+    from linktools.ai.storage import InMemoryCacheBackend
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
     async def answer(messages, info):
+        entered.set()
+        await release.wait()
         yield "ready"
 
-    async with Persistence.open('handoff-required', storage=PersistenceStorage.sqlite(tmp_path / 'state.db')) as persistence_118, Runtime.attach(persistence=persistence_118, features=model_features(_Models(FunctionModel(stream_function=answer)), _group(True))) as runtime:
+    features = _group(True)
+    features.capability(StepPersistenceCapability(), id="runtime.steps")
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    model_features(_Models(FunctionModel(stream_function=answer)), features)
+    cache = InMemoryCacheBackend(max_bytes=2**20) if pending else None
+    async with Runtime.open('handoff-required', storage=PersistenceStorage.sqlite(tmp_path / 'state.db',
+                            cache=cache, coordination=cache), features=features) as runtime:
+        features.capability(CombinedCapability([]), id="runtime.steps")
+        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
+        session = await runtime.agents.get().create_session("session")
+        active = await session.start("Nonrecoverable", idempotency_key="first")
+        await asyncio.wait_for(entered.wait(), 5)
+        features.capability(StepPersistenceCapability(), id="runtime.steps")
+        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
+        assert error.value.safe_details["reason"] == "nonrecoverable_active_execution"
+        release.set()
+        assert (await active.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         execution = await runtime.agents.get().start("Still usable", idempotency_key="request")
         await asyncio.wait_for(execution.wait(), 10)
+        features.capability(CombinedCapability([]), id="runtime.steps")
+        await runtime.handoff()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_checkpoint", [False, True])
+async def test_handoff_keeps_admitted_checkpoint_guarantee_across_policy_updates(
+    tmp_path: Path, late_checkpoint: bool,
+) -> None:
+    from pydantic_ai.capabilities import CombinedCapability
+    from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+    from linktools.ai.core import CommitPolicy
+
+    entered = asyncio.Event()
+
+    async def blocked(messages, info):
+        entered.set()
+        await asyncio.Event().wait()
+        yield "unreachable"
+
+    features = _group(True)
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    if not late_checkpoint:
+        features.capability(StepPersistenceCapability(), id="runtime.steps")
+    model_features(_Models(FunctionModel(stream_function=blocked)), features)
+    storage = PersistenceStorage.from_root(tmp_path)
+    async with Runtime.open("live-handoff", storage=storage, features=features) as runtime:
+        if late_checkpoint:
+            features.capability(StepPersistenceCapability(), id="runtime.steps")
+        execution = await runtime.agents.get().start("Resume me", idempotency_key="first")
+        await asyncio.wait_for(entered.wait(), 5)
+        features.capability(CombinedCapability([]), id="runtime.steps")
+        features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
+        await asyncio.wait_for(runtime.handoff(), 5)
+
+    async def answer(messages, info):
+        yield "recovered"
+
+    features.capability(StepPersistenceCapability(), id="runtime.steps")
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.sync()))
+    model_features(_Models(FunctionModel(stream_function=answer)), features)
+    async with Runtime.open("live-handoff", storage=storage, features=features, auto_recover=False) as successor:
+        recovered = await successor.executions.recover(execution.execution_id,
+            principal=successor.default_principal, idempotency_key="recover")
+        assert recovered.execution_id == execution.execution_id
+        result = await successor.executions.wait(recovered.execution_id,
+            principal=successor.default_principal, timeout_seconds=5)
+        assert result.result.status is ExecutionStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_handoff_rejects_recovery_admission_without_stopping_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.runtime._local import LocalExecutionBackend
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_model(messages, info):
+        entered.set()
+        await asyncio.Event().wait()
+        yield "unreachable"
+
+    features = model_features(_Models(FunctionModel(stream_function=blocked_model)), _group(False))
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with Runtime.open("handoff-recovery", storage=storage, features=features) as owner:
+        execution = await owner.agents.get().start("recover", idempotency_key="first")
+        await asyncio.wait_for(entered.wait(), 5)
+        await owner.handoff()
+
+    entered.clear()
+    original = LocalExecutionBackend.launch
+
+    async def blocked_launch(backend, *args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(backend, *args, **kwargs)
+
+    async def answer(messages, info):
+        yield "recovered"
+
+    monkeypatch.setattr(LocalExecutionBackend, "launch", blocked_launch)
+    model_features(_Models(FunctionModel(stream_function=answer)), features)
+    async with Runtime.open("handoff-recovery", storage=storage, features=features, auto_recover=False) as runtime:
+        recovery = asyncio.create_task(runtime.executions.recover(execution.execution_id,
+            principal=runtime.default_principal, idempotency_key="recover"))
+        await asyncio.wait_for(entered.wait(), 5)
+        try:
+            with pytest.raises(AIError) as error:
+                await asyncio.wait_for(runtime.handoff(), 5)
+            assert error.value.safe_details["reason"] == "admission_in_progress"
+            assert error.value.retryable
+        finally:
+            release.set()
+        recovered = await asyncio.wait_for(recovery, 5)
+        result = await runtime.executions.wait(recovered.execution_id,
+            principal=runtime.default_principal, timeout_seconds=5)
+        assert result.result.status is ExecutionStatus.SUCCEEDED
+        await runtime.handoff()
+
+
+@pytest.mark.asyncio
+async def test_handoff_rejects_worker_without_admission_identity(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+
+    async def blocked(messages, info):
+        entered.set()
+        await asyncio.Event().wait()
+        yield "unreachable"
+
+    features = model_features(_Models(FunctionModel(stream_function=blocked)), _group(False))
+    async with Runtime.open("handoff-unknown", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
+                            features=features) as runtime:
+        execution = await runtime.agents.get().start("first", idempotency_key="first")
+        await asyncio.wait_for(entered.wait(), 5)
+        backend = runtime._execution_service.runtime_backend()
+        owner = backend._turn_owners.pop(execution.execution_id)
+        try:
+            with pytest.raises(AIError) as error:
+                await runtime.handoff()
+            assert error.value.safe_details["reason"] == "unknown_active_execution"
+        finally:
+            backend._turn_owners[execution.execution_id] = owner
+        await asyncio.wait_for(runtime.handoff(), 5)
 
 
 @pytest.mark.asyncio
@@ -348,7 +498,7 @@ async def test_pending_user_cancel_interrupts_tool_during_handoff(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_handoff_joins_admission_before_relinquishing_storage(tmp_path: Path, monkeypatch) -> None:
+async def test_handoff_retry_retains_admitted_execution_identity(tmp_path: Path, monkeypatch) -> None:
     from linktools.ai.runtime._local import LocalExecutionBackend
 
     admitted, release = asyncio.Event(), asyncio.Event()
@@ -368,12 +518,16 @@ async def test_handoff_joins_admission_before_relinquishing_storage(tmp_path: Pa
     async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_371, Runtime.attach(persistence=persistence_371, features=model_features(_Models(FunctionModel(stream_function=blocked)), _group(False))) as owner:
         start = asyncio.create_task(owner.agents.get().start("admitted", idempotency_key="start"))
         await asyncio.wait_for(admitted.wait(), 5)
-        shutdown = asyncio.create_task(owner.handoff())
-        await asyncio.sleep(.05)
-        assert not shutdown.done()
-        release.set()
+        try:
+            with pytest.raises(AIError) as error:
+                await owner.handoff()
+            assert error.value.safe_details["reason"] == "admission_in_progress"
+            assert error.value.retryable
+            assert persistence_371.ready
+        finally:
+            release.set()
         execution = await asyncio.wait_for(start, 10)
-        await asyncio.wait_for(shutdown, 10)
+        await asyncio.wait_for(owner.handoff(), 10)
     async def answer(messages, info):
         yield "recovered"
     async with Persistence.open('handoff-admission', storage=PersistenceStorage.sqlite(database)) as persistence_383, Runtime.attach(persistence=persistence_383, features=model_features(_Models(FunctionModel(stream_function=answer)), _group(False)), auto_recover=False) as successor:

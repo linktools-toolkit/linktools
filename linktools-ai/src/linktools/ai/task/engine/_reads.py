@@ -31,39 +31,41 @@ class TaskExecutionReads:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
         return port.service
 
-    async def _authorized(self, execution_id: str, principal: Principal) -> ExecutionService:
+    async def _authorized(
+        self, execution_id: str, principal: Principal,
+    ) -> tuple[ExecutionService, ExecutionView | None]:
         if not self._ports:
-            return self._tasks
+            return self._tasks, None
         view = await self._tasks.inspect(execution_id, principal=principal)
         if view.binding_kind == "task":
-            return self._tasks
+            return self._tasks, view
         port = self._ports.get(execution_id) or self._ports.get(view.root_execution_id)
         if port is None:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
-        return port.service
+        return port.service, None
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
-        service = await self._authorized(execution_id, principal)
-        return await service.inspect(execution_id, principal=principal)
+        service, view = await self._authorized(execution_id, principal)
+        return view if view is not None else await service.inspect(execution_id, principal=principal)
 
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
-        service = await self._authorized(execution_id, principal)
+        service, _ = await self._authorized(execution_id, principal)
         return await service.result(execution_id, principal=principal)
 
     async def result_payload_size(self, execution_id: str, *, principal: Principal) -> int:
-        service = await self._authorized(execution_id, principal)
+        service, _ = await self._authorized(execution_id, principal)
         return await service.result_payload_size(execution_id, principal=principal)
 
     async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: float | None = None) -> ExecutionResult:
-        service = await self._authorized(execution_id, principal)
+        service, _ = await self._authorized(execution_id, principal)
         return await service.wait(execution_id, principal=principal, timeout_seconds=timeout_seconds)
 
     async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:
-        service = await self._authorized(execution_id, principal)
+        service, _ = await self._authorized(execution_id, principal)
         return await service.list_children(execution_id, principal=principal)
 
     async def budget_usage(self, execution_id: str, *, principal: Principal) -> BudgetUsage | None:
-        service = await self._authorized(execution_id, principal)
+        service, _ = await self._authorized(execution_id, principal)
         return await service.budget_usage(execution_id, principal=principal)
 
     async def acquire_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> bool:

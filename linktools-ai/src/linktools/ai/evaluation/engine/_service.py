@@ -1081,9 +1081,11 @@ class Evaluations:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "requested cutoff is no longer current")
         left_dataset = await self.get_dataset(left.manifest.dataset, principal=principal)
         right_dataset = await self.get_dataset(right.manifest.dataset, principal=principal)
+        case_refs = tuple(dict.fromkeys((*left_dataset.ordered_case_refs, *right_dataset.ordered_case_refs)))
+        cases = dict(zip(case_refs, await self._state.get_cases(case_refs)))
         report = build_comparison_report(spec, left.manifest, right.manifest,
-            await self._state.get_cases(left_dataset.ordered_case_refs),
-            await self._state.get_cases(right_dataset.ordered_case_refs),
+            tuple(cases[ref] for ref in left_dataset.ordered_case_refs),
+            tuple(cases[ref] for ref in right_dataset.ordered_case_refs),
             tuple(item for _, snapshot in snapshots.values() for item in snapshot.trials),
             tuple(item for _, snapshot in snapshots.values() for item in snapshot.score_attempts),
             baseline_dataset=left_dataset, candidate_dataset=right_dataset, cutoff=cutoff,
@@ -1369,6 +1371,7 @@ class Evaluations:
         planning = engine if scorer is None else engine.with_definitions(self._recorder)
         submission = await planning.describe_submission(graph, principal=record.manifest.principal,
             idempotency_key=f"evaluation:{record.experiment_id}:{slot}", limits=limits,
+            tool_effects=policy.external_effects,
             correlation={"evaluation_experiment": record.experiment_id, "evaluation_trial": trial.trial_id,
                          "evaluation_slot": slot})
         timeout = (policy.trial_timeout_seconds if scorer is None else

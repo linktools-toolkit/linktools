@@ -1193,7 +1193,21 @@ class TranscriptRepository:
 
     async def load_messages(self, owner_id: str) -> tuple[ModelMessage, ...]:
         require_no_run_history_lock("TranscriptRepository.load_messages")
-        return tuple([message async for message in self.iter_messages(owner_id)])
+        stream = self._transcript_stream(owner_id)
+        after_sequence: int | None = None
+        messages: list[ModelMessage] = []
+        while True:
+            facts = await self._store.read(
+                lambda transaction, sequence=after_sequence: transaction.list_facts(
+                    FactQuery(stream, after_sequence=sequence, limit=_TRANSCRIPT_PAGE_SIZE)
+                )
+            )
+            if not facts:
+                return tuple(messages)
+            after_sequence = facts[-1].sequence
+            chunks = tuple(self.decode_chunk(fact) for fact in facts)
+            for group in await self._decode_chunks_messages(chunks):
+                messages.extend(group)
 
     async def validate_integrity(self) -> None:
         require_no_run_history_lock("TranscriptRepository.validate_integrity")

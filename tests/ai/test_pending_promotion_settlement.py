@@ -234,7 +234,7 @@ async def test_uncertain_promotion_late_result_cannot_overwrite_successor_fence(
                     tool_name=pending.tool_name, arguments_digest=pending.arguments_digest,
                     binding_digest=pending.binding_digest, replay_safe=True,
                     owner=successor.producer_claim_id, producer_generation=successor.producer_generation,
-                    arguments_payload=pending.arguments_payload,
+                    arguments_payload=pending.arguments_payload, capability_ref=pending.capability_ref,
                 )
                 successor_operation = (await commands.commit_tool_admission(request)).value
                 assert successor_operation.owner == "successor"

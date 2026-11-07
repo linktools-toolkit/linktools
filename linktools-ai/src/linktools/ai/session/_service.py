@@ -199,14 +199,14 @@ class SessionManager(Generic[HandleT]):
             return await self._observe_view(record, principal, active=active)
         return await self.project_view(record, principal, active=active)
 
-    def require_available(self) -> None:
+    async def require_available(self) -> None:
         if not self._enabled:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING, "Session management is disabled"
             )
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
-        self.require_available()
+        await self.require_available()
         try:
             agent_id = validate_agent_id(agent_id)
         except AIError:
@@ -292,7 +292,7 @@ class SessionManager(Generic[HandleT]):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
-        self.require_available()
+        await self.require_available()
         await self._authorization.authorize(
             request.principal,
             AuthorizationAction.SESSION_READ,
@@ -890,7 +890,7 @@ class SessionManager(Generic[HandleT]):
         display_read: bool = False,
     ) -> AsyncIterator[None]:
         """Keep session resources retained while a control or display reader uses them."""
-        self.require_available()
+        await self.require_available()
         completed = None
         if display_read:
             if self._display_close_started:

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 from ...agent import AgentBindingContract, AgentInputCaptureRef
 from ...asset import AssetVersionRef
-from ...capability import tool_effect_policy_from_metadata
 from ...core import JsonValue, Principal, canonical_sha256
 from ...errors import AIError, ErrorCode
 from ...evaluation import (
@@ -156,15 +155,6 @@ class EvaluationCompiler:
                 dict(current.model_contract) == dict(fixture) for fixture in policy.model_fixtures
             ):
                 raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "model is not an explicitly declared fixture")
-            for pin in current.selected:
-                if pin.kind not in {"tool", "mcp"}:
-                    continue
-                if policy.external_effects == "deny":
-                    raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "target tools require explicit effect policy")
-                if policy.external_effects == "read_only" and (
-                    pin.kind == "mcp" or tool_effect_policy_from_metadata(pin.contract.get("metadata")) != "none"
-                ):
-                    raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "tool contract does not establish read-only effects")
 
     async def graph(
         self, candidate: CandidateContract, case: CaseContract, *, graph_id: str,

@@ -18,7 +18,7 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import InstructionPart, ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
-from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
+from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
 from ..capability import (
     AgentContext,
@@ -33,9 +33,10 @@ from ..capability import (
     tool_effect_policy_from_metadata,
     tool_path_fields_from_metadata,
 )
-from ..core import canonical_sha256, normalize_json_value
+from ..core import ToolEffects, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..observe import Observation
+from ..spec import CapabilityRef
 from ..workspace import SupportsFileTools, ToolPermissionPolicy
 from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
@@ -49,6 +50,15 @@ from ._tool_metrics import (
 
 if TYPE_CHECKING:
     from ..capability import RunCallbacks
+
+
+TOOL_CAPABILITY_REF_METADATA_KEY = "linktools.ai.capability_ref"
+
+
+def tool_capability_ref(tool: ToolDefinition) -> CapabilityRef | None:
+    """Read the execution identity carried by the provided native definition."""
+    value = (tool.metadata or {}).get(TOOL_CAPABILITY_REF_METADATA_KEY)
+    return None if value is None else CapabilityRef.from_payload(value)
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -73,6 +83,7 @@ class ManagedToolDescriptor:
     effect_policy: ToolEffectPolicy
     tool_class: ToolClass
     workspace_path_fields: tuple[str, ...] = ()
+    capability_ref: CapabilityRef | None = None
 
     def __post_init__(self) -> None:
         if self.effect_owner not in {"none", "tool_operation"}:
@@ -113,6 +124,24 @@ def managed_tool_descriptor_from_metadata(
     )
 
 
+@dataclass(kw_only=True)
+class _BoundaryTool(ToolsetTool[AgentContext[object]]):
+    boundary: "BoundaryToolset"
+    source_toolset: AbstractToolset[AgentContext[object]]
+    source_tool: ToolsetTool[AgentContext[object]]
+    descriptor: ManagedToolDescriptor
+
+
+def require_tool_effects(
+    restriction: ToolEffects, *, kind: str, effect_policy: ToolEffectPolicy | None,
+) -> None:
+    """Authorize a current declaration without retaining its directory."""
+    if restriction == "deny":
+        raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "target tools require explicit effect policy")
+    if restriction == "read_only" and (kind == "mcp" or effect_policy != "none"):
+        raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "tool contract does not establish read-only effects")
+
+
 class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     """Apply workspace policy and effect durability at the final leaf call."""
 
@@ -124,6 +153,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         id: str,
         descriptor: ManagedToolDescriptor | Callable[[Mapping[str, object] | None], ManagedToolDescriptor] | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
+        tool_effects: ToolEffects = "live",
         workspace_backend: SupportsFileTools | None = None,
         tool_operations: ToolOperationBridge | None = None,
         tool_metrics: ToolMetricContext | None = None,
@@ -138,19 +168,13 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._descriptor = descriptor
         self._id = id
         self._permission_policy = permission_policy
+        self._tool_effects = tool_effects
         self._workspace_backend = workspace_backend
         self._tool_operations = tool_operations
         self._tool_metrics = tool_metrics
         self._budget = budget
         self._repository_boundary = repository_boundary
         self._result_callbacks = result_callbacks
-        self._raw_tools: dict[
-            str,
-            tuple[
-                AbstractToolset[AgentContext[object]],
-                ToolsetTool[AgentContext[object]],
-            ],
-        ] = {}
         self._exit_stack: AsyncExitStack | None = None
 
     @property
@@ -161,13 +185,11 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         bound = copy(self)
         bound._toolsets = tuple([await toolset.for_run(ctx) for toolset in self._toolsets])
         bound._descriptors = dict(self._descriptors)
-        bound._raw_tools = {}
         bound._exit_stack = None
         return bound
 
     async def for_run_step(self, ctx: PydanticRunContext[AgentContext[object]]) -> "BoundaryToolset":
         self._toolsets = tuple([await toolset.for_run_step(ctx) for toolset in self._toolsets])
-        self._raw_tools.clear()
         return self
 
     async def __aenter__(self) -> "BoundaryToolset":
@@ -182,7 +204,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             return None
         exit_stack = self._exit_stack
         self._exit_stack = None
-        return await exit_stack.aclose()
+        return await exit_stack.__aexit__(*args)
 
     async def get_instructions(
         self,
@@ -217,14 +239,21 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     self._descriptors[name] = self._descriptor
                 metadata = dict(raw_tool.tool_def.metadata or {})
                 metadata[TOOL_METRICS_MANAGED_METADATA_KEY] = True
-                result[name] = ToolsetTool(
+                reference = self._descriptors[name].capability_ref
+                metadata.pop(TOOL_CAPABILITY_REF_METADATA_KEY, None)
+                if reference is not None:
+                    metadata[TOOL_CAPABILITY_REF_METADATA_KEY] = reference.to_payload()
+                result[name] = _BoundaryTool(
+                    boundary=self,
+                    source_toolset=toolset,
+                    source_tool=raw_tool,
+                    descriptor=self._descriptors[name],
                     toolset=self,
                     tool_def=replace(raw_tool.tool_def, metadata=metadata),
                     max_retries=raw_tool.max_retries,
                     args_validator=raw_tool.args_validator,
                     args_validator_func=raw_tool.args_validator_func,
                 )
-                self._raw_tools[name] = (toolset, raw_tool)
         return result
 
     async def call_tool(
@@ -249,16 +278,11 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         if not isinstance(tool_args, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         processors = () if self._result_callbacks is None else self._result_callbacks.tool_results(ctx.tool_call_id)
-        descriptor = self._descriptors.get(name)
-        owner = tool.toolset
-        seen: set[int] = set()
-        while isinstance(owner, WrapperToolset) and id(owner) not in seen:
-            seen.add(id(owner))
-            owner = owner.wrapped
-        if descriptor is None or owner is not self:
+        if not isinstance(tool, _BoundaryTool) or tool.boundary is not self or tool.tool_def.name != name:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        descriptor = tool.descriptor
         path_fields = descriptor.workspace_path_fields
-        raw_toolset, raw_tool = await self._raw_tool(name, ctx)
+        raw_toolset, raw_tool = tool.source_toolset, tool.source_tool
         call_id = ctx.tool_call_id
         if not isinstance(call_id, str) or not call_id:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -335,10 +359,16 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         bridge = self._tool_operations
         replay_safe = descriptor.effect_policy == "replay_safe"
         decision = None
-        if descriptor.effect_owner != "none":
+        prior_call = bridge is not None and descriptor.effect_owner == "none" and bool(
+            await bridge.existing_call_ids((call_id,))
+        )
+        if descriptor.effect_owner != "none" or prior_call:
             if bridge is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            decision = await bridge.begin(ctx, call, tool.tool_def, final_args, replay_safe)
+            decision = await bridge.begin(
+                ctx, call, tool.tool_def, final_args, replay_safe,
+                capability_ref=descriptor.capability_ref,
+            )
 
         async def invoke(args: dict[str, Any]) -> Any:
             result = await raw_toolset.call_tool(name, args, ctx, raw_tool)
@@ -371,7 +401,6 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise decision.cached_error
         if decision.has_cached_result:
             return decision.cached_result
-
         observation: Observation | None = None
 
         def capture(value: Observation) -> None:
@@ -462,16 +491,6 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             if observation is not None and self._tool_metrics is not None:
                 await self._tool_metrics.record(observation)
 
-    async def _raw_tool(
-        self,
-        name: str,
-        ctx: PydanticRunContext[AgentContext[object]],
-    ) -> tuple[AbstractToolset[AgentContext[object]], ToolsetTool[AgentContext[object]]]:
-        raw_tool = self._raw_tools.get(name)
-        if raw_tool is not None:
-            return raw_tool
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
     async def _invoke(
         self,
         call: ToolCallPart,
@@ -530,6 +549,11 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         *,
         approved: bool,
     ) -> None:
+        require_tool_effects(
+            self._tool_effects,
+            kind="tool" if descriptor.capability_ref is None else descriptor.capability_ref.kind,
+            effect_policy=descriptor.effect_policy,
+        )
         policy = self._permission_policy
         if policy is None or (
             not descriptor.tool_class.startswith("filesystem")
@@ -592,8 +616,11 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         return result
 
 __all__ = [
+    "TOOL_CAPABILITY_REF_METADATA_KEY",
+    "tool_capability_ref",
     "ManagedToolDescriptor",
     "managed_tool_descriptor_from_metadata",
+    "require_tool_effects",
     "RepositoryInstructionBoundary",
     "BoundaryToolset",
 ]

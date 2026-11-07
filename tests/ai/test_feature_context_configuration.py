@@ -14,7 +14,7 @@ from pydantic_ai.capabilities import CombinedCapability, PrefixTools
 
 from linktools.ai.capability import ToolResponsesCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import AuthorizationAction, PromptLimits, ResourceKind, ResourceRef, service_principal
+from linktools.ai.core import AuthorizationAction, ExecutionStatus, PromptLimits, ResourceKind, ResourceRef, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.history import History
@@ -22,6 +22,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 
 from .test_tool_response_fixture import _manifest, _store
+from .test_explicit_runtime_features import _FeatureModels
 
 
 class Policy:
@@ -42,7 +43,8 @@ class Policy:
 async def test_runtime_borrows_dynamic_policy_and_capture_freezes_limits():
     policy = Policy()
     limits = PromptLimits(max_binary_input_parts=1)
-    capture = await RuntimeFeatures('policy', limits=limits).capture()
+    features = RuntimeFeatures('policy', limits=limits)
+    capture = await features.resolve()
     assert capture.limits is limits
     with pytest.raises(FrozenInstanceError):
         capture.limits = PromptLimits()
@@ -50,7 +52,7 @@ async def test_runtime_borrows_dynamic_policy_and_capture_freezes_limits():
         limits.max_binary_input_parts = 2
     async with Runtime.open(
         'policy', storage=PersistenceStorage.in_memory(),
-        features=capture, authorization=policy,
+        features=features.borrow(), authorization=policy,
     ) as runtime:
         assert (await runtime.history.list_sessions(principal=runtime.default_principal)).items == ()
         assert policy.calls
@@ -87,7 +89,7 @@ async def test_runtime_uses_host_policy_and_captured_limits_when_filter_rejects_
 @pytest.mark.asyncio
 @pytest.mark.parametrize('tenant', ('one', 'two'))
 async def test_default_policy_resolves_per_open_tenant(tenant):
-    capture = await RuntimeFeatures('reused').capture()
+    capture = RuntimeFeatures('reused').borrow()
     async with Persistence.open('test', storage=PersistenceStorage.in_memory(), tenant_id=tenant) as persistence_86, Runtime.attach(persistence=persistence_86, context=ExecutionContext(None), features=capture) as runtime:
         policy = runtime._execution_service._authorization
         ref = ResourceRef(ResourceKind.EXECUTION, 'execution', tenant)
@@ -109,7 +111,7 @@ async def test_history_uses_current_host_policy(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
+async def test_response_capability_scope_uniqueness_and_admission_consumption():
     store, fixture = await _store(_manifest())
     try:
         feature = ToolResponsesCapability(fixture)
@@ -121,15 +123,26 @@ async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
         assert caught.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
         features = RuntimeFeatures('responses')
         features.capability(feature, scope='runtime')
+        replacement = ToolResponsesCapability(fixture)
+        features.capability(replacement, scope='runtime')
+        current = await features.resolve()
+        assert [item.value for item in current.contributions] == [replacement]
         with pytest.raises(AIError) as caught:
-            features.capability(ToolResponsesCapability(fixture), scope='runtime')
+            RuntimeFeatures('duplicate').capability(CombinedCapability([feature, replacement], id='duplicate.responses'))
         assert caught.value.code is ErrorCode.CAPABILITY_CONFLICT
-        async with Persistence.open('test', storage=PersistenceStorage.in_memory()) as persistence_125, Runtime.attach(persistence=persistence_125, features=features) as runtime:
-            assert runtime._execution_service._tool_responses is fixture
         wrapped = RuntimeFeatures('wrapped')
         wrapped.capability(PrefixTools(CombinedCapability([ToolResponsesCapability(fixture)]), prefix='test'), id='wrapped.responses', scope='runtime')
-        async with Persistence.open('wrapped', storage=PersistenceStorage.in_memory()) as persistence_129, Runtime.attach(persistence=persistence_129, features=wrapped) as runtime:
-            assert runtime._execution_service._tool_responses is fixture
+        for declared in (features, wrapped):
+            async with Runtime.open(
+                declared.id, storage=PersistenceStorage.in_memory(),
+                features=model_features(_FeatureModels(), declared),
+            ) as runtime:
+                execution = await runtime.agents.get().start("Use the declared fixture")
+                assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+                record = await runtime._state.execution.executions.get(
+                    execution.execution_id, tenant_id=runtime.tenant_id,
+                )
+                assert record is not None and record.tool_response_ref == fixture.ref
     finally:
         await store.close()
 
@@ -194,7 +207,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     group = _features(ExecutionCapability(retain_history=True), TraceCapability())
     policy = Policy()
     group.model("default", _FeatureModels())
-    capture = await group.capture()
+    capture = group.borrow()
     async with Persistence.open('restore-policy', storage=source_storage()) as persistence_198, Runtime.attach(persistence=persistence_198, features=capture, authorization=policy) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
@@ -220,7 +233,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
         pytest.fail('restored history must not capture unavailable source declarations')
 
     if not captured:
-        monkeypatch.setattr(group, 'capture', forbidden_capture)
+        monkeypatch.setattr(group, 'resolve', forbidden_capture)
     async with restored.open_history(authorization=policy) as history:
         assert history._authorization is policy
         assert (await history.result(execution_id, principal=principal)).output == {'text': 'done'}

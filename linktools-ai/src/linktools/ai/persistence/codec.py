@@ -34,6 +34,7 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from ..asset import AssetVersionRef
+from ..spec import CapabilityRef
 from ..evaluation import (
     CandidateContract,
     CandidateSlotRef,
@@ -350,6 +351,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("transcript_seek_dimension", TranscriptSeekDimension),
     ("transcript_seek", TranscriptSeekRecord),
     ("transcript_span_ref", TranscriptSpanRef),
+    ("capability_ref", CapabilityRef),
     ("tool_operation_admission", ToolOperationAdmission),
     ("runtime_domain", PersistenceDomain),
     ("task_graph", TaskGraph),

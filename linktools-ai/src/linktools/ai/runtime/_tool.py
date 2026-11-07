@@ -40,6 +40,7 @@ from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_run
 from ..persistence import PersistenceDomain
 from ..persistence.state import Observed
 from ..persistence.contracts import ToolOperationAdmission
+from ..spec import CapabilityRef
 from ..persistence.durability import CommitObservation, DurableCommitState, await_owned_task, run_durable_commit
 from ..persistence.contracts import ToolOperationRecord, decode_tool_operation_failure
 
@@ -62,6 +63,7 @@ class ToolOperationDecision:
     cached_error: ToolCallRetry | ToolCallFailed | None = None
     budget_admitted: bool = False
     staged: bool = False
+    capability_ref: CapabilityRef | None = None
 
 
 class PendingToolOperations(Protocol):
@@ -96,7 +98,10 @@ class ToolOperationBridge(Protocol):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         replay_safe: bool,
+        *,
+        capability_ref: CapabilityRef | None = None,
     ) -> ToolOperationDecision | None: ...
+
 
     async def require_active(self) -> None: ...
 
@@ -473,8 +478,11 @@ class RuntimeToolOperationBridge:
         tool_def: ToolDefinition,
         args: dict[str, Any],
         replay_safe: bool,
+        *,
+        capability_ref: CapabilityRef | None = None,
     ) -> "ToolOperationDecision | None":
-        if not isinstance(replay_safe, bool):
+        if (not isinstance(replay_safe, bool)
+                or capability_ref is not None and not isinstance(capability_ref, CapabilityRef)):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self._before_effect is not None and self._pending_tools is None:
             await self._before_effect()
@@ -484,13 +492,18 @@ class RuntimeToolOperationBridge:
         fingerprint = (tool_def.name, arguments_digest)
         prior = self._decisions.get(key)
         if prior is not None:
-            if (
-                prior.replay_safe is not replay_safe
-                or self._decision_fingerprints.get(key) != fingerprint
-            ):
+            if self._decision_fingerprints.get(key) != fingerprint:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             observed = self._effect_receipts.get(call.tool_call_id)
             receipt = None if observed is None else observed.value
+            settled = (prior.has_cached_result or prior.cached_error is not None
+                       or receipt is not None and receipt.status in {
+                           ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED,
+                       })
+            original = prior.capability_ref
+            requested = capability_ref
+            if not settled and not prior.staged and (prior.replay_safe is not replay_safe or original != requested):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if receipt is not None and receipt.status is ToolOperationStatus.CLAIMED:
                 if self._budget_scope_id is not None:
                     raise AIError(ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED, safe_details={
@@ -537,6 +550,7 @@ class RuntimeToolOperationBridge:
             owner=self._owner,
             arguments_payload=arguments_payload,
             producer_generation=self._producer_generation,
+            capability_ref=capability_ref,
         )
         event = None
         known_new = (operation_id not in self._admission_attempts
@@ -693,11 +707,20 @@ class RuntimeToolOperationBridge:
         staged = None if self._pending_tools is None else self._pending_tools.pending_tool_operations()
         if staged is not None:
             return frozenset(value.tool_call_id for value in staged if value.tool_call_id in tool_call_ids)
-        return await self._repository.existing_call_ids(
-            self._agent_run_id,
-            tool_call_ids,
-            tenant_id=self._tenant_id,
-        )
+        known = frozenset(call_id for call_id in tool_call_ids if call_id in self._effect_receipts)
+        missing = tuple(call_id for call_id in tool_call_ids if call_id not in known)
+        if self._fresh_execution and self._recovery_agent_run_id is None:
+            missing = tuple(call_id for call_id in missing
+                            if self._operation_id(self._agent_run_id, call_id) in self._admission_attempts)
+        if not missing:
+            return known
+        for run_id in dict.fromkeys((self._agent_run_id, self._recovery_agent_run_id)):
+            if run_id is not None:
+                known |= await self._repository.existing_call_ids(run_id, missing, tenant_id=self._tenant_id)
+                missing = tuple(call_id for call_id in missing if call_id not in known)
+                if not missing:
+                    break
+        return known
 
     def confirmed_terminal_operations(
         self, *, execution: "ExecutionRecord | None" = None,
@@ -740,8 +763,12 @@ class RuntimeToolOperationBridge:
         existing: ToolOperationRecord,
         replay_safe: bool,
     ) -> "ToolOperationDecision":
-        if existing.execution_id != self._execution_id or existing.replay_safe is not replay_safe:
+        if (existing.execution_id != self._execution_id
+                or existing.replay_safe is not replay_safe and existing.status not in {
+                    ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED,
+                }):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        replay_safe = existing.replay_safe
         if existing.status is ToolOperationStatus.COMPLETED:
             if existing.result_payload is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -752,6 +779,7 @@ class RuntimeToolOperationBridge:
                 replay_safe,
                 cached_result=await self._decode_result(existing),
                 has_cached_result=True,
+                capability_ref=existing.capability_ref,
             )
         if existing.status is ToolOperationStatus.FAILED:
             return ToolOperationDecision(
@@ -760,6 +788,7 @@ class RuntimeToolOperationBridge:
                 existing.fence,
                 replay_safe,
                 cached_error=await self._decode_error(existing),
+                capability_ref=existing.capability_ref,
             )
         if existing.status is ToolOperationStatus.EFFECT_UNKNOWN:
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
@@ -768,6 +797,7 @@ class RuntimeToolOperationBridge:
         return ToolOperationDecision(
             existing.tool_operation_id, self._owner, existing.fence, replay_safe,
             budget_admitted=self._budget_scope_id is not None,
+            capability_ref=existing.capability_ref,
         )
 
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:

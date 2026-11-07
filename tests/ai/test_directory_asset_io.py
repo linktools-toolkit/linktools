@@ -98,7 +98,7 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
     try:
         asset_features = RuntimeFeatures("application")
         asset_features.capability(AssetCapability(store), scope="runtime")
-        capture = await asset_features.capture()
+        capture = await asset_features.resolve()
         definition = next(
             item.value
             for item in capture.contributions
@@ -106,7 +106,7 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
         )
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
-        source = AssetSkillSource("application", capture.asset_reader)
+        source = AssetSkillSource(definition.source_ref.source_id, capture.asset_reader)
         view = await source.inspect(definition.source_ref)
 
         assert view.location.kind == "local"

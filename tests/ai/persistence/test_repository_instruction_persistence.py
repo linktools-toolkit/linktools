@@ -5,7 +5,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from linktools.ai.agent import AgentBindingContract, CapabilityPin
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import SkillDefinition, SkillResource, SkillSourceRef
@@ -117,9 +117,8 @@ def test_instruction_aware_execution_round_trips_exact_pin() -> None:
     assert decoded.repository_instructions == reference
 
 
-def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
+def test_skill_asset_fields_remain_separate_from_runtime_object_refs() -> None:
     reference = _instruction_ref(object_backed=True)
-    output = bind_output()
     asset = AssetVersionRef(
         AssetKey("skill", "review/guide.md"),
         "application",
@@ -138,15 +137,9 @@ def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
     source = contract["source"]
     assert isinstance(source, dict)
     source["future_metadata"] = {"version": 2}
-    binding = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
-        model_contract={"route_id": "model", "model_identity": "test:model"},
-        selected=(CapabilityPin("skill", "review", contract),),
-        subagents=(),
-        output_mode=output.mode,
-        output_schema=output.schema_definition,
-    )
-    execution = replace(_execution(reference), binding=binding)
+    restored = SkillDefinition.from_contract(contract)
+    assert restored.source_ref.resources[0].asset == asset
+    execution = _execution(reference)
 
     refs = tuple(
         iter_runtime_object_refs(

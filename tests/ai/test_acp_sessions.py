@@ -173,7 +173,7 @@ async def test_acp_application_can_serve_again_after_transport_failure(
         assert namespace == "default"
         assert storage is application.storage
         assert authorization is application.authorization
-        captures.append(await features.capture())
+        captures.append(await features.resolve())
         try:
             yield SimpleNamespace(default_principal=service_principal("default", "acp"))
         finally:
@@ -192,6 +192,8 @@ async def test_acp_application_can_serve_again_after_transport_failure(
     await application.serve()
 
     assert len(captures) == len(closed) == 2
-    assert captures[0].contributions == captures[1].contributions
+    assert tuple((item.kind, item.id, item.revision, item.contract) for item in captures[0].contributions) == tuple(
+        (item.kind, item.id, item.revision, item.contract) for item in captures[1].contributions
+    )
     assert all(capture.models["default"] is binding for capture in captures)
     assert all(capture.workspace is application.workspace for capture in captures)

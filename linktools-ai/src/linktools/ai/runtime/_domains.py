@@ -32,7 +32,7 @@ class RuntimeAgents(Generic[AppT]):
         return self._get_agent(agent_id)
 
     def restore(self, binding: AgentBindingContract) -> "Agent[AppT]":
-        """Restore the immutable behavior recorded with a prior execution."""
+        """Keep recorded behavior; resolve current resources when observed or started."""
         return self._restore_agent(binding)
 
 
@@ -156,7 +156,10 @@ class RuntimeExecutions(Generic[AppT]):
         """Take over recoverable work after its previous executor stopped.
 
         Reusing a key observes the same recovery attempt. Without a key each
-        invocation can supersede an earlier attempt.
+        invocation can supersede an earlier attempt. A deferred execution resumes
+        only when its persisted approvals and external results are complete. An
+        incomplete frontier stays waiting without consuming the key, so the same
+        key can be retried after its results arrive.
         """
         self._ensure_open()
         return await self._service.recover(

@@ -51,6 +51,8 @@ from ..core import (
     ThinkingValue,
     UsageMetrics,
     normalize_correlation,
+    normalize_tool_effects,
+    ToolEffects,
     normalize_execution_mode,
     normalize_thinking,
     validate_idempotency_key,
@@ -109,10 +111,12 @@ class ExecutionRequest:
     input_context: ExecutionInputContext | None = None
     budget: RunBudget | None = None
     tool_response_ref: AssetVersionRef | None = None
+    tool_effects: ToolEffects = "live"
     # Ephemeral admission state; never included in durable request projections.
     resolved_binding: AgentBinding | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        normalize_tool_effects(self.tool_effects)
         if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.budget is not None and not isinstance(self.budget, RunBudget):

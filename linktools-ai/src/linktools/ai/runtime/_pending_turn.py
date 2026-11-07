@@ -71,10 +71,7 @@ class _PendingExecutionTurn:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             current = self.tool_operations.get(request.tool_operation_id)
             if current is not None:
-                if any(getattr(current, name) != getattr(request, name) for name in (
-                    "execution_id", "agent_run_id", "tool_call_id", "idempotency_key_digest",
-                    "tool_name", "arguments_digest", "binding_digest", "replay_safe", "arguments_payload",
-                )):
+                if not current.matches_admission(request):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 if current.status is not ToolOperationStatus.PENDING:
                     return current
@@ -87,6 +84,7 @@ class _PendingExecutionTurn:
                     request.idempotency_key_digest, request.tool_name, request.arguments_digest,
                     request.binding_digest, True, ToolOperationStatus.CLAIMED, request.owner, 1, None, now, now,
                     producer_generation=request.producer_generation, arguments_payload=request.arguments_payload,
+                    capability_ref=request.capability_ref,
                 )
             self.tool_operations[current.tool_operation_id] = current
             return current
@@ -185,6 +183,10 @@ class _PendingExecutionTurns:
 
     def bind_coordination(self, coordination: PendingTurnCoordination | None) -> None:
         self.coordination = coordination
+
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._executions)
 
     async def read_remote_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         if self.coordination is None:
