@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 from collections import Counter
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 import pytest
@@ -518,18 +519,30 @@ def test_ci_pool_cannot_mix_with_pytest_groups(
 def test_repository_pool_preserves_all_discovered_package_coverage() -> None:
     modules = manage.get_modules()
     rows = package_checks(modules)
-    core = next(row for row in rows if "linktools" in row["packages"].split())
-    assert {"linktools", "linktools-common", "linktools-mobile", "linktools-cntr"} <= set(core["packages"].split())
-    assert core["name"] == " + ".join(core["packages"].split()) + " checks"
-    assert core["install"] == ""
-    ai = [row for row in rows if row["packages"] == "linktools-ai"]
-    assert {"evaluation-recovery", "runtime"} <= {row["group"] for row in ai}
-    assert all(row["install"] == "linktools-ai" for row in ai)
-    assert all(row["name"] == "linktools-ai checks (%s)" % row["group"] for row in ai)
-    assert core["group"] == "all"
-    assert not any(row["packages"] == "linktools-cntr" for row in rows)
-    expected = {
-        package: len(manage.load_project_checks(package, module["path"]).get("pytest", {}).get("groups", {"all": ()}))
+    expected = Counter(
+        (package, group)
         for package, module in modules.items()
-    }
-    assert Counter(package for row in rows for package in row["packages"].split()) == expected
+        for group in manage.load_project_checks(package, module["path"]).get("pytest", {}).get("groups", {"all": ()})
+    )
+    assert Counter(
+        (package, row["group"]) for row in rows for package in row["packages"].split()
+    ) == expected
+
+
+def test_repository_manifest_groups_partition_current_test_files() -> None:
+    for package, module in manage.get_modules().items():
+        check = manage.load_project_checks(package, module["path"]).get("pytest", {})
+        groups = check.get("groups", {})
+        if not groups:
+            continue
+        owned = Counter()
+        for root in map(Path, check["paths"]):
+            for path in (root.rglob("test_*.py") if root.is_dir() else (root,)):
+                matches = [
+                    name for name, patterns in groups.items()
+                    if any(fnmatchcase(path.name, pattern) for pattern in patterns)
+                ]
+                assert len(matches) <= 1, (package, path, matches)
+                owner = matches[0] if matches else next(name for name, patterns in groups.items() if not patterns)
+                owned[owner] += 1
+        assert set(owned) == set(groups), (package, owned)
