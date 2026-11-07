@@ -17,7 +17,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentBindingContract
+from pydantic import BaseModel
+
+from linktools.ai.agent import AgentBindingContract, bind_output
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
@@ -34,6 +36,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.runtime import Runtime
+from linktools.ai.runtime.agent_execution import AgentExecutionPort
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.task import (
@@ -111,6 +114,7 @@ async def _graph_recovery(
     capture_phase: str | None = None,
     capture_status: ExecutionStatus = ExecutionStatus.STARTED,
     error_origin: str = "node",
+    output_type: type[BaseModel] | None = None,
 ) -> AsyncIterator[tuple[Runtime, PersistenceStorage, DefaultTaskGraphService, _RecoveryBackend, _Launcher, _GraphAuthorization]]:
     authorization = _GraphAuthorization()
     storage = PersistenceStorage.in_memory()
@@ -119,7 +123,7 @@ async def _graph_recovery(
     async with Persistence.open('bound-recovery', storage=storage) as persistence_115, Runtime.attach(persistence=persistence_115, authorization=authorization, features=model_features(create_model(api='openai', model='gpt-test'), capabilities)) as runtime, TaskEngine.open(persistence=persistence_115, authorization=authorization, context=runtime.context) as runtime_engine:
         task = Task.from_agent("test.bound-agent", runtime.agents.get("default"))
         graph = TaskGraph("bound-graph", tuple(
-            TaskNode(node_id, task=task, input={"prompt": "recover"})
+            TaskNode(node_id, task=task, input={"prompt": "recover"}, output_type=output_type)
             for node_id in node_ids
         ))
         submission = await runtime_engine.with_definitions(task).prepare_submission(
@@ -130,6 +134,9 @@ async def _graph_recovery(
         assert runner is not None
         await runner.activate_graph(submission.graph, (runtime_engine._bind_agent_task(task),), ())
         binding = AgentBindingContract.from_payload(task.contract["config"]["binding_contract"])
+        if output_type is not None:
+            output = bind_output(output_type)
+            binding = replace(binding, output_mode=output.mode, output_schema=output.schema_definition)
         leases = []
         for node_id in node_ids:
             status = (capture_status if capture_phase is not None else
@@ -280,10 +287,17 @@ async def test_graph_run_actor_recovers_bound_agent_without_execution_control_pe
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mismatch", ["principal", "binding", "unbound"])
-async def test_graph_recovery_rejects_untrusted_execution_binding_before_takeover(mismatch: str) -> None:
-    async with _graph_recovery() as (_runtime, storage, service, backend, launcher, _authorization):
-        current = await storage.execution.executions.get("execution-agent", tenant_id="default")
+@pytest.mark.parametrize("mismatch,node_ids", [
+    ("principal", ("agent",)),
+    ("binding", ("agent",)),
+    ("unbound", ("agent",)),
+    ("binding", ("first", "second")),
+])
+async def test_graph_recovery_rejects_untrusted_execution_binding_before_takeover(
+    mismatch: str, node_ids: tuple[str, ...],
+) -> None:
+    async with _graph_recovery(node_ids) as (_runtime, storage, service, backend, launcher, _authorization):
+        current = await storage.execution.executions.get(f"execution-{node_ids[-1]}", tenant_id="default")
         assert current is not None
         changes = {
             "principal": {"principal_kind": "service"},
@@ -478,3 +492,51 @@ async def test_bound_recovery_retains_validated_contracts_across_terminal_cleanu
         finally:
             release.set()
             await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_bound_recovery_projects_node_output_and_preserves_producer_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Answer(BaseModel):
+        answer: str
+
+    resolved, attached, recovered = [], [], []
+    resolve_contract = AgentExecutionPort.resolve_contract
+    get = AgentExecutionPort.get
+    recover = AgentExecutionPort.recover_bound_execution
+
+    async def resolve_on_producer(self, contract):
+        resolved.append((self, contract))
+        return await resolve_contract(self, contract)
+
+    async def attach_on_producer(self, execution_id, principal):
+        attached.append((self, execution_id, principal))
+        return await get(self, execution_id, principal)
+
+    async def recover_on_producer(self, execution, *, recovery_operation):
+        recovered.append((self, execution, recovery_operation))
+        return await recover(self, execution, recovery_operation=recovery_operation)
+
+    monkeypatch.setattr(AgentExecutionPort, "resolve_contract", resolve_on_producer)
+    monkeypatch.setattr(AgentExecutionPort, "get", attach_on_producer)
+    monkeypatch.setattr(AgentExecutionPort, "recover_bound_execution", recover_on_producer)
+    async with _graph_recovery(output_type=Answer) as (
+        _runtime, storage, service, backend, launcher, _authorization,
+    ):
+        resolved.clear()
+        expected = await storage.execution.executions.get("execution-agent", tenant_id="default")
+        await service.recover("bound-graph", RecoverGraphRequest(_ACTOR, "recover-output-projection"))
+        assert resolved and attached and recovered
+        port = resolved[0][0]
+        for producer, contract in resolved:
+            assert producer is port
+            assert contract == expected.binding
+            assert contract.output_mode == "structured"
+            assert contract.output_schema == bind_output(Answer).schema_definition
+        assert all(call == (port, expected.execution_id, _ORIGIN) for call in attached)
+        for producer, execution, operation in recovered:
+            assert producer is port
+            assert execution == expected
+            assert operation in backend.operations
+        assert launcher.launches[0].principal == _ORIGIN

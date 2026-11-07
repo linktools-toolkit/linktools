@@ -119,7 +119,8 @@ coverage remains in the repository tests.
 
 TaskEngine composes graph services and binds declarations. AgentTaskRunner owns
 Agent-node output selection, input capture, producer start/get, invocation
-recording and dependency-hold acquisition. It receives the original producer
+recording, dependency-hold acquisition and Agent-specific recovery adaptation.
+It receives the original producer
 port and the Task services already selected by the engine, rather than a second
 set of independent callbacks for the same operations.
 
@@ -133,6 +134,19 @@ The existing port's dispatch remains intentional: start/get call the port's
 methods, while inspection and retention use its service. These two surfaces
 are not required to be the same object. No new identity check or forwarding
 API is needed to preserve advanced producer implementations.
+
+Recovery retains three phases: resolve all admitted Agent bindings, validate
+all referenced executions, then dispatch eligible producers. The Task executor
+owns graph authorization, admission, original-principal checks, node fencing
+and post-dispatch readback. AgentTaskRunner projects each node's output contract
+onto its admitted Agent binding and uses the original port for resolution and
+takeover. It also retains the live invocation-capture handoff exception and
+the original execution deadline; an expired execution is reattached for
+settlement without dispatching another model or tool.
+
+Reattachment uses the graph's admitted principal. The recovery operation's
+request identity instead records the authorized recovery actor. No new
+application call, port method, persisted contract or lifecycle is required.
 
 ## Remaining internal design work
 

@@ -4,7 +4,6 @@
 
 import asyncio
 import re
-import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -21,9 +20,6 @@ from ...core import (
     AuthorizationPolicy,
     ExecutionStatus,
     JsonValue,
-    OperationKind,
-    OperationLedgerInput,
-    OperationStatus,
     Principal,
     ResourceKind,
     ResourceRef,
@@ -32,7 +28,6 @@ from ...core import (
     ThinkingValue,
     canonical_sha256,
     deterministic_id,
-    idempotency_key_digest,
     normalize_json_value,
     normalize_thinking,
     principal_identity_payload,
@@ -1315,22 +1310,12 @@ class TaskNodeExecutor(Generic[AppT]):
                 handler.runner, AgentTaskRunner,
             ):
                 continue
-            if self._execution_state is None or handler.runner.execution_port is None:
+            if self._execution_state is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             declaration = self._validate_task_declaration(
                 task_id, task_revision, graph_id=graph_id, node_id=node.node_id,
             )
-            config = declaration.get("config")
-            if not isinstance(config, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expected_binding = AgentBindingContract.from_payload(config.get("binding_contract"))
-            if node.output_contract is not None:
-                output = _restore_output_contract(node.output_contract)
-                expected_binding = replace(
-                    expected_binding, output_mode=output.mode,
-                    output_schema=output.schema_definition,
-                )
-            expected_binding = await handler.runner.execution_port.resolve_contract(expected_binding)
+            expected_binding = await handler.runner.resolve_recovery_binding(declaration, node=node)
             bindings.append((node, node_state, expected_binding, handler.runner))
 
         candidates: list[tuple[TaskNode, TaskNodeView, ExecutionRecord, AgentTaskRunner]] = []
@@ -1367,58 +1352,14 @@ class TaskNodeExecutor(Generic[AppT]):
 
         for node, node_state, execution, agent_runner in candidates:
             node_state = await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
-            port = agent_runner.execution_port
-            assert port is not None
             await agent_runner.bind_existing_execution(execution.execution_id, admission.principal)
-            if (
-                node_state.status is TaskStatus.RECOVERY_REQUIRED
-                and node_state.error_code == ErrorCode.STORAGE_RECOVERY_REQUIRED.value
-                and node_state.error_origin == "execution"
-                and node_state.safe_error_details.get("phase") == "task_invocation_capture_cancel"
-                and execution.status is ExecutionStatus.STARTED
-                and port.owns_execution(execution.execution_id, tenant_id=tenant_id)
+            if not await agent_runner.recover_bound_execution(
+                execution, graph_id=graph_id, node=node, node_state=node_state,
+                request=request,
+                budget_scope=self._budget_scopes.get(graph_id),
             ):
-                # Only an unfinished invocation-capture handoff may reattach its
-                # live owner. Other explicit graph recovery still requires takeover.
                 continue
-            now = datetime.now(timezone.utc)
-            deadline = AgentTaskRunner.deadline_policy(
-                node, execution.started_at, self._budget_scopes.get(graph_id),
-            )
-            if deadline is not None and deadline[0] <= now:
-                # Reattach the bound waiter to cancel/read back expired execution;
-                # recovery must not dispatch another model or tool first.
-                continue
-            operation = OperationLedgerInput(
-                operation_id=canonical_sha256({
-                    "action": "task.bound_execution.recover",
-                    "graph_operation_id": idempotency_key_digest(request.idempotency_key),
-                    "graph_id": graph_id,
-                    "node_id": node.node_id,
-                    "execution_id": execution.execution_id,
-                }),
-                tenant_id=tenant_id,
-                resource_kind=ResourceKind.EXECUTION,
-                resource_id=execution.execution_id,
-                execution_id=execution.execution_id,
-                operation_kind=OperationKind.EXECUTION_RECOVER,
-                status=OperationStatus.RUNNING,
-                request_digest=canonical_sha256({
-                    "action": "task.bound_execution.recover",
-                    "principal": principal_identity_payload(request.principal),
-                    "graph_id": graph_id,
-                    "node_id": node.node_id,
-                    "execution_id": execution.execution_id,
-                }),
-                result_ref=uuid.uuid4().hex,
-                result_digest=None,
-                error_code=None,
-                compactable=False,
-                created_at=now,
-                updated_at=now,
-            )
             assert self._execution_state is not None
-            await port.recover_bound_execution(execution, recovery_operation=operation)
             latest = await self._execution_state.get(execution.execution_id, tenant_id=tenant_id)
             if latest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

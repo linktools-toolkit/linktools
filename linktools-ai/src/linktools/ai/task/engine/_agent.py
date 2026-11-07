@@ -3,8 +3,10 @@
 """Agent execution adapter for TaskGraph nodes."""
 
 import asyncio
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
+from dataclasses import replace
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from linktools.core import environ
@@ -16,9 +18,15 @@ from ...core import (
     ImmutableJsonMapping,
     ExecutionStatus,
     JsonValue,
+    OperationKind,
+    OperationLedgerInput,
+    OperationStatus,
+    ResourceKind,
+    TaskStatus,
     Principal,
     ThinkingValue,
     canonical_sha256,
+    idempotency_key_digest,
     normalize_json_value,
     normalize_thinking,
     principal_identity_payload,
@@ -49,7 +57,8 @@ if TYPE_CHECKING:
     from ...inputs import ExecutionInputMaterializer
     from ...runtime.agent_execution import AgentExecutionPort
     from ...core import RunBudget
-    from ...execution import Execution, ExecutionView
+    from ...task import RecoverGraphRequest, TaskNodeView
+    from ...execution import Execution, ExecutionRecord, ExecutionView
     from ...persistence import Persistence
     from ...persistence.contracts import TaskAdmissionRepository, BudgetRepository
     from ._runner import TaskNodeExecutor
@@ -257,6 +266,88 @@ class AgentTaskRunner(Generic[AppT]):
 
     async def bind_existing_execution(self, execution_id: str, principal: Principal) -> None:
         await self._get_execution(execution_id, principal)
+
+    async def resolve_recovery_binding(
+        self, declaration: Mapping[str, JsonValue], *, node: TaskNode,
+    ) -> AgentBindingContract:
+        """Restore the Agent binding projected from the admitted Task declaration."""
+        if self.execution_port is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        config = declaration.get("config")
+        if not isinstance(config, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        binding = AgentBindingContract.from_payload(config.get("binding_contract"))
+        if node.output_contract is not None:
+            try:
+                output = restore_output(node.output_contract["mode"], node.output_contract["schema"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+            binding = replace(binding, output_mode=output.mode, output_schema=output.schema_definition)
+        return await self.execution_port.resolve_contract(binding)
+
+    async def recover_bound_execution(
+        self,
+        execution: "ExecutionRecord",
+        *,
+        graph_id: str,
+        node: TaskNode,
+        node_state: "TaskNodeView",
+        request: "RecoverGraphRequest",
+        budget_scope: "tuple[str, RunBudget] | None",
+    ) -> bool:
+        """Resume a bound producer unless live handoff or its deadline requires reattachment only."""
+        tenant_id = request.principal.tenant_id
+        port = self.execution_port
+        assert port is not None
+        if (
+            node_state.status is TaskStatus.RECOVERY_REQUIRED
+            and node_state.error_code == ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+            and node_state.error_origin == "execution"
+            and node_state.safe_error_details.get("phase") == "task_invocation_capture_cancel"
+            and execution.status is ExecutionStatus.STARTED
+            and port.owns_execution(execution.execution_id, tenant_id=tenant_id)
+        ):
+            # Only an unfinished invocation-capture handoff may reattach its
+            # live owner. Other explicit graph recovery still requires takeover.
+            return False
+        now = datetime.now(timezone.utc)
+        deadline = AgentTaskRunner.deadline_policy(
+            node, execution.started_at, budget_scope,
+        )
+        if deadline is not None and deadline[0] <= now:
+            # Reattach the bound waiter to cancel/read back expired execution;
+            # recovery must not dispatch another model or tool first.
+            return False
+        operation = OperationLedgerInput(
+            operation_id=canonical_sha256({
+                "action": "task.bound_execution.recover",
+                "graph_operation_id": idempotency_key_digest(request.idempotency_key),
+                "graph_id": graph_id,
+                "node_id": node.node_id,
+                "execution_id": execution.execution_id,
+            }),
+            tenant_id=tenant_id,
+            resource_kind=ResourceKind.EXECUTION,
+            resource_id=execution.execution_id,
+            execution_id=execution.execution_id,
+            operation_kind=OperationKind.EXECUTION_RECOVER,
+            status=OperationStatus.RUNNING,
+            request_digest=canonical_sha256({
+                "action": "task.bound_execution.recover",
+                "principal": principal_identity_payload(request.principal),
+                "graph_id": graph_id,
+                "node_id": node.node_id,
+                "execution_id": execution.execution_id,
+            }),
+            result_ref=uuid.uuid4().hex,
+            result_digest=None,
+            error_code=None,
+            compactable=False,
+            created_at=now,
+            updated_at=now,
+        )
+        await port.recover_bound_execution(execution, recovery_operation=operation)
+        return True
 
     def validate_binding(self, persistence_owner: object, task: Task[AppT]) -> None:
         if persistence_owner is not self._persistence_owner:
