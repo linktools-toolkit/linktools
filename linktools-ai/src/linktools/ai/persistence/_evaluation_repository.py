@@ -471,16 +471,23 @@ class EvaluationRepositoryImpl(RepositoryBase):
         dataset = await self._decode(row, EvaluationDatasetRecord)
         if dataset.content_expires_at is not None and dataset.content_expires_at <= now:
             return True
-        for case_ref in dataset.contract.ordered_case_refs:
-            identity = [case_ref.dataset_id, case_ref.case_id, case_ref.revision]
-            row = await transaction.get_record(self._key("evaluation_case", identity))
-            if row is None:
-                if await transaction.get_record(self._key("evaluation_content_tombstone", ["evaluation_case", identity])) is not None:
+        references = dataset.contract.ordered_case_refs
+        for offset in range(0, len(references), 64):
+            identities = tuple([ref.dataset_id, ref.case_id, ref.revision]
+                               for ref in references[offset:offset + 64])
+            keys = tuple(self._key("evaluation_case", identity) for identity in identities)
+            tombstones = tuple(self._key("evaluation_content_tombstone", ["evaluation_case", identity])
+                               for identity in identities)
+            records = await transaction.get_records((*keys, *tombstones))
+            for key, tombstone in zip(keys, tombstones):
+                row = records.get(key)
+                if row is None:
+                    if records.get(tombstone) is not None:
+                        return True
+                    continue
+                case = await self._decode(row, EvaluationCaseRecord)
+                if case.content_expires_at is not None and case.content_expires_at <= now:
                     return True
-                continue
-            case = await self._decode(row, EvaluationCaseRecord)
-            if case.content_expires_at is not None and case.content_expires_at <= now:
-                return True
         return False
 
     async def purge_expired_datasets(

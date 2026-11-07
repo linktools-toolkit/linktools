@@ -117,7 +117,9 @@ class _TaskRepository(Protocol):
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView | None": ...
 
-    async def list_nodes(self, graph_id: str, *, tenant_id: str) -> "tuple[TaskNodeView, ...]": ...
+    async def get_node_states(
+        self, graph_id: str, node_ids: "tuple[str, ...]", *, tenant_id: str
+    ) -> "tuple[TaskNodeView, ...]": ...
 
     async def get_results(
         self,
@@ -2288,8 +2290,9 @@ class LocalTaskGraphLauncher:
     ) -> "tuple[dict[str, TaskDependencyResult], dict[str, TaskDependencyState]]":
         if not node.dependencies:
             return {}, {}
-        raw_states = await self._repository.list_nodes(
+        raw_states = await self._repository.get_node_states(
             graph_id,
+            node.dependencies,
             tenant_id=tenant_id,
         )
         by_id = {state.node_id: state for state in raw_states}
@@ -2343,8 +2346,9 @@ class LocalTaskGraphLauncher:
     ) -> "dict[str, TaskDependencyState]":
         if not node.dependencies:
             return {}
-        raw_states = await self._repository.list_nodes(
+        raw_states = await self._repository.get_node_states(
             graph_id,
+            node.dependencies,
             tenant_id=tenant_id,
         )
         return self._project_dependency_states(

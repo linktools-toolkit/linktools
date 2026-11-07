@@ -406,7 +406,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                         producer_generation=producer[1],
                     )
                 events = await execution.list_events(agent_run_id=record.agent_run_id)
-                messages = tuple([message async for message in execution.iter_messages(agent_run_id=record.agent_run_id)])
+                if type(execution) in (StateStepArchive, ModelInteractionStateStepArchive):
+                    messages = await execution.transcript_repository.load_messages(record.agent_run_id)
+                else:
+                    messages = tuple([message async for message in execution.iter_messages(agent_run_id=record.agent_run_id)])
                 pending = None
                 pending_keys = ()
                 if isinstance(execution, StateStepArchive):
