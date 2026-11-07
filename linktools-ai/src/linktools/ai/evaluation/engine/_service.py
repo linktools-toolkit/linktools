@@ -1081,9 +1081,11 @@ class Evaluations:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "requested cutoff is no longer current")
         left_dataset = await self.get_dataset(left.manifest.dataset, principal=principal)
         right_dataset = await self.get_dataset(right.manifest.dataset, principal=principal)
+        case_refs = tuple(dict.fromkeys((*left_dataset.ordered_case_refs, *right_dataset.ordered_case_refs)))
+        cases = dict(zip(case_refs, await self._state.get_cases(case_refs)))
         report = build_comparison_report(spec, left.manifest, right.manifest,
-            await self._state.get_cases(left_dataset.ordered_case_refs),
-            await self._state.get_cases(right_dataset.ordered_case_refs),
+            tuple(cases[ref] for ref in left_dataset.ordered_case_refs),
+            tuple(cases[ref] for ref in right_dataset.ordered_case_refs),
             tuple(item for _, snapshot in snapshots.values() for item in snapshot.trials),
             tuple(item for _, snapshot in snapshots.values() for item in snapshot.score_attempts),
             baseline_dataset=left_dataset, candidate_dataset=right_dataset, cutoff=cutoff,
