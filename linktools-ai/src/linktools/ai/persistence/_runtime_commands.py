@@ -971,7 +971,7 @@ class StateCommands:
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, initial.revision, initial.event_seq,
                                     identity.scope, identity.idempotency_key_digest,
-                                    identity.request_digest, initial.created_at)
+                                    identity.request_digest, initial.created_at, identity.request_identity_version)
 
         async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
             if initial.session_id is not None and isinstance(group, GroupRecordReader):
@@ -1038,6 +1038,7 @@ class StateCommands:
                         continue
                     raise
                 if (observed_identity.request_digest != identity.request_digest
+                        or observed_identity.request_identity_version != identity.request_identity_version
                         or observed_identity.resource_kind != identity.resource_kind):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
                 if observed_identity.resource_id != initial.execution_id:
@@ -2405,13 +2406,14 @@ class StateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
-                                    identity.idempotency_key_digest, identity.request_digest, initial.created_at)
+                                    identity.idempotency_key_digest, identity.request_digest, initial.created_at, identity.request_identity_version)
 
         async def read(group: StateGroupTransaction) -> ExecutionRecord | None:
             idempotency = await self._execution.get_start_idempotency(claim)
             if idempotency is None:
                 return None
             if (idempotency.request_digest != identity.request_digest
+                    or idempotency.request_identity_version != identity.request_identity_version
                     or idempotency.resource_kind != identity.resource_kind):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if (idempotency.resource_id != initial.execution_id
@@ -2486,7 +2488,7 @@ class StateCommands:
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
                                     identity.idempotency_key_digest, identity.request_digest,
-                                    initial.created_at)
+                                    initial.created_at, identity.request_identity_version)
         resolved: ExecutionRecord | None = None
         rejected = False
 

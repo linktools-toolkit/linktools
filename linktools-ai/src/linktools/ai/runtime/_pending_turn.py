@@ -216,6 +216,7 @@ class _PendingExecutionTurns:
         existing = self._requests.get(request_key)
         if existing is not None:
             if (existing.reservation.idempotency.request_digest != identity.request_digest
+                    or existing.reservation.idempotency.request_identity_version != identity.request_identity_version
                     or existing.reservation.execution.principal_id != execution.principal_id
                     or existing.reservation.execution.principal_kind != execution.principal_kind):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)

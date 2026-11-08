@@ -315,11 +315,14 @@ class AgentTaskRunner(Generic[AppT]):
         tenant_id: str,
         contract: Mapping[str, JsonValue],
         materializer: "ExecutionInputMaterializer | None",
+        request_identity_version: int = 2,
     ) -> TaskNode:
         """Freeze Agent input through its producer before graph execution starts."""
         port = self.execution_port
         if port is None:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
+        if not isinstance(node, AgentTaskNode):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         task_input = AgentTaskInput.from_mapping(node.input)
         config = contract.get("config")
         input_mode = config.get("input_mode") if isinstance(config, Mapping) else None
@@ -343,7 +346,8 @@ class AgentTaskRunner(Generic[AppT]):
             body["prompt"] = {
                 "kind": "stored-user-content-v1",
                 "intent": "task-admission",
-                "source_intent_digest": canonical_sha256(task_input["prompt"]),
+                "source_intent_digest": node.prompt_intent_digest(
+                    request_identity_version=request_identity_version),
                 "value": encode_domain(stored),
             }
             _logger.info("task input resolved: node=%s", node.node_id)

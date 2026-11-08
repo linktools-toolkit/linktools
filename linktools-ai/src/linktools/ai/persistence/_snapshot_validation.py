@@ -613,9 +613,14 @@ def _expected_record(
                 namespace, tenant_id, domain, records,
                 "task_submission_payload", value.graph_id,
             )
-        elif state == "admitted":
+        elif state == "admitted" or record_key_digest(
+            namespace, tenant_id, domain.value, "task_graph", value.graph_id,
+        ) in records:
             _require_anchor(
                 namespace, tenant_id, domain, records, "task_graph", value.graph_id,
+            )
+            _require_anchor(
+                namespace, tenant_id, domain, records, "task_admission", value.graph_id,
             )
     elif isinstance(value, TaskGraphSubmission):
         if value.namespace != namespace or value.admission.principal.tenant_id != tenant_id:
@@ -632,6 +637,12 @@ def _expected_record(
         _require_anchor(
             namespace, tenant_id, domain, records, "task_graph", value.graph_id
         )
+        head = records.get(record_key_digest(
+            namespace, tenant_id, domain.value, "task_submission", value.graph_id,
+        ))
+        if (head is None or head.state not in {"admitted", "cancelled"}
+                or _decode_record(head) != TaskSubmissionRef.from_admission(namespace, value)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         scope = scope_digest(
             namespace,
             tenant_id,

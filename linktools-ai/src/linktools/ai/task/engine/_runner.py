@@ -626,6 +626,7 @@ class TaskNodeExecutor(Generic[AppT]):
                         node,
                         admission.principal.tenant_id,
                         tasks,
+                        request_identity_version=admission.request_identity_version,
                     )
                     for node in graph.nodes
                 ]
@@ -657,6 +658,8 @@ class TaskNodeExecutor(Generic[AppT]):
         node: TaskNode,
         tenant_id: str,
         tasks: Mapping[tuple[str, int], Task[AppT]],
+        *,
+        request_identity_version: int = 2,
     ) -> TaskNode:
         reference = node.task
         if reference is None or node.input_capture is not None:
@@ -672,6 +675,7 @@ class TaskNodeExecutor(Generic[AppT]):
             tenant_id=tenant_id,
             contract=task.contract,
             materializer=self._input_materializer,
+            request_identity_version=request_identity_version,
         )
 
     async def restore_prepared_agent_prompt(

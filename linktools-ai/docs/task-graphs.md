@@ -94,6 +94,47 @@ again. A bound or uncertain consumer execution follows the existing execution
 recovery rules; it does not authorize another projection. Cancellation and lease
 fences continue to govern recovery and publication.
 
+## Custom Task persistence and request identity
+
+Custom `TaskPersistence.admissions` implementations must provide
+`get_submission_ref(graph_id, *, tenant_id) -> TaskSubmissionRef | None`.
+The lookup returns the retained submission identity for prepared, admitted,
+and cancelled graphs. It is required, not an optional capability. Reading only
+committed admissions is insufficient: cancellation before admission removes
+the prepared graph payload but retains the submission reference.
+
+`TaskGraphAdmission.request_identity_version` owns the comparison rule;
+`TaskSubmissionRef` carries a verified projection of that field with the graph,
+principal, operation ID, and request digest. Retain the same version through
+preparation, admission, cancellation, recovery, and commit readback. Reject
+inconsistent admission/reference pairs. Older durable records that omit the
+field mean version 1; new submissions use version 2, including direct repository
+prepare/admit calls. An existing owner's version is selected before hashing.
+A concurrent winner must be read back and compared using that one version.
+Cancellation can establish a new fence only from a version-2 reference. An old
+version-1 reference that was never durably prepared cannot be upgraded from its
+digest alone and is rejected; cancellation of retained version-1 submissions
+continues to use their original identity.
+
+Version 2 preserves StructuredContent's value, rendered content, tag,
+description, and metadata. Existing version-1 Agent submissions keep their
+previous text-content comparison, without reconstructing discarded structured
+values or rewriting old records. Only Agent-owned prompt contracts receive
+this projection; ordinary function and runner JSON remains unchanged. Keep the
+original graph until preparation finishes so a competing durable owner can be
+compared without recapturing workspace files or hashing a materialized prompt.
+
+StructuredContent values in Agent and Task requests, input captures, and external
+results follow Pydantic's native JSON serialization, including custom serializers,
+aliases, and model configuration. JSON object key order is immaterial; JSON array
+order is part of identity. Duplicate serialized object keys are rejected rather
+than silently dropping a value. Python sets and frozensets can produce different
+array orders across processes, so the same logical set can conflict when retrying
+a version-2 request or result after restart. Use an explicitly ordered JSON value
+or a deterministic Pydantic serializer, such as one returning a sorted list, when
+stable retries are required. Custom serializers must also return stable values
+for those retries.
+
 ## Conditional batch expansion and collection
 
 The runnable [batch example](../../examples/task_graph.py) uses only public APIs

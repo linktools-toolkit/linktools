@@ -6,27 +6,29 @@ import binascii
 from collections.abc import Mapping, Sequence
 from typing import cast
 
-from pydantic_ai.messages import TextContent, ToolReturn, ToolReturnContent, is_multi_modal_content
+from pydantic_ai.messages import StructuredContent, TextContent, ToolReturn, ToolReturnContent, is_multi_modal_content
 from pydantic_ai.tools import DeferredToolResults
 
-from ..core import JsonValue, canonical_sha256, normalize_json_value
+from ..core import JsonValue, canonical_json_bytes, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from . import ReferencedContent
-from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
+from ._user_content_codec import (
+    RetiredReferencedContent, decode_user_content_item, encode_user_content_item, project_user_content_identity,
+)
 from ._json_snapshot import stable_json_snapshot
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _TOOL_RETURN_CONTRACT = "linktools.tool-return"
-_TOOL_RETURN_VERSION = 1
+_TOOL_RETURN_VERSION = 2
 
 
 def encode_tool_return_content(value: object) -> JsonValue:
-    """Encode portable tool content without depending on Pydantic wire serialization."""
+    """Encode portable tool content in the LinkTools durable result envelope."""
     try:
         return {
             "contract": _TOOL_RETURN_CONTRACT,
             "version": _TOOL_RETURN_VERSION,
-            "value": _encode_node(value),
+            "value": _encode_node(value, version=_TOOL_RETURN_VERSION),
         }
     except AIError:
         raise
@@ -49,7 +51,7 @@ def decode_tool_return_content(value: JsonValue) -> ToolReturnContent:
         if (
             isinstance(version, bool)
             or not isinstance(version, int)
-            or version != _TOOL_RETURN_VERSION
+            or version not in (1, _TOOL_RETURN_VERSION)
         ):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         return cast(ToolReturnContent, _decode_node(value["value"]))
@@ -59,15 +61,35 @@ def decode_tool_return_content(value: JsonValue) -> ToolReturnContent:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+def tool_return_content_matches(value: object, stored: JsonValue) -> bool:
+    """Compare a retry using the verified durable result envelope's one projection."""
+    decode_tool_return_content(stored)
+    envelope = cast(Mapping[str, JsonValue], stored)
+    try:
+        candidate = {
+            "contract": _TOOL_RETURN_CONTRACT,
+            "version": envelope["version"],
+            "value": _encode_node(value, version=cast(int, envelope["version"])),
+        }
+        return canonical_json_bytes(candidate) == canonical_json_bytes(stored)
+    except AIError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "external_result"}) from error
+
+
 def _encode_node(
-    value: object, *, reference_allowed: bool = True, tool_return_allowed: bool = True,
+    value: object, *, version: int, reference_allowed: bool = True, tool_return_allowed: bool = True,
 ) -> JsonValue:
     if isinstance(value, ReferencedContent):
         if not reference_allowed:
             raise ValueError("referenced tool input must be a direct result or a top-level result item")
         return {"type": "referenced-content", "value": encode_user_content_item(value)}
     if isinstance(value, TextContent):
-        return {"type": "text-content", "value": encode_user_content_item(value)}
+        return {
+            "type": "text-content",
+            "value": project_user_content_identity(encode_user_content_item(value), version=version),
+        }
     if isinstance(value, ToolReturn):
         if not tool_return_allowed:
             _reject_nested_references(value.return_value)
@@ -78,9 +100,10 @@ def _encode_node(
             raise ValueError("referenced tool content cannot persist new executable tools")
         return {
             "type": "tool-return",
-            "return_value": _encode_node(value.return_value, tool_return_allowed=False),
+            "return_value": _encode_node(value.return_value, version=version, tool_return_allowed=False),
             "content": (value.content if value.content is None or isinstance(value.content, str)
-                        else [encode_user_content_item(item) for item in value.content]),
+                        else [project_user_content_identity(encode_user_content_item(item), version=version)
+                              for item in value.content]),
             "metadata": stable_json_snapshot(value.metadata),
             "tools": None if value.tools is None else list(value.tools),
         }
@@ -95,7 +118,7 @@ def _encode_node(
         return {
             "type": "mapping",
             "items": {
-                key: _encode_node(value[key], reference_allowed=False, tool_return_allowed=False)
+                key: _encode_node(value[key], version=version, reference_allowed=False, tool_return_allowed=False)
                 for key in sorted(value)
             },
         }
@@ -105,7 +128,7 @@ def _encode_node(
     ):
         return {
             "type": "sequence",
-            "items": [_encode_node(item, reference_allowed=reference_allowed and isinstance(value, list)
+            "items": [_encode_node(item, version=version, reference_allowed=reference_allowed and isinstance(value, list)
                                     and not isinstance(item, (Mapping, list, tuple)),
                                     tool_return_allowed=False) for item in value],
         }
@@ -175,7 +198,7 @@ def _decode_node(
     if node_type == "text-content":
         _require_keys(value, {"type", "value"})
         item = decode_user_content_item(value["value"])
-        if type(item) not in (TextContent, RetiredReferencedContent):
+        if type(item) not in (TextContent, StructuredContent, RetiredReferencedContent):
             raise ValueError("tool-return text content is invalid")
         return item
     if node_type == "scalar":

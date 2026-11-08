@@ -807,12 +807,12 @@ def _encode_datetime(value: datetime | None) -> JsonValue:
 
 
 
-__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'native_checkpoint_messages', 'model_response_usage', 'project_model_response_attempts', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'without_history_system_prompts']
+__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'native_checkpoint_messages', 'model_response_usage', 'project_model_response_attempts', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 
-from ._user_content_codec import (RetiredReferencedContent, UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item)
+from ._user_content_codec import (RetiredReferencedContent, UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item, project_user_content_identity)
 
 from ._json_snapshot import (stable_json_snapshot)
 
-from ._tool_return_codec import (decode_tool_return_content, encode_tool_return_content, rehydrate_deferred_tool_results, tool_return_content_digest)
+from ._tool_return_codec import (decode_tool_return_content, encode_tool_return_content, rehydrate_deferred_tool_results, tool_return_content_digest, tool_return_content_matches)

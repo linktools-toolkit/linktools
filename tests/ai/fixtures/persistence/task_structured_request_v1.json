@@ -1,0 +1,500 @@
+{
+  "prepared_record": {
+    "v": 1,
+    "value": {
+      "payload": {
+        "$dataclass": "task_graph_submission",
+        "fields": {
+          "admission": {
+            "$dataclass": "task_graph_admission",
+            "fields": {
+              "budget": null,
+              "budget_scope_id": null,
+              "correlation": {
+                "$mapping": []
+              },
+              "graph_id": "structured",
+              "initial_request_digest": "2d0f16315de4c2d8e2a8cea4f8e15b3042467dc1b4e6ad9c081178e383155edb",
+              "limits": {
+                "$dataclass": "task_graph_limits",
+                "fields": {
+                  "max_budget": 1000,
+                  "max_concurrency": 8,
+                  "max_depth": 8,
+                  "max_nodes": 128
+                },
+                "schema": 1
+              },
+              "operation_id": "75490bd7b93e6fa7d18cfdea90cc6bcb983d5f3ea326249d2709ca6c94bc07ba",
+              "principal": {
+                "$dataclass": "principal",
+                "fields": {
+                  "kind": "user",
+                  "principal_id": "submitter",
+                  "tenant_id": "tenant"
+                },
+                "schema": 1
+              },
+              "tool_effects": "live",
+              "version": 1
+            },
+            "schema": 1
+          },
+          "graph": {
+            "$dataclass": "task_graph",
+            "fields": {
+              "graph_id": "structured",
+              "nodes": {
+                "$tuple": [
+                  {
+                    "$dataclass": "task_node",
+                    "fields": {
+                      "budget_cost": 1,
+                      "dependencies": {
+                        "$tuple": []
+                      },
+                      "dependency_policy": "all_succeeded",
+                      "expander": null,
+                      "failure_policy": "propagate",
+                      "input": {
+                        "$mapping": [
+                          [
+                            "files",
+                            []
+                          ],
+                          [
+                            "kind",
+                            "agent-task-input"
+                          ],
+                          [
+                            "parameters",
+                            {
+                              "$mapping": []
+                            }
+                          ],
+                          [
+                            "planning",
+                            false
+                          ],
+                          [
+                            "prompt",
+                            {
+                              "$mapping": [
+                                [
+                                  "kind",
+                                  "pydantic-user-content-v1"
+                                ],
+                                [
+                                  "value",
+                                  {
+                                    "$mapping": [
+                                      [
+                                        "items",
+                                        [
+                                          {
+                                            "$mapping": [
+                                              [
+                                                "content",
+                                                "rendered"
+                                              ],
+                                              [
+                                                "kind",
+                                                "text-content"
+                                              ],
+                                              [
+                                                "metadata",
+                                                {
+                                                  "$mapping": [
+                                                    [
+                                                      "source",
+                                                      "native"
+                                                    ]
+                                                  ]
+                                                }
+                                              ]
+                                            ]
+                                          }
+                                        ]
+                                      ]
+                                    ]
+                                  }
+                                ]
+                              ]
+                            }
+                          ],
+                          [
+                            "session_id",
+                            null
+                          ],
+                          [
+                            "thinking",
+                            false
+                          ],
+                          [
+                            "version",
+                            1
+                          ]
+                        ]
+                      },
+                      "input_semantics": "agent-task-input-v1",
+                      "node_id": "worker",
+                      "original_input": {
+                        "$mapping": [
+                          [
+                            "files",
+                            []
+                          ],
+                          [
+                            "kind",
+                            "agent-task-input"
+                          ],
+                          [
+                            "parameters",
+                            {
+                              "$mapping": []
+                            }
+                          ],
+                          [
+                            "planning",
+                            false
+                          ],
+                          [
+                            "prompt",
+                            {
+                              "$mapping": [
+                                [
+                                  "kind",
+                                  "pydantic-user-content-v1"
+                                ],
+                                [
+                                  "value",
+                                  {
+                                    "$mapping": [
+                                      [
+                                        "items",
+                                        [
+                                          {
+                                            "$mapping": [
+                                              [
+                                                "content",
+                                                "rendered"
+                                              ],
+                                              [
+                                                "kind",
+                                                "text-content"
+                                              ],
+                                              [
+                                                "metadata",
+                                                {
+                                                  "$mapping": [
+                                                    [
+                                                      "source",
+                                                      "native"
+                                                    ]
+                                                  ]
+                                                }
+                                              ]
+                                            ]
+                                          }
+                                        ]
+                                      ]
+                                    ]
+                                  }
+                                ]
+                              ]
+                            }
+                          ],
+                          [
+                            "session_id",
+                            null
+                          ],
+                          [
+                            "thinking",
+                            false
+                          ],
+                          [
+                            "version",
+                            1
+                          ]
+                        ]
+                      },
+                      "task": {
+                        "$dataclass": "task_ref",
+                        "fields": {
+                          "id": "identity.agent",
+                          "revision": 1
+                        },
+                        "schema": 1
+                      }
+                    },
+                    "schema": 1
+                  }
+                ]
+              }
+            },
+            "schema": 1
+          },
+          "namespace": "structured-identity"
+        },
+        "schema": 1
+      },
+      "type": "task_graph_submission"
+    }
+  },
+  "ref_record": {
+    "v": 1,
+    "value": {
+      "payload": {
+        "$dataclass": "task_submission_ref",
+        "fields": {
+          "graph_id": "structured",
+          "namespace": "structured-identity",
+          "operation_id": "75490bd7b93e6fa7d18cfdea90cc6bcb983d5f3ea326249d2709ca6c94bc07ba",
+          "principal": {
+            "$dataclass": "principal",
+            "fields": {
+              "kind": "user",
+              "principal_id": "submitter",
+              "tenant_id": "tenant"
+            },
+            "schema": 1
+          },
+          "request_digest": "2d0f16315de4c2d8e2a8cea4f8e15b3042467dc1b4e6ad9c081178e383155edb",
+          "tenant_id": "tenant"
+        },
+        "schema": 1
+      },
+      "type": "task_submission_ref"
+    }
+  },
+  "source_commit": "f9a475d6823b7c355bd3f61ec17494cd1e523a1a",
+  "submission": {
+    "$dataclass": "task_graph_submission",
+    "fields": {
+      "admission": {
+        "$dataclass": "task_graph_admission",
+        "fields": {
+          "budget": null,
+          "budget_scope_id": null,
+          "correlation": {
+            "$mapping": []
+          },
+          "graph_id": "structured",
+          "initial_request_digest": "2d0f16315de4c2d8e2a8cea4f8e15b3042467dc1b4e6ad9c081178e383155edb",
+          "limits": {
+            "$dataclass": "task_graph_limits",
+            "fields": {
+              "max_budget": 1000,
+              "max_concurrency": 8,
+              "max_depth": 8,
+              "max_nodes": 128
+            }
+          },
+          "operation_id": "75490bd7b93e6fa7d18cfdea90cc6bcb983d5f3ea326249d2709ca6c94bc07ba",
+          "principal": {
+            "$dataclass": "principal",
+            "fields": {
+              "kind": "user",
+              "principal_id": "submitter",
+              "tenant_id": "tenant"
+            }
+          },
+          "tool_effects": "live",
+          "version": 1
+        }
+      },
+      "graph": {
+        "$dataclass": "task_graph",
+        "fields": {
+          "graph_id": "structured",
+          "nodes": {
+            "$tuple": [
+              {
+                "$dataclass": "task_node",
+                "fields": {
+                  "budget_cost": 1,
+                  "dependencies": {
+                    "$tuple": []
+                  },
+                  "dependency_policy": "all_succeeded",
+                  "expander": null,
+                  "failure_policy": "propagate",
+                  "input": {
+                    "$mapping": [
+                      [
+                        "files",
+                        []
+                      ],
+                      [
+                        "kind",
+                        "agent-task-input"
+                      ],
+                      [
+                        "parameters",
+                        {
+                          "$mapping": []
+                        }
+                      ],
+                      [
+                        "planning",
+                        false
+                      ],
+                      [
+                        "prompt",
+                        {
+                          "$mapping": [
+                            [
+                              "kind",
+                              "pydantic-user-content-v1"
+                            ],
+                            [
+                              "value",
+                              {
+                                "$mapping": [
+                                  [
+                                    "items",
+                                    [
+                                      {
+                                        "$mapping": [
+                                          [
+                                            "content",
+                                            "rendered"
+                                          ],
+                                          [
+                                            "kind",
+                                            "text-content"
+                                          ],
+                                          [
+                                            "metadata",
+                                            {
+                                              "$mapping": [
+                                                [
+                                                  "source",
+                                                  "native"
+                                                ]
+                                              ]
+                                            }
+                                          ]
+                                        ]
+                                      }
+                                    ]
+                                  ]
+                                ]
+                              }
+                            ]
+                          ]
+                        }
+                      ],
+                      [
+                        "session_id",
+                        null
+                      ],
+                      [
+                        "thinking",
+                        false
+                      ],
+                      [
+                        "version",
+                        1
+                      ]
+                    ]
+                  },
+                  "input_semantics": "agent-task-input-v1",
+                  "node_id": "worker",
+                  "original_input": {
+                    "$mapping": [
+                      [
+                        "files",
+                        []
+                      ],
+                      [
+                        "kind",
+                        "agent-task-input"
+                      ],
+                      [
+                        "parameters",
+                        {
+                          "$mapping": []
+                        }
+                      ],
+                      [
+                        "planning",
+                        false
+                      ],
+                      [
+                        "prompt",
+                        {
+                          "$mapping": [
+                            [
+                              "kind",
+                              "pydantic-user-content-v1"
+                            ],
+                            [
+                              "value",
+                              {
+                                "$mapping": [
+                                  [
+                                    "items",
+                                    [
+                                      {
+                                        "$mapping": [
+                                          [
+                                            "content",
+                                            "rendered"
+                                          ],
+                                          [
+                                            "kind",
+                                            "text-content"
+                                          ],
+                                          [
+                                            "metadata",
+                                            {
+                                              "$mapping": [
+                                                [
+                                                  "source",
+                                                  "native"
+                                                ]
+                                              ]
+                                            }
+                                          ]
+                                        ]
+                                      }
+                                    ]
+                                  ]
+                                ]
+                              }
+                            ]
+                          ]
+                        }
+                      ],
+                      [
+                        "session_id",
+                        null
+                      ],
+                      [
+                        "thinking",
+                        false
+                      ],
+                      [
+                        "version",
+                        1
+                      ]
+                    ]
+                  },
+                  "task": {
+                    "$dataclass": "task_ref",
+                    "fields": {
+                      "id": "identity.agent",
+                      "revision": 1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "namespace": "structured-identity"
+    }
+  }
+}
