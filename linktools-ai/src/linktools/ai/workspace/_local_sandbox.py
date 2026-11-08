@@ -48,7 +48,7 @@ from ._root import Workspace
 from ._file_io import (
     _check_state, _facts, _glob_matches, _inspect_file, _read_text_range, _state, _validate_read,
 )
-from ._sandbox_protocol import validate_request_size
+from ._request_validation import validate_request_params
 from ._local_process import (
     _ProcessState,
     _WindowsJob,
@@ -568,7 +568,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         self, path: str, *, max_bytes: int | None = None,
     ) -> Mapping[str, JsonValue]:
         """Inspect only an authorized, bounded header; never expand containers."""
-        validate_request_size("inspect_file", {"path": path, "max_bytes": max_bytes})
+        validate_request_params("inspect_file", {"path": path, "max_bytes": max_bytes})
         def operation() -> Mapping[str, JsonValue]:
             target, display, _resource_key = self._read_target(path)
             try:
@@ -588,7 +588,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         max_bytes: int | None = None, max_read_bytes: int | None = None,
     ) -> Mapping[str, JsonValue]:
         """Read a bounded UTF-8 preview without implicitly scanning the file."""
-        validate_request_size("read_text", {
+        validate_request_params("read_text", {
             "path": path, "offset": offset, "limit": limit, "cursor": cursor,
             "full_metadata": full_metadata, "max_bytes": max_bytes,
             "max_read_bytes": max_read_bytes,
@@ -623,7 +623,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         try:
             normalized = _normalize_path(path)
             expected = _validate_expected_hash(expected_hash)
-            validate_request_size(
+            validate_request_params(
                 "write_file",
                 {"path": path, "content": content, "expected_hash": expected_hash},
             )
@@ -663,7 +663,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
             if not isinstance(old_text, str) or not old_text:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             expected = _validate_expected_hash(expected_hash)
-            validate_request_size(
+            validate_request_params(
                 "write_file",
                 {
                     "path": path,
@@ -726,7 +726,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     async def list_files(self, path: str = ".", *, include_glob: str = "*") -> str:
         """List names with extension hints and explicit recursive glob traversal."""
         _validate_glob(include_glob)
-        validate_request_size("list_files", {"path": path, "include_glob": include_glob})
+        validate_request_params("list_files", {"path": path, "include_glob": include_glob})
         def operation() -> str:
             target, display, resource_key = self._read_target(path, directory=True)
             if not target.is_dir():
@@ -764,7 +764,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         expression = _compile_pattern(pattern)
         if include_glob is not None:
             _validate_glob(include_glob)
-        validate_request_size("search_text", {"pattern": pattern, "path": path, "include_glob": include_glob})
+        validate_request_params("search_text", {"pattern": pattern, "path": path, "include_glob": include_glob})
         def operation() -> str:
             target, display, resource_key = self._read_target(path, directory=None)
             walk_state = _WalkState()
@@ -820,7 +820,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     ) -> str:
         self._reject_read_only()
         try:
-            validate_request_size(
+            validate_request_params(
                 "run_command",
                 {"command": command, "timeout_seconds": timeout_seconds},
             )
@@ -869,7 +869,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     async def start_command(self, command: str) -> str:
         self._reject_read_only()
         try:
-            validate_request_size("start_command", {"command": command})
+            validate_request_params("start_command", {"command": command})
             _validate_command_input(command)
             _validate_command(command)
         except AIError as error:
@@ -888,7 +888,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
 
     async def check_command(self, command_id: str) -> str:
         self._reject_read_only()
-        validate_request_size("check_command", {"command_id": command_id})
+        validate_request_params("check_command", {"command_id": command_id})
         process = await self._get_process(command_id)
         if process is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -902,7 +902,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     async def stop_command(self, command_id: str) -> str:
         self._reject_read_only()
         try:
-            validate_request_size("stop_command", {"command_id": command_id})
+            validate_request_params("stop_command", {"command_id": command_id})
             if not command_id:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         except AIError as error:

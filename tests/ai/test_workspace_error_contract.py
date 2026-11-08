@@ -14,8 +14,7 @@ from pydantic_ai.workspaces import Workspace
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceOperationRejected
-from linktools.ai.workspace._bubblewrap import _read_workspace_bytes
-from linktools.ai.workspace._sandbox_protocol import validate_request_params
+from linktools.ai.workspace._request_validation import validate_request_params
 
 pytestmark = pytest.mark.asyncio
 
@@ -320,15 +319,6 @@ async def test_logical_file_reads_keep_structured_errors(tmp_path: Path) -> None
         await session.close()
 
 
-@pytest.mark.parametrize("path", [".", "directory"])
-async def test_bubblewrap_reader_classifies_directory_failures(tmp_path: Path, path: str) -> None:
-    (tmp_path / "directory").mkdir()
-    with pytest.raises(AIError) as raised:
-        _read_workspace_bytes(tmp_path, path, read_policy=None, hidden_paths=(), max_bytes=None)
-    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    assert raised.value.safe_details["reason"] == "is_directory"
-
-
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX named pipes")
 async def test_native_read_refuses_special_files_without_waiting(tmp_path: Path) -> None:
     os.mkfifo(tmp_path / "pipe")
@@ -337,13 +327,13 @@ async def test_native_read_refuses_special_files_without_waiting(tmp_path: Path)
         with pytest.raises(OSError, match="not a regular file"):
             await Workspace(session).read_bytes("pipe")
         with pytest.raises(AIError) as raised:
-            _read_workspace_bytes(tmp_path, "pipe", read_policy=None, hidden_paths=(), max_bytes=None)
+            await session.read_bytes("pipe")
         assert raised.value.safe_details["reason"] == "not_regular_file"
     finally:
         await session.close()
 
 
-async def test_sandbox_protocol_rejects_unknown_or_missing_fields() -> None:
+async def test_workspace_requests_reject_unknown_or_missing_fields() -> None:
     invalid_requests = (
         ("read_text", {}),
         ("read_text", {"path": "a", "unknown": None}),

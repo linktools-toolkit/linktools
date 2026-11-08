@@ -77,7 +77,7 @@ from linktools.ai.task import (
     TaskNodeContext,
     TaskRef,
 )
-from linktools.ai.workspace import BubblewrapWorkspaceBackend, LocalWorkspaceBackend, WorkspaceReadPolicy
+from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceReadPolicy
 
 
 @dataclass(frozen=True)
@@ -471,7 +471,7 @@ async def test_binding_resolution_restores_mcp_execution_contract(tmp_path: Path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("bubblewrap", "local", "local_read_policy"))
+@pytest.mark.parametrize("backend", ("local", "local_read_policy"))
 async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     tmp_path: Path,
     backend: str,
@@ -492,11 +492,11 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     catalog = AgentCatalog(
         {specification.id: compiler.compile(specification)}
     )
-    if backend == "bubblewrap":
-        sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=tmp_path, bwrap_executable=tmp_path / "bwrap")
-    else:
-        sandbox = partial(LocalWorkspaceBackend, read_policy=WorkspaceReadPolicy(("visible.txt",))
-                if backend == "local_read_policy" else None, allow_host_stdio_with_read_policy=backend == "local_read_policy")
+    sandbox = partial(
+        LocalWorkspaceBackend,
+        read_policy=WorkspaceReadPolicy(("visible.txt",)) if backend == "local_read_policy" else None,
+        allow_host_stdio_with_read_policy=backend == "local_read_policy",
+    )
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
@@ -512,10 +512,9 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     assert binding.execution_policy == {
         **sandbox(tmp_path).stdio_execution_policy(), "tool_effect_policy": "replay_safe",
     }
-    if backend != "bubblewrap":
-        assert binding.execution_policy == {
-            "version": 1, "boundary": "host-stdio", "tool_effect_policy": "replay_safe",
-        }
+    assert binding.execution_policy == {
+        "version": 1, "boundary": "host-stdio", "tool_effect_policy": "replay_safe",
+    }
 
 
 @pytest.mark.asyncio

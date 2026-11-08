@@ -189,8 +189,7 @@ for name in TARGETS:
     subprocess.run([sys.executable, "-c", blocker], env=environment, check=True)
 
 
-@pytest.mark.parametrize("entry", ("sandbox_guardian", "sandbox_worker"))
-def test_sandbox_entry_imports_do_not_load_model_execution(entry: str) -> None:
+def test_workspace_import_does_not_load_model_execution() -> None:
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -203,7 +202,7 @@ import sys
 from linktools import ai
 
 assert set(ai.__all__) <= set(dir(ai))
-importlib.import_module('linktools.ai.workspace.' + sys.argv[1])
+importlib.import_module('linktools.ai.workspace')
 for name in ('linktools.ai.runtime', 'linktools.ai.capability', 'linktools.ai.model',
              'pydantic_ai', 'fastmcp', 'openai'):
     assert name not in sys.modules, name
@@ -217,7 +216,7 @@ except AttributeError:
 else:
     raise AssertionError('unknown export was accepted')
 """
-    subprocess.run([sys.executable, "-c", script, entry], env=environment, check=True)
+    subprocess.run([sys.executable, "-c", script], env=environment, check=True)
 
 
 def test_migration_exports_preserve_owner_identity() -> None:

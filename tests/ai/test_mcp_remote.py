@@ -6,7 +6,6 @@ from linktools.ai.persistence import Persistence
 from ._runtime_test_helpers import model_features
 
 import asyncio
-from functools import partial
 import json
 import socket
 from collections.abc import AsyncIterator, Mapping
@@ -57,7 +56,6 @@ from linktools.ai.runtime._mcp import (
 )
 from linktools.ai.spec import MCPServerSpec, mcp_server_selector, mcp_tool_selector
 from linktools.ai.workspace import (
-    BubblewrapWorkspaceBackend,
     LocalWorkspaceBackend,
     WorkspaceResource,
     SupportsFileTools,
@@ -563,25 +561,15 @@ def _group(*servers: MCPServerSpec, workspace_factory: Any = LocalWorkspaceBacke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sandbox_kind", ("local", "bubblewrap"))
 async def test_remote_only_runtime_uses_host_network_without_opening_sandbox(
-    sandbox_kind: str,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    sandbox = (
-        LocalWorkspaceBackend
-        if sandbox_kind == "local"
-        else partial(BubblewrapWorkspaceBackend,
-            runtime_root=tmp_path, bwrap_executable=tmp_path / "bwrap"
-        )
-    )
+    sandbox = LocalWorkspaceBackend
 
     async def forbidden_activate(self):
         pytest.fail("remote-only execution must not activate a workspace environment")
 
-    backend_class = LocalWorkspaceBackend if sandbox_kind == "local" else BubblewrapWorkspaceBackend
-    monkeypatch.setattr(backend_class, "working_dir", forbidden_activate)
+    monkeypatch.setattr(LocalWorkspaceBackend, "working_dir", forbidden_activate)
     async with _serve() as remote:
         async with Persistence.open('remote-only', storage=PersistenceStorage.in_memory()) as persistence_586, Runtime.attach(persistence=persistence_586, features=model_features(_RemoteModels(), _group(_spec(remote), workspace_factory=sandbox))) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
@@ -777,26 +765,15 @@ class _MixedModels(_MixedModelBinding):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sandbox_kind", ("local", "bubblewrap"))
 async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    sandbox_kind: str,
 ) -> None:
     import sys
 
-    if sandbox_kind == "bubblewrap":
-        from .test_bubblewrap_integration import _sandbox_configuration
-
-        runtime_root, executable = _sandbox_configuration()
-        sandbox = partial(BubblewrapWorkspaceBackend,
-            runtime_root=runtime_root, bwrap_executable=executable
-        )
-        command, argument = "/usr/bin/python3", "/workspace/server.py"
-    else:
-        sandbox = _RecordingLocalWorkspace
-        sandbox.roots = []
-        command, argument = sys.executable, str(tmp_path / "server.py")
+    sandbox = _RecordingLocalWorkspace
+    sandbox.roots = []
+    command, argument = sys.executable, str(tmp_path / "server.py")
     script = tmp_path / "server.py"
     script.write_text(
         "#!/usr/bin/env python3\n"
@@ -844,11 +821,10 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
                 "call both", timeout_seconds=15
             )).result
             assert result.status is ExecutionStatus.SUCCEEDED
-        if sandbox is _RecordingLocalWorkspace:
-            assert sandbox.roots and set(sandbox.roots) == {tmp_path}
+        assert sandbox.roots and set(sandbox.roots) == {tmp_path}
         assert json.loads((tmp_path / "local-effect.txt").read_text()) == {
-            "cwd": str(tmp_path) if sandbox_kind == "local" else "/workspace",
-            "network": "allowed" if sandbox_kind == "local" else "blocked",
+            "cwd": str(tmp_path),
+            "network": "allowed",
         }
         assert len(remote.effects) == 1
         await _wait_closed(remote)

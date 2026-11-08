@@ -811,14 +811,14 @@ consistent local package tree. The declaration filename is loader-defined; it
 does not need to be `SKILL.md`. This allows Skill scripts to be invoked by
 absolute path without letting a single file symlink redefine the package root.
 If an overlay mixes resource origins, the declaration view is virtual rather
-than claiming a single native package directory. Bubblewrap can still bind
-its local files individually; LocalWorkspaceBackend requires one matching native tree.
+than claiming a single native package directory. LocalWorkspaceBackend requires
+one matching native tree.
 New Skill reads resolve current definitions and resource references. A tool result already retained in Conversation/checkpoint history keeps its original content; an uncommitted or new read may observe current content. Skill reads do not introduce a separate durable receipt or promise recovery without the configured persistence guarantees.
 The workspace provider exposes existing local resource files by path after verifying their
 bound Asset versions and executable bits. Resources without native file paths
 remain available through `load_skill` but cannot be executed by file path.
 Skill resource bytes are not copied to a temporary directory or Runtime ObjectStore.
-Because the paths point to original files, external edits after verification can be observed by an already running process. A Skill or resource added during a run does not expand its sandbox mounts: `load_skill` exposes it as virtual when no matching path is available. Files already under the authorized Workspace remain usable through ordinary FileSystem/Shell tools. The next run prepares its resources from the current allowed Skills.
+Because the paths point to original files, external edits after verification can be observed by an already running process. A Skill or resource added during a run does not expand its prepared resources: `load_skill` exposes it as virtual when no matching path is available. Files already under the authorized Workspace remain usable through ordinary FileSystem/Shell tools. The next run prepares its resources from the current allowed Skills.
 
 For a stdio MCP package, the package directory supplies the default resource
 root when `resource` is omitted; an explicit resource root takes precedence.
@@ -1038,11 +1038,8 @@ execution path and text helpers.
 stdio execution require the provider to run in a POSIX environment; commands use
 `/bin/sh`. On Windows, supply that environment explicitly and run the provider
 inside it. Native Windows Python and `cmd.exe` execution are not supported.
-LinkTools does not install or select a POSIX environment automatically. On Linux,
-`BubblewrapWorkspaceBackend` provides the restricted persistent worker, resource
-mounts and MCP stdio boundary. It requires a non-root user, usable unprivileged
-namespaces, `bwrap >= 0.12.0`, and a trusted read-only runtime rootfs with the same
-LinkTools build and Python >= 3.11. It never falls back to Local. File-only backends
+LinkTools does not install or select a POSIX environment automatically. Applications requiring OS isolation must provide it outside this
+backend or supply an appropriate custom workspace backend. File-only backends
 do not acquire command or stdio support implicitly. Restricted Local providers
 reject stdio unless trusted host stdio is explicitly permitted.
 
@@ -1089,8 +1086,6 @@ the neighboring files. A source-only resource still declares the directory.
 This constrains workspace file APIs, not trusted Local host processes. Applications
 needing additional resource files must declare them explicitly. Independent
 Workspace-relative grants retain their own policy.
-
-With a read-only policy, Bubblewrap mounts the Workspace read-only and never creates hidden-path mount points there. Provision its hidden directories (including `.linktools`) before opening the sandbox; a missing or unsafe mount point causes startup to fail with `SANDBOX_UNAVAILABLE`.
 
 ## 4. Agent selection and capability policy
 

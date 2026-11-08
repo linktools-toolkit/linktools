@@ -3,7 +3,6 @@
 """Workspace shutdown owns operations, independent of caller task lifetime."""
 
 import asyncio
-import json
 import os
 import shlex
 import signal
@@ -17,8 +16,6 @@ import pytest
 
 from linktools.ai.errors import AIError
 from linktools.ai.workspace import LocalWorkspaceBackend, SupportsStdio
-from linktools.ai.workspace import _bubblewrap
-from linktools.ai.workspace._sandbox_protocol import PROTOCOL_VERSION
 
 
 @pytest.mark.asyncio
@@ -318,185 +315,6 @@ async def test_repeated_cancel_during_local_start_waits_for_child_cleanup(
         await session.close()
         if closing is not None:
             await closing
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "posix", reason="Bubblewrap requires POSIX process support")
-async def test_repeated_cancel_during_guardian_start_waits_for_child_cleanup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    processes: list[asyncio.subprocess.Process] = []
-    create_process = asyncio.create_subprocess_exec
-
-    async def delayed_start(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
-        entered.set()
-        await release.wait()
-        process = await create_process(
-            sys.executable, "-c", "import time; time.sleep(60)",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        processes.append(process)
-        return process
-
-    async def stop_child(process: asyncio.subprocess.Process) -> None:
-        process.kill()
-        await process.wait()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_start)
-    monkeypatch.setattr(_bubblewrap, "_abort_guardian", stop_child)
-    opening = asyncio.create_task(_bubblewrap._spawn_guardian({"mode": "stdio"}, -1))
-    try:
-        await asyncio.wait_for(entered.wait(), 5)
-        opening.cancel()
-        await asyncio.sleep(0)
-        opening.cancel()
-        await asyncio.sleep(0)
-        assert not opening.done()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await opening
-        assert processes and all(process.returncode is not None for process in processes)
-    finally:
-        release.set()
-        await asyncio.gather(opening, return_exceptions=True)
-        for process in processes:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="Linux pidfd is required")
-@pytest.mark.parametrize(
-    ("ignore_term", "unread_output"),
-    ((False, False), (True, False), (False, True)),
-)
-async def test_guardian_close_bypasses_buffered_stdin_and_proves_child_exit(
-    monkeypatch: pytest.MonkeyPatch,
-    ignore_term: bool,
-    unread_output: bool,
-) -> None:
-    child_source = (
-        "import os,signal,time; "
-        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_term else "")
-        + "print(os.getpid(), flush=True); "
-        + ("os.write(1, b'x' * (20 * 1024 * 1024)); " if unread_output else "")
-        + "time.sleep(60)"
-    )
-    guardian_source = (
-        "import os,subprocess,sys\n"
-        "from linktools.ai.workspace import sandbox_guardian as g\n"
-        "g._CLOSE_SECONDS = 0.5\n"
-        "def start(arguments):\n"
-        "    reader, writer = os.pipe()\n"
-        "    child = subprocess.Popen(\n"
-        f"        [sys.executable, '-c', {child_source!r}],\n"
-        "        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,\n"
-        "        start_new_session=True)\n"
-        "    return child, reader\n"
-        "g._start_bwrap = start\n"
-        "g._wait_bwrap_started = lambda *arguments: None\n"
-        # This direct child has no descendants; namespace reaping is separately tested.
-        "g._child_process_ids = lambda: ()\n"
-        "raise SystemExit(g.main())\n"
-    )
-    runtime_pidfd = os.pidfd_open(os.getpid())
-    config_read, config_write = os.pipe()
-    control_read, control_write = os.pipe()
-    guardian = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", guardian_source,
-        "--config-fd", str(config_read),
-        "--runtime-pidfd", str(runtime_pidfd),
-        "--stdio-control-fd", str(control_write),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        pass_fds=(config_read, runtime_pidfd, control_write),
-        start_new_session=True,
-    )
-    for fd in (config_read, control_write, runtime_pidfd):
-        os.close(fd)
-    os.write(config_write, json.dumps({
-        "version": PROTOCOL_VERSION,
-        "mode": "stdio",
-        "bwrap_args": ["unused", "--", "unused"],
-    }).encode())
-    os.close(config_write)
-    os.set_blocking(control_read, False)
-    process = None
-    writing: asyncio.Task[None] | None = None
-    reading: asyncio.Task[bytes] | None = None
-    child_pid: int | None = None
-    try:
-        await _bubblewrap._wait_stdio_ready(guardian, control_read)
-        process = _bubblewrap._BubblewrapStdioProcess(
-            guardian, control_fd=control_read, on_close=lambda value: None
-        )
-        stdin = guardian.stdin
-        assert stdin is not None
-        drain = stdin.drain
-        wait_closed = stdin.wait_closed
-        draining = asyncio.Event()
-        stdin_closed = asyncio.Event()
-
-        async def observe_drain() -> None:
-            draining.set()
-            await drain()
-
-        async def observe_closed() -> None:
-            assert guardian.returncode is not None
-            try:
-                await wait_closed()
-            finally:
-                stdin_closed.set()
-
-        monkeypatch.setattr(stdin, "drain", observe_drain)
-        monkeypatch.setattr(stdin, "wait_closed", observe_closed)
-        assert guardian.stdout is not None
-        child_pid = int(await asyncio.wait_for(guardian.stdout.readline(), 5))
-        if unread_output:
-            async def wait_for_backpressure() -> None:
-                while not guardian.stdout._paused:
-                    await asyncio.sleep(0)
-            await asyncio.wait_for(wait_for_backpressure(), 5)
-        else:
-            reading = asyncio.create_task(process.read_stdout())
-        writing = asyncio.create_task(process.write_stdin(b"x" * (20 * 1024 * 1024)))
-        await asyncio.wait_for(draining.wait(), 5)
-        assert not writing.done()
-        await process.close()
-        assert guardian.returncode == 0
-        assert stdin_closed.is_set()
-        if reading is not None:
-            assert await reading == b""
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
-    finally:
-        if child_pid is not None:
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if guardian.returncode is None:
-            guardian.kill()
-        if process is not None:
-            await process._drain_stdout()
-        await guardian.wait()
-        if writing is not None:
-            await asyncio.gather(writing, return_exceptions=True)
-        if process is not None:
-            process._stderr_task.cancel()
-            await asyncio.gather(process._stderr_task, return_exceptions=True)
-        if reading is not None:
-            await asyncio.gather(reading, return_exceptions=True)
-        try:
-            os.close(control_read)
-        except OSError:
-            pass
 
 
 @pytest.mark.asyncio

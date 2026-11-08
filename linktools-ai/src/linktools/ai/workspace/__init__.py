@@ -13,7 +13,6 @@ from ._root import (
     validate_workspace_path,
 )
 from ._local_sandbox import LocalWorkspaceBackend
-from ._bubblewrap import BubblewrapWorkspaceBackend
 from ._sandbox import (
     WorkspaceReadPolicy,
     SupportsFileTools, SupportsStdio, SupportsResources, SupportsClose, SupportsCommandJobs,
@@ -27,7 +26,6 @@ from ._sandbox import (
 __all__ = [
     "SupportsFileTools", "SupportsStdio", "SupportsResources", "SupportsClose", "SupportsCommandJobs",
     "WorkspaceReadPolicy",
-    "BubblewrapWorkspaceBackend",
     "WorkspaceInstructionResolver",
     "PermissionDecision",
     "WorkspaceOperationRejected",
