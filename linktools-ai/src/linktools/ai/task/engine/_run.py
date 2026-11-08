@@ -905,7 +905,11 @@ class TaskGraphRun(Generic[AppT]):
                     and isinstance(task.exception(), ExecutionStreamFailure)
                 }
                 cleanup_errors = await drain_stream_tasks(tasks)
-                await models.close()
+                try:
+                    await models.close()
+                except BaseException as error:
+                    report_observation_error(error)
+                    cleanup_errors.append(error)
                 for stream in (final_events, graph_stream):
                     close = getattr(stream, "aclose", None)
                     if close is not None:
