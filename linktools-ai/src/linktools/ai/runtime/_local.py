@@ -1090,7 +1090,8 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 if existing.status is IdempotencyStatus.START_UNKNOWN:
                     raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-                return existing.resource_id
+                # Let the canonical reservation owner apply terminal replay semantics.
+                return None
             if session is not None:
                 sessions = self._conversation.sessions
                 current_session = await sessions.state_store.read(

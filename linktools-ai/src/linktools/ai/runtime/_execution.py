@@ -1354,71 +1354,28 @@ class DefaultExecutionService(TaskExecutionService):
                     expected_session=session,
                 )
                 return ExecutionHandle(existing.resource_id)
-            if existing.status in {
-                IdempotencyStatus.FAILED,
-                IdempotencyStatus.CANCELLED,
-            }:
-                terminal = await self.load_execution(
-                    existing.resource_id,
-                    tenant_id=request.principal.tenant_id,
-                )
-                if terminal is not None:
-                    self._validate_replayed_execution(
-                        terminal, binding, request,
-                        requires_task_invocation_capture=requires_task_invocation_capture,
-                        budget_scope_id=budget_scope_id,
-                    )
-                    if (
-                        scope == "session.resume"
-                        and terminal.started_at is not None
-                    ):
-                        if not _terminal_idempotency_matches(existing, terminal):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await self._acquire_start_dependency_hold(
-                            terminal,
-                            dependency_hold_id,
-                        )
-                        return ExecutionHandle(existing.resource_id)
-                fallback = (
-                    ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
-                    if existing.status is IdempotencyStatus.FAILED
-                    else ErrorCode.EXECUTION_CANCELLED
-                )
-                raise _stable_idempotency_error(existing.error_code, fallback)
             started = await self.load_execution(
                 existing.resource_id, tenant_id=request.principal.tenant_id
             )
-            if started is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_replayed_execution(
-                started, binding, request,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
-            )
-            if existing.status is IdempotencyStatus.STARTED and started.status in {
+            if started is not None:
+                self._validate_replayed_execution(
+                    started, binding, request,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                )
+            if existing.status is IdempotencyStatus.STARTED and started is not None and started.status in {
                 ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
             }:
                 existing = await self._management.refresh_terminal_identity(
                     existing, started, tenant_id=request.principal.tenant_id,
                 )
-                if existing.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
-                    if scope == "session.resume" and started.started_at is not None:
-                        await self._acquire_start_dependency_hold(started, dependency_hold_id)
-                        return ExecutionHandle(existing.resource_id)
-                    fallback = (
-                        ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
-                        if existing.status is IdempotencyStatus.FAILED
-                        else ErrorCode.EXECUTION_CANCELLED
-                    )
-                    raise _stable_idempotency_error(existing.error_code, fallback)
-            if existing.status is IdempotencyStatus.COMPLETED:
-                if not _terminal_idempotency_matches(existing, started):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._acquire_start_dependency_hold(
-                    started,
-                    dependency_hold_id,
-                )
-                return ExecutionHandle(existing.resource_id)
+            replay = await self._replay_terminal_start(
+                existing, started, scope=scope, dependency_hold_id=dependency_hold_id,
+            )
+            if replay is not None:
+                return replay
+            if started is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if existing.status is IdempotencyStatus.STARTED and started.status in {
                 ExecutionStatus.WAITING_DEFERRED,
                 ExecutionStatus.FINALIZING,
@@ -1623,6 +1580,29 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id, capture_metric=capture_metric, prepared_input=context,
             )
 
+    async def _replay_terminal_start(
+        self,
+        identity: IdempotencyRecord,
+        execution: ExecutionRecord | None,
+        *,
+        scope: str,
+        dependency_hold_id: str | None,
+    ) -> ExecutionHandle | None:
+        if identity.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
+            if scope != "session.resume" or execution is None or execution.started_at is None:
+                fallback = (
+                    ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
+                    if identity.status is IdempotencyStatus.FAILED
+                    else ErrorCode.EXECUTION_CANCELLED
+                )
+                raise _stable_idempotency_error(identity.error_code, fallback)
+        elif identity.status is not IdempotencyStatus.COMPLETED:
+            return None
+        if execution is None or not _terminal_idempotency_matches(identity, execution):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._acquire_start_dependency_hold(execution, dependency_hold_id)
+        return ExecutionHandle(identity.resource_id)
+
     async def _admit_execution_start(
         self,
         request: ExecutionRequest,
@@ -1807,6 +1787,12 @@ class DefaultExecutionService(TaskExecutionService):
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 budget_scope_id=budget_scope_id,
             )
+            replay = await self._replay_terminal_start(
+                reservation.idempotency, reservation.execution,
+                scope=scope, dependency_hold_id=dependency_hold_id,
+            )
+            if replay is not None:
+                return replay
             if (
                 reservation.execution.status is ExecutionStatus.PENDING_START
                 and reservation.idempotency.status is IdempotencyStatus.RESERVED
