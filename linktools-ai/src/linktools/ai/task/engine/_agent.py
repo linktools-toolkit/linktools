@@ -891,7 +891,10 @@ def _agent_task_result(result: object, execution_id: str) -> TaskNodeRunResult:
         except ValueError:
             code = ErrorCode.TASK_NODE_FAILED
         details = getattr(result, "safe_error_details", {})
-        raise TaskNodeRunError(code, execution_id, safe_details=details)
+        raise TaskNodeRunError(
+            code, execution_id, safe_details=details,
+            terminal_status=status if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} else None,
+        )
     try:
         output = normalize_json_value(output)
     except (TypeError, ValueError) as error:

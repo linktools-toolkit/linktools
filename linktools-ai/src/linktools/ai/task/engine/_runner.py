@@ -1862,6 +1862,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                 execution_id,
                 safe_details=result.safe_error_details,
+                terminal_status=result.status,
             )
         if view.status is ExecutionStatus.RECOVERY_REQUIRED:
             return await self._reconcile_custom_execution(
@@ -1906,6 +1907,7 @@ class TaskNodeExecutor(Generic[AppT]):
                     ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 )
             if claimed.status is ExecutionStatus.SUCCEEDED:
                 with self.confirm_execution_result(execution_id):
@@ -1957,6 +1959,7 @@ class TaskNodeExecutor(Generic[AppT]):
                     ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 )
             if claimed.status is ExecutionStatus.SUCCEEDED:
                 with self.confirm_execution_result(execution_id):
@@ -2087,6 +2090,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 failure.code,
                 execution_id,
                 safe_details=failure.safe_details,
+                terminal_status=ExecutionStatus.FAILED,
             ) from error
 
         result = await self._execution.complete_task(
@@ -2154,6 +2158,7 @@ class TaskNodeExecutor(Generic[AppT]):
                     ErrorCode(result.error_code or error.code.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 ) from cause or error
             if retry.task_next_attempt_at is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2177,6 +2182,7 @@ class TaskNodeExecutor(Generic[AppT]):
             error.code,
             execution_id,
             safe_details=error.safe_details,
+            terminal_status=ExecutionStatus.FAILED,
         )
         if cause is not None:
             raise raised from cause
@@ -2308,6 +2314,7 @@ class TaskNodeExecutor(Generic[AppT]):
                     ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 )
             if reconciled.status is ExecutionStatus.RECOVERY_REQUIRED:
                 raise TaskNodeRunError(
@@ -2347,6 +2354,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 failure.code,
                 execution_id,
                 safe_details=failure.safe_details,
+                terminal_status=ExecutionStatus.FAILED,
             ) from error
         result = await self._execution.complete_task(
             execution_id,
@@ -2474,6 +2482,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                 execution_id,
                 safe_details=result.safe_error_details,
+                terminal_status=result.status,
             )
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -2584,6 +2593,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                 execution_id,
                 safe_details=result.safe_error_details,
+                terminal_status=result.status,
             )
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -3388,6 +3398,7 @@ def _execution_failure(result: ExecutionResult) -> TaskNodeRunError:
         code,
         result.execution_id,
         safe_details=result.safe_error_details,
+        terminal_status=result.status,
     )
 
 
