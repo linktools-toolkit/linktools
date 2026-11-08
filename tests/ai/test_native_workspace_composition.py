@@ -234,7 +234,7 @@ async def test_shell_only_runtime_does_not_require_resource_projection_extension
 
 
 @pytest.mark.asyncio
-async def test_runtime_rejects_owned_provider_without_close_before_activation() -> None:
+async def test_runtime_rejects_owned_provider_without_close_before_activation(tmp_path: Path) -> None:
     from linktools.ai.persistence import Persistence, PersistenceStorage
     from linktools.ai.runtime import Runtime
 
@@ -248,6 +248,7 @@ async def test_runtime_rejects_owned_provider_without_close_before_activation() 
             return "/workspace"
 
     features = RuntimeFeatures("missing-workspace-cleanup", workspace_factory=lambda root, **kwargs: NoCleanup())
+    features.capability(FileSystem(Workspace.load(tmp_path)))
     async with Persistence.open("no-cleanup", storage=PersistenceStorage.in_memory()) as persistence:
         with pytest.raises(AIError) as rejected:
             async with Runtime.attach(persistence=persistence, features=features):

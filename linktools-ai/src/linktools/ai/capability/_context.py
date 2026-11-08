@@ -5,7 +5,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, TYPE_CHECKING
 
 from ..core import (
     CorrelationData,
@@ -16,6 +16,10 @@ from ..core import (
     validate_memory_scope,
     validate_persistence_namespace,
 )
+if TYPE_CHECKING:
+    from ._tool_identity import ToolCallIdentity
+    from ._persistence import TraceCapability
+
 AppT = TypeVar("AppT")
 
 
@@ -30,6 +34,12 @@ class AgentContext(Generic[AppT]):
     memory_scope: "str | None" = None
     correlation: CorrelationData = field(default_factory=dict)
     deadline_at: datetime | None = None
+    root_execution_id: str | None = None
+    parent_execution_id: str | None = None
+    agent_id: str | None = None
+    agent_run_seq: int | None = None
+    tool_call: "ToolCallIdentity | None" = None
+    trace: "TraceCapability[AppT] | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.deadline_at is not None and (

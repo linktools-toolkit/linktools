@@ -734,9 +734,10 @@ class _SnapshotAssetStore(AssetStore):
             values[info.key] = content_key
         self._entries = entries
         self._values = values
-        self._revision = str(manifest.get("captured_revision"))
-        if not self._revision or self._revision == "None":
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            self._revision = StorageRevision(manifest.get("captured_revision")).value
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         self._ready = True
 
     async def close(self) -> None:
@@ -997,17 +998,28 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
             or not isinstance(content, Mapping)
         ):
             raise ValueError
-        key = AssetKey(str(key_payload["kind"]), str(key_payload["id"]))
-        digest = str(raw["digest"])
-        size = int(raw["size"])
+        if any(not isinstance(value, str) for value in (
+            key_payload["kind"], key_payload["id"], raw["digest"],
+            raw["status"], raw["modified_at"], content["key"],
+        )):
+            raise ValueError
+        size = raw["size"]
+        content_size = content["size"]
+        if (
+            isinstance(size, bool) or not isinstance(size, int)
+            or isinstance(content_size, bool) or not isinstance(content_size, int)
+        ):
+            raise ValueError
+        key = AssetKey(key_payload["kind"], key_payload["id"])
+        digest = raw["digest"]
         info = AssetInfo(
             key=key,
-            revision=StorageEntryRevision(int(raw["entry_revision"])),
-            store_revision=StorageRevision(str(raw["store_revision"])),
+            revision=StorageEntryRevision(raw["entry_revision"]),
+            store_revision=StorageRevision(raw["store_revision"]),
             digest=digest,
             size=size,
-            status=StorageEntryStatus(str(raw["status"])),
-            modified_at=datetime.fromisoformat(str(raw["modified_at"])),
+            status=StorageEntryStatus(raw["status"]),
+            modified_at=datetime.fromisoformat(raw["modified_at"]),
             metadata=raw.get("metadata", {}),
         )
         if (
@@ -1016,7 +1028,7 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
             or content.get("size") != info.size
         ):
             raise ValueError
-        return info, str(content["key"])
+        return info, content["key"]
     except (KeyError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 

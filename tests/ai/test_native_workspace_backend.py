@@ -122,29 +122,6 @@ def test_native_command_unknown_effect_error_remains_unknown() -> None:
     asyncio.run(run())
 
 
-def test_worker_protocol_preserves_binary_files_and_structured_commands(tmp_path: Path) -> None:
-    import base64
-    import json
-
-    from linktools.ai.workspace._sandbox_protocol import validate_request_params
-    from linktools.ai.workspace.sandbox_worker import _dispatch
-
-    async def run() -> None:
-        session = LocalWorkspaceBackend(tmp_path)
-        try:
-            params = {"operation": "write", "path": "raw.bin", "data": base64.b64encode(b"\x00\xff").decode("ascii")}
-            validate_request_params("raw_filesystem", params)
-            assert json.loads(await _dispatch(session, "raw_filesystem", params)) == {}
-            assert await session.read_bytes("raw.bin") == b"\x00\xff"
-            params = {"command": "printf '%s' \"$MESSAGE\"; exit 4", "environment": {"MESSAGE": "hello"}, "timeout_seconds": 1}
-            validate_request_params("execute_command", params)
-            result = json.loads(await _dispatch(session, "execute_command", params))
-            assert result == {"exit_code": 4, "stdout": "hello", "stderr": "", "timed_out": False, "output_truncated": False}
-        finally:
-            await session.close()
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("restricted", [False, True])
 def test_native_resource_reads_intersect_membership_and_policy(tmp_path: Path, restricted: bool) -> None:
     from linktools.ai.workspace import WorkspaceResource
@@ -225,60 +202,7 @@ def test_command_timeout_keeps_failed_cleanup_owned_for_close(tmp_path: Path, mo
     asyncio.run(run())
 
 
-def test_failed_bubblewrap_handshake_retains_process_and_lock_until_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from types import SimpleNamespace
-    from linktools.ai.workspace import BubblewrapWorkspaceBackend, _bubblewrap
-
-    async def run() -> None:
-        class Stdin:
-            def is_closing(self) -> bool:
-                return False
-            def close(self) -> None:
-                pass
-
-        process = SimpleNamespace(stdin=Stdin(), returncode=None)
-        (tmp_path / ".linktools").mkdir()
-        backend = BubblewrapWorkspaceBackend(tmp_path, runtime_root=tmp_path,
-                                            bwrap_executable=tmp_path / "bwrap",
-                                            read_policy=WorkspaceReadPolicy(()))
-        monkeypatch.setattr(_bubblewrap, "_resolve_directory", lambda path: path)
-        monkeypatch.setattr(_bubblewrap, "_resolve_executable", lambda path: path)
-        monkeypatch.setattr(_bubblewrap, "_validate_rootfs", lambda *args: None)
-        monkeypatch.setattr(_bubblewrap, "_validate_bwrap", lambda *args: None)
-        monkeypatch.setattr(_bubblewrap, "_open_runtime_pidfd", lambda: 12345)
-        monkeypatch.setattr(_bubblewrap, "_close_fd", lambda fd: None)
-        monkeypatch.setattr(_bubblewrap, "_guardian_config", lambda **kwargs: {})
-
-        async def spawn(*args: object) -> tuple[object, int]:
-            return process, -1
-        async def handshake() -> None:
-            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-        async def abort(*args: object, **kwargs: object) -> None:
-            raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
-        waits = 0
-        async def wait(*args: object, **kwargs: object) -> None:
-            nonlocal waits
-            waits += 1
-            assert backend._lock_root.exists()
-            process.returncode = 0
-
-        monkeypatch.setattr(_bubblewrap, "_spawn_guardian", spawn)
-        monkeypatch.setattr(backend, "_open_handshake", handshake)
-        monkeypatch.setattr(_bubblewrap, "_abort_guardian", abort)
-        monkeypatch.setattr(_bubblewrap, "_wait_guardian", wait)
-        with pytest.raises(AIError):
-            await backend.working_dir()
-        ref, lock = backend.ref, backend._lock_root
-        assert ref is not None and lock.exists()
-        assert backend._process is process
-        await backend.close()
-        assert waits == 1 and not lock.exists()
-        assert backend.ref == ref
-    asyncio.run(run())
-
-
 def test_provider_construction_and_unused_close_do_not_touch_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.workspace import BubblewrapWorkspaceBackend
 
     def forbidden(*args: object, **kwargs: object) -> object:
         raise AssertionError("construction must not inspect or create filesystem state")
@@ -287,9 +211,7 @@ def test_provider_construction_and_unused_close_do_not_touch_files(tmp_path: Pat
         with monkeypatch.context() as patch:
             patch.setattr(Path, "resolve", forbidden)
             patch.setattr(Path, "mkdir", forbidden)
-            providers = (LocalWorkspaceBackend(tmp_path), BubblewrapWorkspaceBackend(
-                tmp_path, runtime_root=tmp_path, bwrap_executable=tmp_path / "bwrap",
-            ))
+            providers = (LocalWorkspaceBackend(tmp_path),)
             for backend in providers:
                 assert backend.ref is None
                 await backend.close()
@@ -447,22 +369,18 @@ def test_failed_write_rolls_back_only_owned_empty_parents(
     asyncio.run(run())
 
 
-def test_worker_write_supports_creation_and_exact_replacement(tmp_path: Path) -> None:
-    from linktools.ai.workspace._sandbox_protocol import validate_request_params
-    from linktools.ai.workspace.sandbox_worker import _dispatch
+def test_native_write_supports_creation_and_exact_replacement(tmp_path: Path) -> None:
 
     async def run() -> None:
         backend = LocalWorkspaceBackend(tmp_path)
         try:
             create = {"path": "new/nested/report.txt", "content": "before value", "old_text": None}
-            validate_request_params("write_file", create)
-            await _dispatch(backend, "write_file", create)
+            await backend.write_file(**create)
             replace = {"path": create["path"], "content": "after", "old_text": "before"}
-            validate_request_params("write_file", replace)
-            await _dispatch(backend, "write_file", replace)
+            await backend.write_file(**replace)
             assert await backend.read_bytes(create["path"]) == b"after value"
             with pytest.raises(AIError) as invalid:
-                await _dispatch(backend, "write_file", {**replace, "old_text": ""})
+                await backend.write_file(**{**replace, "old_text": ""})
             assert invalid.value.code == ErrorCode.REQUEST_FIELD_INVALID
             assert await backend.read_bytes(create["path"]) == b"after value"
         finally:
@@ -470,20 +388,18 @@ def test_worker_write_supports_creation_and_exact_replacement(tmp_path: Path) ->
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("owner_kind", ("local", "bubblewrap", "local_stdio", "bubblewrap_stdio"))
+@pytest.mark.parametrize("owner_kind", ("local", "local_stdio"))
 @pytest.mark.parametrize("cancel_caller", (False, True))
 def test_failed_workspace_cleanup_can_be_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_kind: str, cancel_caller: bool,
 ) -> None:
-    from linktools.ai.workspace import _bubblewrap, _local_sandbox
+    from linktools.ai.workspace import _local_sandbox
 
     async def run() -> None:
         # Fault injection isolates close-task ownership from OS process teardown.
         owner_type = {
             "local": _local_sandbox.LocalWorkspaceBackend,
-            "bubblewrap": _bubblewrap.BubblewrapWorkspaceBackend,
             "local_stdio": _local_sandbox._LocalStdioProcess,
-            "bubblewrap_stdio": _bubblewrap._BubblewrapStdioProcess,
         }[owner_kind]
         owner = object.__new__(owner_type)
         owner._state = "OPEN"
@@ -555,3 +471,35 @@ def test_local_provider_retries_retained_stdio_cleanup(tmp_path: Path) -> None:
         assert not backend._stdio_processes
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ("limit", "timeout", "job"))
+async def test_native_output_retains_prefix_while_jobs_retain_tail(tmp_path: Path, mode: str) -> None:
+    import shlex
+    import sys
+
+    script = (
+        "import sys,time; "
+        "sys.stdout.write('stdout-start|' + 'x' * 60000 + '|stdout-end'); sys.stdout.flush(); "
+        "sys.stderr.write('stderr-start|' + 'y' * 60000 + '|stderr-end'); sys.stderr.flush()"
+    )
+    if mode == "timeout":
+        script += "; time.sleep(30)"
+    command = shlex.join((sys.executable, "-c", script))
+    backend = LocalWorkspaceBackend(tmp_path)
+    try:
+        if mode == "job":
+            result = await backend.run_command(command, timeout_seconds=5)
+            assert "|stdout-end" in result and "|stderr-end" in result
+            assert "stdout-start|" not in result and "stderr-start|" not in result
+        else:
+            error_type = WorkspaceTimeoutError if mode == "timeout" else WorkspaceOutputLimitError
+            with pytest.raises(error_type) as raised:
+                await backend.run(command, shell=True, timeout=1 if mode == "timeout" else 5)
+            assert raised.value.stdout.startswith("stdout-start|")
+            assert raised.value.stderr.startswith("stderr-start|")
+            assert "|stdout-end" not in raised.value.stdout
+            assert "|stderr-end" not in raised.value.stderr
+    finally:
+        await backend.close()

@@ -48,7 +48,7 @@ from ._root import Workspace
 from ._file_io import (
     _check_state, _facts, _glob_matches, _inspect_file, _read_text_range, _state, _validate_read,
 )
-from ._sandbox_protocol import validate_request_size
+from ._request_validation import validate_request_params
 from ._local_process import (
     _ProcessState,
     _WindowsJob,
@@ -139,7 +139,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         self._processes: dict[str, _ProcessState] = {}
         self._stdio_processes: set[_LocalStdioProcess] = set()
         self._pending_processes: dict[
-            int, tuple[asyncio.subprocess.Process, _WindowsJob | None]
+            int, tuple[asyncio.subprocess.Process, _WindowsJob | None, _ProcessState | None]
         ] = {}
         self._operations: set[asyncio.Task[object]] = set()
         self._starting_operations: set[asyncio.Future[None]] = set()
@@ -183,7 +183,11 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         self, operation: str, path: str, *, data: bytes | None = None,
     ) -> Mapping[str, JsonValue]:
         """Execute raw file primitives under the same path and resource authority."""
+        effect_possible = True
+
         def perform() -> Mapping[str, JsonValue]:
+            nonlocal effect_possible
+            effect_possible = False
             selected_path = path
             if operation == "realpath":
                 try:
@@ -199,6 +203,13 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 target = self._resolve_path(normalized, allow_missing=True)
                 if _is_protected(self._workspace, _relative(self._root, target.resolve())):
                     raise WorkspaceOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+                parent = target.parent
+                while parent != self._root and not parent.exists():
+                    parent = parent.parent
+                if not parent.is_dir():
+                    raise WorkspaceOperationRejected(
+                        ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "not_directory"},
+                    )
             else:
                 target, normalized, resource = self._read_target(
                     selected_path, allow_missing=True, directory=None,
@@ -211,12 +222,29 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 if not isinstance(data, bytes):
                     raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
                 if target.exists() and not target.is_file():
-                    raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
+                    raise WorkspaceOperationRejected(
+                        ErrorCode.REQUEST_FIELD_INVALID,
+                        safe_details={"reason": "is_directory" if target.is_dir() else "not_regular_file"},
+                    )
+                if parent != target.parent:
+                    effect_possible = True
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                stream = target.open("wb")
+                # Opening may already create or truncate, before the first write.
+                effect_possible = True
+                with stream:
+                    stream.write(data)
                 return {}
             if operation == "mkdir":
-                target.mkdir(parents=True, exist_ok=True)
+                if target.exists() and not target.is_dir():
+                    raise WorkspaceOperationRejected(
+                        ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_exists"},
+                    )
+                try:
+                    target.mkdir(exist_ok=True)
+                except FileNotFoundError:
+                    effect_possible = True
+                    target.mkdir(parents=True, exist_ok=True)
                 return {}
             if operation == "remove":
                 if target == self._root or _inside_or_equal(target, self._root):
@@ -224,10 +252,13 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 original = self._root / normalized
                 if original.is_symlink():
                     original.unlink()
+                elif not target.exists():
+                    raise WorkspaceOperationRejected(ErrorCode.STORAGE_NOT_FOUND)
                 elif target.is_dir():
                     for child in target.rglob("*"):
                         if _is_protected(self._workspace, _relative(self._root, child)):
                             raise WorkspaceOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+                    effect_possible = True
                     shutil.rmtree(target)
                 else:
                     target.unlink()
@@ -246,10 +277,20 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
             raise WorkspaceOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
         try:
             return await self._run_sync(perform)
-        except FileNotFoundError as error:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-        except (IsADirectoryError, NotADirectoryError) as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError, FileExistsError, PermissionError) as error:
+            error_type = (
+                WorkspaceOperationRejected
+                if operation in {"write", "mkdir", "remove"} and not effect_possible else AIError
+            )
+            if isinstance(error, FileNotFoundError):
+                raise error_type(ErrorCode.STORAGE_NOT_FOUND) from error
+            if isinstance(error, IsADirectoryError):
+                raise error_type(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "is_directory"}) from error
+            if isinstance(error, NotADirectoryError):
+                raise error_type(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "not_directory"}) from error
+            if isinstance(error, FileExistsError):
+                raise error_type(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_exists"}) from error
+            raise error_type(ErrorCode.AUTHORIZATION_DENIED) from error
 
     def _raw_entry(self, path: Path) -> dict[str, JsonValue]:
         info = path.stat()
@@ -268,7 +309,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         except AIError as error:
             raise WorkspaceOperationRejected.from_error(error) from error
         await self._ensure_open()
-        process = await self._start_process(command, environment=environment)
+        process = await self._start_process(command, environment=environment, output_prefix=True)
         timed_out = False
         cleanup_succeeded = True
         try:
@@ -317,7 +358,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         }
         values.update(
             process.pid
-            for process, _job in self._pending_processes.values()
+            for process, _job, _cleanup in self._pending_processes.values()
             if process.pid is not None
         )
         values.update(
@@ -408,14 +449,12 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                         job.close()
                     raise
                 process_key = id(process)
-                self._pending_processes[process_key] = (process, job)
+                self._pending_processes[process_key] = (process, job, None)
                 try:
                     await _finish_task(asyncio.create_task(
-                        _terminate_unregistered_process(process, job)
+                        self._terminate_pending_process(process_key)
                     ))
                 except BaseException as cleanup_error:
-                    if process.returncode is not None:
-                        self._pending_processes.pop(process_key, None)
                     raise cancellation from cleanup_error
                 self._pending_processes.pop(process_key, None)
                 raise cancellation
@@ -425,15 +464,16 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
 
             process_key = id(process)
-            self._pending_processes[process_key] = (process, job)
+            self._pending_processes[process_key] = (process, job, None)
             if job is not None:
                 try:
                     job.assign_and_resume(process.pid)
                 except BaseException as error:
                     try:
-                        await _terminate_unregistered_process(process, job)
-                    finally:
-                        self._pending_processes.pop(process_key, None)
+                        await self._terminate_pending_process(process_key)
+                    except BaseException as cleanup_error:
+                        raise cleanup_error from error
+                    self._pending_processes.pop(process_key, None)
                     if isinstance(error, AIError):
                         raise
                     raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
@@ -443,14 +483,19 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 job,
                 self._stdio_processes.discard,
             )
-            async with self._process_lock:
-                if self._state != "OPEN":
-                    await stdio_process.close()
-                    self._pending_processes.pop(process_key, None)
-                    raise AIError(_session_state_error(self._state))
-                self._stdio_processes.add(stdio_process)
-                self._pending_processes.pop(process_key, None)
-            return stdio_process
+            self._stdio_processes.add(stdio_process)
+            self._pending_processes.pop(process_key, None)
+            try:
+                async with self._process_lock:
+                    if self._state != "OPEN":
+                        raise AIError(_session_state_error(self._state))
+                return stdio_process
+            except BaseException as error:
+                try:
+                    await _finish_task(asyncio.create_task(stdio_process.close()))
+                except BaseException as cleanup_error:
+                    raise error from cleanup_error
+                raise
         finally:
             started.set_result(None)
             self._starting_operations.discard(started)
@@ -480,12 +525,19 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         def operation() -> bytes:
             target, display, _resource_key = self._read_target(path)
             try:
-                if not stat.S_ISREG(target.stat().st_mode):
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                mode = target.stat().st_mode
+                if not stat.S_ISREG(mode):
+                    raise AIError(
+                        ErrorCode.REQUEST_FIELD_INVALID,
+                        safe_details={"reason": "is_directory" if stat.S_ISDIR(mode) else "not_regular_file"},
+                    )
                 with target.open("rb") as stream:
                     info = os.fstat(stream.fileno())
                     if not stat.S_ISREG(info.st_mode):
-                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                        raise AIError(
+                            ErrorCode.REQUEST_FIELD_INVALID,
+                            safe_details={"reason": "is_directory" if stat.S_ISDIR(info.st_mode) else "not_regular_file"},
+                        )
                     state = _state(display, info)
                     if expected_state is not None and expected_state != state:
                         raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
@@ -501,6 +553,12 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 raise
             except FileNotFoundError as error:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            except IsADirectoryError as error:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "is_directory"}) from error
+            except NotADirectoryError as error:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "not_directory"}) from error
+            except PermissionError as error:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
             except OSError as error:
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
@@ -510,7 +568,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         self, path: str, *, max_bytes: int | None = None,
     ) -> Mapping[str, JsonValue]:
         """Inspect only an authorized, bounded header; never expand containers."""
-        validate_request_size("inspect_file", {"path": path, "max_bytes": max_bytes})
+        validate_request_params("inspect_file", {"path": path, "max_bytes": max_bytes})
         def operation() -> Mapping[str, JsonValue]:
             target, display, _resource_key = self._read_target(path)
             try:
@@ -530,7 +588,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         max_bytes: int | None = None, max_read_bytes: int | None = None,
     ) -> Mapping[str, JsonValue]:
         """Read a bounded UTF-8 preview without implicitly scanning the file."""
-        validate_request_size("read_text", {
+        validate_request_params("read_text", {
             "path": path, "offset": offset, "limit": limit, "cursor": cursor,
             "full_metadata": full_metadata, "max_bytes": max_bytes,
             "max_read_bytes": max_read_bytes,
@@ -565,7 +623,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         try:
             normalized = _normalize_path(path)
             expected = _validate_expected_hash(expected_hash)
-            validate_request_size(
+            validate_request_params(
                 "write_file",
                 {"path": path, "content": content, "expected_hash": expected_hash},
             )
@@ -605,7 +663,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
             if not isinstance(old_text, str) or not old_text:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             expected = _validate_expected_hash(expected_hash)
-            validate_request_size(
+            validate_request_params(
                 "write_file",
                 {
                     "path": path,
@@ -668,7 +726,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     async def list_files(self, path: str = ".", *, include_glob: str = "*") -> str:
         """List names with extension hints and explicit recursive glob traversal."""
         _validate_glob(include_glob)
-        validate_request_size("list_files", {"path": path, "include_glob": include_glob})
+        validate_request_params("list_files", {"path": path, "include_glob": include_glob})
         def operation() -> str:
             target, display, resource_key = self._read_target(path, directory=True)
             if not target.is_dir():
@@ -706,7 +764,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         expression = _compile_pattern(pattern)
         if include_glob is not None:
             _validate_glob(include_glob)
-        validate_request_size("search_text", {"pattern": pattern, "path": path, "include_glob": include_glob})
+        validate_request_params("search_text", {"pattern": pattern, "path": path, "include_glob": include_glob})
         def operation() -> str:
             target, display, resource_key = self._read_target(path, directory=None)
             walk_state = _WalkState()
@@ -762,7 +820,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     ) -> str:
         self._reject_read_only()
         try:
-            validate_request_size(
+            validate_request_params(
                 "run_command",
                 {"command": command, "timeout_seconds": timeout_seconds},
             )
@@ -811,7 +869,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     async def start_command(self, command: str) -> str:
         self._reject_read_only()
         try:
-            validate_request_size("start_command", {"command": command})
+            validate_request_params("start_command", {"command": command})
             _validate_command_input(command)
             _validate_command(command)
         except AIError as error:
@@ -830,7 +888,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
 
     async def check_command(self, command_id: str) -> str:
         self._reject_read_only()
-        validate_request_size("check_command", {"command_id": command_id})
+        validate_request_params("check_command", {"command_id": command_id})
         process = await self._get_process(command_id)
         if process is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -844,7 +902,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
     async def stop_command(self, command_id: str) -> str:
         self._reject_read_only()
         try:
-            validate_request_size("stop_command", {"command_id": command_id})
+            validate_request_params("stop_command", {"command_id": command_id})
             if not command_id:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         except AIError as error:
@@ -915,14 +973,12 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 async with self._process_lock:
                     if self._processes.get(process.command_id) is process:
                         self._processes.pop(process.command_id, None)
-        for process_key, (process, job) in pending_processes:
+        for process_key, _pending in pending_processes:
             try:
-                await _terminate_unregistered_process(process, job)
+                await self._terminate_pending_process(process_key)
             except BaseException as error:
                 cleanup_error = cleanup_error or error
                 _logger.exception("local pending process cleanup failed")
-                if process.returncode is not None:
-                    self._pending_processes.pop(process_key, None)
             else:
                 self._pending_processes.pop(process_key, None)
         try:
@@ -1172,19 +1228,31 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
         return candidate
 
 
-    async def _start_process(self, command: str, *, environment: Mapping[str, str] | None = None) -> "_ProcessState":
+    async def _terminate_pending_process(self, process_key: int) -> None:
+        process, job, state = self._pending_processes[process_key]
+        if sys.platform.startswith("linux"):
+            if state is None:
+                state = _ProcessState(f"unregistered-{process.pid}", "", process, job=job)
+                self._pending_processes[process_key] = (process, job, state)
+            await _stop_process(state, force=True)
+        else:
+            await _terminate_unregistered_process(process, job)
+
+    async def _start_process(self, command: str, *, environment: Mapping[str, str] | None = None,
+                             output_prefix: bool = False) -> "_ProcessState":
         started = asyncio.get_running_loop().create_future()
         async with self._process_lock:
             if self._state != "OPEN":
                 raise AIError(_session_state_error(self._state))
             self._starting_operations.add(started)
         try:
-            return await self._spawn_process(command, environment=environment)
+            return await self._spawn_process(command, environment=environment, output_prefix=output_prefix)
         finally:
             started.set_result(None)
             self._starting_operations.discard(started)
 
-    async def _spawn_process(self, command: str, *, environment: Mapping[str, str] | None = None) -> "_ProcessState":
+    async def _spawn_process(self, command: str, *, environment: Mapping[str, str] | None = None,
+                             output_prefix: bool = False) -> "_ProcessState":
         if os.name != "posix":
             raise WorkspaceOperationRejected(ErrorCode.SANDBOX_UNAVAILABLE,
                                               safe_details={"reason": "posix_execution_required"})
@@ -1226,18 +1294,16 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                     job.close()
                 raise
             process_key = id(process)
-            self._pending_processes[process_key] = (process, job)
+            self._pending_processes[process_key] = (process, job, None)
             try:
                 await _finish_task(asyncio.create_task(
-                    _terminate_unregistered_process(process, job)
+                    self._terminate_pending_process(process_key)
                 ))
             except BaseException as cleanup_error:
                 _logger.exception(
                     "cancelled local process cleanup failed",
                     exc_info=cleanup_error,
                 )
-                if process.returncode is not None:
-                    self._pending_processes.pop(process_key, None)
                 raise cancellation from cleanup_error
             self._pending_processes.pop(process_key, None)
             raise cancellation
@@ -1246,16 +1312,14 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                 job.close()
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
         process_key = id(process)
-        self._pending_processes[process_key] = (process, job)
+        self._pending_processes[process_key] = (process, job, None)
         if job is not None:
             try:
                 job.assign_and_resume(process.pid)
             except BaseException as error:
                 try:
-                    await _terminate_unregistered_process(process, job)
+                    await self._terminate_pending_process(process_key)
                 except BaseException as cleanup_error:
-                    if process.returncode is not None:
-                        self._pending_processes.pop(process_key, None)
                     if isinstance(error, asyncio.CancelledError):
                         raise error from cleanup_error
                     raise cleanup_error from error
@@ -1266,7 +1330,7 @@ class LocalWorkspaceBackend(_NativeWorkspaceOperations):
                     raise error
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
         command_id = uuid.uuid4().hex
-        state = _ProcessState(command_id, command, process, job=job)
+        state = _ProcessState(command_id, command, process, job=job, output_prefix=output_prefix)
         registered = False
         cleanup_attempted = False
         try:
@@ -1331,6 +1395,7 @@ class _LocalStdioProcess:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
         self._process = process
         self._job = job
+        self._cleanup_state: _ProcessState | None = None
         self._on_close = on_close
         self._stdin_closed = False
         self._state = "OPEN"
@@ -1405,14 +1470,21 @@ class _LocalStdioProcess:
                 async with self._lock:
                     if self._close_task is task:
                         self._close_task = None
-                        self._state = "OPEN"
+                        self._state = "LOST"
 
     async def _close_impl(self) -> None:
         await self.close_stdin()
         self._stderr_task.cancel()
         await asyncio.gather(self._stderr_task, return_exceptions=True)
         try:
-            await _terminate_unregistered_process(self._process, self._job)
+            if sys.platform.startswith("linux"):
+                if self._cleanup_state is None:
+                    self._cleanup_state = _ProcessState(
+                        f"stdio-{self._process.pid}", "", self._process, job=self._job,
+                    )
+                await _stop_process(self._cleanup_state, force=True)
+            else:
+                await _terminate_unregistered_process(self._process, self._job)
             stdin = self._process.stdin
             if stdin is not None:
                 # Discard buffered input even if a detached reader retained the pipe.

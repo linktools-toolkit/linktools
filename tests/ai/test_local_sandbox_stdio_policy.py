@@ -39,6 +39,12 @@ def subprocess_double(
     stop = AsyncMock(side_effect=terminate)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(_local_sandbox, "_terminate_unregistered_process", stop)
+
+    async def stop_state(state: object, *, force: bool) -> None:
+        await stop(process, None)
+
+    monkeypatch.setattr(_local_sandbox, "_ProcessState", MagicMock())
+    monkeypatch.setattr(_local_sandbox, "_stop_process", stop_state)
     monkeypatch.setattr(_local_sandbox._WindowsJob, "create", MagicMock())
     return process, spawn, stop
 

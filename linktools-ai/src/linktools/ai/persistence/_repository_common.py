@@ -433,6 +433,7 @@ def operation_identity_matches(
         and current.execution_id == candidate.execution_id
         and current.operation_kind is candidate.operation_kind
         and current.request_digest == candidate.request_digest
+        and current.request_digest_contract == candidate.request_digest_contract
         and current.compactable == candidate.compactable
     )
 
@@ -1130,6 +1131,7 @@ def _operation_record(
         sequence,
         value.created_at,
         value.updated_at,
+        value.request_digest_contract,
     )
 
 
@@ -1151,6 +1153,7 @@ def _stored_from_operation(
         value.compactable,
         value.created_at,
         value.updated_at,
+        value.request_digest_contract,
     )
     return replace(
         current,

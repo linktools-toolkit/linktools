@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from ..core import Principal, TaskStatus
+from ..errors import AIError, ErrorCode
 from ._graph import TaskGraph, TaskGraphAdmission, TaskGraphResult
 
 
@@ -17,8 +18,13 @@ class TaskSubmissionRef:
     request_digest: str
     operation_id: str
     principal: Principal
+    request_identity_version: int = 1
 
     def __post_init__(self) -> None:
+        if type(self.request_identity_version) is not int:
+            raise ValueError("task request identity version is invalid")
+        if self.request_identity_version not in (1, 2):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if (
             not self.namespace
             or not self.graph_id
@@ -27,6 +33,15 @@ class TaskSubmissionRef:
             or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
         ):
             raise ValueError("task submission identity is invalid")
+
+    @classmethod
+    def from_admission(cls, namespace: str, admission: TaskGraphAdmission) -> "TaskSubmissionRef":
+        """Derive the retained identity from its admission owner."""
+        return cls(
+            namespace, admission.principal.tenant_id, admission.graph_id,
+            admission.initial_request_digest, admission.operation_id, admission.principal,
+            admission.request_identity_version,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,14 +58,7 @@ class TaskGraphSubmission:
 
     @property
     def ref(self) -> TaskSubmissionRef:
-        return TaskSubmissionRef(
-            self.namespace,
-            self.admission.principal.tenant_id,
-            self.admission.graph_id,
-            self.admission.initial_request_digest,
-            self.admission.operation_id,
-            self.admission.principal,
-        )
+        return TaskSubmissionRef.from_admission(self.namespace, self.admission)
 
 
 @dataclass(frozen=True, slots=True)

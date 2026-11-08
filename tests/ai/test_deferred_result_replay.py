@@ -2,17 +2,22 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for durable deferred-result replay."""
 
+import asyncio
 import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
+from pydantic_ai.messages import StructuredContent
 from linktools.ai.core import (
     ApprovalDecision,
     ApprovalStatus,
+    canonical_json_bytes,
     canonical_sha256,
     ExternalCallStatus,
     Principal,
@@ -29,7 +34,7 @@ from linktools.ai.runtime._external import (
     DefaultExternalService,
 )
 from linktools.ai.execution import (
-    ApprovalDecisionRequest, ExternalCallSucceeded, ExternalSupplyRequest,
+    ApprovalDecisionRequest, ExternalCallSucceeded, ExternalCallRetry, ExternalCallFailed, ExternalSupplyRequest,
     ExecutionRecoveryDetail, ExecutionRecoveryState,
 )
 from linktools.ai.persistence.contracts import (
@@ -40,7 +45,8 @@ from linktools.ai.persistence.contracts import (
     PendingToolContinuation,
 )
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
-from linktools.ai.persistence.objects import ObjectKeyFactory
+from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from linktools.ai.model._tool_return_codec import encode_tool_return_content
 from linktools.ai.core import Principal, PrincipalKind
 
@@ -406,3 +412,276 @@ async def test_deferred_list_respects_custom_authorization(approvals: bool) -> N
     with pytest.raises(AIError) as error:
         await service.list("execution", principal=Principal("approver", "tenant", "service"))
     assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+def _structured_external_service(*, inline: bool = True):
+    pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}))
+    call_id = deferred_resource_id('external-call-v1', 'tenant', 'execution', 'step', pending.tool_call_id)
+    calls = _ExternalCalls(ExternalCallRecord(
+        call_id=call_id, execution_id='execution', status=ExternalCallStatus.PENDING,
+        idempotency_key_digest=None, created_at=datetime.now(timezone.utc), supplied_at=None,
+    ))
+    objects = InMemoryObjectStore()
+    factory = ObjectKeyFactory('external-replay')
+    service = DefaultExternalService(
+        calls, _Executions(pending, approvals=False), _AllowAuthorization(),
+        objects=objects, object_key_factory=factory,
+        payload_policy=PayloadPolicy(inline_limit_bytes=65536 if inline else 0),
+    )
+    request = ExternalSupplyRequest(
+        Principal('workspace', 'tenant', PrincipalKind.LOCAL_TRUSTED.value), call_id, 'supply-key',
+        ExternalCallSucceeded(StructuredContent({'count': 1}, content='fixed rendering', tag='state')),
+    )
+    return service, calls, objects, factory, request
+
+
+async def _legacy_external_result(objects, factory, *, inline: bool) -> StoredPayload:
+    payload = {'contract': 'linktools.tool-return', 'version': 1,
+               'value': {'type': 'text-content', 'value': {
+                   'kind': 'text-content', 'content': 'fixed rendering', 'metadata': None,
+               }}}
+    if inline:
+        return StoredPayload.inline_json(payload)
+    reference = await put_runtime_object(objects, factory, PersistenceDomain.CHECKPOINT, 'tenant',
+                                         canonical_json_bytes(payload))
+    return StoredPayload.object(reference)
+
+
+def _supplied_record(record: ExternalCallRecord, payload: StoredPayload) -> ExternalCallRecord:
+    return replace(record, status=ExternalCallStatus.SUPPLIED,
+                   idempotency_key_digest=hashlib.sha256(b'supply-key').hexdigest(),
+                   supplied_at=datetime.now(timezone.utc), resolution_kind='succeeded', result_payload=payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('inline', [True, False], ids=['inline', 'object'])
+async def test_external_legacy_result_retry_uses_stored_projection_without_rewriting(inline: bool) -> None:
+    service, calls, objects, factory, request = _structured_external_service(inline=not inline)
+    payload = await _legacy_external_result(objects, factory, inline=inline)
+    calls.record = original = _supplied_record(calls.record, payload)
+    assert (await service.supply('execution', request)).accepted
+    changed_hidden_value = replace(request, resolution=ExternalCallSucceeded(
+        StructuredContent({'count': 2}, content='fixed rendering', tag='changed')))
+    assert (await service.supply('execution', changed_hidden_value)).accepted
+    assert calls.record is original
+    if not inline:
+        assert await read_runtime_object(objects, payload.ref) == canonical_json_bytes({
+            'contract': 'linktools.tool-return', 'version': 1,
+            'value': {'type': 'text-content', 'value': {
+                'kind': 'text-content', 'content': 'fixed rendering', 'metadata': None,
+            }},
+        })
+    with pytest.raises(AIError) as error:
+        await service.supply('execution', replace(request, resolution=ExternalCallSucceeded(
+            StructuredContent({'count': 1}, content='different rendering', tag='state'))))
+    assert error.value.code is ErrorCode.EXTERNAL_RESULT_CONFLICT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('inline', [True, False], ids=['inline', 'object'])
+@pytest.mark.parametrize('field,value', [('value', {'count': 2}), ('tag', 'changed'),
+                                        ('description', 'changed'), ('metadata', {'changed': True})])
+async def test_external_pending_first_supply_uses_current_structured_identity(
+    inline: bool, field: str, value: object,
+) -> None:
+    service, calls, objects, factory, request = _structured_external_service(inline=inline)
+    first = await service.supply('execution', request)
+    original = calls.record
+    payload = original.result_payload
+    raw = payload.decode() if inline else json.loads(await read_runtime_object(objects, payload.ref))
+    assert raw['version'] == 2
+    assert (await service.supply('execution', request)) == first
+    changed = replace(request.resolution.value, **{field: value})
+    with pytest.raises(AIError) as error:
+        await service.supply('execution', replace(request, resolution=ExternalCallSucceeded(changed)))
+    assert error.value.code is ErrorCode.EXTERNAL_RESULT_CONFLICT
+    assert calls.record is original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('inline', [True, False], ids=['inline', 'object'])
+@pytest.mark.parametrize('conflict', [ErrorCode.EXTERNAL_RESULT_CONFLICT, ErrorCode.STORAGE_CONFLICT])
+async def test_external_concurrent_legacy_winner_selects_retry_projection(inline: bool, conflict: ErrorCode) -> None:
+    service, calls, objects, factory, request = _structured_external_service(inline=inline)
+    payload = await _legacy_external_result(objects, factory, inline=inline)
+    winner = _supplied_record(calls.record, payload)
+
+    async def concurrent_supply(*args, **kwargs):
+        calls.record = winner
+        raise AIError(conflict)
+
+    calls.supply = concurrent_supply
+    assert (await service.supply('execution', request)).accepted
+    assert calls.record is winner
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('committed', [True, False])
+async def test_external_supply_reads_durable_outcome_after_uncertain_commit(committed: bool) -> None:
+    service, calls, objects, factory, request = _structured_external_service()
+    supply = calls.supply
+    failure = AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+    async def interrupted_supply(*args, **kwargs):
+        if committed:
+            await supply(*args, **kwargs)
+        raise failure
+
+    calls.supply = interrupted_supply
+    if committed:
+        assert (await service.supply('execution', request)).accepted
+        assert calls.record.status is ExternalCallStatus.SUPPLIED
+    else:
+        with pytest.raises(type(failure)):
+            await service.supply('execution', request)
+        assert calls.record.status is ExternalCallStatus.PENDING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('committed', [True, False])
+async def test_external_supply_preserves_cancellation_after_durable_readback(committed: bool) -> None:
+    service, calls, objects, factory, request = _structured_external_service()
+    supply, get = calls.supply, calls.get
+    interrupted = asyncio.Event()
+    readback = asyncio.Event()
+
+    async def interrupted_supply(*args, **kwargs):
+        if committed:
+            await supply(*args, **kwargs)
+        interrupted.set()
+        await asyncio.Event().wait()
+
+    async def observe_readback(*args, **kwargs):
+        result = await get(*args, **kwargs)
+        if interrupted.is_set():
+            readback.set()
+        return result
+
+    calls.supply, calls.get = interrupted_supply, observe_readback
+    task = asyncio.create_task(service.supply('execution', request))
+    await asyncio.wait_for(interrupted.wait(), timeout=5)
+    task.cancel('caller stopped')
+    with pytest.raises(asyncio.CancelledError, match='caller stopped'):
+        await task
+    assert task.cancelled()
+    assert readback.is_set()
+    assert calls.record.status is (ExternalCallStatus.SUPPLIED if committed else ExternalCallStatus.PENDING)
+    calls.supply = supply
+    assert (await service.supply('execution', request)).accepted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [
+    RuntimeError('programming failure'), AIError(ErrorCode.AUTHORIZATION_DENIED), AIError(ErrorCode.STORAGE_UNAVAILABLE),
+])
+async def test_external_supply_does_not_hide_unclassified_failures_after_commit(failure: Exception) -> None:
+    service, calls, objects, factory, request = _structured_external_service()
+    supply = calls.supply
+
+    async def failing_supply(*args, **kwargs):
+        await supply(*args, **kwargs)
+        raise failure
+
+    calls.supply = failing_supply
+    with pytest.raises(type(failure)) as error:
+        await service.supply('execution', request)
+    assert error.value is failure
+    assert calls.record.status is ExternalCallStatus.SUPPLIED
+    assert (await service.supply('execution', request)).accepted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('resolution_type', [ExternalCallRetry, ExternalCallFailed])
+async def test_external_non_success_replay_retains_message_and_kind(
+    resolution_type: type[ExternalCallRetry] | type[ExternalCallFailed],
+) -> None:
+    service, calls, objects, factory, request = _structured_external_service()
+    request = replace(request, resolution=resolution_type('message'))
+    first = await service.supply('execution', request)
+    assert await service.supply('execution', request) == first
+    for changed in [resolution_type('different'), ExternalCallSucceeded('message')]:
+        with pytest.raises(AIError) as error:
+            await service.supply('execution', replace(request, resolution=changed))
+        assert error.value.code is ErrorCode.EXTERNAL_RESULT_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_external_retry_verifies_original_object_before_selecting_projection() -> None:
+    service, calls, objects, factory, request = _structured_external_service()
+    payload = await _legacy_external_result(objects, factory, inline=False)
+    calls.record = _supplied_record(calls.record, payload)
+    objects._objects[payload.ref.key] = b'{"version":2}'
+    with pytest.raises(AIError) as error:
+        await service.supply('execution', request)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_external_retry_rejects_unknown_stored_result_version() -> None:
+    service, calls, objects, factory, request = _structured_external_service()
+    payload = encode_tool_return_content(request.resolution.value)
+    payload['version'] = 3
+    calls.record = _supplied_record(calls.record, StoredPayload.inline_json(payload))
+    with pytest.raises(AIError) as error:
+        await service.supply('execution', request)
+    assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('changed', [False, True], ids=['same-result', 'changed-value'])
+async def test_external_independent_sqlite_contenders_share_one_result_owner(
+    tmp_path: Path, changed: bool,
+) -> None:
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+
+    _, seed, objects, factory, request = _structured_external_service()
+    first = Persistence(PersistenceStorage.sqlite(tmp_path / 'external.db'))
+    second = Persistence(PersistenceStorage.sqlite(tmp_path / 'external.db'))
+    await first.initialize(namespace='external-race', tenant_id='tenant')
+    await second.initialize(namespace='external-race', tenant_id='tenant')
+    try:
+        await first.checkpoint.external_calls.create_call(seed.record)
+        ready = asyncio.Event()
+        count = 0
+
+        class Contender:
+            def __init__(self, repository) -> None:
+                self.repository = repository
+                self.read = False
+
+            async def get(self, *args, **kwargs):
+                nonlocal count
+                value = await self.repository.get(*args, **kwargs)
+                if not self.read:
+                    self.read = True
+                    count += 1
+                    if count == 2:
+                        ready.set()
+                    await ready.wait()
+                return value
+
+            async def supply(self, *args, **kwargs):
+                return await self.repository.supply(*args, **kwargs)
+
+        pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}))
+        services = [DefaultExternalService(
+            Contender(state.checkpoint.external_calls), _Executions(pending, approvals=False), _AllowAuthorization(),
+            objects=objects, object_key_factory=factory, payload_policy=PayloadPolicy(),
+        ) for state in (first, second)]
+        other = replace(request, resolution=ExternalCallSucceeded(
+            StructuredContent({'count': 2 if changed else 1}, content='fixed rendering', tag='state')))
+        results = await asyncio.wait_for(asyncio.gather(
+            services[0].supply('execution', request), services[1].supply('execution', other),
+            return_exceptions=True,
+        ), timeout=10)
+        if changed:
+            assert sum(isinstance(result, AIError) for result in results) == 1
+            assert next(result for result in results if isinstance(result, AIError)).code is ErrorCode.EXTERNAL_RESULT_CONFLICT
+        else:
+            assert all(result.accepted for result in results)
+        winner = await first.checkpoint.external_calls.get(request.call_id, tenant_id='tenant')
+        assert winner.status is ExternalCallStatus.SUPPLIED
+        assert winner.result_payload.decode()['version'] == 2
+    finally:
+        await first.close()
+        await second.close()

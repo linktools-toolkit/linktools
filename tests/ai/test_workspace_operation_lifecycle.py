@@ -3,7 +3,6 @@
 """Workspace shutdown owns operations, independent of caller task lifetime."""
 
 import asyncio
-import json
 import os
 import shlex
 import signal
@@ -17,8 +16,6 @@ import pytest
 
 from linktools.ai.errors import AIError
 from linktools.ai.workspace import LocalWorkspaceBackend, SupportsStdio
-from linktools.ai.workspace import _bubblewrap
-from linktools.ai.workspace._sandbox_protocol import PROTOCOL_VERSION
 
 
 @pytest.mark.asyncio
@@ -321,179 +318,212 @@ async def test_repeated_cancel_during_local_start_waits_for_child_cleanup(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "posix", reason="Bubblewrap requires POSIX process support")
-async def test_repeated_cancel_during_guardian_start_waits_for_child_cleanup(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process-group inspection is required")
+@pytest.mark.parametrize("entry", ("registered_stdio", "cancel_stdio", "cancel_command", "cancel_stdio_handoff"))
+async def test_cleanup_retry_retains_process_identity_and_output_readers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str,
 ) -> None:
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    processes: list[asyncio.subprocess.Process] = []
-    create_process = asyncio.create_subprocess_exec
+    from linktools.ai.errors import ErrorCode
+    from linktools.ai.workspace import _local_process
 
-    async def delayed_start(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
-        entered.set()
+    backend = LocalWorkspaceBackend(tmp_path)
+    create_process = asyncio.create_subprocess_exec
+    inspect_group = _local_process._has_owned_process_group_members
+    started, release = asyncio.Event(), asyncio.Event()
+    observed: list[tuple[object, ...]] = []
+    failed = True
+
+    async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await create_process(*args, **kwargs)
+        await process.wait()
+        started.set()
         await release.wait()
-        process = await create_process(
-            sys.executable, "-c", "import time; time.sleep(60)",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        processes.append(process)
         return process
 
-    async def stop_child(process: asyncio.subprocess.Process) -> None:
-        process.kill()
-        await process.wait()
+    def inspect(state: _local_process._ProcessState) -> bool:
+        observed.append((state, state.stdout_reader_task, state.stderr_reader_task,
+                         state.process_start_time, state.process_session_id))
+        if failed:
+            raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
+        return inspect_group(state)
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_start)
-    monkeypatch.setattr(_bubblewrap, "_abort_guardian", stop_child)
-    opening = asyncio.create_task(_bubblewrap._spawn_guardian({"mode": "stdio"}, -1))
+    opening: asyncio.Task[object] | None = None
     try:
-        await asyncio.wait_for(entered.wait(), 5)
-        opening.cancel()
-        await asyncio.sleep(0)
-        opening.cancel()
-        await asyncio.sleep(0)
-        assert not opening.done()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await opening
-        assert processes and all(process.returncode is not None for process in processes)
+        if entry == "registered_stdio":
+            handle = await backend.open_stdio_process(sys.executable, ("-c", "print('ready', flush=True)"))
+            output = bytearray()
+            async with asyncio.timeout(5):
+                while chunk := await handle.read_stdout(2):
+                    output.extend(chunk)
+            assert output == b"ready\n"
+            await handle._process.wait()
+            monkeypatch.setattr(_local_process, "_has_owned_process_group_members", inspect)
+            with pytest.raises(AIError) as initial:
+                await handle.close()
+            assert initial.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+            with pytest.raises(AIError):
+                await handle.read_stdout()
+            with pytest.raises(AIError):
+                await handle.write_stdin(b"must not reopen")
+        else:
+            monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+            monkeypatch.setattr(_local_process, "_has_owned_process_group_members", inspect)
+            operation = (backend.start_command("true") if entry == "cancel_command" else
+                         backend.open_stdio_process(sys.executable, ("-c", "pass")))
+            opening = asyncio.create_task(operation)
+            await asyncio.wait_for(started.wait(), 5)
+            if entry == "cancel_stdio_handoff":
+                async with backend._process_lock:
+                    release.set()
+                    async def wait_for_handoff() -> None:
+                        while not backend._stdio_processes:
+                            await asyncio.sleep(0)
+                    # The backend must register ownership before the cancellable handoff lock.
+                    await asyncio.wait_for(wait_for_handoff(), 1)
+                    opening.cancel()
+            else:
+                opening.cancel()
+                await asyncio.sleep(0)
+                release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await opening
+        for _ in range(2):
+            with pytest.raises(AIError) as closing:
+                await backend.close()
+            assert closing.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+        failed = False
+        await asyncio.wait_for(backend.close(), 5)
+        await backend.close()
+        assert observed and all(item == observed[0] for item in observed)
+        state = observed[0][0]
+        assert state.wait_task.done() and state.wait_task.exception() is None
+        assert state.stdout_reader_task.done() and state.stderr_reader_task.done()
     finally:
+        failed = False
         release.set()
-        await asyncio.gather(opening, return_exceptions=True)
-        for process in processes:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+        if opening is not None:
+            if not opening.done():
+                opening.cancel()
+            await asyncio.gather(opening, return_exceptions=True)
+        await backend.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process identity is required")
+@pytest.mark.parametrize("saved_start", (None, 10))
+def test_cleanup_retry_never_signals_a_reused_or_unproven_process_group(
+    monkeypatch: pytest.MonkeyPatch, saved_start: int | None,
+) -> None:
+    from types import SimpleNamespace
+    from typing import cast
+    from linktools.ai.errors import ErrorCode
+    from linktools.ai.workspace import _local_process
+
+    signaled: list[int] = []
+    state = cast(_local_process._ProcessState, SimpleNamespace(
+        process=SimpleNamespace(pid=12345, returncode=0),
+        process_start_time=saved_start, process_session_id=12345, cleanup_retried=True,
+    ))
+
+    def current_start(process_id: int) -> int:
+        return 20
+
+    def group_exists(value: _local_process._ProcessState) -> bool:
+        return True
+
+    def record_signal(process_id: int, sig: signal.Signals) -> None:
+        signaled.append(process_id)
+
+    monkeypatch.setattr(_local_process, "_proc_start_time", current_start)
+    monkeypatch.setattr(_local_process, "_has_owned_process_group_members", group_exists)
+    monkeypatch.setattr(_local_process, "_signal_process_group", record_signal)
+    if saved_start is None:
+        with pytest.raises(AIError) as raised:
+            _local_process._signal_process_group_if_owned(state, signal.SIGKILL)
+        assert raised.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+    else:
+        _local_process._signal_process_group_if_owned(state, signal.SIGKILL)
+    assert not signaled
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="Linux pidfd is required")
-@pytest.mark.parametrize(
-    ("ignore_term", "unread_output"),
-    ((False, False), (True, False), (False, True)),
-)
-async def test_guardian_close_bypasses_buffered_stdin_and_proves_child_exit(
-    monkeypatch: pytest.MonkeyPatch,
-    ignore_term: bool,
-    unread_output: bool,
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process identity is required")
+@pytest.mark.parametrize("saved_start", (None, 10))
+async def test_failed_process_wait_retry_checks_identity_before_initial_signal(
+    monkeypatch: pytest.MonkeyPatch, saved_start: int | None,
 ) -> None:
-    child_source = (
-        "import os,signal,time; "
-        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_term else "")
-        + "print(os.getpid(), flush=True); "
-        + ("os.write(1, b'x' * (20 * 1024 * 1024)); " if unread_output else "")
-        + "time.sleep(60)"
-    )
-    guardian_source = (
-        "import os,subprocess,sys\n"
-        "from linktools.ai.workspace import sandbox_guardian as g\n"
-        "g._CLOSE_SECONDS = 0.5\n"
-        "def start(arguments):\n"
-        "    reader, writer = os.pipe()\n"
-        "    child = subprocess.Popen(\n"
-        f"        [sys.executable, '-c', {child_source!r}],\n"
-        "        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,\n"
-        "        start_new_session=True)\n"
-        "    return child, reader\n"
-        "g._start_bwrap = start\n"
-        "g._wait_bwrap_started = lambda *arguments: None\n"
-        # This direct child has no descendants; namespace reaping is separately tested.
-        "g._child_process_ids = lambda: ()\n"
-        "raise SystemExit(g.main())\n"
-    )
-    runtime_pidfd = os.pidfd_open(os.getpid())
-    config_read, config_write = os.pipe()
-    control_read, control_write = os.pipe()
-    guardian = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", guardian_source,
-        "--config-fd", str(config_read),
-        "--runtime-pidfd", str(runtime_pidfd),
-        "--stdio-control-fd", str(control_write),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        pass_fds=(config_read, runtime_pidfd, control_write),
-        start_new_session=True,
-    )
-    for fd in (config_read, control_write, runtime_pidfd):
-        os.close(fd)
-    os.write(config_write, json.dumps({
-        "version": PROTOCOL_VERSION,
-        "mode": "stdio",
-        "bwrap_args": ["unused", "--", "unused"],
-    }).encode())
-    os.close(config_write)
-    os.set_blocking(control_read, False)
-    process = None
-    writing: asyncio.Task[None] | None = None
-    reading: asyncio.Task[bytes] | None = None
-    child_pid: int | None = None
+    from types import SimpleNamespace
+    from typing import cast
+    from linktools.ai.workspace import _local_process
+
+    async def failed_wait() -> None:
+        raise RuntimeError("inspection unavailable")
+
+    async def finished_wait(state: _local_process._ProcessState) -> None:
+        return None
+
+    def current_start(process_id: int) -> int:
+        return 20
+
+    signals: list[object] = []
+
+    def signal_process(process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+        signals.append(process)
+
+    def signal_group(process_id: int, sig: signal.Signals) -> None:
+        signals.append(process_id)
+
+    previous = asyncio.create_task(failed_wait())
+    await asyncio.gather(previous, return_exceptions=True)
+    state = cast(_local_process._ProcessState, SimpleNamespace(
+        command_id="retained", process=SimpleNamespace(pid=12345, returncode=None),
+        process_start_time=saved_start, process_session_id=12345, cleanup_retried=False,
+        stop_lock=asyncio.Lock(), wait_task=previous, final_status=None, job=None,
+    ))
+    monkeypatch.setattr(_local_process, "_proc_start_time", current_start)
+    monkeypatch.setattr(_local_process, "_wait_process", finished_wait)
+    monkeypatch.setattr(_local_process, "_signal_process", signal_process)
+    monkeypatch.setattr(_local_process, "_signal_process_group", signal_group)
+    if saved_start is None:
+        with pytest.raises(AIError):
+            await _local_process._stop_process(state, force=True)
+    else:
+        await _local_process._stop_process(state, force=True)
+    assert not signals
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process identity is required")
+async def test_cleanup_does_not_capture_identity_from_reused_reaped_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from linktools.ai.errors import ErrorCode
+    from linktools.ai.workspace import _local_process
+
+    process = MagicMock(spec=asyncio.subprocess.Process)
+    process.pid, process.returncode = 12345, 0
+    process.stdout = process.stderr = None
+    process.wait = AsyncMock(return_value=0)
+    signaled: list[int] = []
+
+    def foreign_start(process_id: int) -> int:
+        return 20
+
+    def foreign_group(process_id: int) -> int:
+        return process_id
+
+    def record_signal(process_id: int, sig: signal.Signals) -> None:
+        signaled.append(process_id)
+
+    monkeypatch.setattr(_local_process, "_proc_start_time", foreign_start)
+    monkeypatch.setattr(_local_process.os, "getpgid", foreign_group)
+    monkeypatch.setattr(_local_process, "_signal_process_group", record_signal)
+    state = _local_process._ProcessState("reaped", "", process)
     try:
-        await _bubblewrap._wait_stdio_ready(guardian, control_read)
-        process = _bubblewrap._BubblewrapStdioProcess(
-            guardian, control_fd=control_read, on_close=lambda value: None
-        )
-        stdin = guardian.stdin
-        assert stdin is not None
-        drain = stdin.drain
-        wait_closed = stdin.wait_closed
-        draining = asyncio.Event()
-        stdin_closed = asyncio.Event()
-
-        async def observe_drain() -> None:
-            draining.set()
-            await drain()
-
-        async def observe_closed() -> None:
-            assert guardian.returncode is not None
-            try:
-                await wait_closed()
-            finally:
-                stdin_closed.set()
-
-        monkeypatch.setattr(stdin, "drain", observe_drain)
-        monkeypatch.setattr(stdin, "wait_closed", observe_closed)
-        assert guardian.stdout is not None
-        child_pid = int(await asyncio.wait_for(guardian.stdout.readline(), 5))
-        if unread_output:
-            async def wait_for_backpressure() -> None:
-                while not guardian.stdout._paused:
-                    await asyncio.sleep(0)
-            await asyncio.wait_for(wait_for_backpressure(), 5)
-        else:
-            reading = asyncio.create_task(process.read_stdout())
-        writing = asyncio.create_task(process.write_stdin(b"x" * (20 * 1024 * 1024)))
-        await asyncio.wait_for(draining.wait(), 5)
-        assert not writing.done()
-        await process.close()
-        assert guardian.returncode == 0
-        assert stdin_closed.is_set()
-        if reading is not None:
-            assert await reading == b""
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        with pytest.raises(AIError) as raised:
+            await _local_process._stop_process(state, force=True)
+        assert raised.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+        assert not signaled
     finally:
-        if child_pid is not None:
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if guardian.returncode is None:
-            guardian.kill()
-        if process is not None:
-            await process._drain_stdout()
-        await guardian.wait()
-        if writing is not None:
-            await asyncio.gather(writing, return_exceptions=True)
-        if process is not None:
-            process._stderr_task.cancel()
-            await asyncio.gather(process._stderr_task, return_exceptions=True)
-        if reading is not None:
-            await asyncio.gather(reading, return_exceptions=True)
-        try:
-            os.close(control_read)
-        except OSError:
-            pass
+        await asyncio.gather(state.wait_task, state.stdout_reader_task, state.stderr_reader_task,
+                             return_exceptions=True)

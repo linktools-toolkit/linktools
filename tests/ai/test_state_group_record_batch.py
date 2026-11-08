@@ -4,7 +4,7 @@
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -12,15 +12,18 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event, update
 from sqlalchemy.dialects import mysql, postgresql, sqlite
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence.state import GroupRecordReader
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStore, _SqlGroupTransaction
-from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StateTransaction, StoredRecord
-from linktools.ai.storage import CacheBackend, InMemoryCacheBackend
+from linktools.ai.persistence.state import (
+    RecordReplacement, StateGroupTransaction, StateStore, StateTransaction,
+    StoredAlias, StoredFact, StoredRecord,
+)
+from linktools.ai.storage import CacheBackend, InMemoryCacheBackend, SqlStorageContext
 
 
 
@@ -217,6 +220,179 @@ async def test_group_reads_demultiplex_aliases_of_one_physical_partition(tmp_pat
             assert (await first.read_records((one.key_digest,)))[one.key_digest].data == {"value": "changed"}
         finally:
             await alias.close()
+
+
+@asynccontextmanager
+async def _partition_handles(
+    path: Path, *, cache: CacheBackend | None = None, alias_cache: CacheBackend | None = None,
+) -> AsyncIterator[tuple[SqlStateStore, SqlStateStore]]:
+    async with _database(path, cache=cache) as (engine, first, _):
+        alias = SqlStateStore(engine, context=first.context, metadata=first.storage_group.metadata,
+                              runtime_domain="alias", group=first.storage_group, store_digest=first.store_digest,
+                              cache=alias_cache)
+        await alias.initialize()
+        try:
+            yield first, alias
+        finally:
+            await alias.close()
+
+
+@pytest.mark.asyncio
+async def test_physical_partition_handles_observe_each_others_writes(tmp_path: Path) -> None:
+    async with _partition_handles(tmp_path / "views.db") as (first, alias):
+        record = _record("owner")
+        alias_key, sequence_key = _key("alias"), _key("sequence")
+        await first.mutate(lambda tx: tx.insert_record(record))
+
+        async def write(group: StateGroupTransaction) -> None:
+            tx = group.transaction(first)
+            assert await tx.resolve_alias(alias_key) is None
+            assert await tx.get_sequence(sequence_key) == 0
+            assert await tx.guard_record_revision(record.key_digest, expected_storage_revision=0) == 1
+
+            async def nested(other: StateTransaction) -> None:
+                current = await other.get_record(record.key_digest)
+                assert current is not None and current.storage_revision == 1
+                assert await other.replace_record(
+                    replace(current, storage_revision=2, data={"value": "changed"}),
+                    expected_storage_revision=1,
+                )
+                await other.insert_alias(StoredAlias(alias_key, record.key_digest))
+                assert await other.next_sequence(sequence_key) == 1
+
+            await alias.mutate(nested)
+            assert await tx.resolve_alias(alias_key) == record.key_digest
+            assert await first.read(lambda current: current.get_sequence(sequence_key)) == 1
+            assert await tx.guard_record_revision(record.key_digest, expected_storage_revision=0) == 2
+            current = await tx.get_record(record.key_digest)
+            assert current is not None and current.data == {"value": "changed"}
+            assert await tx.advance_sequence(sequence_key, 1) == 2
+            assert await alias.read(lambda other: other.get_sequence(sequence_key)) == 2
+
+        await first.storage_group.mutate((first, alias), write)
+
+        async def read(group: StateGroupTransaction) -> None:
+            for store in (first, alias):
+                tx = group.transaction(store)
+                assert await tx.get_sequence(sequence_key) == 2
+                assert await tx.resolve_alias(alias_key) == record.key_digest
+                current = await tx.get_record(record.key_digest)
+                assert current is not None and current.storage_revision == 2
+
+        await first.storage_group.read_many((first, alias), read)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", (False, True))
+async def test_physical_partition_owner_deletion_revokes_guards(tmp_path: Path, batch: bool) -> None:
+    async with _partition_handles(tmp_path / "owner.db") as (first, alias):
+        record = _record("owner")
+        alias_key = _key("alias")
+
+        async def seed(tx: StateTransaction) -> None:
+            await tx.insert_record(record)
+            await tx.insert_alias(StoredAlias(alias_key, record.key_digest))
+
+        await first.mutate(seed)
+
+        async def delete(group: StateGroupTransaction) -> None:
+            tx, other = group.transaction(first), group.transaction(alias)
+            assert await tx.resolve_alias(alias_key) == record.key_digest
+            assert await tx.guard_record_revision(record.key_digest, expected_storage_revision=0) == 1
+            if batch:
+                await other.delete_records((record.key_digest,))
+            else:
+                assert await other.delete_record(record.key_digest)
+            with pytest.raises(RuntimeError, match="owner must be guarded"):
+                await tx.insert_fact(StoredFact(_key("stream"), 1, record.key_digest, "probe", None, None, {}))
+            with pytest.raises(RuntimeError, match="owner must be guarded"):
+                await tx.insert_alias(StoredAlias(_key("new-alias"), record.key_digest))
+            assert await tx.guard_record_revision(record.key_digest, expected_storage_revision=1) is None
+            assert await tx.resolve_alias(alias_key) is None
+
+        await first.storage_group.mutate((first, alias), delete)
+        assert await first.read(lambda tx: tx.get_record(record.key_digest)) is None
+        assert await first.read(lambda tx: tx.scan_facts()) == ()
+        assert await first.read(lambda tx: tx.scan_aliases()) == ()
+        await first.validate_integrity()
+
+
+@pytest.mark.asyncio
+async def test_physical_partition_handles_preserve_caught_batch_abort(tmp_path: Path) -> None:
+    async with _partition_handles(tmp_path / "abort.db") as (first, alias):
+        records = (_record("first"), _record("second"))
+        unrelated = _record("unrelated")
+        await first.mutate(lambda tx: tx.insert_records(records))
+
+        async def write(group: StateGroupTransaction) -> None:
+            async def conflict(tx: StateTransaction) -> None:
+                with pytest.raises(AIError) as caught:
+                    await tx.replace_records((
+                        RecordReplacement(replace(records[0], storage_revision=1), 0),
+                        RecordReplacement(replace(records[1], storage_revision=2), 1),
+                    ))
+                assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+
+            await alias.mutate(conflict)
+            await group.transaction(first).insert_record(unrelated)
+
+        with pytest.raises(AIError) as caught:
+            await first.storage_group.mutate((first, alias), write)
+        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await first.read(lambda tx: tx.get_records(tuple(record.key_digest for record in records))) == {
+            record.key_digest: record for record in records
+        }
+        assert await alias.read(lambda tx: tx.get_record(unrelated.key_digest)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed", (False, True))
+async def test_physical_partition_unknown_mutation_invalidates_each_handle_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool,
+) -> None:
+    async with _partition_handles(
+        tmp_path / "unknown.db", cache=InMemoryCacheBackend(max_bytes=65536),
+        alias_cache=InMemoryCacheBackend(max_bytes=65536),
+    ) as (first, alias):
+        old = replace(_record("owner"), kind="execution")
+        new = replace(old, storage_revision=1, data={"value": "changed"})
+        await first.mutate(lambda tx: tx.insert_record(old))
+        for store in (first, alias):
+            assert await store.read_record(old.key_digest) == old
+
+        context = first.context
+        original = type(context).run_mutation
+        uncertain = AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        async def unknown(
+            owner: SqlStorageContext, callback: Callable[[AsyncSession], Awaitable[object]],
+            *, retry_limit: int | None = None, domain: str = "sql",
+        ) -> object:
+            if owner is not context:
+                return await original(owner, callback, retry_limit=retry_limit, domain=domain)
+            if committed:
+                await original(owner, callback, retry_limit=retry_limit, domain=domain)
+            else:
+                async def rollback(session: AsyncSession) -> object:
+                    await callback(session)
+                    raise uncertain
+                await original(owner, rollback, retry_limit=retry_limit, domain=domain)
+            raise uncertain
+
+        async def change(group: StateGroupTransaction) -> None:
+            assert await group.transaction(first).get_record(old.key_digest) == old
+            assert await alias.mutate(lambda tx: tx.replace_record(new, expected_storage_revision=0))
+            assert await group.transaction(first).get_record(old.key_digest) == new
+
+        with monkeypatch.context() as patch:
+            patch.setattr(type(context), "run_mutation", unknown)
+            with pytest.raises(AIError) as caught:
+                await first.storage_group.mutate((first, alias), change)
+            assert caught.value is uncertain
+        expected = new if committed else old
+        for store in (first, alias):
+            assert await store.read_record(old.key_digest) == expected
+            assert await store.read(lambda tx: tx.get_record(old.key_digest)) == expected
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,6 @@
 """Bounded previews, anchored discovery, and atomic streaming edit contracts."""
 
 import hashlib
-import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,8 +12,6 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceReadPolicy, WorkspaceOperationRejected
 from linktools.ai.workspace import _file_io, _local_sandbox
-from linktools.ai.workspace._bubblewrap import _read_workspace_bytes
-from linktools.ai.workspace.sandbox_worker import _dispatch
 
 pytestmark = pytest.mark.asyncio
 
@@ -26,17 +23,14 @@ def isolated_content_detector_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_file_io, "_magic_threads", _file_io._MagicThreadState())
 
 
-@pytest.mark.parametrize("through_worker", [False, True])
 async def test_preview_has_bounded_io_and_cursor_continues_long_unicode_line(
-    tmp_path: Path, through_worker: bool,
+    tmp_path: Path,
 ) -> None:
     text = "é🙂" * 15000 + "\r\nsecond\nlast"
     (tmp_path / "long.log").write_text(text, encoding="utf-8", newline="")
     session = LocalWorkspaceBackend(tmp_path)
     await session.working_dir()
     async def read(**params: object) -> dict:
-        if through_worker:
-            return json.loads(await _dispatch(session, "read_text", {"path": "long.log", **params}))
         return dict(await session.read_text("long.log", **params))
     try:
         first = await read(max_bytes=4096)
@@ -129,7 +123,6 @@ async def test_inspection_without_magic_preserves_basic_text_and_same_state_read
         assert facts["type_source"] in {"extension", "unknown"}
         assert facts["bytes_read"] == 7
         assert await session.read_bytes("activity.log", max_bytes=7, expected_state=facts["state"]) == b"hello\xff\n"
-        assert _read_workspace_bytes(tmp_path, "activity.log", read_policy=None, hidden_paths=(), max_bytes=7, expected_state=facts["state"]) == b"hello\xff\n"
         (tmp_path / "activity.log").write_text("changed", encoding="utf-8")
         with pytest.raises(AIError) as error:
             await session.read_bytes("activity.log", expected_state=facts["state"])

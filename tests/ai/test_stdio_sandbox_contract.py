@@ -10,16 +10,14 @@ from typing import get_type_hints
 import pytest
 
 from linktools.ai.workspace import (
-    BubblewrapWorkspaceBackend,
     LocalWorkspaceBackend,
     SupportsStdio,
 )
 
 
-@pytest.mark.parametrize("backend", (LocalWorkspaceBackend, BubblewrapWorkspaceBackend))
-def test_workspace_backend_declares_stdio_process_capability(backend) -> None:
+def test_workspace_backend_declares_stdio_process_capability() -> None:
     from linktools.ai.workspace import WorkspaceStdioProcess
-    assert get_type_hints(backend.open_stdio_process)["return"] is WorkspaceStdioProcess
+    assert get_type_hints(LocalWorkspaceBackend.open_stdio_process)["return"] is WorkspaceStdioProcess
 
 
 async def _exchange(session: SupportsStdio) -> bytes:

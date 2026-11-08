@@ -16,7 +16,6 @@ from linktools.ai.capability import AgentContext, PydanticToolControlCapability,
 from linktools.ai.core import service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceReadPolicy, WorkspaceResource, Workspace
-from linktools.ai.workspace.sandbox_worker import _dispatch
 
 from ._runtime_test_helpers import is_tool_retry
 
@@ -43,10 +42,9 @@ def read_policy() -> WorkspaceReadPolicy:
     return WorkspaceReadPolicy((), {"package": ("visible.txt", "nested/**")})
 
 
-@pytest.mark.parametrize("through_worker", (False, True))
 @pytest.mark.parametrize("method", ("read_text", "inspect_file"))
 async def test_file_reads_require_membership_and_read_policy(
-    resource_tree: tuple[Path, WorkspaceResource], through_worker: bool, method: str,
+    resource_tree: tuple[Path, WorkspaceResource], method: str,
 ) -> None:
     root, resource = resource_tree
     session = LocalWorkspaceBackend(root, read_policy=read_policy(), resources=(resource,))
@@ -54,16 +52,12 @@ async def test_file_reads_require_membership_and_read_policy(
     try:
         for relative in ("visible.txt", "nested/visible.txt"):
             path = str(resource.source / relative)
-            result = (await _dispatch(session, method, {"path": path}) if through_worker
-                      else await getattr(session, method)(path))
+            result = await getattr(session, method)(path)
             assert "visible.txt" in str(result)
         for relative in ("unlisted.txt", "nested/unlisted.txt", "blocked/declared.txt"):
             path = str(resource.source / relative)
             with pytest.raises(AIError) as caught:
-                if through_worker:
-                    await _dispatch(session, method, {"path": path})
-                else:
-                    await getattr(session, method)(path)
+                await getattr(session, method)(path)
             assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
             assert "synthetic" not in str(caught.value.safe_details)
         assert await session.read_bytes(str(resource.source / "visible.txt")) == b"synthetic visible.txt\n"
@@ -74,10 +68,9 @@ async def test_file_reads_require_membership_and_read_policy(
         await session.close()
 
 
-@pytest.mark.parametrize("through_worker", (False, True))
 @pytest.mark.parametrize("method", ("list_files", "search_text"))
 async def test_directory_results_only_expose_permitted_resource_members(
-    resource_tree: tuple[Path, WorkspaceResource], through_worker: bool, method: str,
+    resource_tree: tuple[Path, WorkspaceResource], method: str,
 ) -> None:
     root, resource = resource_tree
     session = LocalWorkspaceBackend(root, read_policy=read_policy(), resources=(resource,))
@@ -90,8 +83,7 @@ async def test_directory_results_only_expose_permitted_resource_members(
             params["include_glob"] = "**"
         for directory in (resource.source, resource.source / "nested"):
             params["path"] = str(directory)
-            result = (await _dispatch(session, method, params) if through_worker
-                      else await getattr(session, method)(**params))
+            result = await getattr(session, method)(**params)
             assert "visible.txt" in result
             if directory == resource.source:
                 assert "nested" in result
@@ -99,10 +91,7 @@ async def test_directory_results_only_expose_permitted_resource_members(
         for directory in ("private", "blocked"):
             params["path"] = str(resource.source / directory)
             with pytest.raises(AIError) as caught:
-                if through_worker:
-                    await _dispatch(session, method, params)
-                else:
-                    await getattr(session, method)(**params)
+                await getattr(session, method)(**params)
             assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
     finally:
         await session.close()

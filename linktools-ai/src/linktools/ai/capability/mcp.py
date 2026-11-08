@@ -181,11 +181,14 @@ def _connection_errors(error: BaseException) -> tuple[BaseException, ...] | None
     )):
         return (error,)
     if type(error) is RuntimeError:
-        if error.__cause__ is not None:
-            return _connection_errors(error.__cause__)
+        message = str(error)
+        cause = error.__cause__
+        # FastMCP exposes its connection wrapper as a plain RuntimeError.
+        # Other RuntimeError causes can be secondary cleanup failures.
+        if cause is not None and message == f"Client failed to connect: {cause}":
+            return _connection_errors(cause)
         # SDK negotiation failures have no public error type, and transport
         # exception-group unwrapping can remove their original timeout cause.
-        message = str(error)
         if message in {
             "Failed to initialize server session",
             "Server session was closed unexpectedly",

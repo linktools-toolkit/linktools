@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, asynccontextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -483,6 +483,23 @@ class TaskExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return ExecutionHandle(current.execution_id)
 
+    @contextmanager
+    def _confirm_task_terminal(self, execution_id: str) -> Iterator[None]:
+        try:
+            yield
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_UNAVAILABLE:
+                raise
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "task_terminal_confirmation",
+                    "execution_id": execution_id,
+                    "cause": error.code.value,
+                    "cause_details": dict(error.safe_details),
+                },
+            ) from error
+
     async def claim_task_attempt(
         self,
         execution_id: str,
@@ -521,11 +538,12 @@ class TaskExecutionService:
                 ),
                 attempt=project_execution_view(current),
             )
-            current = await self.load_authorized(
-                execution_id,
-                principal,
-                AuthorizationAction.EXECUTION_RUN,
-            )
+            with self._confirm_task_terminal(execution_id):
+                current = await self.load_authorized(
+                    execution_id,
+                    principal,
+                    AuthorizationAction.EXECUTION_RUN,
+                )
             return project_execution_view(current)
         if current.task_attempt >= current.binding.max_attempts:
             await self.fail_task(
@@ -537,11 +555,12 @@ class TaskExecutionService:
                 ),
                 attempt=project_execution_view(current),
             )
-            current = await self.load_authorized(
-                execution_id,
-                principal,
-                AuthorizationAction.EXECUTION_RUN,
-            )
+            with self._confirm_task_terminal(execution_id):
+                current = await self.load_authorized(
+                    execution_id,
+                    principal,
+                    AuthorizationAction.EXECUTION_RUN,
+                )
             return project_execution_view(current)
         deadline = current.task_deadline_at
         if deadline is None and current.binding.timeout_seconds is not None:
@@ -593,7 +612,8 @@ class TaskExecutionService:
                 ),
                 attempt=attempt,
             )
-            return await self.inspect(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                return await self.inspect(execution_id, principal=principal)
         now = datetime.now(timezone.utc)
         retry_at = now + timedelta(seconds=current.binding.retry_delay_seconds)
         if current.task_deadline_at is not None and retry_at >= current.task_deadline_at:
@@ -606,7 +626,8 @@ class TaskExecutionService:
                 ),
                 attempt=attempt,
             )
-            return await self.inspect(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                return await self.inspect(execution_id, principal=principal)
         updated = await self._repositories.executions.transition_task_execution(
             execution_id,
             tenant_id=self._repositories.executions.tenant_id,
@@ -731,7 +752,8 @@ class TaskExecutionService:
             ) from error
         value_digest = canonical_sha256(normalized)
         if current.status is ExecutionStatus.SUCCEEDED:
-            result = await self.result(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                result = await self.result(execution_id, principal=principal)
             if canonical_sha256(result.output) != value_digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return project_execution_view(current)
@@ -750,14 +772,17 @@ class TaskExecutionService:
         except AIError as error:
             if error.code not in {ErrorCode.EXECUTION_RESULT_CONFLICT, ErrorCode.STORAGE_CONFLICT}:
                 raise
-            latest = await self.inspect(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                latest = await self.inspect(execution_id, principal=principal)
             if latest.status is not ExecutionStatus.SUCCEEDED:
                 raise
-            result = await self.result(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                result = await self.result(execution_id, principal=principal)
             if canonical_sha256(result.output) != value_digest:
                 raise
             return latest
-        return await self.inspect(execution_id, principal=principal)
+        with self._confirm_task_terminal(execution_id):
+            return await self.inspect(execution_id, principal=principal)
 
     async def resume_task_not_applied(
         self,
@@ -791,7 +816,8 @@ class TaskExecutionService:
                     },
                 ),
             )
-            return await self.inspect(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                return await self.inspect(execution_id, principal=principal)
         if current.task_attempt >= current.binding.max_attempts:
             await self.fail_task(
                 execution_id,
@@ -804,7 +830,8 @@ class TaskExecutionService:
                     },
                 ),
             )
-            return await self.inspect(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                return await self.inspect(execution_id, principal=principal)
         updated = await self._repositories.executions.transition_task_execution(
             execution_id,
             tenant_id=self._repositories.executions.tenant_id,
@@ -862,7 +889,8 @@ class TaskExecutionService:
         if current.status is ExecutionStatus.SUCCEEDED:
             if resolution.kind != "applied" or applied_digest is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            result = await self.result(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                result = await self.result(execution_id, principal=principal)
             if canonical_sha256(result.output) != applied_digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return project_execution_view(current)
@@ -902,7 +930,8 @@ class TaskExecutionService:
                         },
                     ),
                 )
-                return await self.inspect(execution_id, principal=principal)
+                with self._confirm_task_terminal(execution_id):
+                    return await self.inspect(execution_id, principal=principal)
             if current.task_attempt >= binding.max_attempts:
                 await self.fail_task(
                     execution_id,
@@ -916,7 +945,8 @@ class TaskExecutionService:
                         },
                     ),
                 )
-                return await self.inspect(execution_id, principal=principal)
+                with self._confirm_task_terminal(execution_id):
+                    return await self.inspect(execution_id, principal=principal)
             return await self.resume_task_not_applied(
                 execution_id,
                 principal=principal,
@@ -941,7 +971,8 @@ class TaskExecutionService:
                     },
                 ),
             )
-            return await self.inspect(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                return await self.inspect(execution_id, principal=principal)
 
         await self._complete_task_output(
             current,
@@ -952,7 +983,8 @@ class TaskExecutionService:
                 "task_effect_value_digest": applied_digest,
             },
         )
-        return await self.inspect(execution_id, principal=principal)
+        with self._confirm_task_terminal(execution_id):
+            return await self.inspect(execution_id, principal=principal)
 
     async def cancel_task(
         self,
@@ -1054,7 +1086,8 @@ class TaskExecutionService:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         execution_id = current.execution_id
         if current.status is ExecutionStatus.SUCCEEDED:
-            result = await self.result(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                result = await self.result(execution_id, principal=principal)
             if canonical_sha256(result.output) != canonical_sha256(output):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return result
@@ -1107,7 +1140,8 @@ class TaskExecutionService:
                 idempotency,
             )
         )
-        return await self.result(execution_id, principal=principal)
+        with self._confirm_task_terminal(execution_id):
+            return await self.result(execution_id, principal=principal)
 
     async def fail_task(
         self,
@@ -1127,7 +1161,8 @@ class TaskExecutionService:
         if attempt is not None and current.task_attempt != attempt.task_attempt:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         if current.status is ExecutionStatus.FAILED:
-            result = await self.result(execution_id, principal=principal)
+            with self._confirm_task_terminal(execution_id):
+                result = await self.result(execution_id, principal=principal)
             if (
                 current.error_code != error.code.value
                 or dict(current.safe_error_details) != dict(error.safe_details)
@@ -1183,7 +1218,8 @@ class TaskExecutionService:
                 idempotency,
             )
         )
-        return await self.result(execution_id, principal=principal)
+        with self._confirm_task_terminal(execution_id):
+            return await self.result(execution_id, principal=principal)
 
     async def _store_task_output(
         self,

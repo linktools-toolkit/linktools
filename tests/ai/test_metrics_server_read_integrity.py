@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
+from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import (
     MetricAggregation,
@@ -47,10 +48,15 @@ async def _payload(engine: AsyncEngine) -> dict[str, object]:
         return dict((await connection.execute(select(table.c.payload_json))).scalar_one())
 
 
-async def _write_payload(engine: AsyncEngine, payload: dict[str, object]) -> None:
+async def _write_payload(
+    engine: AsyncEngine, payload: dict[str, object], *, rehash: bool = False,
+) -> None:
     table = build_metrics_sql_metadata().tables["ai_metric_observations"]
     async with engine.begin() as connection:
-        await connection.execute(update(table).values(payload_json=payload))
+        values = {"payload_json": payload}
+        if rehash:
+            values["payload_digest"] = canonical_sha256(payload)
+        await connection.execute(update(table).values(**values))
 
 
 @pytest.mark.asyncio
@@ -85,7 +91,7 @@ async def test_corrupt_record_fails_before_any_filter_or_aggregation(
             observation["measurements"] *= 2
         else:
             observation["measurements"][0]["value"] = True if damage == "boolean_measurement" else 99
-        await _write_payload(engine, payload)
+        await _write_payload(engine, payload, rehash=damage.endswith("version"))
     code = ErrorCode.STORAGE_VERSION_UNSUPPORTED if damage.endswith("version") else ErrorCode.STORAGE_INTEGRITY_ERROR
     for name in (_COUNT, _RATIO, _VALUE):
         # The invalid SUCCEEDED record must not disappear behind this FAILED filter.
@@ -108,7 +114,7 @@ async def test_global_count_and_missing_measurement_do_not_bypass_verification(
     await metrics.record_observations((observation,))
     payload = await _payload(engine)
     payload["version"] = 999
-    await _write_payload(engine, payload)
+    await _write_payload(engine, payload, rehash=True)
     name = _VALUE if missing else _COUNT
     with pytest.raises(AIError) as raised:
         await metrics.query(MetricQuery(name, _WINDOW))

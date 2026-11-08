@@ -164,7 +164,8 @@ async def test_capture_admission_stops_on_failure_before_later_nodes(cancel: boo
             calls.append("binding-capture")
             return object()
     executor._binding_capture_store = Capture()
-    admission = SimpleNamespace(graph_id="graph", principal=service_principal("tenant", "caller"), budget_scope_id=None)
+    admission = SimpleNamespace(graph_id="graph", principal=service_principal("tenant", "caller"),
+                                budget_scope_id=None, request_identity_version=2)
     graph = TaskGraph("graph", (_node(files=("first",), name="first"), _node(files=("second",), name="second")))
     with pytest.raises(type(failure)) as caught:
         await executor.capture_admission(admission, graph)

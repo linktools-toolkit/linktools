@@ -4,10 +4,8 @@
 
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -22,35 +20,10 @@ from linktools.ai.asset import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import (
-    BubblewrapWorkspaceBackend,
     LocalWorkspaceBackend,
     WorkspaceResource,
     SupportsStdio,
 )
-from linktools.ai.workspace import _bubblewrap, sandbox_guardian
-
-
-def _guardian_config(
-    root: Path,
-    resources: tuple[WorkspaceResource, ...],
-    cwd_resource_id: str | None,
-    *,
-    mode: str = "stdio",
-) -> dict[str, Any]:
-    return _bubblewrap._guardian_config(
-        root=root / "workspace",
-        runtime_root=root / "runtime",
-        bwrap=root / "bwrap",
-        lock_root=root / "locks",
-        resources=resources,
-        hidden_paths=(".linktools",),
-        read_policy=None,
-        mode=mode,
-        command="/usr/bin/python3",
-        command_args=("server.py",),
-        environment={"PWD": "/caller-value"} if cwd_resource_id else None,
-        cwd_resource_id=cwd_resource_id,
-    )
 
 
 @pytest.mark.asyncio
@@ -124,13 +97,11 @@ async def test_session_resource_does_not_grant_process_working_directory(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("local", "bubblewrap"))
 @pytest.mark.parametrize(
     "invalid_resource", ("ungranted", "files_only", "missing", "changed")
 )
 async def test_stdio_resource_working_directory_fails_closed(
     tmp_path: Path,
-    backend: str,
     invalid_resource: str,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -152,11 +123,6 @@ async def test_stdio_resource_working_directory_fails_closed(
         script.unlink()
         script.mkdir()
 
-    if backend == "bubblewrap":
-        with pytest.raises(AIError):
-            _guardian_config(tmp_path, resources, "package")
-        return
-
     session = LocalWorkspaceBackend(workspace)
     await session.working_dir()
     assert isinstance(session, SupportsStdio)
@@ -170,81 +136,6 @@ async def test_stdio_resource_working_directory_fails_closed(
             )
     finally:
         await session.close()
-
-
-def test_bubblewrap_resource_cwd_preserves_readonly_and_process_isolation(
-    tmp_path: Path,
-) -> None:
-    package = tmp_path / "package"
-    package.mkdir()
-    script = package / "server.py"
-    script.write_text("print('ready')\n", encoding="utf-8")
-    sibling = package / "secret.txt"
-    sibling.write_text("not granted", encoding="utf-8")
-    resource = WorkspaceResource("package", package, {"server.py": script})
-
-    config = _guardian_config(tmp_path, (resource,), "package")
-    sandbox_guardian._validate_config(config)
-    args = config["bwrap_args"]
-    guest = _bubblewrap._resource_guest_path("package")
-    assert args[args.index("--chdir") + 1] == guest
-    assert args[args.index("PWD") + 1] == guest
-    assert "/caller-value" not in args
-    assert args[-3:] == ["--", "/usr/bin/python3", "server.py"]
-    index = args.index(str(script))
-    assert args[index - 1 : index + 2] == [
-        "--ro-bind", str(script), f"{guest}/server.py"
-    ]
-    assert str(package) not in args
-    assert str(sibling) not in args
-    assert ["--remount-ro", "/resources"] in [
-        args[index:index + 2] for index in range(len(args))
-    ]
-    assert {
-        "--unshare-net", "--unshare-pid", "--die-with-parent", "--as-pid-1"
-    } <= set(args)
-
-
-@pytest.mark.parametrize("mode", ("worker", "stdio"))
-def test_bubblewrap_default_cwd_remains_workspace(tmp_path: Path, mode: str) -> None:
-    config = _guardian_config(tmp_path, (), None, mode=mode)
-    sandbox_guardian._validate_config(config)
-    args = config["bwrap_args"]
-    assert args[args.index("--chdir") + 1] == "/workspace"
-    assert args[args.index("PWD") + 1] == "/workspace"
-
-
-def test_worker_cannot_select_stdio_resource_cwd(tmp_path: Path) -> None:
-    package = tmp_path / "package"
-    package.mkdir()
-    with pytest.raises(AIError) as error:
-        _guardian_config(
-            tmp_path,
-            (WorkspaceResource("package", package),),
-            "package",
-            mode="worker",
-        )
-    assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
-
-
-def test_guardian_wire_preserves_empty_arguments_and_environment(tmp_path: Path) -> None:
-    config = _bubblewrap._guardian_config(
-        root=tmp_path,
-        runtime_root=tmp_path / "runtime",
-        bwrap=tmp_path / "bwrap",
-        lock_root=tmp_path / "locks",
-        resources=(),
-        hidden_paths=(),
-        read_policy=None,
-        mode="stdio",
-        command="/usr/bin/python3",
-        command_args=("server.py", ""),
-        environment={"EMPTY": ""},
-    )
-    sandbox_guardian._validate_config(config)
-    args = config["bwrap_args"]
-    assert args[-3:] == ["/usr/bin/python3", "server.py", ""]
-    assert args[args.index("EMPTY") + 1] == ""
 
 
 @pytest.mark.asyncio
@@ -314,52 +205,3 @@ async def test_empty_asset_resource_remains_absent_with_materializer() -> None:
             ) is None
     finally:
         await store.close()
-
-
-@pytest.mark.asyncio
-async def test_bubblewrap_runs_relative_script_from_readonly_resource_cwd(
-    tmp_path: Path,
-) -> None:
-    runtime_root = os.environ.get("LINKTOOLS_BWRAP_RUNTIME_ROOT")
-    executable = os.environ.get("LINKTOOLS_BWRAP_EXECUTABLE")
-    if not runtime_root or not executable:
-        if os.environ.get("LINKTOOLS_REQUIRE_BUBBLEWRAP") == "1":
-            pytest.fail("the required Bubblewrap acceptance environment is missing")
-        pytest.skip("Bubblewrap acceptance rootfs is not configured")
-    workspace = tmp_path / "workspace"
-    package = tmp_path / "package"
-    workspace.mkdir()
-    package.mkdir()
-    (package / "value.txt").write_text("resource", encoding="utf-8")
-    (package / "server.py").write_text(
-        "import json, os\n"
-        "from pathlib import Path\n"
-        "try:\n"
-        "    Path('value.txt').write_text('changed')\n"
-        "    writable = True\n"
-        "except OSError:\n"
-        "    writable = False\n"
-        "print(json.dumps([os.getcwd(), os.getenv('PWD'), "
-        "Path('value.txt').read_text(), writable]), flush=True)\n",
-        encoding="utf-8",
-    )
-    session = BubblewrapWorkspaceBackend(workspace, runtime_root=Path(runtime_root), bwrap_executable=Path(executable))
-    await session.working_dir()
-    assert isinstance(session, SupportsStdio)
-    try:
-        process = await session.open_stdio_process(
-            "/usr/bin/python3",
-            ("server.py",),
-            resources=(WorkspaceResource("package", package),),
-            cwd_resource_id="package",
-        )
-        try:
-            chunks: list[bytes] = []
-            while chunk := await asyncio.wait_for(process.read_stdout(), 10):
-                chunks.append(chunk)
-            guest = _bubblewrap._resource_guest_path("package")
-            assert json.loads(b"".join(chunks)) == [guest, guest, "resource", False]
-        finally:
-            await process.close()
-    finally:
-        await session.close()

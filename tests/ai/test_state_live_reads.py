@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.state import (
     FactQuery, OperationQuery, RecordQuery, StateTransaction,
@@ -25,6 +26,43 @@ def _record(value: str) -> StoredRecord:
         _key(value), None, None, "probe", value, "pending", 0,
         None, 0, None, {"value": 0},
     )
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_sequence_cas_reads_own_writes_and_rolls_back(
+    tmp_path: Path, backend: str,
+) -> None:
+    storage = (PersistenceStorage.in_memory() if backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "state.db"))
+    key = _key("sequence")
+    async with Persistence.open("sequence", storage=storage) as persistence:
+        store = persistence.execution.executions.state_store
+        assert await store.mutate(lambda tx: tx.next_sequence(key)) == 1
+
+        async def advance(tx: StateTransaction) -> None:
+            assert await tx.get_sequence(key) == 1
+            assert await tx.advance_sequence(key, 1) == 2
+            assert await tx.get_sequence(key) == 2
+            assert await tx.get_sequences((key,)) == {key: 2}
+            assert await tx.scan_sequences() == {key: 2}
+            assert await tx.advance_sequence(key, await tx.get_sequence(key)) == 3
+            with pytest.raises(AIError) as caught:
+                await tx.advance_sequence(key, 2)
+            assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+            assert await tx.get_sequence(key) == 3
+
+        await store.mutate(advance)
+
+        async def abort(tx: StateTransaction) -> None:
+            assert await tx.get_sequence(key) == 3
+            assert await tx.advance_sequence(key, 3) == 4
+            assert await tx.get_sequence(key) == 4
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        with pytest.raises(AIError) as caught:
+            await store.mutate(abort)
+        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await store.read(lambda tx: tx.get_sequence(key)) == 3
 
 
 async def test_live_reader_invalidates_mutable_and_negative_caches(

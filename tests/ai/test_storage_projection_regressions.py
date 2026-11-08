@@ -233,8 +233,8 @@ async def test_pending_large_history_is_process_local(tmp_path: Path, monkeypatc
     async def put(self, *args, **kwargs):
         assert not blocked, 'Pending admission wrote a temporary object'
         return await original_put(self, *args, **kwargs)
-    async def publish(self, record, coordination):
-        await original_publish(self, record, coordination)
+    async def publish(self, record, coordination, **kwargs):
+        await original_publish(self, record, coordination, **kwargs)
         raw = await self._cache.get(self._record_key(coordination))
         assert raw is not None and b'review-private-history-' not in raw
         observed = await self.read_execution(record.execution_id, tenant_id=self._tenant_id)

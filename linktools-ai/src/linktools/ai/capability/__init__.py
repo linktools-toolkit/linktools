@@ -9,6 +9,7 @@ from ._tool_results import ToolResultsCapability
 from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
 from ._referenced_inputs import ReferencedInputsCapability
 from ._asset import AssetCapability
+from ._tool_identity import ToolCallIdentity
 from ._context import AgentContext
 from ._declaration import AgentDeclarationLoader, capture_contributions
 from ._resource_path import (
@@ -84,6 +85,7 @@ __all__ = [
     "is_tool_class",
     "is_tool_effect_policy",
     "AgentContext",
+    "ToolCallIdentity",
     "AgentDeclarationLoader",
     "capture_contributions",
     "CapabilityContribution",

@@ -714,8 +714,6 @@ async def _restore_workspace(
             max_bytes=limits.max_bytes,
         )
         mode = entry.get("mode", 0)
-        if isinstance(mode, bool) or not isinstance(mode, int) or mode < 0 or mode > 0o111:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             current_mode = destination.stat().st_mode
             os.chmod(destination, (current_mode & ~0o111) | mode)
@@ -820,7 +818,7 @@ def _workspace_entry_kind(entry: Mapping[str, object]) -> str:
     if set(entry) - {"path", "mode", "content"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     mode = entry.get("mode", 0)
-    if isinstance(mode, bool) or not isinstance(mode, int) or mode < 0 or mode > 0o111:
+    if isinstance(mode, bool) or not isinstance(mode, int) or mode & ~0o111:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _object_ref_from_payload(entry.get("content"))
     return "file"

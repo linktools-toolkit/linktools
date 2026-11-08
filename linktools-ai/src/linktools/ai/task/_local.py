@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 from linktools.core import environ
 
 from ..core import (
+    ExecutionStatus,
     JsonValue,
     Page,
     Principal,
@@ -584,6 +585,8 @@ class LocalTaskGraphLauncher:
                 resolution,
             )
         except TaskNodeRunError as error:
+            if error.code in _RECOVERY_UNKNOWN_CODES and error.terminal_status is None:
+                raise
             digest = canonical_sha256(
                 {
                     "graph_id": graph_id,
@@ -591,18 +594,28 @@ class LocalTaskGraphLauncher:
                     "code": error.code.value,
                 }
             )
-            await self._repository.fail(
-                None,
-                tenant_id=tenant_id,
-                graph_id=graph_id,
-                node_id=node_id,
-                execution_id=execution_id,
-                error_code=error.code.value,
-                error_digest=digest,
-                error_origin=error.error_origin,
-                safe_error_details=error.safe_details if error.error_origin == "node" else {},
-                expected_fence=expected_fence,
-            )
+            if error.terminal_status is ExecutionStatus.CANCELLED:
+                await self._repository.cancel_node(
+                    graph_id,
+                    node_id,
+                    tenant_id=tenant_id,
+                    execution_id=execution_id,
+                    cancel_confirmed=True,
+                    expected_fence=expected_fence,
+                )
+            else:
+                await self._repository.fail(
+                    None,
+                    tenant_id=tenant_id,
+                    graph_id=graph_id,
+                    node_id=node_id,
+                    execution_id=execution_id,
+                    error_code=error.code.value,
+                    error_digest=digest,
+                    error_origin=error.error_origin,
+                    safe_error_details=error.safe_details if error.error_origin == "node" else {},
+                    expected_fence=expected_fence,
+                )
         else:
             if completion is None:
                 view = await self._repository.get_graph(
@@ -1614,7 +1627,7 @@ class LocalTaskGraphLauncher:
                 digest = canonical_sha256(
                     {"graph_id": graph_id, "node_id": node.node_id, "code": code}
                 )
-                if error.code in _RECOVERY_UNKNOWN_CODES:
+                if error.code in _RECOVERY_UNKNOWN_CODES and error.terminal_status is None:
                     await self._defer_waiting_recovery(
                         run,
                         node,
@@ -1623,7 +1636,9 @@ class LocalTaskGraphLauncher:
                         cause=error,
                     )
                     return
-                if error.code is ErrorCode.EXECUTION_CANCELLED:
+                if error.terminal_status is ExecutionStatus.CANCELLED or (
+                    error.terminal_status is None and error.code is ErrorCode.EXECUTION_CANCELLED
+                ):
                     await self._repository.cancel_node(
                         graph_id,
                         node.node_id,
@@ -1634,7 +1649,7 @@ class LocalTaskGraphLauncher:
                     )
                     await self._notify(run)
                     return
-                if error.code in _EXECUTION_RESULT_CONFLICT_CODES:
+                if error.code in _EXECUTION_RESULT_CONFLICT_CODES and error.terminal_status is None:
                     await self._defer_waiting_recovery(
                         run,
                         node,
@@ -1922,6 +1937,7 @@ class LocalTaskGraphLauncher:
                         type(error).__name__,
                         exc_info=True,
                     )
+                terminal_status = error.terminal_status if isinstance(error, TaskNodeRunError) else None
                 if (
                     isinstance(error, AIError)
                     and error.code is ErrorCode.TASK_INPUT_PROJECTION_FAILED
@@ -1931,7 +1947,8 @@ class LocalTaskGraphLauncher:
                 ):
                     await self._defer_recovery(run, node, lease_state, cause=error)
                     return
-                if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
+                if (isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES
+                        and terminal_status is None):
                     await self._defer_recovery(
                         run,
                         node,
@@ -1949,6 +1966,7 @@ class LocalTaskGraphLauncher:
                     control.execution_id is not None
                     and isinstance(error, AIError)
                     and error.code in _EXECUTION_RESULT_CONFLICT_CODES
+                    and terminal_status is None
                 ):
                     await self._settle_bound_node(
                         run,
@@ -1958,15 +1976,17 @@ class LocalTaskGraphLauncher:
                         wait_for_completion=False,
                     )
                     return
-                if isinstance(error, AIError) and error.code in {
+                if (isinstance(error, AIError) and error.code in {
                     ErrorCode.TASK_FENCE_STALE,
                     ErrorCode.TASK_OWNER_CONFLICT,
                     ErrorCode.TASK_NOT_READY,
-                }:
+                } and terminal_status is None):
                     return
                 if (
                     isinstance(error, TaskNodeRunError)
-                    and error.code is ErrorCode.EXECUTION_CANCELLED
+                    and (error.terminal_status is ExecutionStatus.CANCELLED or (
+                        error.terminal_status is None and error.code is ErrorCode.EXECUTION_CANCELLED
+                    ))
                 ):
                     async with lease_state.lock:
                         try:
@@ -2143,20 +2163,26 @@ class LocalTaskGraphLauncher:
             await _stop_heartbeat(heartbeat_stop, heartbeat)
             raise
         finally:
-            execution_id = control.handed_off_execution_id
-            is_input_wait = (
-                node.task is not None
-                and node.task.id == "linktools.ai.input"
-                and node.task.revision == 1
-            )
-            if execution_id is not None and not is_input_wait:
-                await self._finish_execution_hold(
-                    execution_id,
-                    tenant_id=tenant_id,
-                    hold_id=f"task:{graph_id}:{node.node_id}",
-                    graph_id=graph_id, node_id=node.node_id,
-                    expected_fence=lease_state.lease.fence,
+            try:
+                heartbeat_stop.set()
+                if not heartbeat.done():
+                    heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+            finally:
+                execution_id = control.handed_off_execution_id
+                is_input_wait = (
+                    node.task is not None
+                    and node.task.id == "linktools.ai.input"
+                    and node.task.revision == 1
                 )
+                if execution_id is not None and not is_input_wait:
+                    await self._finish_execution_hold(
+                        execution_id,
+                        tenant_id=tenant_id,
+                        hold_id=f"task:{graph_id}:{node.node_id}",
+                        graph_id=graph_id, node_id=node.node_id,
+                        expected_fence=lease_state.lease.fence,
+                    )
 
     async def _completion_committed(
         self,

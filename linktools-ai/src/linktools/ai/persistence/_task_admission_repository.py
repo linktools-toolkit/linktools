@@ -108,6 +108,7 @@ def _same_task_admission_contract(
 ) -> bool:
     return (
         left.version == right.version
+        and left.request_identity_version == right.request_identity_version
         and left.graph_id == right.graph_id
         and left.principal == right.principal
         and left.limits == right.limits
@@ -167,6 +168,27 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         ):
             raise _SubmissionConflict()
 
+    async def _read_submission_in_transaction(
+        self, transaction: StateTransaction, graph_id: str,
+    ) -> tuple[StoredRecord, TaskSubmissionRef] | None:
+        record = await transaction.get_record(self._submission_key(graph_id))
+        if record is None:
+            return None
+        stored = await self._decode(record, TaskSubmissionRef)
+        if (
+            record.kind != "task_submission"
+            or record.key_digest != self._submission_key(graph_id)
+            or record.scope_digest is not None
+            or record.parent_digest is not None
+            or record.sort_key != sortable_identity(graph_id)
+            or record.state not in {"prepared", "admitted", "cancelled"}
+            or stored.namespace != self._namespace
+            or stored.tenant_id != self._tenant_id
+            or stored.graph_id != graph_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return record, stored
+
     async def _submission_in_transaction(
         self,
         transaction: StateTransaction,
@@ -177,21 +199,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             or submission.tenant_id != self._tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        record = await transaction.get_record(self._submission_key(submission.graph_id))
-        if record is None:
+        existing = await self._read_submission_in_transaction(transaction, submission.graph_id)
+        if existing is None:
             return None
-        stored = await self._decode(record, TaskSubmissionRef)
-        if (
-            record.kind != "task_submission"
-            or record.scope_digest is not None
-            or record.parent_digest is not None
-            or record.sort_key != sortable_identity(submission.graph_id)
-            or record.state not in {"prepared", "admitted", "cancelled"}
-            or stored.namespace != self._namespace
-            or stored.tenant_id != self._tenant_id
-            or stored.graph_id != submission.graph_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        record, stored = existing
         if stored != submission:
             if stored.operation_id != submission.operation_id:
                 graph = await transaction.get_record(self._graph_key(submission.graph_id))
@@ -203,6 +214,52 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         return record
+
+    async def get_submission_ref(self, graph_id: str, *, tenant_id: str) -> TaskSubmissionRef | None:
+        """Read the retained request owner, including prepared and cancelled graphs."""
+        if tenant_id != self._tenant_id:
+            return None
+
+        return await self._store.read(lambda transaction: self._submission_ref_in_transaction(transaction, graph_id))
+
+    async def _submission_ref_in_transaction(
+        self, transaction: StateTransaction, graph_id: str,
+    ) -> TaskSubmissionRef | None:
+        existing = await self._read_submission_in_transaction(transaction, graph_id)
+        payload_key = self._prepared_key(graph_id)
+        graph_key = self._graph_key(graph_id)
+        admission_key = self._admission_key(graph_id)
+        records = await transaction.get_records((payload_key, graph_key, admission_key))
+        if existing is None:
+            if records:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return None
+        head, reference = existing
+        payload = records.get(payload_key)
+        graph = records.get(graph_key)
+        admission_record = records.get(admission_key)
+        if head.state == "prepared":
+            if graph is not None or admission_record is not None or payload is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if payload.kind != "task_submission_payload":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            prepared = await self._decode(payload, TaskGraphSubmission)
+            if prepared.ref != reference:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        else:
+            if payload is not None or (graph is None) != (admission_record is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if graph is None:
+                if head.state != "cancelled":
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                self._validate_graph_record(graph, graph_id)
+                self._validate_admission_record(admission_record, graph_id)
+                admission = await self._decode(admission_record, TaskGraphAdmission)
+                derived = TaskSubmissionRef.from_admission(self._namespace, admission)
+                if derived != reference:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return reference
 
     async def submission_status(self, submission: TaskSubmissionRef) -> str | None:
         async def read(transaction: StateTransaction) -> str | None:
@@ -222,39 +279,49 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         async def mutate(
             transaction: StateTransaction,
         ) -> tuple[TaskGraphSubmission, bool]:
-            record = await self._submission_in_transaction(transaction, submission.ref)
+            candidate = TaskGraphSubmission(
+                submission.namespace,
+                await self._select_admission_identity(transaction, submission.admission, submission.graph),
+                submission.graph,
+            )
+            record = await self._submission_in_transaction(transaction, candidate.ref)
             if record is None:
-                graph_id = submission.graph.graph_id
+                graph_id = candidate.graph.graph_id
                 records = await transaction.get_records((
                     self._graph_key(graph_id), self._admission_key(graph_id),
                     self._prepared_key(graph_id),
                 ))
                 operation = await transaction.get_operation(operation_key(
                     self._namespace, self._tenant_id, self._domain.value,
-                    submission.admission.operation_id,
+                    candidate.admission.operation_id,
                 ))
                 if records or operation is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await transaction.insert_records((
                     self._stored(
-                        "task_submission", submission.graph.graph_id,
-                        submission.ref, state="prepared",
+                        "task_submission", candidate.graph.graph_id,
+                        candidate.ref, state="prepared",
                     ),
                     self._stored(
-                        "task_submission_payload", submission.graph.graph_id, submission,
+                        "task_submission_payload", candidate.graph.graph_id, candidate,
                     ),
                 ))
-                return submission, True
-            return await self._prepared_submission(transaction, record, submission), False
+                return candidate, True
+            return await self._prepared_submission(transaction, record, candidate), False
 
         async def readback() -> CommitObservation[tuple[TaskGraphSubmission, bool]]:
             async def read(
                 transaction: StateTransaction,
             ) -> CommitObservation[tuple[TaskGraphSubmission, bool]]:
-                record = await self._submission_in_transaction(transaction, submission.ref)
+                candidate = TaskGraphSubmission(
+                    submission.namespace,
+                    await self._select_admission_identity(transaction, submission.admission, submission.graph),
+                    submission.graph,
+                )
+                record = await self._submission_in_transaction(transaction, candidate.ref)
                 if record is None:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                stored = await self._prepared_submission(transaction, record, submission)
+                stored = await self._prepared_submission(transaction, record, candidate)
                 # Readback establishes durable preparation, but not which caller created it.
                 return CommitObservation(DurableCommitState.COMMITTED, (stored, False))
             return await self._store.read(read)
@@ -295,6 +362,9 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> bool:
             record = await self._submission_in_transaction(transaction, submission)
             if record is None:
+                if submission.request_identity_version != 2:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                                  safe_details={"reason": "legacy_submission_not_retained"})
                 record = self._stored("task_submission", submission.graph_id, submission, state="cancelled")
                 await transaction.insert_records((record,))
             graph_record = await transaction.get_record(self._graph_key(submission.graph_id))
@@ -684,6 +754,15 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
 
         return await self.state_store.read(read)
 
+    async def _select_admission_identity(
+        self, transaction: StateTransaction, admission: TaskGraphAdmission, graph: TaskGraph,
+    ) -> TaskGraphAdmission:
+        existing = await self._submission_ref_in_transaction(transaction, graph.graph_id)
+        identity_version = 2 if existing is None else existing.request_identity_version
+        if identity_version == admission.request_identity_version:
+            return admission
+        return admission.with_request_identity(graph, request_identity_version=identity_version)
+
     async def _admit_in_transaction(
         self,
         transaction: StateTransaction,
@@ -692,6 +771,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         *,
         require_prepared: bool,
     ) -> TaskGraphView:
+        admission = await self._select_admission_identity(transaction, admission, graph)
         submission = TaskGraphSubmission(self._namespace, admission, graph)
         head = await self._submission_in_transaction(transaction, submission.ref)
         if head is None:
@@ -894,6 +974,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         admission: TaskGraphAdmission,
         graph: TaskGraph,
     ) -> CommitObservation[TaskGraphView]:
+        admission = await self._select_admission_identity(transaction, admission, graph)
         head = await self._submission_in_transaction(
             transaction, TaskGraphSubmission(self._namespace, admission, graph).ref,
         )

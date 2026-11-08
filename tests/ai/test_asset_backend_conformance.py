@@ -12,9 +12,10 @@ import pytest_asyncio
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend, SqlAssetBackend
 from linktools.ai.capability import CapabilityLoadContext, CapabilityLoadEntry
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay, read_object
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay, read_object
 
 
 @pytest_asyncio.fixture(params=("memory", "sqlite-inline", "sqlite-object", "sqlite-filesystem"))
@@ -206,5 +207,82 @@ async def test_asset_digest_binds_metadata_receipts_versions_and_snapshot(asset_
         restored_info = await restored.stat(key)
         assert restored_info is not None and restored_info.digest == digest
         assert await restored.get(key) == value
+    finally:
+        await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", (
+    "fractional-size", "bool-size", "key-kind", "key-id", "entry-revision",
+    "bool-entry-revision", "store-revision", "captured-revision", "content-size",
+    "content-key", "metadata-omitted", "extra-fields",
+))
+async def test_asset_snapshot_preserves_known_field_types_and_open_metadata(corruption: str) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    objects = InMemoryObjectStore("snapshot")
+    key = AssetKey("test", "123")
+    await store.initialize()
+    try:
+        await store.put(key, b"x")
+        original = await store.snapshot((key,), object_store=objects)
+    finally:
+        await store.close()
+    manifest = json.loads(await read_object(
+        objects, original.key, expected_digest=original.digest, expected_size=original.size,
+    ))
+    entry = manifest["entries"][0]
+    if corruption == "fractional-size":
+        entry["size"] = 1.5
+    elif corruption == "bool-size":
+        entry["size"] = True
+    elif corruption == "key-kind":
+        entry["key"]["kind"] = 123
+    elif corruption == "key-id":
+        entry["key"]["id"] = 123
+    elif corruption == "entry-revision":
+        entry["entry_revision"] = 1.5
+    elif corruption == "bool-entry-revision":
+        entry["entry_revision"] = True
+    elif corruption == "store-revision":
+        entry["store_revision"] = 123
+    elif corruption == "captured-revision":
+        manifest["captured_revision"] = 123
+    elif corruption == "content-size":
+        entry["content"]["size"] = True
+    elif corruption == "content-key":
+        content = b"x"
+
+        async def content_chunks() -> AsyncIterator[bytes]:
+            yield content
+
+        await objects.put("123", content_chunks(), expected_size=1,
+                          expected_digest=hashlib.sha256(content).hexdigest())
+        entry["content"]["key"] = 123
+    elif corruption == "metadata-omitted":
+        del entry["metadata"]
+    else:
+        manifest["ordinary_extension"] = {"value": True}
+        entry["ordinary_extension"] = {"value": 1}
+    payload = canonical_json_bytes(manifest)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield payload
+
+    await objects.put("modified-manifest", chunks(), expected_size=len(payload), expected_digest=digest)
+    restored = AssetStore.from_snapshot(
+        ObjectRef(objects.store_id, "modified-manifest", digest, len(payload)), object_store=objects,
+    )
+    try:
+        if corruption in {"metadata-omitted", "extra-fields"}:
+            await restored.initialize()
+            info = await restored.stat(key)
+            assert info is not None and info.size == 1 and info.metadata == {}
+            assert await restored.get(key) == b"x"
+        else:
+            with pytest.raises(AIError) as rejected:
+                await restored.initialize()
+            assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await restored.close()
