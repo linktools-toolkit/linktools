@@ -24,7 +24,7 @@ async def _workspace_tool_contributions(workspace: Workspace):
         if item.kind == "tool"
     )
 
-from linktools.ai.workspace._request_validation import validate_request_params
+from linktools.ai.workspace._request_validation import validate_request_values
 
 
 def _golden_contract() -> dict[str, object]:
@@ -48,7 +48,7 @@ def test_local_semantic_validation_accepts_large_file_content() -> None:
     content = "x" * (8 * 1024 * 1024 + 1)
     params = {"path": "large.txt", "content": content, "expected_hash": None}
 
-    validate_request_params("write_file", params)
+    validate_request_values(**params)
 
 
 @pytest.mark.asyncio

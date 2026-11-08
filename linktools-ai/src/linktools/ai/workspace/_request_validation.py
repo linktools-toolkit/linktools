@@ -5,32 +5,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
-from typing import Any
 
 from ..errors import AIError, ErrorCode
 
-_REQUEST_FIELDS = {
-    "run_command": (
-        frozenset({"command"}),
-        frozenset({"timeout_seconds"}),
-    ),
-    "start_command": (frozenset({"command"}), frozenset()),
-    "check_command": (frozenset({"command_id"}), frozenset()),
-    "stop_command": (frozenset({"command_id"}), frozenset()),
-    "inspect_file": (frozenset({"path"}), frozenset({"max_bytes"})),
-    "read_text": (
-        frozenset({"path"}),
-        frozenset({"offset", "limit", "cursor", "full_metadata", "max_bytes", "max_read_bytes"}),
-    ),
-    "list_files": (frozenset(), frozenset({"path", "include_glob"})),
-    "search_text": (frozenset({"pattern"}), frozenset({"path", "include_glob"})),
-    "write_file": (
-        frozenset({"path", "content"}),
-        frozenset({"old_text", "expected_hash"}),
-    ),
-
-}
 _REQUEST_VALUE_TYPES = {
     "path": (str,),
     "pattern": (str,),
@@ -50,26 +27,9 @@ _REQUEST_VALUE_TYPES = {
 }
 
 
-def validate_request_params(
-    method: str,
-    params: Mapping[str, Any],
-) -> None:
-    """Validate the fixed fields and value types for one workspace operation."""
-    if not isinstance(method, str):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    schema = _REQUEST_FIELDS.get(method)
-    if schema is None or not isinstance(params, Mapping):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    required, optional = schema
-    fields = set(params)
-    if (
-        any(not isinstance(field, str) for field in fields)
-        or not required.issubset(fields)
-        or fields - required - optional
-    ):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    for field in fields:
-        value = params[field]
+def validate_request_values(**params: object) -> None:
+    """Validate argument values; Python signatures enforce operation fields."""
+    for field, value in params.items():
         accepted_types = _REQUEST_VALUE_TYPES[field]
         if isinstance(value, bool) and (int in accepted_types or float in accepted_types):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -81,4 +41,4 @@ def validate_request_params(
 
 
 
-__all__ = ["validate_request_params"]
+__all__ = ["validate_request_values"]

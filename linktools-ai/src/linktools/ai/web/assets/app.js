@@ -1013,9 +1013,8 @@ async function refreshNativeRequests(view,generation) {
       } catch(error){
         if(!current())return;
         // Isolate unavailable identities so one missing record does not hide others.
-        if(entries.length>1){for(const entry of entries){if(!current() || !visible())return;await read(execution,[entry]);}return;}
-        const request=entries[0][1];
-        request.error=`${execution} · request ${request.item.model_request_seq}: ${error.message}`;
+        if(error.code==='STORAGE_NOT_FOUND' && entries.length>1){for(const entry of entries){if(!current() || !visible())return;await read(execution,[entry]);}return;}
+        for(const [,request] of entries)request.error=`${execution} · request ${request.item.model_request_seq}: ${error.message}`;
       }
     };
     for(const [execution,entries] of groups) {

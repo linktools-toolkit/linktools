@@ -14,7 +14,6 @@ from pydantic_ai.workspaces import Workspace
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalWorkspaceBackend, WorkspaceOperationRejected
-from linktools.ai.workspace._request_validation import validate_request_params
 
 pytestmark = pytest.mark.asyncio
 
@@ -333,16 +332,24 @@ async def test_native_read_refuses_special_files_without_waiting(tmp_path: Path)
         await session.close()
 
 
-async def test_workspace_requests_reject_unknown_or_missing_fields() -> None:
-    invalid_requests = (
-        ("read_text", {}),
-        ("read_text", {"path": "a", "unknown": None}),
-        ("unknown", {}),
-    )
-    for method, params in invalid_requests:
+@pytest.mark.parametrize(("method", "params"), (
+    ("read_text", {"path": 42}),
+    ("read_text", {"path": "a", "offset": True}),
+    ("read_text", {"path": "a", "full_metadata": 1}),
+    ("run_command", {"command": "echo test", "timeout_seconds": True}),
+    ("run_command", {"command": "echo test", "timeout_seconds": float("nan")}),
+    ("run_command", {"command": "echo test", "timeout_seconds": float("inf")}),
+))
+async def test_workspace_operations_reject_invalid_argument_values(
+    tmp_path: Path, method: str, params: dict[str, object],
+) -> None:
+    session = LocalWorkspaceBackend(tmp_path)
+    try:
         with pytest.raises(AIError) as raised:
-            validate_request_params(method, params)
+            await getattr(session, method)(**params)
         assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    finally:
+        await session.close()
 
 
 async def test_missing_file_is_reported_as_not_found(tmp_path: Path) -> None:

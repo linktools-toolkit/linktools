@@ -28,10 +28,19 @@ assert.equal(new URL(result.calls[0],'http://localhost').searchParams.getAll('id
 result=await exercise(Array.from({length:201},(_,index)=>item('a',index+1)));
 assert.equal(result.calls.length,2);assert.equal(result.view.pending.size,0);
 result=await exercise([item('a',1),item('a',2)],({path})=>{
-  if(new URL(path,'http://localhost').searchParams.getAll('identity').includes('1:2'))throw new Error('missing');
+  if(new URL(path,'http://localhost').searchParams.getAll('identity').includes('1:2'))throw Object.assign(new Error('missing'),{code:'STORAGE_NOT_FOUND'});
 });
 assert.equal(result.calls.length,3);assert.equal(result.view.pending.size,1);
 assert.equal(result.view.items[0].model_request_seq,1);
+for(const code of ['AUTHORIZATION_DENIED','STORAGE_UNAVAILABLE','STORAGE_INTEGRITY_ERROR','REQUEST_FIELD_INVALID',undefined]){
+  result=await exercise(Array.from({length:200},(_,index)=>item('a',index+1)),()=>{
+    throw Object.assign(new Error('unavailable'),{code});
+  });
+  assert.equal(result.calls.length,1,`${code}: shared failures must not fan out`);
+  assert.equal(result.view.pending.size,200);
+  assert.ok([...result.view.pending.values()].every(request=>request.error?.includes('unavailable')));
+  assert.equal(result.view.loading,false);
+}
 result=await exercise([item('a',1),item('a',2)],({inspector})=>{inspector.hidden=true;throw new Error('closed');});
 assert.equal(result.calls.length,1);assert.equal(result.view.pending.size,2);
 result=await exercise([item('a',1),item('a',2)],({state})=>{state.generation++;});
