@@ -148,6 +148,10 @@ async def test_high_fan_in_dependency_reads_bound_parameters(tmp_path: Path) -> 
             assert {item.status for item in states.values()} == {TaskStatus.CANCELLED}
             assert reads == [513, 491]
             reads.clear()
+            results, combined_states = await _launcher(repository)._dependency_context("graph", target, tenant_id="tenant")
+            assert results == {} and combined_states == states
+            assert reads == [513, 491]
+            reads.clear()
             result_ids = dependencies + tuple(f"missing-{i}" for i in range(500))
             assert await repository.get_results("graph", result_ids, tenant_id="tenant") == {}
             assert reads == [257, 257, 257, 234]
@@ -181,16 +185,16 @@ async def test_dependency_context_rejects_missing_or_inconsistent_facts(
 
             await repository.state_store.mutate(remove)
         else:
-            original = repository.get_results
+            original = repository.get_dependency_records
 
             async def wrong_result(*args, **kwargs):
-                results = await original(*args, **kwargs)
+                states, results = await original(*args, **kwargs)
                 if fault == "result":
-                    return {}
+                    return states, {}
                 field = {"result_digest": "b" * 64} if fault == "digest" else {"execution_id": "other"}
-                return {"source": replace(results["source"], **field)}
+                return states, {"source": replace(results["source"], **field)}
 
-            monkeypatch.setattr(repository, "get_results", wrong_result)
+            monkeypatch.setattr(repository, "get_dependency_records", wrong_result)
         with pytest.raises(AIError) as raised:
             await _launcher(repository)._dependency_context("graph", target, tenant_id="tenant")
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -198,9 +202,13 @@ async def test_dependency_context_rejects_missing_or_inconsistent_facts(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", ["all_terminal", "any_succeeded"])
-async def test_dependency_context_preserves_mixed_terminal_results(policy: str) -> None:
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite", "sqlite"])
+async def test_dependency_context_preserves_mixed_terminal_results(tmp_path: Path, policy: str, backend: str) -> None:
+    storage = (PersistenceStorage.in_memory() if backend == "memory" else
+               PersistenceStorage.from_root(tmp_path, exclusive_writer=True) if backend == "local_sqlite" else
+               PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
     async with Persistence.open(
-        "dependency-terminal", storage=PersistenceStorage.in_memory(), tenant_id="tenant",
+        "dependency-terminal", storage=storage, tenant_id="tenant",
     ) as state:
         target = TaskNode("target", ("success", "failed"), dependency_policy=policy)
         await _admit(state, (TaskNode("success"), TaskNode("failed", failure_policy="isolate"), target))

@@ -122,13 +122,13 @@ class _TaskRepository(Protocol):
         self, graph_id: str, node_ids: "tuple[str, ...]", *, tenant_id: str
     ) -> "tuple[TaskNodeView, ...]": ...
 
-    async def get_results(
+    async def get_dependency_records(
         self,
         graph_id: str,
         node_ids: "tuple[str, ...]",
         *,
         tenant_id: str,
-    ) -> "Mapping[str, TaskResultRecord]": ...
+    ) -> "tuple[tuple[TaskNodeView, ...], Mapping[str, TaskResultRecord]]": ...
 
     async def list_events(
         self,
@@ -2316,7 +2316,7 @@ class LocalTaskGraphLauncher:
     ) -> "tuple[dict[str, TaskDependencyResult], dict[str, TaskDependencyState]]":
         if not node.dependencies:
             return {}, {}
-        raw_states = await self._repository.get_node_states(
+        raw_states, records = await self._repository.get_dependency_records(
             graph_id,
             node.dependencies,
             tenant_id=tenant_id,
@@ -2327,15 +2327,6 @@ class LocalTaskGraphLauncher:
             dependency_id
             for dependency_id in node.dependencies
             if states[dependency_id].status is TaskStatus.SUCCEEDED
-        )
-        records = (
-            {}
-            if not successful
-            else await self._repository.get_results(
-                graph_id,
-                successful,
-                tenant_id=tenant_id,
-            )
         )
         results: dict[str, TaskDependencyResult] = {}
         for dependency_id in successful:

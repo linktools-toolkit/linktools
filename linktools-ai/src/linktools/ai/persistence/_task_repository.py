@@ -113,6 +113,15 @@ _RECOVERY_REQUIRED_CODES = frozenset(
 )
 
 
+def _validate_node_ids(node_ids: tuple[str, ...]) -> None:
+    if not isinstance(node_ids, tuple):
+        raise TypeError("node_ids must be a tuple")
+    if any(not isinstance(node_id, str) or not node_id for node_id in node_ids):
+        raise ValueError("node_ids must contain non-empty strings")
+    if len(set(node_ids)) != len(node_ids):
+        raise ValueError("node_ids must not contain duplicates")
+
+
 
 
 def _resolve_task_execution_id(
@@ -495,35 +504,35 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> Mapping[str, TaskResultRecord]:
         if tenant_id != self._tenant_id:
             return {}
-        if not isinstance(node_ids, tuple):
-            raise TypeError("node_ids must be a tuple")
-        if any(not isinstance(node_id, str) or not node_id for node_id in node_ids):
-            raise ValueError("node_ids must contain non-empty strings")
-        if len(set(node_ids)) != len(node_ids):
-            raise ValueError("node_ids must not contain duplicates")
+        _validate_node_ids(node_ids)
         if not node_ids:
             return {}
-        keys = tuple(self._result_key(graph_id, node_id) for node_id in node_ids)
 
         async def read(transaction: StateTransaction) -> Mapping[str, TaskResultRecord]:
-            records: dict[bytes, StoredRecord] = {}
-            for offset in range(0, len(keys), _TASK_NODE_READ_BATCH_SIZE):
-                records.update(await transaction.get_records(
-                    keys[offset:offset + _TASK_NODE_READ_BATCH_SIZE],
-                ))
-            result: dict[str, TaskResultRecord] = {}
-            for node_id, key in zip(node_ids, keys, strict=True):
-                record = records.get(key)
-                if record is None:
-                    continue
-                self._validate_result_record(record, graph_id, node_id)
-                value = await self._decode(record, TaskResultRecord)
-                if value.graph_id != graph_id or value.node_id != node_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                result[node_id] = value
-            return result
+            return await self._results_in_transaction(transaction, graph_id, node_ids)
 
         return await self._store.read(read)
+
+    async def _results_in_transaction(
+        self, transaction: StateTransaction, graph_id: str, node_ids: tuple[str, ...],
+    ) -> Mapping[str, TaskResultRecord]:
+        keys = tuple(self._result_key(graph_id, node_id) for node_id in node_ids)
+        records: dict[bytes, StoredRecord] = {}
+        for offset in range(0, len(keys), _TASK_NODE_READ_BATCH_SIZE):
+            records.update(await transaction.get_records(
+                keys[offset:offset + _TASK_NODE_READ_BATCH_SIZE],
+            ))
+        result: dict[str, TaskResultRecord] = {}
+        for node_id, key in zip(node_ids, keys, strict=True):
+            record = records.get(key)
+            if record is None:
+                continue
+            self._validate_result_record(record, graph_id, node_id)
+            value = await self._decode(record, TaskResultRecord)
+            if value.graph_id != graph_id or value.node_id != node_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result[node_id] = value
+        return result
 
     async def get_prepared_input(
         self,
@@ -1131,55 +1140,78 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> tuple[TaskNodeView, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        if not isinstance(node_ids, tuple):
-            raise TypeError("node_ids must be a tuple")
-        if any(not isinstance(node_id, str) or not node_id for node_id in node_ids):
-            raise ValueError("node_ids must contain non-empty strings")
-        if len(set(node_ids)) != len(node_ids):
-            raise ValueError("node_ids must not contain duplicates")
+        _validate_node_ids(node_ids)
         if not node_ids:
             return ()
+
+        async def read(transaction: StateTransaction) -> tuple[TaskNodeView, ...]:
+            return await self._node_states_in_transaction(transaction, graph_id, node_ids)
+
+        return await self.state_store.read(read)
+
+    async def get_dependency_records(
+        self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str,
+    ) -> tuple[tuple[TaskNodeView, ...], Mapping[str, TaskResultRecord]]:
+        """Read requested states and successful result metadata in one transaction.
+
+        States retain request order; results include only present SUCCEEDED
+        records. Missing states/definitions and malformed records are errors.
+        No result bodies are loaded; backend read isolation remains unchanged.
+        """
+        if tenant_id != self._tenant_id:
+            return (), {}
+        _validate_node_ids(node_ids)
+        if not node_ids:
+            return (), {}
+
+        async def read(transaction: StateTransaction) -> tuple[tuple[TaskNodeView, ...], Mapping[str, TaskResultRecord]]:
+            states = await self._node_states_in_transaction(transaction, graph_id, node_ids)
+            successful = tuple(state.node_id for state in states if state.status is TaskStatus.SUCCEEDED)
+            results = await self._results_in_transaction(transaction, graph_id, successful)
+            return states, results
+
+        return await self.state_store.read(read)
+
+    async def _node_states_in_transaction(
+        self, transaction: StateTransaction, graph_id: str, node_ids: tuple[str, ...],
+    ) -> tuple[TaskNodeView, ...]:
         state_keys = tuple(self._state_key(graph_id, node_id) for node_id in node_ids)
         definition_keys = tuple(
             self._definition_key(graph_id, node_id) for node_id in node_ids
         )
-
-        async def read(transaction: StateTransaction) -> tuple[TaskNodeView, ...]:
-            records: dict[bytes, StoredRecord] = {}
-            for offset in range(0, len(node_ids), _TASK_NODE_READ_BATCH_SIZE):
-                end = offset + _TASK_NODE_READ_BATCH_SIZE
-                records.update(await transaction.get_records(
-                    state_keys[offset:end] + definition_keys[offset:end],
-                ))
-            states: list[TaskNodeView] = []
-            for node_id, state_key, definition_key in zip(
-                node_ids,
-                state_keys,
-                definition_keys,
-                strict=True,
+        records: dict[bytes, StoredRecord] = {}
+        for offset in range(0, len(node_ids), _TASK_NODE_READ_BATCH_SIZE):
+            end = offset + _TASK_NODE_READ_BATCH_SIZE
+            records.update(await transaction.get_records(
+                state_keys[offset:end] + definition_keys[offset:end],
+            ))
+        states: list[TaskNodeView] = []
+        for node_id, state_key, definition_key in zip(
+            node_ids,
+            state_keys,
+            definition_keys,
+            strict=True,
+        ):
+            state_record = records.get(state_key)
+            definition_record = records.get(definition_key)
+            if state_record is None or definition_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_state_record(state_record, graph_id, node_id)
+            self._validate_definition_record(
+                definition_record,
+                graph_id,
+                node_id,
+            )
+            state = await self._decode(state_record, TaskNodeView)
+            definition = await self._decode(definition_record, TaskNode)
+            if (
+                state.graph_id != graph_id
+                or state.node_id != node_id
+                or definition.node_id != node_id
             ):
-                state_record = records.get(state_key)
-                definition_record = records.get(definition_key)
-                if state_record is None or definition_record is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                self._validate_state_record(state_record, graph_id, node_id)
-                self._validate_definition_record(
-                    definition_record,
-                    graph_id,
-                    node_id,
-                )
-                state = await self._decode(state_record, TaskNodeView)
-                definition = await self._decode(definition_record, TaskNode)
-                if (
-                    state.graph_id != graph_id
-                    or state.node_id != node_id
-                    or definition.node_id != node_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                states.append(replace(state, dependencies=definition.dependencies))
-            return tuple(states)
-
-        return await self.state_store.read(read)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            states.append(replace(state, dependencies=definition.dependencies))
+        return tuple(states)
 
     async def list_events(
         self,

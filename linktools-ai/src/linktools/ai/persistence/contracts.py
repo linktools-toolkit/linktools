@@ -1876,6 +1876,9 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def get_results(
         self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str
     ) -> Mapping[str, TaskResultRecord]: ...
+    async def get_dependency_records(
+        self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str
+    ) -> tuple[tuple[TaskNodeView, ...], Mapping[str, TaskResultRecord]]: ...
     async def get_prepared_input(
         self, graph_id: str, node_id: str, *, tenant_id: str
     ) -> TaskPreparedInputRecord | None: ...
