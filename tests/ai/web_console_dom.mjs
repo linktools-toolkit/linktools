@@ -545,12 +545,14 @@ if(process.argv[3]==='sdk') {
   await select('#session=b');
   executions.set('a-run',{...info('a-run'),status:'RUNNING'});streamBlocks.set('a-run',{});
   detailResponses.set(path,url=>({items:[url.searchParams.has('model_request_seq')?{...sdk,model_request_seq:2,purpose:'compaction'}:{...sdk,status:'RUNNING',content_included:false,request:{}}],next_cursor:null}));
+  const exactPath='/api/executions/a-run/models-exact';
+  detailResponses.set(exactPath,url=>({items:url.searchParams.getAll('identity').map(value=>({...sdk,model_request_seq:Number(value.split(':')[1]),purpose:'compaction'}))}));
   await select('#session=a');await node('native-mode').click();
   assert.match(node('conversation').textContent,/not committed yet/);
   streamBlocks.get('a-run').controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'model',item:{item:{...sdk,model_request_seq:2,purpose:'compaction',request:{},content_included:false},visibility:'durable_history'}})+'\n\n'));
   await until('SDK terminal exact refresh',()=>descendants(node('conversation')).some(item=>item.tagName==='OPTION' && item.value==='a-run:1:2'));
   const picker=descendants(node('conversation')).find(item=>item.tagName==='SELECT' && item.className==='native-request');picker.value='a-run:1:2';picker.onchange();
-  assert.match(node('conversation').textContent,/dynamic instruction/);assert.ok(calls.some(call=>call.key===path && call.query.model_request_seq==='2' && call.query.include_content==='true' && !call.query.include_client_requests));
+  assert.match(node('conversation').textContent,/dynamic instruction/);assert.ok(calls.some(call=>call.key===exactPath && call.query.identities.includes('1:2') && call.query.include_content==='true' && !call.query.include_client_requests));
   console.log('SDK messages stay readable without HTTP capture, preserving ordered parts and separate instruction/tool metadata');process.exit(0);
 }
 if(process.argv[3]==='streaming') {
