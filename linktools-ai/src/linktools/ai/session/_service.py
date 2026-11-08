@@ -213,7 +213,8 @@ class SessionManager(Generic[HandleT]):
             raise
         except TypeError as error:
             raise AIError(ErrorCode.AGENT_ID_INVALID) from error
-        if any(key.startswith("linktools.ai.") for key in request.metadata):
+        metadata = dict(request.metadata)
+        if any(key.startswith("linktools.ai.") for key in metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         cwd = await self._canonicalize_cwd(request.cwd)
         resource = ResourceRef(
@@ -233,7 +234,7 @@ class SessionManager(Generic[HandleT]):
                 "session_id": request.session_id,
                 "agent_id": agent_id,
                 "cwd": cwd,
-                "metadata": dict(request.metadata),
+                "metadata": metadata,
             }
         )
         now = datetime.now(timezone.utc)
@@ -243,7 +244,7 @@ class SessionManager(Generic[HandleT]):
             status=SessionStatus.OPEN,
             revision=0,
             cwd=cwd,
-            metadata=dict(request.metadata),
+            metadata=metadata,
             created_at=now,
             updated_at=now,
             closed_at=None,
@@ -530,7 +531,8 @@ class SessionManager(Generic[HandleT]):
         )
         if current.agent_id != agent_id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-        if any(key.startswith("linktools.ai.") for key in request.metadata):
+        metadata = dict(request.metadata)
+        if any(key.startswith("linktools.ai.") for key in metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         requested_cwd = (
             current.cwd
@@ -544,7 +546,7 @@ class SessionManager(Generic[HandleT]):
                 "principal_id": request.principal.principal_id,
                 "session_id": session_id,
                 "expected_revision": request.expected_revision,
-                "metadata": request.metadata,
+                "metadata": metadata,
                 "cwd": requested_cwd,
             }
         )
@@ -553,7 +555,7 @@ class SessionManager(Generic[HandleT]):
             current,
             revision=current.revision + 1,
             cwd=requested_cwd,
-            metadata=dict(request.metadata),
+            metadata=metadata,
             updated_at=now,
         )
         operation = self._session_terminal_operation(
