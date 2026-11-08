@@ -325,7 +325,8 @@ def native_checkpoint_messages(messages: Sequence[ModelMessage], *, restore: boo
     """Carry host input descriptors through native TextContent metadata.
 
     Only explicit supported input positions are adapted. Opaque application JSON
-    is never inspected, and referenced bodies remain with the authorized loader.
+    is never recursively inspected, and referenced bodies remain with the authorized loader.
+    Colliding ordinary values use an envelope in the legacy reader's rejected space.
     """
     def content(value: object) -> object:
         if not restore and isinstance(value, (ReferencedContent, RetiredReferencedContent)):
@@ -339,11 +340,31 @@ def native_checkpoint_messages(messages: Sequence[ModelMessage], *, restore: boo
             and set(value) == {"kind", "content", "metadata"}
             and value["kind"] == "text-content" else None
         )
-        if (restore and isinstance(metadata, Mapping) and set(metadata) == {_HOST_CONTENT}
+        if (isinstance(metadata, Mapping) and set(metadata) == {_HOST_CONTENT}
                 and isinstance(metadata[_HOST_CONTENT], Mapping)
                 and metadata[_HOST_CONTENT].get("type") == "runtime-reference"):
             try:
                 marker = metadata[_HOST_CONTENT]
+                if not restore:
+                    native = isinstance(value, TextContent)
+                    payload = {"kind": "native" if native else "json", "value": (
+                        _dump_native(_USER_CONTENT_ADAPTER, value) if native else _portable_json(value)
+                    )}
+                    return TextContent(value.content if native else "", metadata={_HOST_CONTENT: {
+                        "type": "runtime-reference", "version": 2, "value": payload,
+                    }})
+                if "version" in marker:
+                    if (set(marker) != {"type", "version", "value"}
+                            or type(marker["version"]) is not int or marker["version"] != 2):
+                        raise ValueError("invalid native content envelope version")
+                    payload = marker["value"]
+                    if not isinstance(payload, Mapping) or set(payload) != {"kind", "value"}:
+                        raise ValueError("invalid native content envelope")
+                    if payload["kind"] == "native":
+                        return _USER_CONTENT_ADAPTER.validate_python(payload["value"])
+                    if payload["kind"] == "json":
+                        return _portable_json(payload["value"])
+                    raise ValueError("invalid native content envelope kind")
                 if set(marker) != {"type", "value"}:
                     raise ValueError("invalid native reference marker")
                 decoded = decode_user_content_item(marker["value"])
@@ -367,7 +388,10 @@ def native_checkpoint_messages(messages: Sequence[ModelMessage], *, restore: boo
             if any(left is not right for left, right in zip(items, projected, strict=True)):
                 value = (list(projected) if isinstance(part, UserPromptPart) or isinstance(part.content, list)
                          else projected[0])
-                part = replace(part, content=value)
+                try:
+                    part = replace(part, content=value)
+                except (TypeError, ValueError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 changed = True
             parts.append(part)
         result.append(replace(message, parts=parts) if changed else message)
