@@ -40,7 +40,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 import anyio
-from pydantic_ai import CallToolsNode, ModelRequestNode
+from pydantic_ai import CallToolsNode, DeferredToolRequests, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, CombinedCapability, durable_operation
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
@@ -291,8 +291,15 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         messages = result.all_messages()
         snapshot = None
         step = self._atomic_live_history[1] if self._atomic_live_history is not None else ctx.run_step
-        if (self._atomic_last_snapshot_messages != messages or self._atomic_last_snapshot_step != step) and is_provider_valid(messages):
-            snapshot = self._atomic_prepare_snapshot(ctx, list(messages), step)
+        interrupted = isinstance(result.output, DeferredToolRequests)
+        if (self._atomic_last_snapshot_messages != messages or self._atomic_last_snapshot_step != step) and (
+            interrupted or is_provider_valid(messages)
+        ):
+            # Deferred runs can end with confirmed sibling returns but an incomplete
+            # tool round. Recovery reads this native owner, not the Trace projection.
+            snapshot = self._atomic_prepare_snapshot(
+                ctx, list(messages), step, "interrupted" if interrupted else "complete",
+            )
         event = self._atomic_prepare_event(ctx, kind="run_completed")
         await self._atomic_commit(events=(event,), snapshot=snapshot)
         if snapshot is not None:
