@@ -10,6 +10,7 @@ import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import Principal
 from linktools.ai.task.engine._agent import AgentTaskRunner
+from linktools.ai.task.engine._runner import TaskNodeExecutor
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode, TaskNodeInvocation
@@ -81,7 +82,7 @@ async def test_cancelled_wait_leaves_handed_off_execution_for_graph_recovery() -
         persistence=SimpleNamespace(
             task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
         ), materializer=None, task_admissions=None, budgets=None,
-        node_executor=lambda: None, execution_ports={},
+        node_executor=lambda: TaskNodeExecutor.__new__(TaskNodeExecutor), execution_ports={},
     )
     runner._start_execution = start_execution
     runner._get_execution = unused
@@ -161,7 +162,7 @@ async def test_cancelled_start_defers_binding_to_idempotent_recovery() -> None:
         persistence=SimpleNamespace(
             task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
         ), materializer=None, task_admissions=None, budgets=None,
-        node_executor=lambda: None, execution_ports={},
+        node_executor=lambda: TaskNodeExecutor.__new__(TaskNodeExecutor), execution_ports={},
     )
     runner._start_execution = start_execution
     runner._get_execution = unused
@@ -279,7 +280,7 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         persistence=SimpleNamespace(
             task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
         ), materializer=None, task_admissions=None, budgets=None,
-        node_executor=lambda: None, execution_ports={},
+        node_executor=lambda: TaskNodeExecutor.__new__(TaskNodeExecutor), execution_ports={},
     )
     runner._start_execution = start_execution
     runner._get_execution = get_execution

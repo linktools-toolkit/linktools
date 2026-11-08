@@ -16,6 +16,7 @@ from linktools.ai.errors import ErrorCode
 from linktools.ai.execution import ExecutionView
 from linktools.ai.task.engine import _agent as _agent_task
 from linktools.ai.task.engine._agent import AgentTaskRunner
+from linktools.ai.task.engine._runner import TaskNodeExecutor
 from linktools.ai.task import TaskNode, TaskNodeInvocation, TaskNodeRunError
 
 
@@ -65,6 +66,8 @@ def _runner(execution: _Execution) -> AgentTaskRunner:
     # A controlled execution boundary makes result/readback races deterministic;
     # full Runtime construction and real cancellation are covered by integration tests.
     runner = AgentTaskRunner.__new__(AgentTaskRunner)
+    executor = TaskNodeExecutor.__new__(TaskNodeExecutor)
+    runner._node_executor = lambda: executor
 
     async def inspect(execution_id: str, principal: Principal) -> ExecutionView:
         assert execution_id == "execution" and principal == _PRINCIPAL
