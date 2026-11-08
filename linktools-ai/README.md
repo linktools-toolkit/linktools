@@ -411,6 +411,12 @@ async with Runtime.open("default", storage=storage,
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
 
+Ordinary tools receive an invocation-local `ctx.tool_call` identity and, when enabled,
+`ctx.trace` for explicit source-confirmed Trace publication. Native SDK hooks use
+`ToolCallIdentity.from_context(ctx)` and `TraceCapability.for_context(ctx)`. See
+[tool invocation identity and Trace visibility](docs/tool-invocation.md) for batching,
+authorization and recovery boundaries.
+
 Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Admitted native hooks and managed calls retain these references; Runtime resolves the matching current implementation without a second provider registry. Agent contracts, effect records and Asset version references retain their own execution, authorization and byte-integrity facts. Tool, Skill, MCP and generic Capability identity checks use only their ID and revision within the kind namespace; configuration equality is the caller’s responsibility, not a second identity check. Agent/Task declaration validation and resource access, sandbox policy and output validation remain separate boundaries. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.

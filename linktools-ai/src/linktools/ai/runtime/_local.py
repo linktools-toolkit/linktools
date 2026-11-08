@@ -4640,6 +4640,10 @@ class LocalExecutionBackend:
                 memory_scope=current.memory_scope,
                 correlation=current.correlation,
                 deadline_at=None if request.budget is None else request.budget.deadline_at,
+                root_execution_id=current.root_execution_id,
+                parent_execution_id=current.parent_execution_id,
+                agent_id=binding.compiled_agent.spec.id,
+                agent_run_seq=current.agent_run_seq,
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store

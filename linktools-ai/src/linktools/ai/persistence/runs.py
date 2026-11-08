@@ -1851,7 +1851,10 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def flush_execution_projection(
         self, agent_run_id: str, *, execution_id: str,
         producer_generation: int | None = None, deferred: bool = False,
+        require_durable: bool = False,
     ) -> None:
+        if require_durable and self._archive_for_run(PersistenceDomain.TRACE, agent_run_id) is None:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         operation = self._flush_execution_projection(
             agent_run_id, execution_id=execution_id,
             producer_generation=producer_generation, deferred=deferred,

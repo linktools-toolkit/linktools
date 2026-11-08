@@ -147,6 +147,20 @@ async def compose_platform_capabilities(
         if isinstance(run_store, RuntimeAgentRunStore):
             await run_store.require_active_producer(agent_run_id)
 
+    producer_generation = (
+        run_store.execution_producer_generation(agent_run_id, execution_id=execution_id)
+        if isinstance(run_store, RuntimeAgentRunStore) and execution_id is not None else None
+    )
+
+    async def flush_trace() -> None:
+        if not isinstance(run_store, RuntimeAgentRunStore) or execution_id is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        await run_store.require_active_producer(agent_run_id)
+        await run_store.flush_execution_projection(
+            agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+            require_durable=True,
+        )
+
     persistence = AgentRunCapture(
         recorder=run_recorder,
         agent_id=agent_id,
@@ -234,7 +248,10 @@ async def compose_platform_capabilities(
                         batch_size=capability.commit.batch_size or DEFAULT_TRACE_BATCH_SIZE,
                         flush_interval=capability.commit.flush_interval or DEFAULT_TRACE_FLUSH_INTERVAL,
                     )
-                return capability.bind(service(persistence))
+                return capability.bind(
+                    service(persistence), flush=flush_trace,
+                    model_request_seq=run_recorder.model_request_seq_for_tool_call,
+                )
         return capability
 
     for template in runtime_capabilities:
@@ -247,7 +264,10 @@ async def compose_platform_capabilities(
         ))
     for enabled, feature, service in ((guarantees[2], TraceCapability, TraceService),):
         if enabled and feature not in bound_types:
-            capabilities.append(feature().bind(service(persistence)))
+            capabilities.append(feature().bind(
+                service(persistence), flush=flush_trace,
+                model_request_seq=run_recorder.model_request_seq_for_tool_call,
+            ))
     selected_memory = MemoryCapability.select_tools(tool_policy)
     if memory_scope is not None and selected_memory:
         if memory_store is None:
