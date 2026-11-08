@@ -44,3 +44,20 @@ PYTHONPATH="$PWD:$PWD/linktools/src:$PWD/linktools-ai/src" \
 PYTEST_ADDOPTS='-k "task_terminal_write_batch or task_sqlite_cas_convergence or sql_batch_write_failure" -s' \
 python manage.py check linktools-ai --skip-compatibility
 ```
+
+## Backend and graph-width probe
+
+`tests/ai/test_task_terminal_backend_io.py` measures only the last node's terminal
+publication after the other nodes have completed. Matched runs on 1-node and
+32-node SQLite graphs both show the same change: 3 to 2 UPDATE executions,
+with 3 SELECTs, one pool checkout and one committed transaction unchanged.
+Success retains 3 INSERTs; failure retains 2. This does not measure total graph
+execution cost or establish a reduction in whole-graph transaction counts.
+
+The probe also checks complete graph state, results and events after reopening
+Persistence, and verifies that Persistence does not dispose the borrowed engine.
+Its MySQL cases use the repository's real-server fixture and count asyncmy
+COM_QUERY commands separately from SQLAlchemy executions, including COMMIT.
+They skip explicitly when Oracle MySQL tools are unavailable; MariaDB and a
+row-wise SQLite simulation are not substitutes. No real MySQL measurement was
+available in the local environment for this addition.
