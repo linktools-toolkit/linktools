@@ -536,17 +536,17 @@ class DefaultExecutionService(TaskExecutionService):
             request_intent_digest=intent.digest,
         )
 
-    async def _request_identity_version(
+    async def _request_identity(
         self, scope: str, key_digest: str, *, tenant_id: str,
         include_remote: bool = False,
-    ) -> int:
+    ) -> tuple[int, IdempotencyRecord | None]:
         identity = await self._state.idempotency.get(scope, key_digest, tenant_id=tenant_id)
         if identity is not None:
-            return identity.request_identity_version
+            return identity.request_identity_version, identity
         pending = self._runtime_bridge.pending_turns
         local = pending.peek_request(tenant_id=tenant_id, scope=scope, idempotency_key_digest=key_digest)
         if local is not None:
-            return local.reservation.idempotency.request_identity_version
+            return local.reservation.idempotency.request_identity_version, None
         coordinator = pending.coordination
         if (include_remote and coordinator is not None and coordinator.supports_pending_views
                 and coordinator.supports_request_lookup):
@@ -554,12 +554,12 @@ class DefaultExecutionService(TaskExecutionService):
                 f"{scope}:{key_digest}", tenant_id=tenant_id,
             )
             if version is not None:
-                return version
+                return version, None
             # A live owner may have committed and released between source and owner reads.
             identity = await self._state.idempotency.get(scope, key_digest, tenant_id=tenant_id)
             if identity is not None:
-                return identity.request_identity_version
-        return 2
+                return identity.request_identity_version, identity
+        return 2, None
 
     async def _freeze_input(
         self,
@@ -650,13 +650,9 @@ class DefaultExecutionService(TaskExecutionService):
         if identity is not None and record.status in {
             ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
         }:
-            if identity.status is IdempotencyStatus.STARTED:
-                # The first identity read may precede the atomic terminal commit.
-                refreshed = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
-                if (refreshed is None or refreshed.request_digest != identity.request_digest
-                        or refreshed.scope != scope or refreshed.idempotency_key_digest != key):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                identity = refreshed
+            identity = await self._management.refresh_terminal_identity(
+                identity, record, tenant_id=principal.tenant_id,
+            )
             if not _terminal_idempotency_matches(identity, record):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if record.stored_user_input is None:
@@ -782,7 +778,7 @@ class DefaultExecutionService(TaskExecutionService):
             await self.authorize_budget_scope(budget_scope_id, request.principal)
         scope = "execution.run"
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
-        identity_version = await self._request_identity_version(
+        identity_version, existing = await self._request_identity(
             scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
         )
         request_digest = _request_digest(
@@ -802,12 +798,12 @@ class DefaultExecutionService(TaskExecutionService):
         )
         try:
             admitted = await self._management.resolve_admission(
-                scope, idempotency_key_digest, request_digest, request.principal,
+                scope, idempotency_key_digest, request_digest, request.principal, identity=existing,
             )
         except AIError as error:
-            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
+            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT or existing is not None:
                 raise
-            latest_version = await self._request_identity_version(
+            latest_version, existing = await self._request_identity(
                 scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
             )
             if latest_version == identity_version:
@@ -822,7 +818,7 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
             )
             admitted = await self._management.resolve_admission(
-                scope, idempotency_key_digest, request_digest, request.principal,
+                scope, idempotency_key_digest, request_digest, request.principal, identity=existing,
             )
         if admitted is None:
             return None
@@ -1264,7 +1260,7 @@ class DefaultExecutionService(TaskExecutionService):
                 ),
             )
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
-        identity_version = await self._request_identity_version(
+        identity_version, existing = await self._request_identity(
             scope, idempotency_key_digest, tenant_id=request.principal.tenant_id, include_remote=prepared_input is not None,
         )
         request_digest = _request_digest(
@@ -1293,11 +1289,12 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
             )
             return ExecutionHandle(pending_turn.execution.execution_id)
-        existing = await self._state.idempotency.get(
-            scope,
-            idempotency_key_digest,
-            tenant_id=request.principal.tenant_id,
-        )
+        if existing is None:
+            existing = await self._state.idempotency.get(
+                scope,
+                idempotency_key_digest,
+                tenant_id=request.principal.tenant_id,
+            )
         if existing is not None:
             if existing.request_identity_version != identity_version:
                 identity_version = existing.request_identity_version
@@ -1401,22 +1398,9 @@ class DefaultExecutionService(TaskExecutionService):
             if existing.status is IdempotencyStatus.STARTED and started.status in {
                 ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
             }:
-                # Terminal commit updates both records atomically, but these two
-                # reads can straddle that commit. Refresh only this mixed view.
-                refreshed = await self._state.idempotency.get(
-                    scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
+                existing = await self._management.refresh_terminal_identity(
+                    existing, started, tenant_id=request.principal.tenant_id,
                 )
-                if (
-                    refreshed is None
-                    or refreshed.scope != existing.scope
-                    or refreshed.idempotency_key_digest != existing.idempotency_key_digest
-                    or refreshed.request_digest != existing.request_digest
-                    or refreshed.resource_kind is not existing.resource_kind
-                    or refreshed.resource_id != existing.resource_id
-                    or not _terminal_idempotency_matches(refreshed, started)
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                existing = refreshed
                 if existing.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
                     if scope == "session.resume" and started.started_at is not None:
                         await self._acquire_start_dependency_hold(started, dependency_hold_id)
@@ -1621,7 +1605,7 @@ class DefaultExecutionService(TaskExecutionService):
         except AIError as error:
             if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT or prepared_input is not None:
                 raise
-            winner_version = await self._request_identity_version(
+            winner_version, _ = await self._request_identity(
                 scope, idempotency_key_digest, tenant_id=request.principal.tenant_id, include_remote=True,
             )
             if winner_version == 2:

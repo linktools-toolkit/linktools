@@ -101,8 +101,11 @@ class ExecutionManager:
         return header
 
     async def resolve_admission(self, scope: str, key_digest: str, request_digest: str,
-                                principal: Principal) -> tuple[IdempotencyRecord, ExecutionRecord] | None:
-        identity = await self._port.get_idempotency(scope, key_digest, tenant_id=principal.tenant_id)
+                                principal: Principal, *, identity: IdempotencyRecord | None = None,
+                                ) -> tuple[IdempotencyRecord, ExecutionRecord] | None:
+        """Reuse an observed source identity for request validation and replay."""
+        if identity is None:
+            identity = await self._port.get_idempotency(scope, key_digest, tenant_id=principal.tenant_id)
         if identity is None:
             return None
         if identity.request_digest != request_digest:
@@ -119,7 +122,33 @@ class ExecutionManager:
                                              owner_principal_id=None)
         if execution.status is ExecutionStatus.START_UNKNOWN:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        identity = await self.refresh_terminal_identity(identity, execution, tenant_id=principal.tenant_id)
         return identity, execution
+
+    async def refresh_terminal_identity(
+        self, identity: IdempotencyRecord, execution: ExecutionRecord, *, tenant_id: str,
+    ) -> IdempotencyRecord:
+        if identity.status is not IdempotencyStatus.STARTED or execution.status not in {
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        }:
+            return identity
+        # Terminal commit updates both records atomically, but these two
+        # reads can straddle that commit. Refresh only this mixed view.
+        refreshed = await self._port.get_idempotency(
+            identity.scope, identity.idempotency_key_digest, tenant_id=tenant_id,
+        )
+        if (
+            refreshed is None
+            or refreshed.scope != identity.scope
+            or refreshed.idempotency_key_digest != identity.idempotency_key_digest
+            or refreshed.request_digest != identity.request_digest
+            or refreshed.request_identity_version != identity.request_identity_version
+            or refreshed.resource_kind is not identity.resource_kind
+            or refreshed.resource_id != identity.resource_id
+            or not terminal_idempotency_matches(refreshed, execution)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return refreshed
 
     async def _load_cancel_execution(
         self, execution_id: str, request: CancelExecutionRequest,
