@@ -364,8 +364,8 @@ async def test_concurrent_boundaries_do_not_retire_a_replacement_run_buffer(tmp_
     store = state.run_store
     owner = store.trace_persistence
     owner.configure("run", buffer=owner._caches["run"], batch_size=128, flush_interval=60)
-    entered, release, first_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    original = owner._stop_locked
+    entered, second_entered, release, first_finished = [asyncio.Event() for _ in range(4)]
+    original = owner._stop
     calls = 0
 
     async def held(run_id, **kwargs):
@@ -375,19 +375,20 @@ async def test_concurrent_boundaries_do_not_retire_a_replacement_run_buffer(tmp_
             entered.set()
             await release.wait()
         elif calls == 2:
-            # The first boundary has retired its scope before this one can select an owner.
+            # Wait before acquiring the boundary needed by the replacement admission.
+            second_entered.set()
             await first_finished.wait()
         await original(run_id, **kwargs)
 
-    monkeypatch.setattr(owner, "_stop_locked", held)
+    monkeypatch.setattr(owner, "_stop", held)
     first = second = None
     try:
         await _observe(store, 1)
         old = owner._buffers["run"]
         first = asyncio.create_task(store.flush_execution_projection("run", execution_id="execution", producer_generation=1))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 2)
         second = asyncio.create_task(store.flush_execution_projection("run", execution_id="execution", producer_generation=1))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(second_entered.wait(), 2)
         release.set()
         await first
         await _observe(store, 2)
