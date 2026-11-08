@@ -361,62 +361,74 @@ class StateCommands:
             return await stores[0].storage_group.mutate(stores, mutate)
 
         async def readback() -> CommitObservation[ExecutionRecord]:
-            execution = await self._load_execution(execution_id, tenant_id=tenant_id)
-            checkpoint = execution
-            if execution is None or checkpoint is None or checkpoint.recovery is None:
-                return CommitObservation(
-                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+            async def read(group: StateGroupTransaction) -> CommitObservation[ExecutionRecord]:
+                execution = await self._execution.get_in_transaction(
+                    group.transaction(self._execution.state_store),
+                    execution_id, tenant_id=tenant_id,
                 )
-            if producer_generation is not None:
-                if execution.producer_generation > producer_generation:
-                    return CommitObservation(
-                        DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT),
+                if execution is None or execution.recovery is None:
+                    return _partial_integrity()
+                if producer_generation is not None:
+                    if execution.producer_generation != producer_generation:
+                        return CommitObservation(
+                            DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT),
+                        )
+                    if execution.status is ExecutionStatus.CANCELLING:
+                        return CommitObservation(
+                            DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.EXECUTION_CANCELLED),
+                        )
+                complete_members = True
+                for expected in approval_values:
+                    actual = await approvals.get_in_transaction(
+                        group.transaction(approvals.state_store),
+                        expected.approval_id, tenant_id=tenant_id,
                     )
-                if execution.status is ExecutionStatus.CANCELLING:
-                    return CommitObservation(
-                        DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.EXECUTION_CANCELLED),
+                    if actual is not None and (
+                        actual.approval_id != expected.approval_id
+                        or actual.execution_id != execution_id
+                    ):
+                        return _partial_integrity()
+                    complete_members = complete_members and actual is not None and (
+                        actual.created_at == expected.created_at
+                        and (actual.status is not ApprovalStatus.PENDING or actual == expected)
                     )
-            for expected in approval_values:
-                actual = await approvals.get(
-                    expected.approval_id,
-                    tenant_id=tenant_id,
-                )
-                if actual != expected:
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                for expected in external_values:
+                    actual = await external_calls.get_in_transaction(
+                        group.transaction(external_calls.state_store),
+                        expected.call_id, tenant_id=tenant_id,
                     )
-            for expected in external_values:
-                actual = await external_calls.get(
-                    expected.call_id,
-                    tenant_id=tenant_id,
-                )
-                if actual != expected:
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    if actual is not None and (
+                        actual.call_id != expected.call_id
+                        or actual.execution_id != execution_id
+                    ):
+                        return _partial_integrity()
+                    complete_members = complete_members and actual is not None and (
+                        actual.created_at == expected.created_at
+                        and (actual.status is not ExternalCallStatus.PENDING or actual == expected)
                     )
-            if (
-                execution.status is ExecutionStatus.WAITING_DEFERRED
-                and execution.agent_run_seq == expected_agent_run_seq
-                and checkpoint.recovery_state is ExecutionRecoveryState.WAITING
-                and checkpoint.recovery.pending_tools == continuation
-            ):
-                return CommitObservation(
-                    DurableCommitState.COMMITTED,
-                    value=execution,
-                )
-            if (
-                execution.status is ExecutionStatus.STARTED
-                and execution.revision == expected_execution_revision
-                and execution.event_seq == expected_event_seq
-            ):
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            return CommitObservation(
-                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-            )
+                if (
+                    execution.status is ExecutionStatus.STARTED
+                    and execution.revision == expected_execution_revision
+                    and execution.event_seq == expected_event_seq
+                    and execution.agent_run_seq == expected_agent_run_seq
+                    and execution.recovery_state is ExecutionRecoveryState.ACTIVE
+                    and execution.recovery.agent_run_id == continuation.source_agent_run_id
+                ):
+                    # Other owners may resolve or pre-create members. This command
+                    # atomically publishes its members and execution frontier.
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if (
+                    execution.status is ExecutionStatus.WAITING_DEFERRED
+                    and execution.agent_run_seq == expected_agent_run_seq
+                    and execution.recovery_state is ExecutionRecoveryState.WAITING
+                    and execution.recovery.pending_tools == continuation
+                ):
+                    if not complete_members:
+                        return _partial_integrity()
+                    return CommitObservation(DurableCommitState.COMMITTED, value=execution)
+                return CommitObservation(DurableCommitState.UNRESOLVED)
+
+            return await stores[0].storage_group.read_many(stores, read)
 
         owner_tasks = self._background_tasks if background_tasks is None else background_tasks
         outcome = await run_durable_commit(
@@ -513,79 +525,103 @@ class StateCommands:
             return await stores[0].storage_group.mutate(stores, mutate)
 
         async def readback() -> CommitObservation[ExecutionRecord]:
-            execution = await self._load_execution(
-                commit.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            checkpoint = execution
-            if execution is None or checkpoint is None or checkpoint.recovery is None:
-                return CommitObservation(
-                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+            async def read(group: StateGroupTransaction) -> CommitObservation[ExecutionRecord]:
+                execution = await self._execution.get_in_transaction(
+                    group.transaction(self._execution.state_store),
+                    commit.execution_id, tenant_id=self._tenant_id,
                 )
-            for approval_id in approval_ids:
-                record = await approvals.get(
-                    approval_id,
-                    tenant_id=self._tenant_id,
+                if execution is None or execution.recovery is None:
+                    return _partial_integrity()
+                page = await self._events.list(
+                    commit.execution_id, tenant_id=self._tenant_id,
+                    after_event_seq=commit.expected_event_seq, limit=2,
                 )
+                items = page.items
+                revision_delta = execution.revision - commit.expected_revision
+                sequence_delta = execution.event_seq - commit.expected_event_seq
                 if (
-                    record is None
-                    or record.execution_id != commit.execution_id
-                    or record.status is ApprovalStatus.PENDING
-                ):
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    any(
+                        event.execution_id != commit.execution_id
+                        or event.event_seq != commit.expected_event_seq + index
+                        for index, event in enumerate(items, 1)
                     )
-            for call_id in call_ids:
-                record = await external_calls.get(
-                    call_id,
-                    tenant_id=self._tenant_id,
+                    or revision_delta < 0
+                    or sequence_delta < 0
+                    or revision_delta < sequence_delta
+                    or items and items[-1].event_seq > execution.event_seq
+                    or sequence_delta > 0 and not items
+                ):
+                    return _partial_integrity()
+                own_cancellation = (
+                    bool(items)
+                    and items[0].event_type == ExecutionEventType.CANCEL_REQUESTED
+                    and items[0].payload == {"operation_id": commit.operation_id}
                 )
+                pending_members = False
+                for approval_id in approval_ids:
+                    record = await approvals.get_in_transaction(
+                        group.transaction(approvals.state_store),
+                        approval_id, tenant_id=self._tenant_id,
+                    )
+                    if (
+                        record is None
+                        or record.approval_id != approval_id
+                        or record.execution_id != commit.execution_id
+                    ):
+                        return _partial_integrity()
+                    pending_members = pending_members or record.status is ApprovalStatus.PENDING
+                for call_id in call_ids:
+                    record = await external_calls.get_in_transaction(
+                        group.transaction(external_calls.state_store),
+                        call_id, tenant_id=self._tenant_id,
+                    )
+                    if (
+                        record is None
+                        or record.call_id != call_id
+                        or record.execution_id != commit.execution_id
+                    ):
+                        return _partial_integrity()
+                    pending_members = pending_members or record.status is ExternalCallStatus.PENDING
                 if (
-                    record is None
-                    or record.execution_id != commit.execution_id
-                    or record.status is ExternalCallStatus.PENDING
+                    execution.status is ExecutionStatus.WAITING_DEFERRED
+                    and execution.revision == commit.expected_revision
+                    and execution.event_seq == commit.expected_event_seq
+                    and execution.recovery_state is ExecutionRecoveryState.WAITING
+                    and execution.recovery.pending_tools == expected_pending_tools
                 ):
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                    )
-            if (
-                execution.status
-                in {
-                    ExecutionStatus.CANCELLING,
-                    ExecutionStatus.FINALIZING,
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }
-                and execution.event_seq
-                >= commit.expected_event_seq + 1
-                and checkpoint.recovery_state
-                in {
-                    ExecutionRecoveryState.ACTIVE,
-                    ExecutionRecoveryState.COMPLETED,
-                }
-                and checkpoint.recovery.pending_tools is None
-                and checkpoint.recovery.handoff_phase is RecoveryHandoffPhase.NONE
-                and checkpoint.recovery.terminal_handoff is None
-            ):
-                return CommitObservation(
-                    DurableCommitState.COMMITTED,
-                    value=execution,
-                )
-            if (
-                execution.status is ExecutionStatus.WAITING_DEFERRED
-                and execution.revision == commit.expected_revision
-                and execution.event_seq == commit.expected_event_seq
-                and checkpoint.recovery.pending_tools == expected_pending_tools
-            ):
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            return CommitObservation(
-                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-            )
+                    # Member resolution has its own owner and does not prove
+                    # that this atomic cancellation command was published.
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if not own_cancellation:
+                    if items:
+                        return CommitObservation(
+                            DurableCommitState.NOT_COMMITTED,
+                            error=AIError(ErrorCode.STORAGE_CONFLICT),
+                        )
+                    return CommitObservation(DurableCommitState.UNRESOLVED)
+                if (
+                    execution.status
+                    in {
+                        ExecutionStatus.CANCELLING,
+                        ExecutionStatus.FINALIZING,
+                        ExecutionStatus.SUCCEEDED,
+                        ExecutionStatus.FAILED,
+                        ExecutionStatus.CANCELLED,
+                    }
+                    and execution.event_seq >= commit.expected_event_seq + 1
+                    and execution.recovery_state
+                    in {ExecutionRecoveryState.ACTIVE, ExecutionRecoveryState.COMPLETED}
+                    and execution.recovery.pending_tools is None
+                    and execution.recovery.handoff_phase is RecoveryHandoffPhase.NONE
+                    and execution.recovery.terminal_handoff is None
+                ):
+                    if pending_members:
+                        return _partial_integrity()
+                    return CommitObservation(DurableCommitState.COMMITTED, value=execution)
+                return CommitObservation(DurableCommitState.UNRESOLVED)
+
+            read_stores = _dedupe_stores((*stores, self._events.state_store))
+            return await stores[0].storage_group.read_many(read_stores, read)
 
         owner_tasks = self._background_tasks if background_tasks is None else background_tasks
         outcome = await run_durable_commit(

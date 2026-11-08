@@ -82,7 +82,10 @@ class _Producer:
             return
         if self.queue and not self.queue[-1][1]:
             previous = json.loads(self.queue[-1][0])
-            if value.get("kind") == previous.get("kind") == "delta" and value.get("type") == previous.get("type"):
+            if (value.get("kind") == previous.get("kind") == "delta"
+                    and value.get("type") == previous.get("type")
+                    and value.get("position") == previous.get("position")
+                    and not (value.get("position") or {}).get("part_start")):
                 value = dict(value, text=previous["text"] + value["text"],
                              truncated=previous["truncated"] or value["truncated"])
                 old, _ = self.queue.pop()

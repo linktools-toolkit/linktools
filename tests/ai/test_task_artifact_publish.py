@@ -6,6 +6,7 @@ from linktools.ai.persistence import Persistence
 
 import hashlib
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -16,6 +17,9 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.asyncio
@@ -71,3 +75,92 @@ async def test_task_artifact_publish_readback_and_idempotency() -> None:
         run = await engine.start(graph, idempotency_key="artifact-publish")
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
         assert isinstance(await run.result("publish"), str)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("difference", ("same", "mime", "content"))
+async def test_task_artifact_concurrent_publication_preserves_semantic_identity(tmp_path: "Path", monkeypatch: pytest.MonkeyPatch, backend: str, difference: str) -> None:
+    import asyncio
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.sqlite")
+    async with Persistence.open("artifact-race", storage=storage) as state:
+        put = state.artifact.records.put_metadata
+        arrived = 0
+        ready = asyncio.Event()
+        async def synchronized(record):
+            nonlocal arrived
+            arrived += 1
+            if arrived == 2:
+                ready.set()
+            await asyncio.wait_for(ready.wait(), timeout=3)
+            return await put(record)
+        monkeypatch.setattr(state.artifact.records, "put_metadata", synchronized)
+        async def body(ctx):
+            async def publish(data, mime):
+                async def chunks():
+                    yield data
+                return await ctx.artifacts.publish("report", chunks(), mime_type=mime, expected_size=len(data), expected_digest=hashlib.sha256(data).hexdigest())
+            results = await asyncio.gather(
+                publish(b"first", "text/plain"),
+                publish(b"other" if difference == "content" else b"first", "application/json" if difference == "mime" else "text/plain"),
+                return_exceptions=True,
+            )
+            if difference == "same":
+                assert not any(isinstance(r, BaseException) for r in results)
+                assert results[0] == results[1]
+            else:
+                successes = [r for r in results if not isinstance(r, BaseException)]
+                errors = [r for r in results if isinstance(r, AIError)]
+                assert len(successes) == len(errors) == 1
+                assert errors[0].code is ErrorCode.IDEMPOTENCY_CONFLICT
+            return "done"
+        task = Task("publish", body, effect_policy="none")
+        async with TaskEngine.open(task, persistence=state) as engine:
+            run = await engine.start(TaskGraph("graph", (TaskNode("node", task=task),)), idempotency_key="start")
+            assert (await run.wait(timeout_seconds=5)).result.status is TaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ("before", "after", "cancel", "object", "readback"))
+async def test_task_artifact_publication_resolves_only_metadata_commit_uncertainty(monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
+    import asyncio
+    async with Persistence.open("artifact-unknown", storage=PersistenceStorage.in_memory()) as state:
+        put = state.artifact.records.put_metadata
+        error = asyncio.CancelledError() if fault == "cancel" else AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+        async def uncertain(record):
+            if fault in {"after", "readback"}:
+                await put(record)
+            if fault == "readback":
+                monkeypatch.setattr(state.artifact.records, "get_metadata", unavailable_metadata)
+            raise error
+        async def unavailable_object(*args, **kwargs):
+            raise error
+        async def unavailable_metadata(*args, **kwargs):
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        if fault == "object":
+            monkeypatch.setattr(state.object_store(PersistenceDomain.ARTIFACT), "put", unavailable_object)
+        else:
+            monkeypatch.setattr(state.artifact.records, "put_metadata", uncertain)
+        async def body(ctx):
+            data = b"content"
+            async def chunks():
+                yield data
+            async def publish():
+                return await ctx.artifacts.publish("report", chunks(), mime_type="text/plain", expected_size=len(data), expected_digest=hashlib.sha256(data).hexdigest())
+            if fault == "readback":
+                with pytest.raises(AIError) as raised:
+                    await publish()
+                assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            elif fault == "after":
+                record = await publish()
+                assert record == await state.artifact.records.get_metadata(record.artifact_id, tenant_id=state.tenant_id)
+                assert await publish() == record
+            else:
+                with pytest.raises(type(error)) as raised:
+                    await publish()
+                assert raised.value is error
+            return "done"
+        task = Task("publish", body, effect_policy="none")
+        async with TaskEngine.open(task, persistence=state) as engine:
+            run = await engine.start(TaskGraph("graph", (TaskNode("node", task=task),)), idempotency_key="start")
+            assert (await run.wait(timeout_seconds=5)).result.status is TaskStatus.SUCCEEDED

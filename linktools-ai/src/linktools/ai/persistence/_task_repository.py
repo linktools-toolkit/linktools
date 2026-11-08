@@ -3085,6 +3085,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 result_digest=result_digest,
                 error_code=None,
                 error_digest=None,
+                error_origin=None,
+                safe_error_details={},
                 conflict=error,
             )
 
@@ -3351,6 +3353,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 result_digest=None,
                 error_code=error_code,
                 error_digest=error_digest,
+                error_origin=error_origin,
+                safe_error_details=details,
                 conflict=error,
             )
 
@@ -3364,6 +3368,8 @@ class TaskRepositoryImpl(RepositoryBase):
         result_digest: str | None,
         error_code: str | None,
         error_digest: str | None,
+        error_origin: str | None,
+        safe_error_details: Mapping[str, JsonValue],
         conflict: AIError,
     ) -> TaskTerminalRecord:
         current = await self._node(lease.graph_id, lease.node_id, tenant_id)
@@ -3374,6 +3380,10 @@ class TaskRepositoryImpl(RepositoryBase):
                 current.result_digest != result_digest
                 or current.error_code != error_code
                 or current.error_digest != error_digest
+                or status is TaskStatus.FAILED and (
+                    current.error_origin != error_origin
+                    or dict(current.safe_error_details) != safe_error_details
+                )
                 or (execution_id is not None and current.execution_id != execution_id)
             ):
                 raise AIError(ErrorCode.TASK_RESULT_CONFLICT) from conflict

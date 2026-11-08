@@ -584,6 +584,8 @@ class LocalTaskGraphLauncher:
                 resolution,
             )
         except TaskNodeRunError as error:
+            if error.code in _RECOVERY_UNKNOWN_CODES:
+                raise
             digest = canonical_sha256(
                 {
                     "graph_id": graph_id,
@@ -2143,20 +2145,26 @@ class LocalTaskGraphLauncher:
             await _stop_heartbeat(heartbeat_stop, heartbeat)
             raise
         finally:
-            execution_id = control.handed_off_execution_id
-            is_input_wait = (
-                node.task is not None
-                and node.task.id == "linktools.ai.input"
-                and node.task.revision == 1
-            )
-            if execution_id is not None and not is_input_wait:
-                await self._finish_execution_hold(
-                    execution_id,
-                    tenant_id=tenant_id,
-                    hold_id=f"task:{graph_id}:{node.node_id}",
-                    graph_id=graph_id, node_id=node.node_id,
-                    expected_fence=lease_state.lease.fence,
+            try:
+                heartbeat_stop.set()
+                if not heartbeat.done():
+                    heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+            finally:
+                execution_id = control.handed_off_execution_id
+                is_input_wait = (
+                    node.task is not None
+                    and node.task.id == "linktools.ai.input"
+                    and node.task.revision == 1
                 )
+                if execution_id is not None and not is_input_wait:
+                    await self._finish_execution_hold(
+                        execution_id,
+                        tenant_id=tenant_id,
+                        hold_id=f"task:{graph_id}:{node.node_id}",
+                        graph_id=graph_id, node_id=node.node_id,
+                        expected_fence=lease_state.lease.fence,
+                    )
 
     async def _completion_committed(
         self,
