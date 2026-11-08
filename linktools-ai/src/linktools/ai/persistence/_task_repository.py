@@ -1338,7 +1338,9 @@ class TaskRepositoryImpl(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> TaskNodeView:
             graph_key = self._graph_key(lease.graph_id)
             node_key = self._state_key(lease.graph_id, lease.node_id)
-            records = await transaction.get_records((graph_key, node_key))
+            records = await transaction.get_records(
+                (graph_key, node_key, self._definition_key(lease.graph_id, lease.node_id)),
+            )
             graph_record = records.get(graph_key)
             node_record = records.get(node_key)
             if graph_record is None or node_record is None:
@@ -1401,7 +1403,9 @@ class TaskRepositoryImpl(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> TaskNodeView:
             graph_key = self._graph_key(lease.graph_id)
             node_key = self._state_key(lease.graph_id, lease.node_id)
-            records = await transaction.get_records((graph_key, node_key))
+            records = await transaction.get_records(
+                (graph_key, node_key, self._definition_key(lease.graph_id, lease.node_id)),
+            )
             graph_record = records.get(graph_key)
             node_record = records.get(node_key)
             if graph_record is None or node_record is None:
