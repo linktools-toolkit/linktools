@@ -1,0 +1,39 @@
+{
+  "v": 1,
+  "value": {
+    "payload": {
+      "$dataclass": "operation_ledger_input",
+      "fields": {
+        "compactable": false,
+        "created_at": {
+          "$datetime": "2026-11-07T19:57:45.504754+00:00"
+        },
+        "error_code": null,
+        "execution_id": null,
+        "operation_id": "1f58b9145b24d108d7ac38887338b3ea3229833b9c1e418250343f907bfd1047",
+        "operation_kind": {
+          "$enum": "operation_kind",
+          "value": "SESSION_UPDATE"
+        },
+        "request_digest": "0e9aa637e2d63f2cbe82acf882d48a04c0186f65cded2ccd8c5113f94fc94726",
+        "resource_id": "session",
+        "resource_kind": {
+          "$enum": "resource_kind",
+          "value": "SESSION"
+        },
+        "result_digest": "338f70372235dda58b96950bbb31c92986223f2deac6481cfc58986906302945",
+        "result_ref": "session",
+        "status": {
+          "$enum": "operation_status",
+          "value": "SUCCEEDED"
+        },
+        "tenant_id": "tenant",
+        "updated_at": {
+          "$datetime": "2026-11-07T19:57:45.504754+00:00"
+        }
+      },
+      "schema": 1
+    },
+    "type": "operation_ledger_input"
+  }
+}

@@ -953,6 +953,7 @@ def operation_result(
         operation.sequence,
         operation.created_at,
         datetime.now(timezone.utc),
+        operation.request_digest_contract,
     )
 
 
@@ -975,6 +976,7 @@ def operation_failure(
         operation.sequence,
         operation.created_at,
         datetime.now(timezone.utc),
+        operation.request_digest_contract,
     )
 
 
@@ -997,6 +999,7 @@ def operation_status(
         operation.sequence,
         operation.created_at,
         datetime.now(timezone.utc),
+        operation.request_digest_contract,
     )
 
 

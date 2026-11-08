@@ -25,6 +25,7 @@ class OperationLedgerRecord:
     sequence: int
     created_at: datetime
     updated_at: datetime
+    request_digest_contract: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class OperationLedgerInput:
     compactable: bool
     created_at: datetime
     updated_at: datetime
+    request_digest_contract: str | None = None
 
 
 def operation_replay_matches(
@@ -58,6 +60,7 @@ def operation_replay_matches(
         and record.operation_kind is candidate.operation_kind
         and record.status is candidate.status
         and record.request_digest == candidate.request_digest
+        and record.request_digest_contract == candidate.request_digest_contract
         and record.result_ref == candidate.result_ref
         and record.result_digest == candidate.result_digest
         and record.error_code == candidate.error_code
@@ -77,6 +80,7 @@ def operation_cas_immutable_matches(
         and current.execution_id == candidate.execution_id
         and current.operation_kind is candidate.operation_kind
         and current.request_digest == candidate.request_digest
+        and current.request_digest_contract == candidate.request_digest_contract
         and current.compactable == candidate.compactable
         and current.sequence == candidate.sequence
         and current.created_at == candidate.created_at

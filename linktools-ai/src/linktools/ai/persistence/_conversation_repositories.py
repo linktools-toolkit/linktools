@@ -1184,6 +1184,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             value = await self._decode(current, SessionRecord)
             if value.owner_principal_id != next_record.owner_principal_id:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            _, replayed = await _append_operation(transaction, self, operation)
+            if replayed:
+                return value, True
             if value.revision != expected_revision:
                 raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             proposed = next_record
@@ -1194,9 +1197,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 proposed = replace(
                     proposed, active_execution_id=value.active_execution_id
                 )
-            _, replayed = await _append_operation(transaction, self, operation)
-            if replayed:
-                return value, True
             candidate = _projected_record(self, current, proposed)
             await _replace_checked(transaction, candidate, current.storage_revision)
             await self._bump_list_generation(transaction, value.owner_principal_id)
