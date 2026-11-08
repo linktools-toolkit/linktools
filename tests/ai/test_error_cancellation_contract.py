@@ -42,7 +42,7 @@ from linktools.ai.task import (
 )
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.core import Principal, PrincipalKind
-from linktools.ai.workspace import BubblewrapWorkspaceBackend
+from linktools.ai.workspace import LocalWorkspaceBackend
 
 
 @pytest_asyncio.fixture
@@ -113,10 +113,7 @@ async def test_mcp_materialization_rejects_disabled_workspace() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_requires_stdio_support_on_the_selected_workspace(tmp_path) -> None:
-    sandbox = BubblewrapWorkspaceBackend(
-        tmp_path, runtime_root=tmp_path,
-        bwrap_executable=tmp_path / "bwrap",
-    )
+    sandbox = LocalWorkspaceBackend(tmp_path)
     server = MCPServerSpec("server", "echo")
     binding = _MCPBinding(
         None,

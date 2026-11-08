@@ -184,3 +184,50 @@ async def test_cancel_authorization_reuses_its_source_record() -> None:
         "execution", CancelExecutionRequest(_PRINCIPAL, "cancel"),
     ) is record
     assert port.reads == [("source_execution", "execution", "tenant")]
+
+
+@pytest.mark.parametrize("mismatch,expected_error", (
+    (None, None),
+    ("request", ErrorCode.IDEMPOTENCY_CONFLICT),
+    ("scope", ErrorCode.STORAGE_INTEGRITY_ERROR),
+    ("key", ErrorCode.STORAGE_INTEGRITY_ERROR),
+    ("kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
+    ("owner", ErrorCode.AUTHORIZATION_DENIED),
+))
+async def test_admission_reuses_observed_identity_without_bypassing_validation(
+    mismatch: str | None, expected_error: ErrorCode | None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    identity = IdempotencyRecord("execution.run", "key", "request", ResourceKind.EXECUTION,
+        "execution", IdempotencyStatus.STARTED, None, None, now, now)
+    record = _execution()
+    if mismatch == "request":
+        identity = replace(identity, request_digest="other")
+    elif mismatch == "scope":
+        identity = replace(identity, scope="other")
+    elif mismatch == "key":
+        identity = replace(identity, idempotency_key_digest="other")
+    elif mismatch == "kind":
+        identity = replace(identity, resource_kind=ResourceKind.SESSION)
+    elif mismatch == "owner":
+        record = replace(record, principal_id="other")
+
+    class ObservedPort(_ReadPort):
+        async def get_idempotency(self, scope, key_digest, *, tenant_id):
+            raise AssertionError("Admission must reuse the observed source identity")
+
+    port = ObservedPort(record)
+    manager = ExecutionManager(port, TenantAuthorizationPolicy())
+    if expected_error is None:
+        assert await manager.resolve_admission(
+            "execution.run", "key", "request", _PRINCIPAL, identity=identity,
+        ) == (identity, record)
+    else:
+        with pytest.raises(AIError) as caught:
+            await manager.resolve_admission(
+                "execution.run", "key", "request", _PRINCIPAL, identity=identity,
+            )
+        assert caught.value.code is expected_error
+    assert port.reads == (
+        [("source_execution", "execution", "tenant")] if mismatch in {None, "owner"} else []
+    )

@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ..core import Page, validate_persistence_namespace, validate_resource_id
+from ..core import Page, canonical_sha256, validate_persistence_namespace, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import (
     create_sql_storage_context,
@@ -746,11 +746,16 @@ def _decode_observation_record(
             )
         except (TypeError, ValueError, RecursionError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    try:
+        expected_payload = canonical_sha256(payload)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if row["payload_digest"] != expected_payload:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     observation = decode_observation_envelope(
         payload, expected_namespace=namespace
     )
     expected_identity = observation_digest(namespace, observation.observation_id)
-    expected_payload = observation_payload_digest(namespace, observation)
     if (
         row["namespace_digest"] != namespace_key
         or row["observation_id"] != observation.observation_id
@@ -761,7 +766,6 @@ def _decode_observation_record(
         or _utc_database_datetime(cast("datetime", row["occurred_at"]))
         != observation.occurred_at
         or row["observation_digest"] != expected_identity
-        or row["payload_digest"] != expected_payload
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return observation

@@ -5,7 +5,8 @@
 import asyncio
 import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -258,7 +259,34 @@ class _TaskArtifactPublisher:
             object_ref=object_ref,
             created_at=datetime.now(timezone.utc),
         )
-        return await self._state.records.put_metadata(record)
+        try:
+            return await self._state.records.put_metadata(record)
+        except AIError as error:
+            if error.code not in {
+                ErrorCode.IDEMPOTENCY_CONFLICT,
+                ErrorCode.STORAGE_CONFLICT,
+                ErrorCode.STORAGE_COMMIT_UNKNOWN,
+            }:
+                raise
+            try:
+                existing = await self._state.records.get_metadata(
+                    artifact_id,
+                    tenant_id=self._principal.tenant_id,
+                )
+            except AIError as read_error:
+                if read_error.code is ErrorCode.STORAGE_UNAVAILABLE:
+                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from read_error
+                raise
+            if existing is None:
+                raise
+            if (
+                existing.execution_id != self._execution_id
+                or existing.object_ref.digest != expected_digest
+                or existing.object_ref.size != expected_size
+                or existing.mime_type != mime_type
+            ):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+            return existing
 
 
 class _TaskStateReader(Protocol):
@@ -626,6 +654,7 @@ class TaskNodeExecutor(Generic[AppT]):
                         node,
                         admission.principal.tenant_id,
                         tasks,
+                        request_identity_version=admission.request_identity_version,
                     )
                     for node in graph.nodes
                 ]
@@ -657,6 +686,8 @@ class TaskNodeExecutor(Generic[AppT]):
         node: TaskNode,
         tenant_id: str,
         tasks: Mapping[tuple[str, int], Task[AppT]],
+        *,
+        request_identity_version: int = 2,
     ) -> TaskNode:
         reference = node.task
         if reference is None or node.input_capture is not None:
@@ -672,6 +703,7 @@ class TaskNodeExecutor(Generic[AppT]):
             tenant_id=tenant_id,
             contract=task.contract,
             materializer=self._input_materializer,
+            request_identity_version=request_identity_version,
         )
 
     async def restore_prepared_agent_prompt(
@@ -1632,6 +1664,23 @@ class TaskNodeExecutor(Generic[AppT]):
             invocation = replace(invocation, node=restored, input_capture=node.input_capture)
         return invocation
 
+    @contextmanager
+    def confirm_execution_result(self, execution_id: str) -> Iterator[None]:
+        try:
+            yield
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_UNAVAILABLE:
+                raise
+            raise TaskNodeRunError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                execution_id,
+                safe_details={
+                    "phase": "task_result_confirmation",
+                    "cause": error.code.value,
+                    "cause_details": dict(error.safe_details),
+                },
+            ) from error
+
     async def run(
         self,
         invocation: TaskNodeInvocation,
@@ -1709,12 +1758,14 @@ class TaskNodeExecutor(Generic[AppT]):
         await self._capture_invocation(execution_id, original_invocation)
 
         if handler is self._deferred_input:
-            view = await self._execution_reads.inspect(execution_id, principal=principal)
+            with self.confirm_execution_result(execution_id):
+                view = await self._execution_reads.inspect(execution_id, principal=principal)
             if view.status is ExecutionStatus.SUCCEEDED:
-                result = await self._execution_reads.result(
-                    execution_id,
-                    principal=principal,
-                )
+                with self.confirm_execution_result(execution_id):
+                    result = await self._execution_reads.result(
+                        execution_id,
+                        principal=principal,
+                    )
                 return await self._complete_output(
                     node,
                     result.output,
@@ -1796,9 +1847,11 @@ class TaskNodeExecutor(Generic[AppT]):
         graph_id: str,
         execution_id: str,
     ) -> TaskNodeRunResult:
-        view = await self._execution_reads.inspect(execution_id, principal=principal)
+        with self.confirm_execution_result(execution_id):
+            view = await self._execution_reads.inspect(execution_id, principal=principal)
         if view.status is ExecutionStatus.SUCCEEDED:
-            result = await self._execution_reads.result(execution_id, principal=principal)
+            with self.confirm_execution_result(execution_id):
+                result = await self._execution_reads.result(execution_id, principal=principal)
             return await self._complete_output(
                 node,
                 result.output,
@@ -1807,11 +1860,13 @@ class TaskNodeExecutor(Generic[AppT]):
                 graph_id=graph_id,
             )
         if view.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            result = await self._execution_reads.result(execution_id, principal=principal)
+            with self.confirm_execution_result(execution_id):
+                result = await self._execution_reads.result(execution_id, principal=principal)
             raise TaskNodeRunError(
                 ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                 execution_id,
                 safe_details=result.safe_error_details,
+                terminal_status=result.status,
             )
         if view.status is ExecutionStatus.RECOVERY_REQUIRED:
             return await self._reconcile_custom_execution(
@@ -1847,20 +1902,23 @@ class TaskNodeExecutor(Generic[AppT]):
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
-                result = await self._execution_reads.result(
-                    execution_id,
-                    principal=principal,
-                )
+                with self.confirm_execution_result(execution_id):
+                    result = await self._execution_reads.result(
+                        execution_id,
+                        principal=principal,
+                    )
                 raise TaskNodeRunError(
                     ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 )
             if claimed.status is ExecutionStatus.SUCCEEDED:
-                result = await self._execution_reads.result(
-                    execution_id,
-                    principal=principal,
-                )
+                with self.confirm_execution_result(execution_id):
+                    result = await self._execution_reads.result(
+                        execution_id,
+                        principal=principal,
+                    )
                 return await self._complete_output(
                     node,
                     result.output,
@@ -1896,20 +1954,23 @@ class TaskNodeExecutor(Generic[AppT]):
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
-                result = await self._execution_reads.result(
-                    execution_id,
-                    principal=principal,
-                )
+                with self.confirm_execution_result(execution_id):
+                    result = await self._execution_reads.result(
+                        execution_id,
+                        principal=principal,
+                    )
                 raise TaskNodeRunError(
                     ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 )
             if claimed.status is ExecutionStatus.SUCCEEDED:
-                result = await self._execution_reads.result(
-                    execution_id,
-                    principal=principal,
-                )
+                with self.confirm_execution_result(execution_id):
+                    result = await self._execution_reads.result(
+                        execution_id,
+                        principal=principal,
+                    )
                 return await self._complete_output(
                     node,
                     result.output,
@@ -2033,6 +2094,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 failure.code,
                 execution_id,
                 safe_details=failure.safe_details,
+                terminal_status=ExecutionStatus.FAILED,
             ) from error
 
         result = await self._execution.complete_task(
@@ -2091,14 +2153,16 @@ class TaskNodeExecutor(Generic[AppT]):
                 attempt=attempt,
             )
             if retry.status is ExecutionStatus.FAILED:
-                result = await self._execution_reads.result(
-                    execution_id,
-                    principal=principal,
-                )
+                with self.confirm_execution_result(execution_id):
+                    result = await self._execution_reads.result(
+                        execution_id,
+                        principal=principal,
+                    )
                 raise TaskNodeRunError(
                     ErrorCode(result.error_code or error.code.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 ) from cause or error
             if retry.task_next_attempt_at is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2122,6 +2186,7 @@ class TaskNodeExecutor(Generic[AppT]):
             error.code,
             execution_id,
             safe_details=error.safe_details,
+            terminal_status=ExecutionStatus.FAILED,
         )
         if cause is not None:
             raise raised from cause
@@ -2244,14 +2309,16 @@ class TaskNodeExecutor(Generic[AppT]):
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
-                result = await self._execution_reads.result(
-                    execution_id,
-                    principal=principal,
-                )
+                with self.confirm_execution_result(execution_id):
+                    result = await self._execution_reads.result(
+                        execution_id,
+                        principal=principal,
+                    )
                 raise TaskNodeRunError(
                     ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                     execution_id,
                     safe_details=result.safe_error_details,
+                    terminal_status=result.status,
                 )
             if reconciled.status is ExecutionStatus.RECOVERY_REQUIRED:
                 raise TaskNodeRunError(
@@ -2260,10 +2327,11 @@ class TaskNodeExecutor(Generic[AppT]):
                 )
             if reconciled.status is not ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result = await self._execution_reads.result(
-                execution_id,
-                principal=principal,
-            )
+            with self.confirm_execution_result(execution_id):
+                result = await self._execution_reads.result(
+                    execution_id,
+                    principal=principal,
+                )
             return await self._complete_output(
                 node,
                 result.output,
@@ -2290,6 +2358,7 @@ class TaskNodeExecutor(Generic[AppT]):
                 failure.code,
                 execution_id,
                 safe_details=failure.safe_details,
+                terminal_status=ExecutionStatus.FAILED,
             ) from error
         result = await self._execution.complete_task(
             execution_id,
@@ -2335,10 +2404,11 @@ class TaskNodeExecutor(Generic[AppT]):
         )
         if view.status is not ExecutionStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result = await self._execution_reads.result(
-            execution_id,
-            principal=invocation.principal,
-        )
+        with self.confirm_execution_result(execution_id):
+            result = await self._execution_reads.result(
+                execution_id,
+                principal=invocation.principal,
+            )
         return await self._complete_output(
             invocation.node,
             result.output,
@@ -2394,10 +2464,11 @@ class TaskNodeExecutor(Generic[AppT]):
                 retry_at=view.task_next_attempt_at,
             )
         if view.status is ExecutionStatus.SUCCEEDED:
-            result = await self._execution_reads.result(
-                execution_id,
-                principal=invocation.principal,
-            )
+            with self.confirm_execution_result(execution_id):
+                result = await self._execution_reads.result(
+                    execution_id,
+                    principal=invocation.principal,
+                )
             return await self._complete_output(
                 invocation.node,
                 result.output,
@@ -2406,14 +2477,16 @@ class TaskNodeExecutor(Generic[AppT]):
                 graph_id=invocation.graph_id,
             )
         if view.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            result = await self._execution_reads.result(
-                execution_id,
-                principal=invocation.principal,
-            )
+            with self.confirm_execution_result(execution_id):
+                result = await self._execution_reads.result(
+                    execution_id,
+                    principal=invocation.principal,
+                )
             raise TaskNodeRunError(
                 ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                 execution_id,
                 safe_details=result.safe_error_details,
+                terminal_status=result.status,
             )
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -2442,16 +2515,18 @@ class TaskNodeExecutor(Generic[AppT]):
             else:
                 runner_result = await handler.runner.wait_bound(invocation, execution_id)
             return await self._complete_runner_result(invocation, runner_result)
-        view = await self._execution_reads.inspect(
-            execution_id,
-            principal=invocation.principal,
-        )
+        with self.confirm_execution_result(execution_id):
+            view = await self._execution_reads.inspect(
+                execution_id,
+                principal=invocation.principal,
+            )
         if view.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result = await self._execution_reads.wait(
-            execution_id,
-            principal=invocation.principal,
-        )
+        with self.confirm_execution_result(execution_id):
+            result = await self._execution_reads.wait(
+                execution_id,
+                principal=invocation.principal,
+            )
         if result.status is not ExecutionStatus.SUCCEEDED:
             raise _execution_failure(result)
         return await self._complete_output(
@@ -2467,10 +2542,11 @@ class TaskNodeExecutor(Generic[AppT]):
         invocation: TaskNodeInvocation,
         execution_id: str,
     ) -> TaskNodeRunResult | None:
-        view = await self._execution_reads.inspect(
-            execution_id,
-            principal=invocation.principal,
-        )
+        with self.confirm_execution_result(execution_id):
+            view = await self._execution_reads.inspect(
+                execution_id,
+                principal=invocation.principal,
+            )
         if view.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if view.status is ExecutionStatus.RECOVERY_REQUIRED:
@@ -2499,10 +2575,11 @@ class TaskNodeExecutor(Generic[AppT]):
         if isinstance(handler, _TaskRunnerAdapter):
             return await self.wait_bound(invocation, execution_id)
         if view.status is ExecutionStatus.SUCCEEDED:
-            result = await self._execution_reads.result(
-                execution_id,
-                principal=invocation.principal,
-            )
+            with self.confirm_execution_result(execution_id):
+                result = await self._execution_reads.result(
+                    execution_id,
+                    principal=invocation.principal,
+                )
             return await self._complete_output(
                 node,
                 result.output,
@@ -2511,14 +2588,16 @@ class TaskNodeExecutor(Generic[AppT]):
                 graph_id=invocation.graph_id,
             )
         if view.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            result = await self._execution_reads.result(
-                execution_id,
-                principal=invocation.principal,
-            )
+            with self.confirm_execution_result(execution_id):
+                result = await self._execution_reads.result(
+                    execution_id,
+                    principal=invocation.principal,
+                )
             raise TaskNodeRunError(
                 ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
                 execution_id,
                 safe_details=result.safe_error_details,
+                terminal_status=result.status,
             )
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -2857,12 +2936,19 @@ class TaskNodeExecutor(Generic[AppT]):
         if execution_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            execution_result = await self._execution_reads.result(
-                execution_id,
-                principal=invocation.principal,
-            )
+            with self.confirm_execution_result(execution_id):
+                execution_result = await self._execution_reads.result(
+                    execution_id,
+                    principal=invocation.principal,
+                )
         except AIError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if error.code in {
+                ErrorCode.AUTHORIZATION_DENIED,
+                ErrorCode.EXECUTION_NOT_READY,
+                ErrorCode.STORAGE_NOT_FOUND,
+            }:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            raise
         if (
             execution_result.status is not ExecutionStatus.SUCCEEDED
             or canonical_sha256(execution_result.output) != result.result_digest
@@ -3316,6 +3402,7 @@ def _execution_failure(result: ExecutionResult) -> TaskNodeRunError:
         code,
         result.execution_id,
         safe_details=result.safe_error_details,
+        terminal_status=result.status,
     )
 
 

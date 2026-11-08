@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import secrets
 import uuid
 from copy import copy
@@ -89,6 +90,7 @@ class TaskEngine(Generic[AppT]):
         context: ExecutionContext[AppT] | None = None,
         authorization: AuthorizationPolicy | None = None,
         metrics: MetricRecorderProvider | None = None,
+        model_refresh_interval_seconds: float = 1.0,
     ) -> None:
         if not isinstance(persistence, Persistence) or not persistence.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -96,6 +98,12 @@ class TaskEngine(Generic[AppT]):
             raise TypeError("context must be ExecutionContext")
         if metrics is not None and not isinstance(metrics, MetricRecorderProvider):
             raise TypeError("metrics must be MetricRecorderProvider or None")
+        if (isinstance(model_refresh_interval_seconds, bool)
+                or not isinstance(model_refresh_interval_seconds, (int, float))
+                or not math.isfinite(model_refresh_interval_seconds)
+                or model_refresh_interval_seconds <= 0):
+            raise ValueError("model_refresh_interval_seconds must be finite and positive")
+        self._model_refresh_interval_seconds = float(model_refresh_interval_seconds)
         self._persistence = persistence
         self._context = ExecutionContext(None) if context is None else context
         self._authorization = TenantAuthorizationPolicy() if authorization is None else authorization
@@ -193,6 +201,11 @@ class TaskEngine(Generic[AppT]):
         self._release_persistence = persistence.bind_task_engine()
 
     @property
+    def model_refresh_interval_seconds(self) -> float:
+        """Fallback metadata refresh period; local notifications remain immediate."""
+        return self._model_refresh_interval_seconds
+
+    @property
     def metrics(self) -> MetricsControl:
         return self._metrics_control
 
@@ -224,8 +237,12 @@ class TaskEngine(Generic[AppT]):
         context: ExecutionContext[AppT] | None = None,
         authorization: AuthorizationPolicy | None = None,
         metrics: MetricRecorderProvider | None = None,
+        model_refresh_interval_seconds: float = 1.0,
     ) -> AsyncIterator["TaskEngine[AppT]"]:
-        engine = cls(*definitions, persistence=persistence, context=context, authorization=authorization, metrics=metrics)
+        engine = cls(
+            *definitions, persistence=persistence, context=context, authorization=authorization, metrics=metrics,
+            model_refresh_interval_seconds=model_refresh_interval_seconds,
+        )
         try:
             yield engine
         finally:
@@ -441,6 +458,7 @@ class TaskEngine(Generic[AppT]):
         return TaskGraphRun(
             self, self._graph_service, graph.graph_id,
             submission.admission.principal, self._watch_execution_tree,
+            _model_refresh_interval_seconds=self.model_refresh_interval_seconds,
         )
 
     async def prepare_submission(
@@ -577,6 +595,7 @@ class TaskEngine(Generic[AppT]):
             graph_id,
             resolved_principal,
             runtime._watch_execution_tree,
+            _model_refresh_interval_seconds=self.model_refresh_interval_seconds,
         )
 
     async def recover_pending(

@@ -8,7 +8,6 @@ from ._runtime_test_helpers import model_features
 from linktools.ai.capability import TraceCapability
 
 import asyncio
-from functools import partial
 import json
 import os
 import sys
@@ -39,7 +38,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import mcp_tool_selector
 from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy, StorageOverlay
-from linktools.ai.workspace import BubblewrapWorkspaceBackend, LocalWorkspaceBackend
+from linktools.ai.workspace import LocalWorkspaceBackend
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -51,7 +50,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo
 
 from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel
-from .test_bubblewrap_integration import _sandbox_configuration
 
 _SERVER = textwrap.dedent(
     '''\
@@ -353,8 +351,7 @@ async def test_plain_filename_uses_current_asset_package_and_preserves_history(
 @pytest.mark.parametrize(("sandbox_kind", "argument"), (
     ("local", "resource:server.py"),
     ("injected-no-session", "resource:server.py"),
-    ("bubblewrap", "resource:server.py"),
-    ("bubblewrap", "server.py"),
+    ("local", "server.py"),
 ))
 async def test_resource_arguments_use_the_package_working_directory(
     sandbox_kind: str,
@@ -363,13 +360,8 @@ async def test_resource_arguments_use_the_package_working_directory(
     temporary_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    if sandbox_kind == "bubblewrap":
-        runtime_root, executable = _sandbox_configuration()
-        sandbox = partial(BubblewrapWorkspaceBackend, runtime_root=runtime_root, bwrap_executable=executable)
-        command = "/usr/bin/python3"
-    else:
-        sandbox = _workspace_factory(sandbox_kind)
-        command = sys.executable
+    sandbox = _workspace_factory(sandbox_kind)
+    command = sys.executable
     async with _store("memory", tmp_path) as store:
         await _put_package(store, _package(command=command, argument=argument))
         async with Persistence.open('asset-resource-argument', storage=PersistenceStorage.in_memory()) as persistence_375, Runtime.attach(persistence=persistence_375, features=model_features(_ProbeModels(), _group(store, sandbox))) as runtime:

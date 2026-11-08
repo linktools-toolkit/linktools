@@ -97,6 +97,7 @@ from ..core import HandoffGate, HandoffState
 from ..inputs import (
     ExecutionInputMaterializer,
     decode_user_content_payload,
+    encode_user_content,
     input_intent,
     validate_user_input,
 )
@@ -190,6 +191,7 @@ class ExecutionStartIdentity:
     idempotency_key_digest: str
     request_digest: str
     expected_session: "SessionRecord | None" = None
+    request_identity_version: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,6 +536,31 @@ class DefaultExecutionService(TaskExecutionService):
             request_intent_digest=intent.digest,
         )
 
+    async def _request_identity(
+        self, scope: str, key_digest: str, *, tenant_id: str,
+        include_remote: bool = False,
+    ) -> tuple[int, IdempotencyRecord | None]:
+        identity = await self._state.idempotency.get(scope, key_digest, tenant_id=tenant_id)
+        if identity is not None:
+            return identity.request_identity_version, identity
+        pending = self._runtime_bridge.pending_turns
+        local = pending.peek_request(tenant_id=tenant_id, scope=scope, idempotency_key_digest=key_digest)
+        if local is not None:
+            return local.reservation.idempotency.request_identity_version, None
+        coordinator = pending.coordination
+        if (include_remote and coordinator is not None and coordinator.supports_pending_views
+                and coordinator.supports_request_lookup):
+            version = await coordinator.read_request_identity_version(
+                f"{scope}:{key_digest}", tenant_id=tenant_id,
+            )
+            if version is not None:
+                return version, None
+            # A live owner may have committed and released between source and owner reads.
+            identity = await self._state.idempotency.get(scope, key_digest, tenant_id=tenant_id)
+            if identity is not None:
+                return identity.request_identity_version, identity
+        return 2, None
+
     async def _freeze_input(
         self,
         context: _ExecutionStartContext,
@@ -549,11 +576,9 @@ class DefaultExecutionService(TaskExecutionService):
                     StoredPayload.inline_text(canonical),
                 )
             else:
-                from ._input import _encode_user_content
-
                 stored = StoredUserInput(
                     "user-content-v1",
-                    StoredPayload.inline_json(_encode_user_content(canonical)),
+                    StoredPayload.inline_json(encode_user_content(canonical)),
                 )
         else:
             canonical = await self._input_materializer.materialize(
@@ -625,13 +650,9 @@ class DefaultExecutionService(TaskExecutionService):
         if identity is not None and record.status in {
             ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
         }:
-            if identity.status is IdempotencyStatus.STARTED:
-                # The first identity read may precede the atomic terminal commit.
-                refreshed = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
-                if (refreshed is None or refreshed.request_digest != identity.request_digest
-                        or refreshed.scope != scope or refreshed.idempotency_key_digest != key):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                identity = refreshed
+            identity = await self._management.refresh_terminal_identity(
+                identity, record, tenant_id=principal.tenant_id,
+            )
             if not _terminal_idempotency_matches(identity, record):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if record.stored_user_input is None:
@@ -757,6 +778,9 @@ class DefaultExecutionService(TaskExecutionService):
             await self.authorize_budget_scope(budget_scope_id, request.principal)
         scope = "execution.run"
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
+        identity_version, existing = await self._request_identity(
+            scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
+        )
         request_digest = _request_digest(
             request,
             binding_digest,
@@ -768,12 +792,34 @@ class DefaultExecutionService(TaskExecutionService):
             parent_invocation_id=None,
             lineage_kind=ExecutionLineageKind.RUN,
             request_intent_digest=context.request_intent_digest,
+            request_identity_version=identity_version,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
         )
-        admitted = await self._management.resolve_admission(
-            scope, idempotency_key_digest, request_digest, request.principal,
-        )
+        try:
+            admitted = await self._management.resolve_admission(
+                scope, idempotency_key_digest, request_digest, request.principal, identity=existing,
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT or existing is not None:
+                raise
+            latest_version, existing = await self._request_identity(
+                scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
+            )
+            if latest_version == identity_version:
+                raise
+            request_digest = _request_digest(
+                request, binding_digest, session_id=None, previous_execution_id=None,
+                fork_base_execution_id=None, parent_execution_id=None, root_execution_id=None,
+                parent_invocation_id=None, lineage_kind=ExecutionLineageKind.RUN,
+                request_intent_digest=context.request_intent_digest,
+                request_identity_version=latest_version,
+                requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
+            )
+            admitted = await self._management.resolve_admission(
+                scope, idempotency_key_digest, request_digest, request.principal, identity=existing,
+            )
         if admitted is None:
             return None
         existing, execution = admitted
@@ -1115,6 +1161,7 @@ class DefaultExecutionService(TaskExecutionService):
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
+        prepared_input: _ExecutionStartContext | None = None,
     ) -> ExecutionHandle:
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
@@ -1129,7 +1176,8 @@ class DefaultExecutionService(TaskExecutionService):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        context = await self._canonicalize_request(request)
+        context = (await self._canonicalize_request(request) if prepared_input is None else
+                   replace(prepared_input, request=request))
         request = context.request
         binding = await self._binding(binding_digest, binding_contract, resolved_binding)
         policy = _runtime_feature_policy(binding.compiled_agent.runtime_contributions)
@@ -1212,6 +1260,9 @@ class DefaultExecutionService(TaskExecutionService):
                 ),
             )
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
+        identity_version, existing = await self._request_identity(
+            scope, idempotency_key_digest, tenant_id=request.principal.tenant_id, include_remote=prepared_input is not None,
+        )
         request_digest = _request_digest(
             request,
             binding_digest,
@@ -1223,6 +1274,7 @@ class DefaultExecutionService(TaskExecutionService):
             parent_invocation_id=parent_invocation_id,
             lineage_kind=lineage_kind,
             request_intent_digest=context.request_intent_digest,
+            request_identity_version=identity_version,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
         )
@@ -1237,12 +1289,25 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
             )
             return ExecutionHandle(pending_turn.execution.execution_id)
-        existing = await self._state.idempotency.get(
-            scope,
-            idempotency_key_digest,
-            tenant_id=request.principal.tenant_id,
-        )
+        if existing is None:
+            existing = await self._state.idempotency.get(
+                scope,
+                idempotency_key_digest,
+                tenant_id=request.principal.tenant_id,
+            )
         if existing is not None:
+            if existing.request_identity_version != identity_version:
+                identity_version = existing.request_identity_version
+                request_digest = _request_digest(
+                    request, binding_digest, session_id=session_id,
+                    previous_execution_id=previous_execution_id, fork_base_execution_id=fork_base_execution_id,
+                    parent_execution_id=parent_execution_id, root_execution_id=root_execution_id,
+                    parent_invocation_id=parent_invocation_id, lineage_kind=lineage_kind,
+                    request_intent_digest=context.request_intent_digest,
+                    request_identity_version=identity_version,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                )
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if existing.status is IdempotencyStatus.START_UNKNOWN:
@@ -1281,6 +1346,7 @@ class DefaultExecutionService(TaskExecutionService):
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
+                    request_identity_version=existing.request_identity_version,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     capture_metric=capture_metric,
@@ -1288,84 +1354,28 @@ class DefaultExecutionService(TaskExecutionService):
                     expected_session=session,
                 )
                 return ExecutionHandle(existing.resource_id)
-            if existing.status in {
-                IdempotencyStatus.FAILED,
-                IdempotencyStatus.CANCELLED,
-            }:
-                terminal = await self.load_execution(
-                    existing.resource_id,
-                    tenant_id=request.principal.tenant_id,
-                )
-                if terminal is not None:
-                    self._validate_replayed_execution(
-                        terminal, binding, request,
-                        requires_task_invocation_capture=requires_task_invocation_capture,
-                        budget_scope_id=budget_scope_id,
-                    )
-                    if (
-                        scope == "session.resume"
-                        and terminal.started_at is not None
-                    ):
-                        if not _terminal_idempotency_matches(existing, terminal):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await self._acquire_start_dependency_hold(
-                            terminal,
-                            dependency_hold_id,
-                        )
-                        return ExecutionHandle(existing.resource_id)
-                fallback = (
-                    ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
-                    if existing.status is IdempotencyStatus.FAILED
-                    else ErrorCode.EXECUTION_CANCELLED
-                )
-                raise _stable_idempotency_error(existing.error_code, fallback)
             started = await self.load_execution(
                 existing.resource_id, tenant_id=request.principal.tenant_id
             )
-            if started is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_replayed_execution(
-                started, binding, request,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
-            )
-            if existing.status is IdempotencyStatus.STARTED and started.status in {
+            if started is not None:
+                self._validate_replayed_execution(
+                    started, binding, request,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                )
+            if existing.status is IdempotencyStatus.STARTED and started is not None and started.status in {
                 ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
             }:
-                # Terminal commit updates both records atomically, but these two
-                # reads can straddle that commit. Refresh only this mixed view.
-                refreshed = await self._state.idempotency.get(
-                    scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
+                existing = await self._management.refresh_terminal_identity(
+                    existing, started, tenant_id=request.principal.tenant_id,
                 )
-                if (
-                    refreshed is None
-                    or refreshed.scope != existing.scope
-                    or refreshed.idempotency_key_digest != existing.idempotency_key_digest
-                    or refreshed.request_digest != existing.request_digest
-                    or refreshed.resource_kind is not existing.resource_kind
-                    or refreshed.resource_id != existing.resource_id
-                    or not _terminal_idempotency_matches(refreshed, started)
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                existing = refreshed
-                if existing.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
-                    if scope == "session.resume" and started.started_at is not None:
-                        await self._acquire_start_dependency_hold(started, dependency_hold_id)
-                        return ExecutionHandle(existing.resource_id)
-                    fallback = (
-                        ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
-                        if existing.status is IdempotencyStatus.FAILED
-                        else ErrorCode.EXECUTION_CANCELLED
-                    )
-                    raise _stable_idempotency_error(existing.error_code, fallback)
-            if existing.status is IdempotencyStatus.COMPLETED:
-                if not _terminal_idempotency_matches(existing, started):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._acquire_start_dependency_hold(
-                    started,
-                    dependency_hold_id,
-                )
-                return ExecutionHandle(existing.resource_id)
+            replay = await self._replay_terminal_start(
+                existing, started, scope=scope, dependency_hold_id=dependency_hold_id,
+            )
+            if replay is not None:
+                return replay
+            if started is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if existing.status is IdempotencyStatus.STARTED and started.status in {
                 ExecutionStatus.WAITING_DEFERRED,
                 ExecutionStatus.FINALIZING,
@@ -1401,7 +1411,13 @@ class DefaultExecutionService(TaskExecutionService):
                 item.path for item in request.user_prompt if isinstance(item, WorkspaceFileInput)
             )),
         )
-        context = await self._freeze_input(context, binding)
+        original_request = request
+        if prepared_input is None:
+            context = await self._freeze_input(context, binding)
+        else:
+            context = replace(context, request=replace(
+                request, user_prompt=prepared_input.request.user_prompt, files=(),
+            ))
         request = context.request
 
         input_context = None
@@ -1529,18 +1545,63 @@ class DefaultExecutionService(TaskExecutionService):
                     error_code=None,
                     created_at=now,
                     updated_at=now,
+                    request_identity_version=identity_version,
                 ),
                 budget=request.budget,
                 parent_producer_generation=parent_producer_generation,
         )
-        return await self._admit_execution_start(
-            request, proposed_reservation, binding, session,
-            prepare_local_stream=prepare_local_stream,
-            dependency_hold_id=dependency_hold_id,
-            requires_task_invocation_capture=requires_task_invocation_capture,
-            budget_scope_id=budget_scope_id,
-            capture_metric=capture_metric,
-        )
+        try:
+            return await self._admit_execution_start(
+                request, proposed_reservation, binding, session,
+                prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
+                capture_metric=capture_metric,
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT or prepared_input is not None:
+                raise
+            winner_version, _ = await self._request_identity(
+                scope, idempotency_key_digest, tenant_id=request.principal.tenant_id, include_remote=True,
+            )
+            if winner_version == 2:
+                raise
+            return await self._start_unlocked(
+                binding_digest, original_request, session_id=session_id, session_agent_id=session_agent_id,
+                session=session, previous_execution_id=previous_execution_id,
+                fork_base_execution_id=fork_base_execution_id,
+                conversation_agent_run_id=conversation_agent_run_id,
+                parent_execution_id=parent_execution_id, parent_producer_generation=parent_producer_generation,
+                root_execution_id=root_execution_id, parent_invocation_id=parent_invocation_id,
+                lineage_kind=lineage_kind, scope=scope, prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id, binding_contract=binding_contract,
+                resolved_binding=resolved_binding, requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id, capture_metric=capture_metric, prepared_input=context,
+            )
+
+    async def _replay_terminal_start(
+        self,
+        identity: IdempotencyRecord,
+        execution: ExecutionRecord | None,
+        *,
+        scope: str,
+        dependency_hold_id: str | None,
+    ) -> ExecutionHandle | None:
+        if identity.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
+            if scope != "session.resume" or execution is None or execution.started_at is None:
+                fallback = (
+                    ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
+                    if identity.status is IdempotencyStatus.FAILED
+                    else ErrorCode.EXECUTION_CANCELLED
+                )
+                raise _stable_idempotency_error(identity.error_code, fallback)
+        elif identity.status is not IdempotencyStatus.COMPLETED:
+            return None
+        if execution is None or not _terminal_idempotency_matches(identity, execution):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._acquire_start_dependency_hold(execution, dependency_hold_id)
+        return ExecutionHandle(identity.resource_id)
 
     async def _admit_execution_start(
         self,
@@ -1573,6 +1634,14 @@ class DefaultExecutionService(TaskExecutionService):
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
                 )
+            if proposed_reservation.idempotency.request_identity_version != 2:
+                identity = proposed_reservation.idempotency
+                previous = await self._state.idempotency.get(
+                    identity.scope, identity.idempotency_key_digest, tenant_id=request.principal.tenant_id,
+                )
+                if previous is None:
+                    # The observed legacy owner disappeared; it cannot authorize a new legacy admission.
+                    raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             if (policy.execution.commit.mode == "terminal" and execution.conversation
                     and dependency_hold_id is None
                     and self._runtime_bridge.pending_start is not None):
@@ -1718,6 +1787,12 @@ class DefaultExecutionService(TaskExecutionService):
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 budget_scope_id=budget_scope_id,
             )
+            replay = await self._replay_terminal_start(
+                reservation.idempotency, reservation.execution,
+                scope=scope, dependency_hold_id=dependency_hold_id,
+            )
+            if replay is not None:
+                return replay
             if (
                 reservation.execution.status is ExecutionStatus.PENDING_START
                 and reservation.idempotency.status is IdempotencyStatus.RESERVED
@@ -1731,6 +1806,7 @@ class DefaultExecutionService(TaskExecutionService):
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
+                    request_identity_version=reservation.idempotency.request_identity_version,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     parent_producer_generation=proposed_reservation.parent_producer_generation,
@@ -1801,6 +1877,7 @@ class DefaultExecutionService(TaskExecutionService):
             scope=scope,
             idempotency_key_digest=idempotency_key_digest,
             request_digest=request_digest,
+            request_identity_version=reservation.idempotency.request_identity_version,
             prepare_local_stream=prepare_local_stream,
             dependency_hold_id=dependency_hold_id,
             capture_metric=capture_metric,
@@ -1840,6 +1917,7 @@ class DefaultExecutionService(TaskExecutionService):
         scope: str,
         idempotency_key_digest: str,
         request_digest: str,
+        request_identity_version: int = 1,
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
@@ -1855,7 +1933,7 @@ class DefaultExecutionService(TaskExecutionService):
                 launch_request = replace(request, budget=usage.limits)
             identity = ExecutionStartIdentity(
                 scope, idempotency_key_digest, request_digest,
-                expected_session,
+                expected_session, request_identity_version,
             )
             try:
                 started = await self._backend.prepare_start(
@@ -2895,13 +2973,15 @@ def _request_digest(
     parent_invocation_id: str | None,
     lineage_kind: ExecutionLineageKind,
     request_intent_digest: str | None = None,
+    request_identity_version: int = 2,
     requires_task_invocation_capture: bool = False,
     budget_scope_id: str | None = None,
 ) -> str:
-    if request_intent_digest is None:
+    if request_intent_digest is None or request_identity_version != 2:
         user_prompt_identity = input_intent(
             validate_user_input(request.user_prompt),
             request.files,
+            identity_version=request_identity_version,
         ).digest
     else:
         user_prompt_identity = request_intent_digest

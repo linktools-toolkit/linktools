@@ -147,7 +147,9 @@ def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str 
         if kind in {"audio-url", "document-url"}:
             return "file-block"
         probe = BinaryContent(b"", media_type=mime_type)
-        if kind == "binary" and (probe.is_image or probe.is_document):
+        if kind == "binary" and probe.is_image:
+            return "file-block"
+        if kind == "binary" and probe.is_document:
             try:
                 probe.format
             except (KeyError, ValueError):

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_database
 from linktools.ai.observe import (
@@ -78,6 +79,11 @@ async def test_ignored_fields_obey_json_syntax_before_aggregation(
                 text("UPDATE ai_metric_observations SET payload_json = :payload"),
                 {"payload": json.dumps(payload)},
             )
+            if value == 1.5:
+                await connection.execute(
+                    text("UPDATE ai_metric_observations SET payload_digest = :digest"),
+                    {"digest": canonical_sha256(payload)},
+                )
         event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
         for query in queries:
             statements.clear()

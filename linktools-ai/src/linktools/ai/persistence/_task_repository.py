@@ -790,13 +790,18 @@ class TaskRepositoryImpl(RepositoryBase):
         value: TaskNodeView,
         node_record: StoredRecord,
     ) -> None:
+        replacement = await self._node_replacement(current, value, node_record)
+        await replace_checked(transaction, replacement.record, replacement.expected_storage_revision)
+
+    async def _node_replacement(
+        self, current: TaskNodeView, value: TaskNodeView, node_record: StoredRecord,
+    ) -> RecordReplacement:
         self._validate_state_record(node_record, current.graph_id, current.node_id)
         stored_node = await self._decode(node_record, TaskNodeView)
         stored_node = replace(stored_node, dependencies=current.dependencies)
         if stored_node != current:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        node_candidate = projected_record(self, node_record, value)
-        await replace_checked(transaction, node_candidate, node_record.storage_revision)
+        return RecordReplacement(projected_record(self, node_record, value), node_record.storage_revision)
 
     async def _mutate_with_event_retry(
         self,
@@ -3019,11 +3024,8 @@ class TaskRepositoryImpl(RepositoryBase):
                     parent=self._result_parent(target_graph_id),
                 )
             )
-            await self._update_node_in_transaction(
-                transaction, node, source_value, node_record
-            )
-            if replacements:
-                await transaction.replace_records(tuple(replacements))
+            replacements.append(await self._node_replacement(node, source_value, node_record))
+            await transaction.replace_records(tuple(replacements))
             await _append_task_events(
                 transaction,
                 namespace=self._namespace,
@@ -3085,6 +3087,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 result_digest=result_digest,
                 error_code=None,
                 error_digest=None,
+                error_origin=None,
+                safe_error_details={},
                 conflict=error,
             )
 
@@ -3273,11 +3277,11 @@ class TaskRepositoryImpl(RepositoryBase):
                     ),
                     guarded_graph_record.storage_revision,
                 )
-            await self._update_node_in_transaction(
-                transaction, node, value, node_record
+            node_replacement = await self._node_replacement(node, value, node_record)
+            await transaction.replace_records(
+                (node_replacement,) if graph_replacement is None
+                else (node_replacement, graph_replacement)
             )
-            if graph_replacement is not None:
-                await transaction.replace_records((graph_replacement,))
             await _append_task_events(
                 transaction,
                 namespace=self._namespace,
@@ -3351,6 +3355,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 result_digest=None,
                 error_code=error_code,
                 error_digest=error_digest,
+                error_origin=error_origin,
+                safe_error_details=details,
                 conflict=error,
             )
 
@@ -3364,6 +3370,8 @@ class TaskRepositoryImpl(RepositoryBase):
         result_digest: str | None,
         error_code: str | None,
         error_digest: str | None,
+        error_origin: str | None,
+        safe_error_details: Mapping[str, JsonValue],
         conflict: AIError,
     ) -> TaskTerminalRecord:
         current = await self._node(lease.graph_id, lease.node_id, tenant_id)
@@ -3374,6 +3382,10 @@ class TaskRepositoryImpl(RepositoryBase):
                 current.result_digest != result_digest
                 or current.error_code != error_code
                 or current.error_digest != error_digest
+                or status is TaskStatus.FAILED and (
+                    current.error_origin != error_origin
+                    or dict(current.safe_error_details) != safe_error_details
+                )
                 or (execution_id is not None and current.execution_id != execution_id)
             ):
                 raise AIError(ErrorCode.TASK_RESULT_CONFLICT) from conflict

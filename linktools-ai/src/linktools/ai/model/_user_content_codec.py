@@ -3,15 +3,18 @@
 """Low-level durable codec for Pydantic user-content items."""
 
 import base64
+import json
 from collections.abc import Callable, Mapping
 from typing import cast
 
+from pydantic import ConfigDict, TypeAdapter
 from pydantic_ai.messages import (
     AudioUrl,
     BinaryContent,
     CachePoint,
     DocumentUrl,
     ImageUrl,
+    StructuredContent,
     TextContent,
     UserContent,
     UploadedFile,
@@ -22,6 +25,10 @@ from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
 from . import ReferencedContent
 from ._wire_fields import decode_fields
+from ._json_snapshot import stable_json_snapshot
+
+
+_NATIVE_VALUE_ADAPTER = TypeAdapter(object, config=ConfigDict(ser_json_bytes="base64"))
 
 
 class RetiredReferencedContent(TextContent):
@@ -52,6 +59,15 @@ def encode_user_content_item(item: UserContent) -> JsonValue:
                     **({"identifier": item.identifier} if item.identifier is not None else {}),
                     **({"representation": item.representation} if item.representation != "binary" else {}),
                     **({"source_parameters": dict(item.source_parameters)} if item.source_parameters else {})}
+        if isinstance(item, StructuredContent):
+            return {
+                "kind": "structured-content",
+                "value": _native_value_snapshot(item.value),
+                "content": item.content,
+                "tag": item.tag,
+                "description": item.description,
+                "metadata": normalize_json_value(item.metadata),
+            }
         if isinstance(item, TextContent):
             return {
                 "kind": "text-content",
@@ -91,6 +107,30 @@ def encode_user_content_item(item: UserContent) -> JsonValue:
     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
+def _native_value_snapshot(value: object) -> JsonValue:
+    # Serialize once so native aliases, serializers, and array order remain authoritative.
+    encoded = _NATIVE_VALUE_ADAPTER.dump_json(value, warnings="error")
+    return stable_json_snapshot(json.loads(encoded, object_pairs_hook=_unique_json_object))
+
+
+def _unique_json_object(items: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("durable JSON mapping keys collide after encoding")
+        result[key] = value
+    return result
+
+
+def project_user_content_identity(value: JsonValue, *, version: int) -> JsonValue:
+    """Project one encoded content item using its request owner's identity rule."""
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("user content identity version is unsupported")
+    if version == 1 and isinstance(value, Mapping) and value.get("kind") == "structured-content":
+        return {"kind": "text-content", "content": value["content"], "metadata": value["metadata"]}
+    return value
+
+
 def decode_user_content_item(value: object) -> UserContent:
     if not isinstance(value, Mapping) or not isinstance(value.get("kind"), str):
         raise ValueError("user content item is invalid")
@@ -115,6 +155,14 @@ def decode_user_content_item(value: object) -> UserContent:
         if not isinstance(text, str):
             raise ValueError("text content is invalid")
         return text
+    if kind == "structured-content":
+        return StructuredContent(**_content_fields(value, StructuredContent, {
+            "value": normalize_json_value,
+            "content": _required_string,
+            "tag": _optional_string,
+            "description": _optional_string,
+            "metadata": lambda raw: raw,
+        }))
     if kind == "text-content":
         kwargs = _content_fields(value, TextContent, {
             "content": _required_string,

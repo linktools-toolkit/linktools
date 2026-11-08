@@ -119,64 +119,82 @@ class _WorkspaceMCPTransport(ClientTransport):
             **kwargs,
         )
         self._process = process
-        read_send, read_receive = anyio.create_memory_object_stream(1)
-        write_send, write_receive = anyio.create_memory_object_stream(1)
-        client_session = ClientSession(
-            read_receive,
-            write_send,
-            **session_kwargs,
-        )
-        reader_scope = anyio.CancelScope()
-        writer_scope = anyio.CancelScope()
-        reader_done = anyio.Event()
-        writer_done = anyio.Event()
+        cleanup_started = False
+        primary_error: BaseException | None = None
         try:
-            async with client_session:
-                async with anyio.create_task_group() as tasks:
-                    tasks.start_soon(
-                        self._read_worker,
-                        process,
-                        read_send,
-                        reader_scope,
-                        reader_done,
-                    )
-                    tasks.start_soon(
-                        self._write_worker,
-                        process,
-                        write_receive,
-                        writer_scope,
-                        writer_done,
-                    )
-                    try:
-                        yield client_session
-                    finally:
-                        with anyio.CancelScope(shield=True):
-                            await _close_process(
-                                process,
-                                reader_scope,
-                                writer_scope,
-                                reader_done,
-                                writer_done,
-                                read_send,
-                                read_receive,
-                                write_send,
-                                write_receive,
-                            )
+            read_send, read_receive = anyio.create_memory_object_stream(1)
+            write_send, write_receive = anyio.create_memory_object_stream(1)
+            async with read_send, read_receive, write_send, write_receive:
+                client_session = ClientSession(
+                    read_receive,
+                    write_send,
+                    **session_kwargs,
+                )
+                reader_scope = anyio.CancelScope()
+                writer_scope = anyio.CancelScope()
+                reader_done = anyio.Event()
+                writer_done = anyio.Event()
+                async with client_session:
+                    async with anyio.create_task_group() as tasks:
+                        tasks.start_soon(
+                            self._read_worker,
+                            process,
+                            read_send,
+                            reader_scope,
+                            reader_done,
+                        )
+                        tasks.start_soon(
+                            self._write_worker,
+                            process,
+                            write_receive,
+                            writer_scope,
+                            writer_done,
+                        )
+                        try:
+                            yield client_session
+                        finally:
+                            cleanup_started = True
+                            with anyio.CancelScope(shield=True):
+                                await _close_process(
+                                    process,
+                                    reader_scope,
+                                    writer_scope,
+                                    reader_done,
+                                    writer_done,
+                                    read_send,
+                                    read_receive,
+                                    write_send,
+                                    write_receive,
+                                )
+                                if self._process is process:
+                                    self._process = None
         except BaseException as error:
-            nested = _find_ai_error(error)
-            if nested is None:
+            primary_error = _find_ai_error(error) or error
+            if primary_error is error:
                 raise
-            raise nested from error
+            raise primary_error from error
         finally:
-            if self._process is process:
-                self._process = None
+            if not cleanup_started:
+                # Session entry can fail before either bridge worker exists.
+                # Its process still belongs to this transport until close succeeds.
+                try:
+                    with anyio.CancelScope(shield=True):
+                        await self.close()
+                except BaseException as cleanup_error:
+                    if primary_error is not None and cleanup_error is not primary_error:
+                        raise primary_error from cleanup_error
+                    raise
 
     async def close(self) -> None:
         process = self._process
         if process is None:
             return
-        await process.close_stdin()
-        await process.close()
+        try:
+            await process.close_stdin()
+        finally:
+            await process.close()
+            if self._process is process:
+                self._process = None
 
     @staticmethod
     async def _read_messages(

@@ -418,7 +418,6 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
     import uuid
     from dataclasses import replace
     from linktools.ai.runtime._local import LocalExecutionBackend
-    from linktools.ai.execution import ExecutionHandle
     failed_releases = []
     class ReleaseFailure(InMemoryCacheBackend):
         fail_release = False
@@ -429,9 +428,13 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
             return await super().release_turn(lease)
     cache = ReleaseFailure(max_bytes=2**20)
     captured = []
+    replay_owners = []
     original = LocalExecutionBackend.start_pending
     async def capture(backend, request, reservation, session, coordination):
         captured.append((backend, request, reservation))
+        if cache.fail_release:
+            assert coordination is not None and coordination.lease is not None
+            replay_owners.append(backend._turn_owners[reservation.execution.execution_id])
         return await original(backend, request, reservation, session, coordination)
     monkeypatch.setattr(LocalExecutionBackend, 'start_pending', capture)
     calls = []
@@ -439,6 +442,14 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     async with Persistence.open('replay-release', storage=PersistenceStorage.sqlite(tmp_path / 'state.db', cache=cache, coordination=cache)) as persistence_409, Runtime.attach(persistence=persistence_409, features=model_features(_Models(_UsageFunctionModel(model)), _group())) as runtime:
+        admissions = []
+        original_admit = runtime._execution_service._admit_execution_start
+
+        async def capture_admission(*args, **kwargs):
+            admissions.append((args, kwargs))
+            return await original_admit(*args, **kwargs)
+
+        monkeypatch.setattr(runtime._execution_service, '_admit_execution_start', capture_admission)
         execution = await runtime.agents.get().start('question', idempotency_key='request')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         backend, request, reservation = captured[0]
@@ -448,16 +459,10 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
         previous_owner = backend._turn_owners.get(execution.execution_id)
         if previous_owner is not None:
             await asyncio.wait_for(previous_owner.closed.wait(), 5)
-        replay_owners = []
-
-        async def admit(coordination):
-            assert coordination is not None and coordination.lease is not None
-            replay_owners.append(backend._turn_owners[candidate])
-            replayed = await original(backend, request, proposal, None, coordination)
-            return ExecutionHandle(replayed)
-
+        args, kwargs = admissions[0]
         cache.fail_release = True
-        replayed = await backend.run_turn(proposal, request.principal, admit)
+        # Replay through the admission owner so pending fallback validates the receipt.
+        replayed = await original_admit(args[0], proposal, *args[2:], **kwargs)
         assert replayed.execution_id == execution.execution_id
         await asyncio.wait_for(replay_owners[0].closed.wait(), 5)
         assert failed_releases

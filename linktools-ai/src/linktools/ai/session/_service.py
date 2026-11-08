@@ -55,6 +55,8 @@ HandleT = TypeVar("HandleT")
 HandleT_co = TypeVar("HandleT_co", covariant=True)
 _logger = environ.get_logger("ai.session")
 _SESSION_CURSOR_KIND = "SESSION"
+_SESSION_UPDATE_REQUEST_CONTRACT = "session-update-request-v2"
+_SESSION_FORK_REQUEST_CONTRACT = "session-fork-request-v2"
 _VIEW_ACTIVE_UNSET = object()
 
 
@@ -213,7 +215,8 @@ class SessionManager(Generic[HandleT]):
             raise
         except TypeError as error:
             raise AIError(ErrorCode.AGENT_ID_INVALID) from error
-        if any(key.startswith("linktools.ai.") for key in request.metadata):
+        metadata = dict(request.metadata)
+        if any(key.startswith("linktools.ai.") for key in metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         cwd = await self._canonicalize_cwd(request.cwd)
         resource = ResourceRef(
@@ -233,7 +236,7 @@ class SessionManager(Generic[HandleT]):
                 "session_id": request.session_id,
                 "agent_id": agent_id,
                 "cwd": cwd,
-                "metadata": dict(request.metadata),
+                "metadata": metadata,
             }
         )
         now = datetime.now(timezone.utc)
@@ -243,7 +246,7 @@ class SessionManager(Generic[HandleT]):
             status=SessionStatus.OPEN,
             revision=0,
             cwd=cwd,
-            metadata=dict(request.metadata),
+            metadata=metadata,
             created_at=now,
             updated_at=now,
             closed_at=None,
@@ -458,6 +461,21 @@ class SessionManager(Generic[HandleT]):
             )
             if source.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            existing = await self._conversation.operations.get(
+                idempotency_key_digest(request.idempotency_key),
+                tenant_id=request.principal.tenant_id,
+            )
+            contract = _SESSION_FORK_REQUEST_CONTRACT
+            if existing is not None:
+                if (
+                    existing.resource_kind is not ResourceKind.SESSION
+                    or existing.operation_kind is not OperationKind.SESSION_FORK
+                    or existing.resource_id != request.new_session_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                contract = existing.request_digest_contract
+                if contract not in (None, _SESSION_FORK_REQUEST_CONTRACT):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             target_cwd = (
                 source.cwd
                 if request.cwd is None
@@ -476,7 +494,7 @@ class SessionManager(Generic[HandleT]):
                     "source": session_id,
                     "target": request.new_session_id,
                     "agent_id": source.agent_id,
-                    "cwd": target_cwd,
+                    "cwd": None if contract is not None and request.cwd is None else target_cwd,
                 }
             )
             now = datetime.now(timezone.utc)
@@ -502,6 +520,7 @@ class SessionManager(Generic[HandleT]):
                 OperationKind.SESSION_FORK,
                 digest,
                 target.revision,
+                request_digest_contract=contract,
             )
             if source.history_id is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
@@ -530,8 +549,24 @@ class SessionManager(Generic[HandleT]):
         )
         if current.agent_id != agent_id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-        if any(key.startswith("linktools.ai.") for key in request.metadata):
+        metadata = dict(request.metadata)
+        if any(key.startswith("linktools.ai.") for key in metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        existing = await self._conversation.operations.get(
+            idempotency_key_digest(request.idempotency_key),
+            tenant_id=request.principal.tenant_id,
+        )
+        contract = _SESSION_UPDATE_REQUEST_CONTRACT
+        if existing is not None:
+            if (
+                existing.resource_kind is not ResourceKind.SESSION
+                or existing.operation_kind is not OperationKind.SESSION_UPDATE
+                or existing.resource_id != session_id
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            contract = existing.request_digest_contract
+            if contract not in (None, _SESSION_UPDATE_REQUEST_CONTRACT):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         requested_cwd = (
             current.cwd
             if request.cwd is None
@@ -544,8 +579,8 @@ class SessionManager(Generic[HandleT]):
                 "principal_id": request.principal.principal_id,
                 "session_id": session_id,
                 "expected_revision": request.expected_revision,
-                "metadata": request.metadata,
-                "cwd": requested_cwd,
+                "metadata": metadata,
+                "cwd": None if contract is not None and request.cwd is None else requested_cwd,
             }
         )
         now = datetime.now(timezone.utc)
@@ -553,7 +588,7 @@ class SessionManager(Generic[HandleT]):
             current,
             revision=current.revision + 1,
             cwd=requested_cwd,
-            metadata=dict(request.metadata),
+            metadata=metadata,
             updated_at=now,
         )
         operation = self._session_terminal_operation(
@@ -563,6 +598,7 @@ class SessionManager(Generic[HandleT]):
             OperationKind.SESSION_UPDATE,
             digest,
             request.expected_revision + 1,
+            request_digest_contract=contract,
         )
         updated, _ = await self._conversation.sessions.compare_and_swap_with_operation(
             session_id,
@@ -1129,6 +1165,8 @@ class SessionManager(Generic[HandleT]):
         operation_kind: OperationKind,
         request_digest: str,
         revision: int,
+        *,
+        request_digest_contract: str | None = None,
     ) -> OperationLedgerInput:
         now = datetime.now(timezone.utc)
         return OperationLedgerInput(
@@ -1146,6 +1184,7 @@ class SessionManager(Generic[HandleT]):
             False,
             now,
             now,
+            request_digest_contract,
         )
 
     async def _begin_close_operation(
@@ -1194,6 +1233,8 @@ class SessionManager(Generic[HandleT]):
             or not existing.compactable
         ):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if existing.request_digest_contract is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if existing.status is OperationStatus.PENDING:
             if (
                 existing.result_ref is not None
@@ -1203,12 +1244,13 @@ class SessionManager(Generic[HandleT]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         if existing.status is OperationStatus.SUCCEEDED:
-            if (
-                existing.result_ref != session_id
-                or existing.result_digest is None
-                or existing.error_code is not None
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_succeeded_close_operation(
+                existing,
+                tenant_id=tenant_id,
+                session_id=session_id,
+                request_digest=request_digest,
+                result_digest=existing.result_digest,
+            )
             return existing
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -1301,6 +1343,8 @@ class SessionManager(Generic[HandleT]):
             or current.operation_kind is not expected.operation_kind
             or current.operation_kind is not OperationKind.SESSION_CLOSE
             or expected.operation_kind is not OperationKind.SESSION_CLOSE
+            or current.request_digest_contract is not None
+            or expected.request_digest_contract is not None
             or current.request_digest != expected.request_digest
             or current.compactable != expected.compactable
             or current.compactable is not True
@@ -1316,7 +1360,7 @@ class SessionManager(Generic[HandleT]):
         tenant_id: str,
         session_id: str,
         request_digest: str,
-        result_digest: str,
+        result_digest: str | None,
     ) -> None:
         if (
             operation.tenant_id != tenant_id
@@ -1324,9 +1368,13 @@ class SessionManager(Generic[HandleT]):
             or operation.resource_id != session_id
             or operation.execution_id is not None
             or operation.operation_kind is not OperationKind.SESSION_CLOSE
+            or operation.request_digest_contract is not None
             or operation.request_digest != request_digest
             or operation.status is not OperationStatus.SUCCEEDED
             or operation.result_ref != session_id
+            or not isinstance(operation.result_digest, str)
+            or len(operation.result_digest) != 64
+            or any(char not in "0123456789abcdef" for char in operation.result_digest)
             or operation.result_digest != result_digest
             or operation.error_code is not None
             or not operation.compactable
@@ -1346,9 +1394,6 @@ class SessionManager(Generic[HandleT]):
             or session.active_execution_id is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result_digest = canonical_sha256(
-            {"session_id": session_id, "revision": session.revision}
-        )
         SessionManager._validate_close_operation_identity(
             operation,
             operation,
@@ -1360,7 +1405,7 @@ class SessionManager(Generic[HandleT]):
             tenant_id=tenant_id,
             session_id=session_id,
             request_digest=operation.request_digest,
-            result_digest=result_digest,
+            result_digest=operation.result_digest,
         )
 
 

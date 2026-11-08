@@ -34,7 +34,10 @@ from ..model import (
     validate_user_content,
     validate_user_input,
 )
-from ..model.messages import UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item
+from ..model.messages import (
+    UnsupportedUserContentKind, decode_user_content_item, encode_user_content_item,
+    project_user_content_identity,
+)
 
 if TYPE_CHECKING:
     from ..persistence.objects import ObjectKeyFactory
@@ -68,10 +71,12 @@ class InputIntent:
         ).hexdigest()
 
 
-def input_intent(value: _UserPromptInput, files: Sequence[str]) -> InputIntent:
+def input_intent(
+    value: _UserPromptInput, files: Sequence[str], *, identity_version: int = 2,
+) -> InputIntent:
     canonical = validate_user_input(value)
     normalized_files = normalize_input_files(files)
-    return InputIntent(_draft_prompt(canonical), normalized_files)
+    return InputIntent(_draft_prompt(canonical, identity_version=identity_version), normalized_files)
 
 
 def task_prompt_draft(value: _UserPromptInput) -> TaskPrompt:
@@ -580,7 +585,9 @@ def _binary_parts(
     return tuple(item for item in content if isinstance(item, (BinaryContent, ReferencedContent)))
 
 
-def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
+def _draft_prompt(value: _UserPromptInput, *, identity_version: int = 2) -> DraftPrompt:
+    if type(identity_version) is not int or identity_version not in (1, 2):
+        raise ValueError("input identity version is unsupported")
     canonical = validate_user_input(value)
     if isinstance(canonical, str):
         return {"kind": "text", "text": canonical}
@@ -613,7 +620,9 @@ def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
                 {
                     "kind": "native",
                     "codec": _USER_CONTENT_CODEC,
-                    "value": encode_user_content((item,)),
+                    "value": {"items": [project_user_content_identity(
+                        encode_user_content_item(item), version=identity_version,
+                    )]},
                 }
             )
     return result

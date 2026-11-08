@@ -184,7 +184,9 @@ class RuntimeMemoryStore:
             if not isinstance(version, str) or _MEMORY_VERSION.fullmatch(version) is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             operation = MemoryOperation(id="capture:" + path, fingerprint=canonical_sha256(value))
-            if await self.get_operation(operation) is not None:
+            receipt = await self._get_receipt(operation, captured_version=version)
+            if receipt is not None:
+                receipt.require_target(path, "write")
                 continue
             now = datetime.now(timezone.utc)
             memory_id = _memory_id(self._memory_scope_digest, path)
@@ -392,6 +394,8 @@ class RuntimeMemoryStore:
     async def _get_receipt(
         self,
         operation: MemoryOperation,
+        *,
+        captured_version: str | None = None,
     ) -> _MutationReceipt | None:
         _validate_operation(operation)
         operation_id = _operation_id(self._memory_scope_digest, operation.id)
@@ -430,13 +434,13 @@ class RuntimeMemoryStore:
             or record.operation_kind is not expected_kind
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if receipt.version is not None and receipt.version != _version_token(
+        if receipt.version is not None and receipt.version != (captured_version or _version_token(
             self._namespace,
             self._tenant_id,
             self._memory_scope_digest,
             receipt.path,
             operation.id,
-        ):
+        )):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return receipt
 

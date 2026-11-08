@@ -5,7 +5,7 @@
 import asyncio
 from dataclasses import asdict, dataclass
 from types import ModuleType
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
 from linktools.core import environ
@@ -32,6 +32,9 @@ from .errors import AIError, ErrorCode
 from .execution import CancelExecutionRequest, ExecutionTreeEvent, ListSessionRequest
 from .runtime import Runtime
 from .workspace import Workspace
+
+if TYPE_CHECKING:
+    from acp.schema import ResourceContentBlock
 
 _logger = environ.get_logger("ai.acp")
 
@@ -143,10 +146,26 @@ class ACPAgent:
         acp, _ = _require_acp()
         raise acp.RequestError.invalid_params({"reason": "unknown_auth_method"})
 
-    async def prompt(self, session_id: str, prompt: "list[ACPTextContent]", **kwargs: JsonValue) -> JsonValue:
+    async def prompt(self, session_id: str, prompt: "list[ACPTextContent | ResourceContentBlock]", **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         acp, schema = _require_acp()
-        text = "".join(item.text for item in prompt)
+        parts: list[str] = []
+        for item in prompt:
+            kind = getattr(item, "type", "text")
+            if kind == "text" and isinstance(getattr(item, "text", None), str):
+                parts.append(item.text)
+            elif kind == "resource_link":
+                # Links are context, not permission to read or fetch their URI.
+                fields = [f"Resource: {item.name}", f"URI: {item.uri}"]
+                for name, label in (("title", "Title"), ("description", "Description"),
+                                    ("mime_type", "MIME type"), ("size", "Size")):
+                    value = getattr(item, name, None)
+                    if value is not None:
+                        fields.append(f"{label}: {value}")
+                parts.append("\n" + "\n".join(fields) + "\n")
+            else:
+                raise acp.RequestError.invalid_params({"reason": "unsupported_prompt_content"})
+        text = "".join(parts)
         loaded = await self._runtime.sessions.get(session_id, principal=self._principal)
         execution = await self._runtime.agents.get(loaded.agent_id).start(
             text,

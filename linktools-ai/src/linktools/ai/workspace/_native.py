@@ -67,6 +67,16 @@ class _NativeWorkspaceOperations:
             raise PermissionError("Sandbox policy refused the operation") from error
         if error.code == ErrorCode.STORAGE_NOT_FOUND:
             raise FileNotFoundError(errno.ENOENT, "Workspace path does not exist") from error
+        reason = error.safe_details.get("reason")
+        if error.code == ErrorCode.REQUEST_FIELD_INVALID:
+            if reason == "is_directory":
+                raise IsADirectoryError(errno.EISDIR, "Workspace path is a directory") from error
+            if reason == "not_directory":
+                raise NotADirectoryError(errno.ENOTDIR, "Workspace path is not a directory") from error
+            if reason == "not_regular_file":
+                raise OSError("not a regular file") from error
+        if error.code == ErrorCode.STORAGE_CONFLICT and reason == "file_exists":
+            raise FileExistsError(errno.EEXIST, "Workspace path already exists") from error
 
     async def read_bytes(self, path: str, *, max_bytes: int | None = None,
                          expected_state: str | None = None) -> bytes:

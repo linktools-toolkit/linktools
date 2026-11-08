@@ -92,22 +92,38 @@ async def test_invalid_or_failed_renewal_permanently_loses_owner(failure: str) -
 
 
 @pytest.mark.asyncio
-async def test_late_renewal_cannot_restore_expired_authority() -> None:
-    started, finish = asyncio.Event(), asyncio.Event()
+async def test_late_renewal_cannot_restore_expired_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    started, finish, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
     class Backend(InMemoryCacheBackend):
         async def renew_turn(self, lease, *, lease_seconds):
             result = await super().renew_turn(lease, lease_seconds=lease_seconds)
+            assert result is not None and result.lease == lease
             started.set()
             await finish.wait()
+            returned.set()
             return result
-    lifetime = scope(Backend(max_bytes=1))
+    lifetime = RenewingTurnScope(
+        Backend(max_bytes=1), "scope", session_key="session", request_key="request", request_digest="digest",
+        execution_id="execution", owner_id="owner", lease_seconds=60, renew_seconds=.01,
+    )
     async with lifetime:
-        await started.wait()
-        assert await asyncio.wait_for(lifetime.wait_signal(), 1) == "owner_lost"
-        finish.set()
-        await asyncio.sleep(0)
-        with pytest.raises(AIError):
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            loop = asyncio.get_running_loop()
+            expired = loop.time() + 60
+            # Advance only the authority check, not the event loop's scheduler.
+            with monkeypatch.context() as clock:
+                clock.setattr(loop, "time", lambda: expired)
+                with pytest.raises(AIError) as error:
+                    lifetime.require_active()
+                assert error.value.code is ErrorCode.STORAGE_CONFLICT
+            assert await asyncio.wait_for(lifetime.wait_signal(), 1) == "owner_lost"
+        finally:
+            finish.set()
+        await asyncio.wait_for(returned.wait(), 1)
+        with pytest.raises(AIError) as error:
             lifetime.require_active()
+        assert error.value.code is ErrorCode.STORAGE_CONFLICT
 
 
 @pytest.mark.asyncio

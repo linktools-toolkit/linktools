@@ -1068,3 +1068,24 @@ as a valid retry. Terminal-commit runtimes query their existing live request
 index; a shared coordination backend must implement `TurnAdmissionReader` for
 this query. An unsupported backend reports `admission_lookup_not_supported`
 without changing its existing execution capabilities.
+
+## Exact model interaction batches
+
+For already known request identities in one execution, use
+`runtime.history.read_model_interactions(execution_id, principal=principal,
+identities=((1, 3), (1, 1)), include_content=True)`. Each pair is
+`(agent_run_seq, model_request_seq)`. The operation reads no descendants and
+accepts no pagination cursor. Up to 200 identities may be supplied; duplicates
+are returned once in first-requested order. An absent identity fails the batch.
+An empty batch still requires execution read authorization.
+
+Content and captured client requests are omitted unless explicitly requested
+with `include_content` and `include_client_requests`. Metadata is captured
+before content resolution, so content loading does not run inside the metadata
+read scope. Active request state is observed at read time, not frozen for later
+reads. Each call uses the existing execution read authorization.
+
+The Web reader uses `GET /api/executions/{execution_id}/models-exact` with
+repeated `identity=run:request` query parameters. Pending refreshes are grouped
+by execution and bounded to 200 identities; a failed group is isolated into
+single-identity reads while its view remains visible.
