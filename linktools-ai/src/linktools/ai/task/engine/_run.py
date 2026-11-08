@@ -66,6 +66,7 @@ class TaskGraphRun(Generic[AppT]):
     graph_id: str
     _principal: Principal
     _watch_tree: _ExecutionTreeWatcher
+    _model_refresh_interval_seconds: float = 1.0
 
     async def budget_usage(self) -> BudgetUsage | None:
         """Read the budget shared by all graph nodes and their descendants."""
@@ -735,7 +736,7 @@ class TaskGraphRun(Generic[AppT]):
             yield self._projection_checkpoint(graph_state, "initial", models, captured, last_delivered_cursor(), False)
             if initial_ready is not None:
                 initial_ready.set()
-            reconciliation = asyncio.create_task(asyncio.sleep(1.0))
+            reconciliation = asyncio.create_task(asyncio.sleep(self._model_refresh_interval_seconds))
 
             while graph_task is not None or execution_tasks:
                 waiters = list(execution_tasks.values())
@@ -764,7 +765,7 @@ class TaskGraphRun(Generic[AppT]):
                 dirty = models.changed(done)
                 if reconciliation in done:
                     dirty.update(models.views)
-                    reconciliation = asyncio.create_task(asyncio.sleep(1.0))
+                    reconciliation = asyncio.create_task(asyncio.sleep(self._model_refresh_interval_seconds))
                 for execution_id in sorted(dirty):
                     async for node_id, projection in models.refresh(execution_id):
                         yield TaskGraphRunEvent(self.graph_id, node_id, projection, last_delivered_cursor())

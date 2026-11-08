@@ -221,3 +221,74 @@ Use the existing [watch/wait and graph projection APIs](task-observation.md) to
 observe a run, including dynamically admitted nodes. Use
 [runtime history](runtime-history.md) for paginated retained records and the
 [evaluation guide](evaluation.md#native-graph-candidates) for graph candidates.
+
+## Observation and persistence IO
+
+`TaskEngine(..., model_refresh_interval_seconds=5.0)` and `TaskEngine.open`
+accept a finite positive fallback period for model metadata in graph `watch`
+and observed `wait`. The default remains 1 second. Definition views and
+handles obtained through `get` keep the engine's period. Increasing it reduces
+idle metadata reads when many executions are observed; remote metadata without
+local notifications can take up to that period to appear. Local notifications
+still wake immediately, and initial replay and the final authoritative
+projection do not wait for the timer. This is an observation preference, not
+part of the admitted graph's durable identity.
+
+The setting does not change scheduler cadence, lease renewal, execution-tree
+discovery or durable event polling. Task and Execution event streams already
+use local notifications and a 1-to-30-second idle fallback backoff. Never use
+an observation interval to delay claims, execution bindings, handoffs,
+cancellation or terminal commits.
+
+Reuse a long-lived `Persistence` and its storage routes across producers.
+SQL routes sharing an `AsyncEngine` share its connection pool; a session or
+transaction scope is not a new physical connection. Configure server pool
+size, overflow and recycling on the caller-owned SQLAlchemy engine and dispose
+it only after borrowed producers and Persistence have closed. SQLite storage
+also retains its engine. A close-free `SQLiteMetricStore`, by contrast, uses
+operation-scoped engines; use a caller-owned `SqlMetricStore` engine when
+Metrics needs explicit pooling and lifetime control.
+
+For optional Agent trace/capability writes, use the existing
+`CommitPolicy.batch(batch_size=..., flush_interval=..., buffer=...)` on the
+owning capability. A batch policy without a buffer publishes synchronously;
+there is no hidden queue. Trace defaults are 128 entries and 3 seconds when a
+buffer is supplied. Required flushes, terminal publication, cancellation
+settlement and unknown-commit readback retain their owning safety boundaries.
+See [capability persistence](capability-persistence.md) for acceptance versus
+durability and failure semantics. These settings do not batch arbitrary Task
+state transitions across recovery boundaries.
+
+Measure SQL statements, transactions, physical connects and pooled checkouts
+separately. None is a disk-fsync or wire-byte measurement. The matched idle
+observer test `test_task_observation_interval.py` compares the default period
+with 10 seconds over the same blocked execution and verifies both final
+projections. The connection/batch probes in `test_task_io_controls.py` isolate
+existing control behavior rather than claiming those mechanisms are new.
+
+To reproduce the focused checks from an installed development environment:
+
+```sh
+PYTHONPATH="$PWD:$PWD/linktools/src:$PWD/linktools-ai/src" \
+PYTEST_ADDOPTS='-k "task_observation_interval or task_io_controls or graph_metadata_projection" -s' \
+python manage.py check linktools-ai --skip-compatibility
+```
+
+A matched SQLite run with SQLAlchemy 2.1.8 measured 10 independent read
+transactions: `NullPool` created 10 physical connections while the default
+pool created 1; both performed 10 checkouts and 10 transactions. For eight
+Trace observations plus an explicit final flush, source commits were 26
+without a buffer and 5 with a buffer; both retained all eight observations.
+These are configuration comparisons of existing mechanisms, not reductions
+introduced by the observation-interval parameter, and are not server network
+or physical disk measurements. Exact totals are diagnostic evidence rather
+than frozen backend contracts.
+
+In the same probe environment, two independent observer engines watched one
+blocked Agent execution after initial replay. Over a 3.2-second idle window,
+the default 1-second refresh performed 29 SELECT statements and 18 logical
+transactions; a 10-second refresh performed 13 SELECTs and 11 transactions.
+Both observers completed their final projection within the test's 5-second
+completion bound, without waiting for the 10-second timer. These counts include
+other observer polling, so the longer interval does not eliminate all reads.
+Real event-loop scheduling and shared-pool contention can vary exact totals.

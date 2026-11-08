@@ -34,7 +34,7 @@ from .test_task_sqlite_cas_convergence import _provision_sqlite
 
 
 @asynccontextmanager
-async def _runtime(tmp_path: Path, *, backend: str = "local_sqlite", models=None) -> AsyncIterator[tuple[Runtime, TaskEngine]]:
+async def _runtime(tmp_path: Path, *, backend: str = "local_sqlite", models=None, model_refresh_interval_seconds: float = 1.0) -> AsyncIterator[tuple[Runtime, TaskEngine]]:
     if backend == "sqlite":
         database = tmp_path / "state.sqlite"
         await _provision_sqlite(database)
@@ -43,7 +43,7 @@ async def _runtime(tmp_path: Path, *, backend: str = "local_sqlite", models=None
         storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     group = RuntimeFeatures("metadata")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Persistence.open('metadata-projection', storage=storage) as persistence_43, Runtime.attach(persistence=persistence_43, features=model_features(FixtureModels() if models is None else models, group)) as runtime, TaskEngine.open(persistence=persistence_43, context=runtime.context) as runtime_engine:
+    async with Persistence.open('metadata-projection', storage=storage) as persistence_43, Runtime.attach(persistence=persistence_43, features=model_features(FixtureModels() if models is None else models, group)) as runtime, TaskEngine.open(persistence=persistence_43, context=runtime.context, model_refresh_interval_seconds=model_refresh_interval_seconds) as runtime_engine:
         yield runtime, runtime_engine
 
 
@@ -195,7 +195,10 @@ async def test_dynamic_graph_projection_defines_unbound_nodes_before_execution_u
 
 
 @pytest.mark.asyncio
-async def test_running_graph_projects_request_finish_without_a_new_model_sequence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model_refresh_interval_seconds, notifications", ((1.0, True), (60.0, True), (0.05, False)))
+async def test_running_graph_projects_request_finish_without_a_new_model_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_refresh_interval_seconds: float, notifications: bool,
+) -> None:
     model_started = asyncio.Event()
     release_model = asyncio.Event()
     graph_holding = asyncio.Event()
@@ -217,7 +220,11 @@ async def test_running_graph_projects_request_finish_without_a_new_model_sequenc
         return "held"
 
     hold_task = Task("metadata.hold", hold_graph, effect_policy="none")
-    async with _runtime(tmp_path, models=ControlledModels()) as (runtime, runtime_engine):
+    async with _runtime(tmp_path, models=ControlledModels(), model_refresh_interval_seconds=model_refresh_interval_seconds) as (runtime, runtime_engine):
+        if not notifications:
+            async def no_subscription(*args, **kwargs):
+                return None
+            monkeypatch.setattr(runtime.history, "subscribe_model_interactions", no_subscription)
         agent_task = Task.from_agent("metadata.running-agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(agent_task, hold_task).start(TaskGraph("running-metadata", (
             TaskNode("agent", task=agent_task, input=AgentTaskInput("private-request-marker")),
@@ -282,7 +289,7 @@ async def test_graph_wait_final_projection_closes_at_nonterminal_authoritative_b
         "metadata.uncertain", uncertain_output,
         effect_policy="non_replay_safe", output_type=ExpectedOutput,
     )
-    async with _runtime(tmp_path) as (runtime, runtime_engine):
+    async with _runtime(tmp_path, model_refresh_interval_seconds=60) as (runtime, runtime_engine):
         agent_task = Task.from_agent("metadata.boundary-agent", runtime.agents.get())
         stop = (
             TaskNode.wait("stop", dependencies=("agent",))
