@@ -1696,18 +1696,18 @@ class RuntimeAgentRunStore(AgentRunStore):
                 prepared.checkpoints, observation, interaction_archive,
             )
             prepared = replace(prepared, checkpoints=checkpoint_values)
+            durable_head = await archive.execution_history_head_record(captured.run.agent_run_id)
+            expected_head = ExecutionRunSealHead(
+                captured.run.agent_run_id,
+                durable_head.event_count + len(captured.events),
+                durable_head.checkpoint_count + len(prepared.checkpoints),
+                prepared.target_transcript_message_count,
+                prepared.checkpoints[-1].projection.digest if prepared.checkpoints else durable_head.projection_digest,
+                max(durable_head.interaction_count, captured.target_interaction_offset),
+            )
         except BaseException:
             await self.abandon_execution_projection(flight)
             raise
-        durable_head = await archive.execution_history_head_record(captured.run.agent_run_id)
-        expected_head = ExecutionRunSealHead(
-            captured.run.agent_run_id,
-            durable_head.event_count + len(captured.events),
-            durable_head.checkpoint_count + len(prepared.checkpoints),
-            prepared.target_transcript_message_count,
-            prepared.checkpoints[-1].projection.digest if prepared.checkpoints else durable_head.projection_digest,
-            max(durable_head.interaction_count, captured.target_interaction_offset),
-        )
 
         async def operation() -> ExecutionRunSealHead:
             async def commit(group: StateGroupTransaction) -> ExecutionRunSealHead:

@@ -515,7 +515,7 @@ class _MySQLSession:
             raise IntegrityError(
                 "INSERT",
                 {},
-                RuntimeError("1062 Duplicate entry"),
+                RuntimeError(1062, "Duplicate entry"),
             )
         return SimpleNamespace(lastrowid=7, inserted_primary_key=(7,))
 

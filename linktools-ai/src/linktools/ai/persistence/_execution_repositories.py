@@ -153,6 +153,8 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
         self._require_resource_kind(next_record)
+        if next_record.scope != scope or next_record.idempotency_key_digest != idempotency_key_digest:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         identity = self._identity_key(scope, idempotency_key_digest)
 
         async def mutate(transaction: StateTransaction) -> IdempotencyRecord:

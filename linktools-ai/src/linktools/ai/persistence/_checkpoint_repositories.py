@@ -68,6 +68,17 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             value_type=ApprovalRecord,
         )
 
+    async def get_approval_in_transaction(
+        self,
+        transaction: StateTransaction,
+        approval_id: str,
+        *,
+        tenant_id: str,
+    ) -> ApprovalRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        return await self.get_in_transaction(transaction, approval_id, tenant_id=tenant_id)
+
     async def decide(
         self,
         approval_id: str,
