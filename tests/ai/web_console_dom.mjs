@@ -72,7 +72,7 @@ function deferred(path){
 let forkAttempts=0,cancelAttempts=0,endMode=null;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
-  calls.push({key,method,body,signal:options.signal,query:Object.fromEntries(url.searchParams)});
+  calls.push({key,method,body,signal:options.signal,query:{...Object.fromEntries(url.searchParams),identities:url.searchParams.getAll('identity')}});
   if(networkFailures.has(method+' '+key))throw new Error('Runtime read unavailable');
   if(delays.has(method+' '+key)){const pending=delays.get(method+' '+key);pending.started();return pending.promise;}
   if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
@@ -844,7 +844,9 @@ if(process.argv[3]==='native') {
   const controller=streamBlocks.get(id).controller;assert.ok(controller);
   const emit=value=>controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify(value)+'\n\n'));
   const projection=(seq,status)=>({type:'model',item:{item:{...completed(seq),status,client_requests:null},visibility:'durable_history'}});
-  const bodyCalls=()=>calls.filter(call=>call.key===path),bodyReads=()=>bodyCalls().length;
+  const exactPath=`/api/executions/${id}/models-exact`;
+  detailResponses.set(exactPath,url=>({items:url.searchParams.getAll('identity').map(value=>completed(Number(value.split(':')[1])))}));
+  const bodyCalls=()=>calls.filter(call=>call.key===path || call.key===exactPath),bodyReads=()=>bodyCalls().length;
   // Negative timer assertions must span the 60 ms original-body debounce.
   const waitNativeRefresh=()=>new Promise(resolve=>setTimeout(resolve,80));
   emit(projection(20,'SUCCEEDED'));await until('completed original request 20',()=>node('conversation').textContent.includes('Request 20 · Attempt'));
@@ -859,34 +861,34 @@ if(process.argv[3]==='native') {
   assert.match(node('live').textContent,/LIVE RESPONSE · incomplete SDK display/);assert.match(node('live').textContent,/live!!!/);
   assert.ok(descendants(node('live')).some(value=>value.innerHTML.includes('<strong>live</strong>')),'Live Markdown remains visible in original mode');
   emit(projection(21,'SUCCEEDED'));emit(projection(22,'SUCCEEDED'));emit(projection(21,'SUCCEEDED'));await until('completed original requests 21 and 22',()=>node('conversation').textContent.includes('Request 21 · Attempt') && node('conversation').textContent.includes('Request 22 · Attempt'));
-  assert.equal(bodyReads(),beforeDeltas+2,'Distinct completions read exactly their own requests and coalesce replays');
-  assert.ok(bodyCalls().slice(beforeDeltas).every(call=>call.query.agent_run_seq==='1' && ['21','22'].includes(call.query.model_request_seq)),'Completion never rereads previous history pages');
+  assert.equal(bodyReads(),beforeDeltas+1,'Distinct completions share one exact batch and coalesce replays');
+  assert.ok(bodyCalls().slice(beforeDeltas).every(call=>call.query.identities.length===2 && call.query.identities.every(value=>['1:21','1:22'].includes(value))),'Completion never rereads previous history pages');
   assert.match(node('conversation').textContent,/Request 19 · Attempt/);assert.match(node('conversation').textContent,/Request 22 · Attempt/);await pick('native-live:1:22:0');assert.match(node('conversation').textContent,/compaction/);assert.match(node('execution-meta').textContent,/STARTED/);
-  emit(projection(21,'SUCCEEDED'));await waitNativeRefresh();assert.equal(bodyReads(),beforeDeltas+2,'Replayed completion does not reread bodies');
+  emit(projection(21,'SUCCEEDED'));await waitNativeRefresh();assert.equal(bodyReads(),beforeDeltas+1,'Replayed completion does not reread bodies');
   networkFailures.add(`GET ${path}`);await clickText('Refresh requests');
   assert.match(node('conversation').textContent,/Request 19 · Attempt/);assert.match(node('conversation').textContent,/Request 22 · Attempt/);assert.match(node('conversation').textContent,/Runtime read unavailable/);
   networkFailures.clear();
   const loading=deferred(`GET ${path}`),loadingRefresh=clickText('Refresh requests');await loading.requested;emit(projection(23,'SUCCEEDED'));await until('completion during a body read',()=>node('inspector-content').textContent.includes('Request 23 · SUCCEEDED'));
   loading({items:Array.from({length:10},(_,i)=>completed(i+1)),next_cursor:'live-next'});await loadingRefresh;await until('original body for queued completion',()=>node('conversation').textContent.includes('Request 23 · Attempt'));
   assert.match(node('conversation').textContent,/Request 19 · Attempt/);assert.match(node('conversation').textContent,/Request 23 · Attempt/);
-  assert.equal(bodyCalls().filter(call=>call.query.model_request_seq==='23').length,1,'Completion during a body read refreshes its request once after paging finishes');
+  assert.equal(bodyCalls().filter(call=>call.query.identities.includes('1:23')).length,1,'Completion during a body read refreshes its request once after paging finishes');
   const beforeHidden=bodyReads();emit(projection(24,'SUCCEEDED'));await until('completion queued before hiding original view',()=>node('inspector-content').textContent.includes('Request 24 · SUCCEEDED'));node('chat-mode').click();await waitNativeRefresh();
   assert.equal(bodyReads(),beforeHidden,'A queued refresh cannot read bodies after the original view is hidden');
   openOriginal();await until('original body after reopening original view',()=>node('conversation').textContent.includes('Request 24 · Attempt'));assert.equal(bodyReads(),beforeHidden+1);assert.match(node('conversation').textContent,/Request 24 · Attempt/);
-  networkFailures.add(`GET ${path}`);emit(projection(25,'SUCCEEDED'));await until('failed original point read',()=>node('conversation').textContent.includes('request 25: Runtime read unavailable'));
+  networkFailures.add(`GET ${exactPath}`);emit(projection(25,'SUCCEEDED'));await until('failed original point read',()=>node('conversation').textContent.includes('request 25: Runtime read unavailable'));
   assert.match(node('conversation').textContent,/Request 24 · Attempt/);const failedReads=bodyReads();await waitNativeRefresh();assert.equal(bodyReads(),failedReads,'Failed point reads do not retry in a loop');
   networkFailures.clear();await clickText('Refresh requests');await until('retried original point read',()=>node('conversation').textContent.includes('Request 25 · Attempt'));assert.match(node('conversation').textContent,/Request 25 · Attempt/);
   const child={...completed(1),execution_id:'native-child'};
-  detailResponses.set('/api/executions/native-child/models',{items:[child],next_cursor:null});
+  detailResponses.set('/api/executions/native-child/models-exact',{items:[child],next_cursor:null});
   emit({type:'model',item:{item:{...child,client_requests:null},visibility:'durable_history'}});await until('child original body',()=>descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='native-child:1:1:0'));
-  assert.ok(calls.some(call=>call.key==='/api/executions/native-child/models' && call.query.agent_run_seq==='1' && call.query.model_request_seq==='1'),'Child completion reads its actual execution identity');
+  assert.ok(calls.some(call=>call.key==='/api/executions/native-child/models-exact' && call.query.identities.includes('1:1')),'Child completion reads its actual execution identity');
   assert.ok(descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='native-live:1:1:0'));
   assert.ok(descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='native-child:1:1:0'));await pick('native-child:1:1:0');assert.ok(descendants(node('conversation')).some(value=>value.tagName==='BUTTON' && value.textContent==='Open subagent'),'Child navigation stays available on its selected request');
-  const deniedChild={...completed(1),execution_id:'denied-child'},deniedPath='/api/executions/denied-child/models';
+  const deniedChild={...completed(1),execution_id:'denied-child'},deniedPath='/api/executions/denied-child/models-exact';
   detailResponses.set(deniedPath,()=>response({error_code:'AUTHORIZATION_DENIED'},403));
-  const corruptChild={...completed(1),execution_id:'corrupt-child'},corruptPath='/api/executions/corrupt-child/models';
+  const corruptChild={...completed(1),execution_id:'corrupt-child'},corruptPath='/api/executions/corrupt-child/models-exact';
   detailResponses.set(corruptPath,()=>response({error_code:'STORAGE_INTEGRITY_ERROR'},500));
-  const readyChild={...child,model_request_seq:2};detailResponses.set('/api/executions/native-child/models',{items:[readyChild],next_cursor:null});
+  const readyChild={...child,model_request_seq:2};detailResponses.set('/api/executions/native-child/models-exact',{items:[readyChild],next_cursor:null});
   emit({type:'model',item:{item:{...deniedChild,client_requests:null},visibility:'durable_history'}});
   emit({type:'model',item:{item:{...corruptChild,client_requests:null},visibility:'durable_history'}});
   emit({type:'model',item:{item:{...readyChild,client_requests:null},visibility:'durable_history'}});

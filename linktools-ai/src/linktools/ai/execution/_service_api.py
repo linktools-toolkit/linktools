@@ -560,6 +560,11 @@ class UsageSummary:
 
 
 class ExecutionHistoryReader(Protocol):
+    async def read_model_interactions(
+        self, execution_id: str, *, tenant_id: str, identities: tuple[tuple[int, int], ...],
+        include_content: bool = False, include_client_requests: bool = False,
+    ) -> tuple[ModelInteractionItem, ...]: ...
+
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionReadBoundary: ...
@@ -968,6 +973,11 @@ class ArtifactDownload:
 
 
 class ExecutionHistoryService(Protocol):
+    async def read_model_interactions(
+        self, execution_id: str, *, principal: Principal, identities: tuple[tuple[int, int], ...],
+        include_content: bool = False, include_client_requests: bool = False,
+    ) -> tuple[ModelInteractionItem, ...]: ...
+
     async def read_model_interaction_updates(
         self, execution_id: str, *, principal: Principal,
         after_cutoffs: tuple[UsageReadCutoff, ...] = (), limit: int = 200,
