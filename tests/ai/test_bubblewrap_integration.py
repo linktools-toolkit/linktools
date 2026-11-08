@@ -970,17 +970,20 @@ async def test_workspace_mcp_stdio_runtime_death_reaps_process_tree(
                 WorkspaceResourcePath,
             )
 
-            async def main():
+            async def main() -> None:
                 runtime_root = Path(sys.argv[1])
                 bwrap = Path(sys.argv[2])
                 workspace = Path(sys.argv[3])
                 resource_root = Path(sys.argv[4])
                 external = Path(sys.argv[5])
                 resource = WorkspaceResource("mcp", resource_root)
-                session = await BubblewrapWorkspaceBackend(
+                session = BubblewrapWorkspaceBackend(
+                    workspace,
                     runtime_root=runtime_root,
                     bwrap_executable=bwrap,
-                ).open(root=workspace, resources=(resource,))
+                    resources=(resource,),
+                )
+                await session.working_dir()
                 transport = _WorkspaceMCPTransport(
                     session,
                     "/usr/bin/python3",
@@ -1037,3 +1040,41 @@ async def test_workspace_mcp_stdio_runtime_death_reaps_process_tree(
 
     await asyncio.sleep(2.2)
     assert not (workspace_root / "detached.txt").exists()
+
+
+@pytest.mark.parametrize("members_only", (False, True))
+async def test_bubblewrap_resource_alias_keeps_host_and_guest_on_same_grant(
+    tmp_path: Path, members_only: bool,
+) -> None:
+    runtime_root, bwrap = _sandbox_configuration()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    real = tmp_path / "real" / "assets"
+    other = tmp_path / "other" / "assets"
+    real.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (real / "allowed").write_bytes(b"granted")
+    (real / "nonmember").write_bytes(b"not a member")
+    (other / "allowed").write_bytes(b"different source")
+    alias = tmp_path / "alias"
+    alias.symlink_to(real.parent, target_is_directory=True)
+    files = {"allowed": alias / "assets" / "allowed"} if members_only else None
+    resource = WorkspaceResource("docs", alias / "assets", files)
+    backend = BubblewrapWorkspaceBackend(
+        workspace, runtime_root=runtime_root, bwrap_executable=bwrap, resources=(resource,),
+    )
+    try:
+        await backend.working_dir()
+        guest = backend.resource_path("docs")
+        assert guest is not None
+        alias.unlink()
+        alias.symlink_to(other.parent, target_is_directory=True)
+        assert await backend.read_bytes(guest + "/allowed") == b"granted"
+        result = await backend.run(["/bin/cat", guest + "/allowed"])
+        assert result.exit_code == 0 and result.stdout == "granted"
+        if members_only:
+            with pytest.raises(PermissionError):
+                await backend.read_bytes(guest + "/nonmember")
+            assert (await backend.run(["/bin/test", "-e", guest + "/nonmember"])).exit_code == 1
+    finally:
+        await backend.close()

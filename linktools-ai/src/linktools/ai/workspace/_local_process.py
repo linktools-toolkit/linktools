@@ -150,6 +150,13 @@ class _WindowsJob:
 
 async def _stop_process(state: "_ProcessState", *, force: bool) -> None:
     async with state.stop_lock:
+        if state.wait_task.done() and (
+            state.wait_task.cancelled() or state.wait_task.exception() is not None
+        ):
+            state.cleanup_retried = True
+            state.wait_task = asyncio.create_task(
+                _wait_process(state), name=f"sandbox-wait-{state.command_id}",
+            )
         if state.final_status == "stopped" and state.wait_task.done():
             return
         requested_stop = state.process.returncode is None
@@ -161,10 +168,15 @@ async def _stop_process(state: "_ProcessState", *, force: bool) -> None:
                 cleanup_error = error
         if state.process.returncode is None:
             try:
-                _signal_process(
-                    state.process,
-                    signal.SIGKILL if force else signal.SIGTERM,
-                )
+                if state.cleanup_retried and os.name == "posix":
+                    _signal_process_group_if_owned(
+                        state, signal.SIGKILL if force else signal.SIGTERM,
+                    )
+                else:
+                    _signal_process(
+                        state.process,
+                        signal.SIGKILL if force else signal.SIGTERM,
+                    )
             except Exception as error:
                 cleanup_error = cleanup_error or error
         try:
@@ -198,15 +210,7 @@ async def _terminate_unregistered_process(
     process: asyncio.subprocess.Process,
     job: _WindowsJob | None,
 ) -> None:
-    if sys.platform.startswith("linux"):
-        state = _ProcessState(
-            f"unregistered-{process.pid}",
-            "",
-            process,
-            job=job,
-        )
-        await _stop_process(state, force=True)
-        return
+    """Terminate a child on platforms without Linux group tracking."""
     cleanup_error: BaseException | None = None
     try:
         if job is not None:
@@ -243,6 +247,7 @@ class _ProcessState:
         process: asyncio.subprocess.Process,
         *,
         job: _WindowsJob | None = None,
+        output_prefix: bool = False,
     ) -> None:
         self.command_id = command_id
         self.command = command
@@ -253,6 +258,8 @@ class _ProcessState:
         self.stderr_chars = 0
         self.output_incomplete = False
         self.output_truncated = False
+        self.output_prefix = output_prefix
+        self.cleanup_retried = False
         self.stdout_decoder = codecs.getincrementaldecoder("utf-8")(
             errors="replace"
         )
@@ -266,7 +273,7 @@ class _ProcessState:
         # start_new_session establishes this identity even if asyncio has
         # already reaped the shell before its process state is registered.
         self.process_session_id = process.pid if sys.platform.startswith("linux") else None
-        if sys.platform.startswith("linux"):
+        if sys.platform.startswith("linux") and process.returncode is None:
             try:
                 self.process_start_time = _proc_start_time(process.pid)
             except OSError:
@@ -328,7 +335,16 @@ def _append_process_output(state: _ProcessState, channel: str, text: str) -> Non
         chars = state.stderr_chars
     else:
         raise ValueError("unknown process output channel")
-    output.append(text)
+    if state.output_prefix:
+        remaining = max(0, _MAX_OUTPUT_CHARS - (chars - len(text)))
+        if remaining:
+            output.append(text[:remaining])
+        if chars > _MAX_OUTPUT_CHARS:
+            state.output_incomplete = True
+            state.output_truncated = True
+            chars = _MAX_OUTPUT_CHARS
+    else:
+        output.append(text)
     while chars > _MAX_OUTPUT_CHARS and output:
         removed = output.popleft()
         excess = chars - _MAX_OUTPUT_CHARS
@@ -489,12 +505,17 @@ def _process_group_is_owned(state: _ProcessState) -> bool:
     process_id = state.process.pid
     if sys.platform.startswith("linux"):
         try:
-            if state.process_start_time is not None:
-                if _proc_start_time(process_id) != state.process_start_time:
+            if (state.process_start_time is not None or state.cleanup_retried
+                    or state.process.returncode is not None):
+                current_start = _proc_start_time(process_id)
+                if state.process_start_time is None:
+                    raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
+                if current_start != state.process_start_time:
                     return False
                 return os.getpgid(process_id) == process_id
-        except OSError:
-            pass
+        except OSError as error:
+            if (state.cleanup_retried or state.process.returncode is not None) and error.errno not in {errno.ENOENT, errno.ESRCH}:
+                raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
         return _has_owned_process_group_members(state)
     elif state.process.returncode is not None:
         return False

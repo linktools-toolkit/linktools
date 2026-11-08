@@ -555,3 +555,35 @@ def test_local_provider_retries_retained_stdio_cleanup(tmp_path: Path) -> None:
         assert not backend._stdio_processes
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ("limit", "timeout", "job"))
+async def test_native_output_retains_prefix_while_jobs_retain_tail(tmp_path: Path, mode: str) -> None:
+    import shlex
+    import sys
+
+    script = (
+        "import sys,time; "
+        "sys.stdout.write('stdout-start|' + 'x' * 60000 + '|stdout-end'); sys.stdout.flush(); "
+        "sys.stderr.write('stderr-start|' + 'y' * 60000 + '|stderr-end'); sys.stderr.flush()"
+    )
+    if mode == "timeout":
+        script += "; time.sleep(30)"
+    command = shlex.join((sys.executable, "-c", script))
+    backend = LocalWorkspaceBackend(tmp_path)
+    try:
+        if mode == "job":
+            result = await backend.run_command(command, timeout_seconds=5)
+            assert "|stdout-end" in result and "|stderr-end" in result
+            assert "stdout-start|" not in result and "stderr-start|" not in result
+        else:
+            error_type = WorkspaceTimeoutError if mode == "timeout" else WorkspaceOutputLimitError
+            with pytest.raises(error_type) as raised:
+                await backend.run(command, shell=True, timeout=1 if mode == "timeout" else 5)
+            assert raised.value.stdout.startswith("stdout-start|")
+            assert raised.value.stderr.startswith("stderr-start|")
+            assert "|stdout-end" not in raised.value.stdout
+            assert "|stderr-end" not in raised.value.stderr
+    finally:
+        await backend.close()

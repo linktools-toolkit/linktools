@@ -112,3 +112,80 @@ def test_restricted_host_read_never_follows_new_file_symlink(
         assert error.code is ErrorCode.AUTHORIZATION_DENIED
     else:
         assert value == b"allowed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resource_kind", ("directory", "members", "source_less"))
+@pytest.mark.parametrize("restricted", (False, True))
+async def test_host_resource_reads_share_canonical_mount_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource_kind: str, restricted: bool,
+) -> None:
+    import asyncio
+    from typing import Any
+    from unittest.mock import AsyncMock, MagicMock
+    from linktools.ai.workspace import Workspace, WorkspaceResource
+
+    root, runtime = tmp_path / "workspace", tmp_path / "runtime"
+    real, outside = tmp_path / "real" / "assets", tmp_path / "outside" / "assets"
+    for directory in (root, runtime, real, outside):
+        directory.mkdir(parents=True)
+    (root / Workspace.STORAGE_DIR_NAME).mkdir()
+    for directory, value in ((real, b"granted"), (outside, b"not granted")):
+        for name in ("allowed", "policy-denied", "nonmember"):
+            (directory / name).write_bytes(value)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real.parent, target_is_directory=True)
+    source = None if resource_kind == "source_less" else alias / "assets"
+    files = None if resource_kind == "directory" else {
+        name: alias / "assets" / name for name in ("allowed", "policy-denied")
+    }
+    resource = WorkspaceResource("docs", source, files)
+    policy = WorkspaceReadPolicy((), resource_paths={"docs": ("allowed",)}) if restricted else None
+    backend = _bubblewrap.BubblewrapWorkspaceBackend(
+        root, runtime_root=runtime, bwrap_executable=Path(sys.executable).resolve(),
+        resources=(resource,), read_policy=policy,
+    )
+    configs: list[dict[str, Any]] = []
+    process = MagicMock(spec=asyncio.subprocess.Process)
+    process.stdin = None
+    process.returncode = 0
+    process.wait = AsyncMock(return_value=0)
+
+    def validate_rootfs(runtime_root: Path, workspace_root: Path) -> None:
+        return None
+
+    def validate_bwrap(executable: Path) -> None:
+        return None
+
+    async def spawn_guardian(config: dict[str, Any], runtime_pidfd: int) -> tuple[asyncio.subprocess.Process, int]:
+        configs.append(config)
+        return process, -1
+
+    async def ready() -> None:
+        backend._state = "OPEN"
+
+    # Only the host preparation/read owner is exercised, not a namespace launch.
+    monkeypatch.setattr(_bubblewrap.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(_bubblewrap, "_validate_rootfs", validate_rootfs)
+    monkeypatch.setattr(_bubblewrap, "_validate_bwrap", validate_bwrap)
+    monkeypatch.setattr(_bubblewrap, "_spawn_guardian", spawn_guardian)
+    monkeypatch.setattr(backend, "_open_handshake", ready)
+    try:
+        await backend.working_dir()
+        guest = backend.resource_path("docs")
+        assert guest is not None
+        mounted = real if resource_kind == "directory" else real / "allowed"
+        assert str(mounted) in configs[0]["bwrap_args"]
+        alias.unlink()
+        alias.symlink_to(outside.parent, target_is_directory=True)
+        assert await backend.read_bytes(guest + "/allowed") == b"granted"
+        if resource_kind != "directory":
+            with pytest.raises(PermissionError):
+                await backend.read_bytes(guest + "/nonmember")
+        if restricted:
+            with pytest.raises(PermissionError):
+                await backend.read_bytes(guest + "/policy-denied")
+        else:
+            assert await backend.read_bytes(guest + "/policy-denied") == b"granted"
+    finally:
+        await backend.close()

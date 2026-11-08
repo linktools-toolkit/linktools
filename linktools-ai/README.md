@@ -1034,7 +1034,11 @@ Sandbox/session/adapter lifecycle. LinkTools `Workspace` remains the project
 configuration and instruction context, while native Pydantic AI Workspace owns
 execution path and text helpers.
 
-`LocalWorkspaceBackend` is trusted host execution, not OS isolation. On Linux,
+`LocalWorkspaceBackend` is trusted host execution, not OS isolation. Command and
+stdio execution require the provider to run in a POSIX environment; commands use
+`/bin/sh`. On Windows, supply that environment explicitly and run the provider
+inside it. Native Windows Python and `cmd.exe` execution are not supported.
+LinkTools does not install or select a POSIX environment automatically. On Linux,
 `BubblewrapWorkspaceBackend` provides the restricted persistent worker, resource
 mounts and MCP stdio boundary. It requires a non-root user, usable unprivileged
 namespaces, `bwrap >= 0.12.0`, and a trusted read-only runtime rootfs with the same

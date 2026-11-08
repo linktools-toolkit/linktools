@@ -103,6 +103,7 @@ class BubblewrapWorkspaceBackend(_NativeWorkspaceOperations):
             raise TypeError("hidden_paths must be a tuple")
         self._root_config = root
         self._resource_config = resources
+        self._active_resources: tuple[WorkspaceResource, ...] = ()
         self._process: asyncio.subprocess.Process | None = None
         self._ref_id: str | None = None
         self._initialize_lock = asyncio.Lock()
@@ -175,6 +176,7 @@ class BubblewrapWorkspaceBackend(_NativeWorkspaceOperations):
                 runtime_root,
                 resources,
             )
+            self._active_resources = normalized_resources
             runtime_pidfd = _open_runtime_pidfd()
             config = _guardian_config(
                 root=normalized_root,
@@ -367,7 +369,7 @@ class BubblewrapWorkspaceBackend(_NativeWorkspaceOperations):
             path = path.removeprefix("/workspace").lstrip("/") or "."
             state_path = path
         elif path.startswith("/"):
-            matched = next((resource for resource in self._resource_config
+            matched = next((resource for resource in self._active_resources
                             if path.startswith(_resource_guest_path(resource.id) + "/")), None)
             if matched is None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -1096,7 +1098,7 @@ def _read_workspace_bytes(
     state_path: str | None = None,
 ) -> bytes:
     state_path = path if state_path is None else state_path
-    if path == "." or _hidden_path_covers(hidden_paths, path):
+    if _hidden_path_covers(hidden_paths, path):
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     if read_policy is not None:
         try:
@@ -1104,6 +1106,8 @@ def _read_workspace_bytes(
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         except ValueError as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+    if path == ".":
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "is_directory"})
     relative = path
     if read_policy is None:
         parts = PurePosixPath(path).parts
@@ -1117,13 +1121,17 @@ def _read_workspace_bytes(
             resolved = candidate.resolve(strict=True)
         except FileNotFoundError as error:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+        except NotADirectoryError as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "not_directory"}) from error
+        except PermissionError as error:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
         except (OSError, RuntimeError) as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         if not _inside(root, resolved):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         relative = resolved.relative_to(root).as_posix()
     if relative == ".":
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "is_directory"})
     if _hidden_path_covers(hidden_paths, relative):
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     descriptor = -1
@@ -1142,8 +1150,12 @@ def _read_workspace_bytes(
         )
         os.close(descriptor)
         descriptor = child
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        mode = os.fstat(descriptor).st_mode
+        if not stat.S_ISREG(mode):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"reason": "is_directory" if stat.S_ISDIR(mode) else "not_regular_file"},
+            )
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
             info = os.fstat(stream.fileno())
@@ -1161,6 +1173,8 @@ def _read_workspace_bytes(
         raise
     except FileNotFoundError as error:
         raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+    except PermissionError as error:
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
     except OSError as error:
         if error.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
