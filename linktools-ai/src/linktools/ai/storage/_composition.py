@@ -179,7 +179,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self._initialized = False
         self._close_started = False
         self._close_task: asyncio.Task[None] | None = None
-        self._read_operations: set[asyncio.Future[None]] = set()
+        self._operations: set[asyncio.Future[None]] = set()
         self._closed = False
         self._lifecycle_backends: tuple[InitializableStorage, ...] = ()
 
@@ -272,8 +272,8 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         backends = self._lifecycle_backends
         first_error: BaseException | None = None
         cancelled = False
-        while self._read_operations:
-            await asyncio.wait(tuple(self._read_operations))
+        while self._operations:
+            await asyncio.wait(tuple(self._operations))
         async with self._cache_task_lock:
             tasks = tuple(self._cache_loaders)
         tasks += tuple(
@@ -308,19 +308,19 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         _logger.debug("storage overlay closed")
 
     @contextmanager
-    def _read_operation(self) -> Iterator[None]:
-        if self._close_started:
+    def _operation(self) -> Iterator[None]:
+        if self._close_started or self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._read_operations.add(completed)
+        self._operations.add(completed)
         try:
             yield
         finally:
-            self._read_operations.discard(completed)
+            self._operations.discard(completed)
             completed.set_result(None)
 
     async def refresh(self) -> StorageRevision:
-        with self._read_operation():
+        with self._operation():
             return (await self._capture_metadata()).effective.revision
 
     async def _state(self) -> 'EffectiveMetadataState[KeyT, InfoT]':
@@ -353,7 +353,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if not tasks:
             return []
         completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._read_operations.add(completed)
+        self._operations.add(completed)
         remaining = len(tasks)
 
         def finished(done: asyncio.Future[_MetadataT]) -> None:
@@ -362,7 +362,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 done.exception()
             remaining -= 1
             if remaining == 0:
-                self._read_operations.discard(completed)
+                self._operations.discard(completed)
                 completed.set_result(None)
 
         for task in tasks:
@@ -381,19 +381,22 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         return StorageRevision(canonical_sha256(list(revisions)))
 
     async def current_revision(self) -> StorageRevision:
-        with self._read_operation():
-            heads = await self._gather_metadata(tuple(view.head_revision() for view in self._views))
-            if any(head is None for head in heads):
-                return (await self._state()).revision
-            return self._effective_revision([str(head) for head in heads], cast(StorageRevision, heads[0]))
+        with self._operation():
+            return await self._current_revision()
+
+    async def _current_revision(self) -> StorageRevision:
+        heads = await self._gather_metadata(tuple(view.head_revision() for view in self._views))
+        if any(head is None for head in heads):
+            return (await self._state()).revision
+        return self._effective_revision([str(head) for head in heads], cast(StorageRevision, heads[0]))
 
     async def get(self, key: KeyT) -> 'ValueT | None':
-        with self._read_operation():
+        with self._operation():
             state = await self._state()
             return await self._get_from_state(key, state, retried=False)
 
     async def stat(self, key: KeyT) -> 'InfoT | None':
-        with self._read_operation():
+        with self._operation():
             state = await self._state()
             retried = False
             while True:
@@ -434,7 +437,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         keys: 'Sequence[KeyT]',
     ) -> 'tuple[StorageLocation[KeyT, ValueT, InfoT] | None, ...]':
         """Return effective layers for keys from one metadata capture."""
-        with self._read_operation():
+        with self._operation():
             state = await self._state()
             result: list[StorageLocation[KeyT, ValueT, InfoT] | None] = []
             for key in keys:
@@ -461,7 +464,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             view.invalidate()
 
     async def get_many(self, keys: 'Sequence[KeyT]') -> 'tuple[ValueT | None, ...]':
-        with self._read_operation():
+        with self._operation():
             if not keys:
                 return ()
             state = await self._state()
@@ -720,12 +723,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             _logger.debug("failed to delete corrupted storage cache entry: key=%s", cache_key)
 
     async def list_info(self) -> 'tuple[InfoT, ...]':
-        with self._read_operation():
+        with self._operation():
             state = await self._state()
             return tuple(state.entries[key] for key in sorted(state.entries, key=str))
 
     async def list_info_with_locations(self) -> 'tuple[StorageLocatedInfo[InfoT], ...]':
-        with self._read_operation():
+        with self._operation():
             state = await self._state()
             return tuple(
                 StorageLocatedInfo(
@@ -740,7 +743,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self,
         keys: "Sequence[KeyT]",
     ) -> "Mapping[KeyT, StorageWriteState[InfoT]]":
-        with self._read_operation():
+        with self._operation():
             self._require_writer()
             capture = await self._capture_metadata()
             if capture.writer_state is None or self._writer_index is None:
@@ -767,7 +770,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         return "primary" if index == 0 else self.layers[index - 1].id
 
     async def preload(self, keys: 'Sequence[KeyT] | None' = None) -> PreloadResult:
-        with self._read_operation():
+        with self._operation():
             state = await self._state()
             selected = tuple(dict.fromkeys(keys)) if keys is not None else tuple(state.entries)
             if self.content_cache is None:
@@ -828,6 +831,19 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         expected_revision: 'StorageEntryRevision | None' = None,
         metadata: 'Mapping[str, JsonValue] | None' = None,
     ) -> 'StoragePutResult[InfoT]':
+        with self._operation():
+            return await self._put(
+                key, value, expected_revision=expected_revision, metadata=metadata,
+            )
+
+    async def _put(
+        self,
+        key: KeyT,
+        value: ValueT,
+        *,
+        expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
+    ) -> 'StoragePutResult[InfoT]':
         writer = self._require_writer()
         result = await writer.put(
             key,
@@ -842,6 +858,18 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         return result
 
     async def delete(
+        self,
+        key: KeyT,
+        *,
+        expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
+    ) -> 'StorageDeleteResult[KeyT]':
+        with self._operation():
+            return await self._delete(
+                key, expected_revision=expected_revision, metadata=metadata,
+            )
+
+    async def _delete(
         self,
         key: KeyT,
         *,
@@ -866,6 +894,18 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         expected_revision: 'StorageEntryRevision | None' = None,
         metadata: 'Mapping[str, JsonValue] | None' = None,
     ) -> 'StorageResetResult[KeyT]':
+        with self._operation():
+            return await self._reset(
+                key, expected_revision=expected_revision, metadata=metadata,
+            )
+
+    async def _reset(
+        self,
+        key: KeyT,
+        *,
+        expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
+    ) -> 'StorageResetResult[KeyT]':
         writer = self._require_writer()
         result = await writer.reset(
             key,
@@ -878,6 +918,20 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         return result
 
     async def apply_batch(
+        self,
+        changes: 'Sequence[StorageChange[KeyT, ValueT]]',
+        *,
+        expected_revision: 'StorageRevision | None' = None,
+        idempotency_key: 'str | None' = None,
+        request_digest: 'str | None' = None,
+    ) -> 'StorageBatchResult[InfoT, KeyT]':
+        with self._operation():
+            return await self._apply_batch(
+                changes, expected_revision=expected_revision,
+                idempotency_key=idempotency_key, request_digest=request_digest,
+            )
+
+    async def _apply_batch(
         self,
         changes: 'Sequence[StorageChange[KeyT, ValueT]]',
         *,
@@ -937,7 +991,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if idempotency_key is not None:
             raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
         if expected_revision is not None:
-            current = await self.current_revision()
+            current = await self._current_revision()
             if current != expected_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         results: list[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT]] = []
@@ -946,26 +1000,26 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             try:
                 if change.operation is StorageOperation.PUT:
                     value = cast(ValueT, change.value)
-                    item = await self.put(
+                    item = await self._put(
                         change.key,
                         value,
                         expected_revision=change.expected_revision,
                         metadata=change.metadata,
                     )
                 elif change.operation is StorageOperation.DELETE:
-                    item = await self.delete(
+                    item = await self._delete(
                         change.key,
                         expected_revision=change.expected_revision,
                         metadata=change.metadata,
                     )
                 else:
-                    item = await self.reset(
+                    item = await self._reset(
                         change.key,
                         expected_revision=change.expected_revision,
                         metadata=change.metadata,
                     )
             except Exception as exc:
-                failure_revision = revision if revision is not None else await self.current_revision()
+                failure_revision = revision if revision is not None else await self._current_revision()
                 error_code = (
                     exc.code.value
                     if isinstance(exc, AIError)
@@ -981,17 +1035,18 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             results.append(item)
             revision = item.store_revision
         if revision is None:
-            revision = await self.current_revision()
+            revision = await self._current_revision()
         return StorageBatchResult(revision, False, tuple(results))
 
     async def batch_result(
         self,
         idempotency_key: str,
     ) -> 'StorageBatchResult[InfoT, KeyT] | None':
-        writer = self._require_writer()
-        if not isinstance(writer, BatchStorageWriter):
-            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
-        return await writer.batch_result(idempotency_key)
+        with self._operation():
+            writer = self._require_writer()
+            if not isinstance(writer, BatchStorageWriter):
+                raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+            return await writer.batch_result(idempotency_key)
 
     def _validate_writer_batch_result(
         self,

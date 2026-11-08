@@ -4,6 +4,8 @@
 
 import hashlib
 import json
+import os
+import stat
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -11,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence.contracts import ArtifactRecord
@@ -174,3 +177,93 @@ async def test_workspace_snapshot_rejects_a_scalar_exclusion_before_publication(
                 exclusive=_OfflineGuard(), limits=SnapshotLimits(1000, 1024 * 1024),
             )
     assert [stat async for stat in target.list_objects()] == []
+
+
+async def _workspace_mode_snapshot(tmp_path: Path) -> tuple[InMemoryObjectStore, ObjectRef]:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "content.txt").write_text("content", encoding="utf-8")
+    storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    archive = InMemoryObjectStore("snapshot")
+    async with Persistence.open("workspace-modes", storage=storage):
+        pass
+    async with Persistence.open("workspace-modes", storage=storage, read_only=True) as persistence:
+        ref = await Snapshot.create(
+            persistence=persistence, object_store=archive, workspace=Workspace.load(root),
+            exclusive=_OfflineGuard(), limits=SnapshotLimits(1000, 1024 * 1024),
+        )
+    return archive, ref
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", (0o002, -1, 0o200, True, 1.5))
+@pytest.mark.parametrize("operation", ("verify", "restore"))
+async def test_snapshot_rejects_invalid_execute_bits_before_workspace_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: object, operation: str,
+) -> None:
+    archive, original = await _workspace_mode_snapshot(tmp_path)
+    manifest = json.loads(await read_object(
+        archive, original.key, expected_digest=original.digest, expected_size=original.size,
+    ))
+    entry = next(entry for entry in manifest["workspace"]["entries"] if "content" in entry)
+    entry["mode"] = mode
+    payload = canonical_json_bytes(manifest)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield payload
+
+    await archive.put("invalid-mode", chunks(), expected_size=len(payload), expected_digest=digest)
+    ref = ObjectRef(archive.store_id, "invalid-mode", digest, len(payload))
+
+    def reject_chmod(*args: object, **kwargs: object) -> None:
+        pytest.fail("invalid snapshot must be rejected before chmod")
+
+    monkeypatch.setattr(os, "chmod", reject_chmod)
+    target = tmp_path / "restored"
+    limits = SnapshotLimits(1000, 1024 * 1024)
+    with pytest.raises(AIError) as rejected:
+        if operation == "verify":
+            await Snapshot.verify(ref, object_store=archive, limits=limits)
+        else:
+            await Snapshot.restore(
+                ref, object_store=archive, target=target,
+                namespace="workspace-modes", tenant_id="default", limits=limits,
+            )
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX execute-bit combinations require POSIX chmod")
+async def test_snapshot_round_trips_all_execute_bit_combinations(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    modes = (0, 0o001, 0o010, 0o011, 0o100, 0o101, 0o110, 0o111)
+    for mode in modes:
+        path = root / f"mode-{mode:o}"
+        path.write_text("content", encoding="utf-8")
+        path.chmod(0o600 | mode)
+    storage = PersistenceStorage.sqlite(tmp_path / "runtime.db")
+    archive = InMemoryObjectStore("snapshot")
+    async with Persistence.open("workspace-modes", storage=storage):
+        pass
+    limits = SnapshotLimits(1000, 1024 * 1024)
+    async with Persistence.open("workspace-modes", storage=storage, read_only=True) as persistence:
+        ref = await Snapshot.create(
+            persistence=persistence, object_store=archive, workspace=Workspace.load(root),
+            exclusive=_OfflineGuard(), limits=limits,
+        )
+    await Snapshot.verify(ref, object_store=archive, limits=limits)
+    restored = await Snapshot.restore(
+        ref, object_store=archive, target=tmp_path / "restored",
+        namespace="workspace-modes", tenant_id="default", limits=limits,
+    )
+    assert restored.workspace_root is not None
+    default_file = tmp_path / "default-file"
+    default_file.write_text("content", encoding="utf-8")
+    non_execute = stat.S_IMODE(default_file.stat().st_mode) & ~0o111
+    for mode in modes:
+        path = restored.workspace_root / f"mode-{mode:o}"
+        assert path.read_text(encoding="utf-8") == "content"
+        assert stat.S_IMODE(path.stat().st_mode) == non_execute | mode
