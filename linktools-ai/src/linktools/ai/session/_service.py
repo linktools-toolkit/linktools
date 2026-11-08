@@ -1233,6 +1233,8 @@ class SessionManager(Generic[HandleT]):
             or not existing.compactable
         ):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if existing.request_digest_contract is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if existing.status is OperationStatus.PENDING:
             if (
                 existing.result_ref is not None
@@ -1242,12 +1244,13 @@ class SessionManager(Generic[HandleT]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         if existing.status is OperationStatus.SUCCEEDED:
-            if (
-                existing.result_ref != session_id
-                or existing.result_digest is None
-                or existing.error_code is not None
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_succeeded_close_operation(
+                existing,
+                tenant_id=tenant_id,
+                session_id=session_id,
+                request_digest=request_digest,
+                result_digest=existing.result_digest,
+            )
             return existing
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -1340,6 +1343,8 @@ class SessionManager(Generic[HandleT]):
             or current.operation_kind is not expected.operation_kind
             or current.operation_kind is not OperationKind.SESSION_CLOSE
             or expected.operation_kind is not OperationKind.SESSION_CLOSE
+            or current.request_digest_contract is not None
+            or expected.request_digest_contract is not None
             or current.request_digest != expected.request_digest
             or current.compactable != expected.compactable
             or current.compactable is not True
@@ -1355,7 +1360,7 @@ class SessionManager(Generic[HandleT]):
         tenant_id: str,
         session_id: str,
         request_digest: str,
-        result_digest: str,
+        result_digest: str | None,
     ) -> None:
         if (
             operation.tenant_id != tenant_id
@@ -1363,9 +1368,13 @@ class SessionManager(Generic[HandleT]):
             or operation.resource_id != session_id
             or operation.execution_id is not None
             or operation.operation_kind is not OperationKind.SESSION_CLOSE
+            or operation.request_digest_contract is not None
             or operation.request_digest != request_digest
             or operation.status is not OperationStatus.SUCCEEDED
             or operation.result_ref != session_id
+            or not isinstance(operation.result_digest, str)
+            or len(operation.result_digest) != 64
+            or any(char not in "0123456789abcdef" for char in operation.result_digest)
             or operation.result_digest != result_digest
             or operation.error_code is not None
             or not operation.compactable
@@ -1385,9 +1394,6 @@ class SessionManager(Generic[HandleT]):
             or session.active_execution_id is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result_digest = canonical_sha256(
-            {"session_id": session_id, "revision": session.revision}
-        )
         SessionManager._validate_close_operation_identity(
             operation,
             operation,
@@ -1399,7 +1405,7 @@ class SessionManager(Generic[HandleT]):
             tenant_id=tenant_id,
             session_id=session_id,
             request_digest=operation.request_digest,
-            result_digest=result_digest,
+            result_digest=operation.result_digest,
         )
 
 
