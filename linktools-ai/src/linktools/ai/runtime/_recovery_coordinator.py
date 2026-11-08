@@ -868,7 +868,7 @@ class _RecoveryCoordinator:
                 )
                 return False
         if execution.recovery.handoff_phase is not RecoveryHandoffPhase.NONE:
-            await self._port.validate_binding(execution)
+            # Terminal publication uses durable facts, not an executable Agent directory.
             await self._port._reconcile_handoff(execution)
             return False
         if execution.status in {
@@ -1066,7 +1066,6 @@ class _RecoveryCoordinator:
             if (current.recovery is None or current.recovery.terminal_handoff is None
                     or current.recovery.handoff_phase is RecoveryHandoffPhase.NONE):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._port.validate_binding(current)
             if recovery_operation is not None:
                 await self._port._admit_recovery_without_producer(current, recovery_operation)
             return await self._port._reconcile_handoff(current), False

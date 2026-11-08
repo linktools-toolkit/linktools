@@ -311,6 +311,88 @@ class StepExecutionHistoryReader:
     def _durable_for(self, record: ExecutionRecord) -> bool:
         return record.durable_trace and self._durable_history_available
 
+    async def read_model_interactions(
+        self, execution_id: str, *, tenant_id: str,
+        identities: tuple[tuple[int, int], ...], include_content: bool = False,
+        include_client_requests: bool = False,
+    ) -> tuple[ModelInteractionItem, ...]:
+        """Read only explicit identities from one execution, without discovering descendants.
+
+        Duplicate identities are returned once, in first-requested order. Missing
+        identities fail the batch. Content resolves after the metadata read scope.
+        """
+        if (not isinstance(identities, tuple) or len(identities) > 200
+                or not isinstance(include_content, bool) or not isinstance(include_client_requests, bool)):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        for identity in identities:
+            if (not isinstance(identity, tuple) or len(identity) != 2
+                    or any(isinstance(value, bool) or not isinstance(value, int) or value < 1
+                           for value in identity)):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        keys = tuple(dict.fromkeys(identities))
+
+        # Pending execution lookup can reconcile durable state; keep it outside
+        # the metadata-only owner scope used for the selected archive records.
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        store = self._store_for(record)
+
+        async def capture() -> tuple[_ExecutionHistoryStore, dict[tuple[int, int], ModelInteractionRecord | StagedModelInteraction]]:
+            selected: dict[tuple[int, int], ModelInteractionRecord | StagedModelInteraction] = {}
+            for run_seq in sorted({run for run, _ in keys}):
+                if run_seq > record.agent_run_seq:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                run_id = make_agent_run_id(
+                    namespace=self._namespace, tenant_id=tenant_id,
+                    execution_id=execution_id, agent_run_seq=run_seq,
+                )
+                run = await store.get_agent_run(agent_run_id=run_id)
+                if run is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                _validate_agent_run(run, run_id, make_agent_conversation_id(
+                    namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
+                ), run_seq)
+                sequences = sorted(sequence for run, sequence in keys if run == run_seq)
+                ranges: list[tuple[int, int]] = []
+                for sequence in sequences:
+                    if ranges and ranges[-1][1] + 1 == sequence:
+                        ranges[-1] = (ranges[-1][0], sequence)
+                    else:
+                        ranges.append((sequence, sequence))
+                for first, last in ranges:
+                    values = await store.list_model_interactions(
+                        agent_run_id=run_id, after_model_request_seq=first - 1, limit=last - first + 1,
+                    )
+                    for value in values:
+                        if (not isinstance(value, (ModelInteractionRecord, StagedModelInteraction))
+                                or value.agent_run_id != run_id
+                                or value.model_request_seq < first
+                                or (run_seq, value.model_request_seq) in selected):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if value.model_request_seq <= last:
+                            selected[(run_seq, value.model_request_seq)] = value
+                    if any((run_seq, sequence) not in selected for sequence in range(first, last + 1)):
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            return store, selected
+
+        store, selected = await self._read_model_metadata(self._executions, capture)
+        resolved: dict[tuple[int, int], object] = {}
+        if include_content or include_client_requests:
+            for run_seq in dict.fromkeys(run for run, _ in keys):
+                run_keys = tuple(key for key in keys if key[0] == run_seq)
+                values = await store.resolve_model_interactions(
+                    tuple(selected[key] for key in run_keys), include_content=include_content,
+                    include_client_requests=include_client_requests,
+                )
+                if len(values) != len(run_keys):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                resolved.update(zip(run_keys, values))
+        return tuple(self._project_model_interaction(
+            selected[key], execution_id, key[0], 0, resolved.get(key),
+            include_content=include_content, include_client_requests=include_client_requests,
+        ) for key in keys)
+
     async def trace(
         self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int,
         agent_run_seq: int | None = None,

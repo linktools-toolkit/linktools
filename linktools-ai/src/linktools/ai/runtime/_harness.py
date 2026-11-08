@@ -11,7 +11,7 @@ from typing import Any, cast, TYPE_CHECKING
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, StructuredContent, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
@@ -95,7 +95,8 @@ class SummaryProviderModel(ReferencedInputModel):
                 content = [
                     item.content if (
                         isinstance(item, RetiredReferencedContent)
-                        or isinstance(item, TextContent) and isinstance(item.metadata, dict)
+                        or isinstance(item, TextContent) and not isinstance(item, StructuredContent)
+                        and isinstance(item.metadata, dict)
                         and item.metadata.get("source") == "linktools.attachment"
                     ) else item
                     for item in model_input_content(part)

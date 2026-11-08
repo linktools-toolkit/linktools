@@ -111,7 +111,10 @@ async def test_source_cancel_reaches_owner_after_remote_terminal_settlement(
 
 
 @pytest.mark.asyncio
-async def test_expired_scope_stops_worker_without_business_cancel(tmp_path: Path) -> None:
+@pytest.mark.parametrize("claim_delay", (0, .6))
+async def test_expired_scope_stops_worker_without_business_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claim_delay: float,
+) -> None:
     entered, finish, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def model(messages, info):
@@ -126,7 +129,15 @@ async def test_expired_scope_stops_worker_without_business_cancel(tmp_path: Path
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     features = model_features(_Models(_UsageFunctionModel(model)), features)
-    coordination = _DelayedRenewal(lease_seconds=.5)
+    coordination = _DelayedRenewal()
+    claim_turn = coordination.claim_turn
+
+    async def delayed_claim(*args, **kwargs):
+        result = await claim_turn(*args, **kwargs)
+        await asyncio.sleep(claim_delay)
+        return result
+
+    monkeypatch.setattr(coordination, "claim_turn", delayed_claim)
     database = tmp_path / "state.db"
     async with Persistence.open("expired-turn-signal", storage=PersistenceStorage.sqlite(
         database, coordination=coordination,
@@ -137,6 +148,11 @@ async def test_expired_scope_stops_worker_without_business_cancel(tmp_path: Path
         try:
             await asyncio.wait_for(entered.wait(), 5)
             await asyncio.wait_for(coordination.renewing.wait(), 5)
+            loop = asyncio.get_running_loop()
+            clock = loop.time
+            # Expire local authority only after bootstrap reaches the model.
+            # Keep the offset through Runtime cleanup; backend time stays real.
+            monkeypatch.setattr(loop, "time", lambda: clock() + coordination.lease_seconds)
             await asyncio.wait_for(stopped.wait(), 5)
             await asyncio.wait_for(coordination.released.wait(), 5)
             observed = await remote.executions.inspect(execution.execution_id, principal=remote.default_principal)

@@ -4,7 +4,6 @@
 
 import asyncio
 import json
-from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -19,14 +18,13 @@ from ..core import (
     ResourceRef,
     ExecutionStatus,
     canonical_json_bytes,
-    canonical_sha256,
     normalize_json_value,
     idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from ..model.messages import encode_tool_return_content
+from ..model.messages import encode_tool_return_content, tool_return_content_matches
 from ..execution import (
     ExternalCallFailed,
     ExternalCallRetry,
@@ -104,7 +102,7 @@ class DefaultExternalService:
             record = await self._calls.get(call_id, tenant_id=principal.tenant_id)
             if record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            arguments = await _decode_arguments(self._objects, pending.arguments_payload)
+            arguments = await _decode_json_payload(self._objects, pending.arguments_payload)
             views.append(
                 ExternalCallView(
                     call_id,
@@ -138,46 +136,74 @@ class DefaultExternalService:
         )
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
-        payload, resolution_kind = await self._resolution_payload(request)
-        resolution_metadata = dict(request.metadata)
-        key_digest = idempotency_key_digest(request.idempotency_key)
-        try:
-            updated = await self._calls.supply(
-                request.call_id,
-                tenant_id=request.principal.tenant_id,
-                expected_status=ExternalCallStatus.PENDING,
-                idempotency_key_digest=key_digest,
-                resolution_kind=resolution_kind,
-                result_payload=payload,
-                resolution_metadata=resolution_metadata,
-                supplied_at=datetime.now(timezone.utc),
-            )
-        except AIError as error:
-            if error.code is not ErrorCode.EXTERNAL_RESULT_CONFLICT:
-                raise
-            updated = await self._calls.get(
-                request.call_id,
-                tenant_id=request.principal.tenant_id,
-            )
-            if not _is_exact_replay(
-                updated,
-                execution_id=execution_id,
-                idempotency_key_digest=key_digest,
-                resolution_kind=resolution_kind,
-                result_payload=payload,
-                metadata=resolution_metadata,
-            ):
-                raise
+        if record.status is ExternalCallStatus.SUPPLIED:
+            if not await self._is_exact_replay(record, execution_id=execution_id, request=request):
+                raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+            updated = record
+        else:
+            payload, resolution_kind = await self._resolution_payload(request)
+            try:
+                updated = await self._calls.supply(
+                    request.call_id,
+                    tenant_id=request.principal.tenant_id,
+                    expected_status=ExternalCallStatus.PENDING,
+                    idempotency_key_digest=idempotency_key_digest(request.idempotency_key),
+                    resolution_kind=resolution_kind,
+                    result_payload=payload,
+                    resolution_metadata=dict(request.metadata),
+                    supplied_at=datetime.now(timezone.utc),
+                )
+            except (AIError, asyncio.CancelledError) as error:
+                if isinstance(error, AIError) and error.code not in {
+                    ErrorCode.EXTERNAL_RESULT_CONFLICT, ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                }:
+                    raise
+                try:
+                    updated = await self._calls.get(
+                        request.call_id,
+                        tenant_id=request.principal.tenant_id,
+                    )
+                    replay = await self._is_exact_replay(updated, execution_id=execution_id, request=request)
+                finally:
+                    if isinstance(error, asyncio.CancelledError):
+                        raise error
+                if not replay:
+                    raise
         if updated is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
             "external result resolved: execution=%s call=%s kind=%s",
             execution_id,
             request.call_id,
-            resolution_kind,
+            updated.resolution_kind,
         )
         await _reconcile(self._continuation, execution_id, request.principal.tenant_id)
         return ExternalSupplyResult(request.call_id, request.idempotency_key, True)
+
+    async def _is_exact_replay(
+        self,
+        record: ExternalCallRecord | None,
+        *,
+        execution_id: str,
+        request: ExternalSupplyRequest,
+    ) -> bool:
+        if (record is None or record.execution_id != execution_id
+            or record.status is not ExternalCallStatus.SUPPLIED
+            or record.idempotency_key_digest != idempotency_key_digest(request.idempotency_key)
+            or dict(record.resolution_metadata) != dict(request.metadata)):
+            return False
+        resolution = request.resolution
+        if isinstance(resolution, ExternalCallSucceeded):
+            if record.resolution_kind != "succeeded":
+                return False
+            if record.result_payload is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stored = await _decode_json_payload(self._objects, record.result_payload)
+            return tool_return_content_matches(resolution.value, stored)
+        if isinstance(resolution, (ExternalCallRetry, ExternalCallFailed)):
+            return (record.resolution_kind == ("retry" if isinstance(resolution, ExternalCallRetry) else "failed")
+                    and record.result_payload == StoredPayload.inline_text(resolution.message))
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
     async def _waiting_execution(
         self,
@@ -249,7 +275,7 @@ def _pending_call(
     return None
 
 
-async def _decode_arguments(objects: ObjectStore, payload: StoredPayload) -> JsonValue:
+async def _decode_json_payload(objects: ObjectStore, payload: StoredPayload) -> JsonValue:
     if payload.kind == "inline":
         if payload.encoding != "json":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -265,26 +291,6 @@ async def _decode_arguments(objects: ObjectStore, payload: StoredPayload) -> Jso
         return normalize_json_value(value)
     except (UnicodeError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _is_exact_replay(
-    record: ExternalCallRecord | None,
-    *,
-    execution_id: str,
-    idempotency_key_digest: str,
-    resolution_kind: str,
-    result_payload: StoredPayload | None,
-    metadata: Mapping[str, JsonValue],
-) -> bool:
-    return bool(
-        record is not None
-        and record.execution_id == execution_id
-        and record.status is ExternalCallStatus.SUPPLIED
-        and record.idempotency_key_digest == idempotency_key_digest
-        and record.resolution_kind == resolution_kind
-        and record.result_payload == result_payload
-        and dict(record.resolution_metadata) == dict(metadata)
-    )
 
 
 async def _reconcile(

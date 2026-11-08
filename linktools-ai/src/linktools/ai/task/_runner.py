@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core import CorrelationData, JsonValue, Principal
+from ..core import CorrelationData, ExecutionStatus, JsonValue, Principal
 from ..errors import AIError, ErrorCode
 from ._capture import TaskInvocationInputRef
 from ._graph import TaskDependencyResult, TaskLease, TaskNode
@@ -52,14 +52,22 @@ class TaskNodeRunError(AIError):
         *,
         safe_details: "Mapping[str, JsonValue] | None" = None,
         error_origin: Literal["node", "execution"] = "execution",
+        terminal_status: "ExecutionStatus | None" = None,
     ) -> None:
         if not isinstance(execution_id, str) or not execution_id.strip():
             raise ValueError("task node failure execution id is required")
         if error_origin not in {"node", "execution"}:
             raise ValueError("task node failure origin is invalid")
+        if terminal_status is not None and (
+            not isinstance(terminal_status, ExecutionStatus)
+            or terminal_status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+        ):
+            raise ValueError("task node failure terminal status is invalid")
         super().__init__(code, safe_details=safe_details)
         self.execution_id = execution_id
         self.error_origin = error_origin
+        # Evidence from a confirmed execution result, never inferred from its error code.
+        self.terminal_status = terminal_status
 
 
 @runtime_checkable

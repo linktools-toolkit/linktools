@@ -62,6 +62,16 @@ class DefaultExecutionHistoryService:
         self._cursor_signer = cursor_signer
         self._pending_execution = pending_execution
 
+    async def read_model_interactions(
+        self, execution_id: str, *, principal: Principal, identities: tuple[tuple[int, int], ...],
+        include_content: bool = False, include_client_requests: bool = False,
+    ) -> tuple[ModelInteractionItem, ...]:
+        await self._authorize(execution_id, principal)
+        return await self._reader.read_model_interactions(
+            execution_id, tenant_id=principal.tenant_id, identities=identities,
+            include_content=include_content, include_client_requests=include_client_requests,
+        )
+
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView:

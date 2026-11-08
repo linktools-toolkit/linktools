@@ -533,6 +533,7 @@ class LocalExecutionBackend:
                 identity.idempotency_key_digest,
                 identity.request_digest,
                 datetime.now(timezone.utc),
+                identity.request_identity_version,
             ),
             session_id=execution.session_id,
             expected_cursor=expected,
@@ -1084,11 +1085,13 @@ class LocalExecutionBackend:
                 identity.scope, identity.idempotency_key_digest, tenant_id=self._tenant_id,
             ))
             if existing is not None:
-                if existing.request_digest != identity.request_digest:
+                if (existing.request_digest != identity.request_digest
+                        or existing.request_identity_version != identity.request_identity_version):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 if existing.status is IdempotencyStatus.START_UNKNOWN:
                     raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-                return existing.resource_id
+                # Let the canonical reservation owner apply terminal replay semantics.
+                return None
             if session is not None:
                 sessions = self._conversation.sessions
                 current_session = await sessions.state_store.read(
@@ -1118,7 +1121,10 @@ class LocalExecutionBackend:
             turn.promotion_claim_id = coordination.owner_id
             if self._execution_buffer is not None:
                 await self._execution_buffer.append(_ExecutionPayloadCapture(turn.execution, turn.reservation))
-            await coordinator.publish(turn.execution, coordination)
+            await coordinator.publish(
+                turn.execution, coordination,
+                request_identity_version=reservation.idempotency.request_identity_version,
+            )
             if not self._accepting:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self._live_broker.prepare_local_producer(execution.execution_id)
@@ -1784,6 +1790,7 @@ class LocalExecutionBackend:
                 identity.idempotency_key_digest,
                 identity.request_digest,
                 now,
+                identity.request_identity_version,
             ),
             session_id=execution.session_id,
             expected_cursor=expected, expected_session=identity.expected_session,
@@ -4499,7 +4506,10 @@ class LocalExecutionBackend:
                                         audit_events=tuple(self._pending_audit_events.get(execution_id, ())),
                                     ))
                                 assert self._pending_turns.coordination is not None and pending.coordination is not None
-                                await self._pending_turns.coordination.publish(current, pending.coordination)
+                                await self._pending_turns.coordination.publish(
+                                    current, pending.coordination,
+                                    request_identity_version=pending.reservation.idempotency.request_identity_version,
+                                )
                             else:
                                 if context_write is None:
                                     prepared = await self._context_archive.prepare(accepted_context, history_root=loaded_context.archive_root, history_digest=loaded_context.archive_digest)
@@ -4640,6 +4650,10 @@ class LocalExecutionBackend:
                 memory_scope=current.memory_scope,
                 correlation=current.correlation,
                 deadline_at=None if request.budget is None else request.budget.deadline_at,
+                root_execution_id=current.root_execution_id,
+                parent_execution_id=current.parent_execution_id,
+                agent_id=binding.compiled_agent.spec.id,
+                agent_run_seq=current.agent_run_seq,
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store

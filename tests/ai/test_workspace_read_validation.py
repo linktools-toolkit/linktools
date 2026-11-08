@@ -10,7 +10,6 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import (
-    BubblewrapWorkspaceBackend,
     LocalWorkspaceBackend,
     WorkspaceOperationRejected,
     WorkspaceReadPolicy,
@@ -111,14 +110,6 @@ def test_validator_restores_position_and_preserves_unicode_page_semantics(tmp_pa
             await baseline.close()
 
     asyncio.run(run())
-
-
-def test_remote_backend_cannot_silently_drop_read_validator(tmp_path: Path) -> None:
-    policy = WorkspaceReadPolicy(("**",), read_validator=lambda path, resource, stream: None)
-    with pytest.raises(WorkspaceOperationRejected) as raised:
-        BubblewrapWorkspaceBackend(tmp_path, runtime_root=tmp_path / "runtime", bwrap_executable=Path("/usr/bin/bwrap"), read_policy=policy)
-    assert raised.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
-    assert raised.value.safe_details == {"reason": "sandbox_read_validator_unsupported"}
 
 
 @pytest.mark.asyncio

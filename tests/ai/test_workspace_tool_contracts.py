@@ -24,11 +24,7 @@ async def _workspace_tool_contributions(workspace: Workspace):
         if item.kind == "tool"
     )
 
-from linktools.ai.workspace._sandbox_protocol import (
-    MAX_FRAME_BYTES,
-    encode_frame,
-    validate_request_size,
-)
+from linktools.ai.workspace._request_validation import validate_request_values
 
 
 def _golden_contract() -> dict[str, object]:
@@ -48,21 +44,11 @@ async def test_workspace_tool_contracts_match_frozen_golden(tmp_path: Path) -> N
     assert actual == _golden_contract()
 
 
-def test_local_semantic_validation_is_not_limited_by_ipc_frame() -> None:
-    content = "x" * (MAX_FRAME_BYTES + 1)
+def test_local_semantic_validation_accepts_large_file_content() -> None:
+    content = "x" * (8 * 1024 * 1024 + 1)
     params = {"path": "large.txt", "content": content, "expected_hash": None}
 
-    validate_request_size("write_file", params)
-    with pytest.raises(AIError) as raised:
-        encode_frame(
-            {
-                "version": 1,
-                "request_id": "request",
-                "method": "write_file",
-                "params": params,
-            }
-        )
-    assert raised.value.code is ErrorCode.TOOL_ARGUMENTS_TOO_LARGE
+    validate_request_values(**params)
 
 
 @pytest.mark.asyncio

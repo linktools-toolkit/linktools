@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_database
 from linktools.ai.observe import (
@@ -131,6 +132,8 @@ async def test_pushdown_rejects_corrupt_records_before_filters(
                 )
             else:
                 values["payload_json"] = payload
+                if damage in {"envelope_version", "observation_version"}:
+                    values["payload_digest"] = canonical_sha256(payload)
                 await connection.execute(update(table).values(**values))
         queries = (
             MetricQuery("business.integrity.count", _WINDOW),
@@ -275,9 +278,51 @@ async def test_verification_preserves_codec_normalization(tmp_path: Path) -> Non
                 payload["observation"].pop(key)
             payload["future_optional_field"] = {"ignored": True}
             await connection.execute(
-                text("UPDATE ai_metric_observations SET payload_json = :payload"),
-                {"payload": json.dumps(payload, sort_keys=True, indent=2)},
+                text("UPDATE ai_metric_observations SET payload_json = :payload, payload_digest = :digest"),
+                {"payload": json.dumps(payload, sort_keys=True, indent=2),
+                 "digest": canonical_sha256(payload)},
             )
         assert await metrics.query(query) == expected
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", (
+    "omit-stale", "omit-rehashed", "extra-stale", "extra-rehashed",
+    "bad-known-field", "index-mismatch",
+))
+async def test_observation_integrity_uses_original_json_before_decoding(
+    tmp_path: Path, change: str,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'original-json.db'}")
+    metrics = Metrics.sql(engine, namespace="integrity")
+    table = build_metrics_sql_metadata().tables["ai_metric_observations"]
+    try:
+        await provision_metrics_database(engine)
+        await _seed(metrics)
+        async with engine.begin() as connection:
+            row = (await connection.execute(select(table))).mappings().one()
+            payload = deepcopy(row["payload_json"])
+            values = {}
+            if change.startswith("omit"):
+                del payload["observation"]["correlation"]
+            elif change.startswith("extra"):
+                payload["ordinary_extension"] = {"value": True}
+            elif change == "bad-known-field":
+                payload["observation"]["correlation"] = []
+            else:
+                values["observation_id"] = "other"
+            values["payload_json"] = payload
+            if not change.endswith("stale"):
+                values["payload_digest"] = canonical_sha256(payload)
+            await connection.execute(update(table).values(**values))
+        query = MetricQuery("business.integrity.count", _WINDOW)
+        if change in {"omit-rehashed", "extra-rehashed"}:
+            assert (await metrics.query(query)).points[0].value == 1
+        else:
+            with pytest.raises(AIError) as rejected:
+                await metrics.query(query)
+            assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await engine.dispose()

@@ -171,7 +171,9 @@ class SqlStepStore:
         await self.initialize()
         table = self._table("runs")
         async with self._context.sessions() as session:
-            row = (await session.execute(select(table).where(*self._run_predicates(table, run_id)))).mappings().first()
+            row = (await self._context.run_statement(
+                session.execute(select(table).where(*self._run_predicates(table, run_id)))
+            )).mappings().first()
         return None if row is None else _RUN_ADAPTER.validate_python(self._record_data(row))
 
     async def list_runs(
@@ -187,7 +189,7 @@ class SqlStepStore:
         if conversation_id is not None:
             query = query.where(table.c.conversation_digest == _digest(conversation_id), table.c.conversation_id == conversation_id)
         async with self._context.sessions() as session:
-            rows = (await session.execute(query.order_by(table.c.id))).mappings().all()
+            rows = (await self._context.run_statement(session.execute(query.order_by(table.c.id)))).mappings().all()
         return sorted((_RUN_ADAPTER.validate_python(self._record_data(row)) for row in rows), key=lambda r: r.started_at)
 
     async def append_event(self, event: StepEvent) -> None:
@@ -222,9 +224,9 @@ class SqlStepStore:
         await self.initialize()
         table = self._table("events")
         async with self._context.sessions() as session:
-            rows = (await session.execute(select(table).where(
+            rows = (await self._context.run_statement(session.execute(select(table).where(
                 *self._run_predicates(table, run_id),
-            ).order_by(table.c.id))).mappings().all()
+            ).order_by(table.c.id)))).mappings().all()
         return [_EVENT_ADAPTER.validate_python(self._record_data(row)) for row in rows]
 
     @property
@@ -438,18 +440,18 @@ class SqlStepStore:
         if latest:
             query = query.limit(1)
         async with self._context.sessions() as session, session.begin():
-            await self._context.dialect.begin_consistent_read(session)
-            rows = (await session.execute(query)).mappings().all()
+            await self._context.run_statement(self._context.dialect.begin_consistent_read(session))
+            rows = (await self._context.run_statement(session.execute(query))).mappings().all()
             histories: dict[int, list[tuple[int, str, str | None]]] = {}
             for offset in range(0, len(rows), _BATCH_SIZE):
                 ids = [row["id"] for row in rows[offset:offset + _BATCH_SIZE]]
-                found = (await session.execute(select(
+                found = (await self._context.run_statement(session.execute(select(
                     refs.c.snapshot_id, refs.c.position, refs.c.sha256, messages.c.message,
                 ).select_from(refs.outerjoin(messages, and_(
                     messages.c.store_digest == self._store_digest,
                     messages.c.sha256 == refs.c.sha256,
                 ))).where(refs.c.snapshot_id.in_(ids))
-                    .order_by(refs.c.snapshot_id, refs.c.position))).all()
+                    .order_by(refs.c.snapshot_id, refs.c.position)))).all()
                 for ref in found:
                     histories.setdefault(ref.snapshot_id, []).append((ref.position, ref.sha256, ref.message))
         return [(self._record_data(row), histories.get(row["id"], [])) for row in rows]

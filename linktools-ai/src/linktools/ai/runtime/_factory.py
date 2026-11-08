@@ -219,12 +219,6 @@ async def compose_runtime_components(
     if workspace is not None:
         workspace.policy.validate()
     execution_cwd = _capture_host_cwd() if workspace is None else str(workspace.root)
-    input_backend = (None if workspace_factory is None or execution_cwd is None
-                     else workspace_factory(Path(execution_cwd), resources=()))
-    if input_backend is not None and not isinstance(input_backend, SupportsClose):
-        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE,
-                      safe_details={"reason": "workspace_cleanup_required"})
-
     selected_state: Persistence | None = None
     run_store: RuntimeAgentRunStore | None = None
     workspace_access: WorkspaceAccess | None = None
@@ -376,6 +370,11 @@ async def compose_runtime_components(
         if workspace is None:
             workspace_access = None
         else:
+            input_backend = (None if workspace_factory is None
+                             else workspace_factory(workspace.root, resources=()))
+            if input_backend is not None and not isinstance(input_backend, SupportsClose):
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE,
+                              safe_details={"reason": "workspace_cleanup_required"})
             workspace_access = WorkspaceAccess.for_workspace(
                 workspace, backend=input_backend, owns_backend=True,
             )
@@ -425,7 +424,6 @@ async def compose_runtime_components(
             namespace=resolved_namespace,
             workspace=workspace,
             workspace_factory=workspace_factory,
-            workspace_backend=input_backend,
             limits=selected_limits,
             execution_cwd=execution_cwd,
             app=app,
@@ -588,7 +586,6 @@ async def _build_local_components(
     namespace: str,
     workspace: "Workspace | None",
     workspace_factory: "Callable[..., WorkspaceBackend] | None",
-    workspace_backend: "WorkspaceBackend | None",
     limits: PromptLimits,
     execution_cwd: "str | None",
     app: AppT,

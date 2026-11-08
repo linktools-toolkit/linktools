@@ -1,0 +1,80 @@
+{
+  "reference": [
+    {
+      "parts": [
+        {
+          "content": [
+            {
+              "content": "{\"attachment\":\"reference\",\"size\":33,\"mime_type\":\"application/pdf\"}",
+              "metadata": {
+                "linktools-content": {
+                  "type": "runtime-reference",
+                  "value": {
+                    "kind": "referenced-content",
+                    "ref": {
+                      "version": 1,
+                      "kind": "document",
+                      "id": "immutable-file",
+                      "layer_id": "configured",
+                      "revision": 1,
+                      "digest": "797369a98d001e4dff7ee446b155e7d5296195d64cb4ea115b3c854b99e11489",
+                      "size": 33
+                    },
+                    "source": {
+                      "kind": "capability",
+                      "id": "files",
+                      "revision": 1
+                    },
+                    "media_type": "application/pdf"
+                  }
+                }
+              },
+              "kind": "text-content"
+            }
+          ],
+          "timestamp": "2026-11-07T20:09:36.588646Z",
+          "part_kind": "user-prompt"
+        }
+      ],
+      "timestamp": null,
+      "instructions": null,
+      "kind": "request",
+      "run_id": null,
+      "conversation_id": null,
+      "metadata": null,
+      "state": "complete"
+    }
+  ],
+  "ordinary_new_type": [
+    {
+      "parts": [
+        {
+          "content": [
+            {
+              "content": "ordinary",
+              "metadata": {
+                "linktools-content": {
+                  "type": "escaped-text",
+                  "version": 2,
+                  "value": {
+                    "ordinary": true
+                  }
+                }
+              },
+              "kind": "text-content"
+            }
+          ],
+          "timestamp": "2026-11-07T20:09:36.623183Z",
+          "part_kind": "user-prompt"
+        }
+      ],
+      "timestamp": null,
+      "instructions": null,
+      "kind": "request",
+      "run_id": null,
+      "conversation_id": null,
+      "metadata": null,
+      "state": "complete"
+    }
+  ]
+}

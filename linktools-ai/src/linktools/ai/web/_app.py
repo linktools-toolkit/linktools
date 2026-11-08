@@ -300,6 +300,21 @@ class _Console:
             request.path_params["execution_id"], principal=self.principal,
         ))
 
+    async def model_batch(self, request: Request) -> Response:
+        identities = []
+        for value in request.query_params.getlist("identity"):
+            try:
+                run, sequence = value.split(":")
+                identities.append((int(run), int(sequence)))
+            except ValueError:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from None
+        items = await self.require_history().read_model_interactions(
+            request.path_params["execution_id"], principal=self.principal,
+            identities=tuple(identities), include_content=_content(request),
+            include_client_requests=_content(request, "include_client_requests"),
+        )
+        return _json({"items": items})
+
     async def detail(self, request: Request) -> Response:
         history = self.require_history()
         identity = request.path_params["execution_id"]
@@ -488,6 +503,7 @@ def create_app(
         Route("/api/executions", console.executions),
         Route("/api/executions/{execution_id}", console.execution),
         Route("/api/executions/{execution_id}/events", console.events),
+        Route("/api/executions/{execution_id}/models-exact", console.model_batch),
         Route("/api/executions/{execution_id}/{kind}", console.detail),
         Route("/api/executions/{execution_id}/{action}", console.execution_action, methods=["POST"]),
         Route("/api/metrics", console.metric_query),

@@ -224,11 +224,11 @@ async def test_pending_publish_cannot_install_worker_after_captured_owner_is_los
         coordinator = backend._pending_turns.coordination
         publish = coordinator.publish
 
-        async def paused_publish(record, coordination):
+        async def paused_publish(record, coordination, **kwargs):
             captured_ids.append(record.execution_id)
             publishing.set()
             await finish.wait()
-            await publish(record, coordination)
+            await publish(record, coordination, **kwargs)
 
         monkeypatch.setattr(coordinator, "publish", paused_publish)
         session = await runtime.agents.get().create_session("session")

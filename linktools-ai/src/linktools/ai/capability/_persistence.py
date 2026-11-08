@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from copy import copy
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from pydantic_ai.capabilities import (
@@ -39,6 +40,8 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
 
     id = "runtime.trace"
     _service: AbstractCapability[AgentContext[AppT]] | None = None
+    _flush: Callable[[], Awaitable[None]] | None = None
+    _model_request_seq: Callable[[str], int | None] | None = None
 
     def __init__(
         self, *,
@@ -64,11 +67,38 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
         return self._commit
 
     def bind(
-        self, service: AbstractCapability[AgentContext[AppT]]
+        self, service: AbstractCapability[AgentContext[AppT]], *,
+        flush: Callable[[], Awaitable[None]] | None = None,
+        model_request_seq: Callable[[str], int | None] | None = None,
     ) -> TraceCapability[AppT]:
         bound = copy(self)
         bound._service = service
+        bound._flush = flush
+        bound._model_request_seq = model_request_seq
         return bound
+
+    @classmethod
+    def for_context(cls, ctx: PydanticRunContext[AgentContext[AppT]]) -> TraceCapability[AppT]:
+        """Get this run's bound Trace feature from the native SDK registry."""
+        capability = ctx.capabilities.get(cls.id)
+        if not isinstance(capability, cls):
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+        return capability
+
+    async def flush(self) -> None:
+        """Publish this run's captured Trace frontier to its source archive.
+
+        Success is a source-confirmed visibility barrier, not buffer admission.
+        Future observations keep the configured batching policy. This does not
+        capture hooks that have not run, commit business state, or drain other runs.
+        """
+        if self._flush is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        await self._flush()
+
+    def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
+        """Return the captured originating request, including restored calls."""
+        return None if self._model_request_seq is None else self._model_request_seq(tool_call_id)
 
     def _bound_service(self) -> AbstractCapability[AgentContext[AppT]]:
         if self._service is None:

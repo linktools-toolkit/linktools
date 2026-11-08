@@ -1964,6 +1964,10 @@ class TaskAdmissionRepository(RuntimeRepository, Protocol):
         self, submission: TaskGraphSubmission
     ) -> TaskGraphView: ...
 
+    async def get_submission_ref(
+        self, graph_id: str, *, tenant_id: str,
+    ) -> TaskSubmissionRef | None: ...
+
     async def submission_status(self, submission: TaskSubmissionRef) -> str | None: ...
     async def prepare(
         self, submission: TaskGraphSubmission

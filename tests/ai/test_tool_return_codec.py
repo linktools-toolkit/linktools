@@ -83,7 +83,7 @@ def test_tool_return_content_uses_explicit_linktools_envelope() -> None:
     encoded = encode_tool_return_content({"type": "business", "value": 1})
 
     assert encoded["contract"] == "linktools.tool-return"
-    assert encoded["version"] == 1
+    assert encoded["version"] == 2
     assert encoded["value"]["type"] == "mapping"
 
 

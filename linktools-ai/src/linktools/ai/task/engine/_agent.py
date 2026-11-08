@@ -406,11 +406,14 @@ class AgentTaskRunner(Generic[AppT]):
         tenant_id: str,
         contract: Mapping[str, JsonValue],
         materializer: "ExecutionInputMaterializer | None",
+        request_identity_version: int = 2,
     ) -> TaskNode:
         """Freeze Agent input through its producer before graph execution starts."""
         port = self.execution_port
         if port is None:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
+        if not isinstance(node, AgentTaskNode):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         task_input = AgentTaskInput.from_mapping(node.input)
         config = contract.get("config")
         input_mode = config.get("input_mode") if isinstance(config, Mapping) else None
@@ -434,7 +437,8 @@ class AgentTaskRunner(Generic[AppT]):
             body["prompt"] = {
                 "kind": "stored-user-content-v1",
                 "intent": "task-admission",
-                "source_intent_digest": canonical_sha256(task_input["prompt"]),
+                "source_intent_digest": node.prompt_intent_digest(
+                    request_identity_version=request_identity_version),
                 "value": encode_domain(stored),
             }
             _logger.info("task input resolved: node=%s", node.node_id)
@@ -680,10 +684,11 @@ class AgentTaskRunner(Generic[AppT]):
                 dependency_hold_id=hold_id,
             )
         else:
-            execution = await self._get_execution(
-                invocation.execution_id,
-                invocation.principal,
-            )
+            with self._node_executor().confirm_execution_result(invocation.execution_id):
+                execution = await self._get_execution(
+                    invocation.execution_id,
+                    invocation.principal,
+                )
         execution_id = getattr(execution, "execution_id", None)
         if not isinstance(execution_id, str) or not execution_id:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
@@ -736,7 +741,8 @@ class AgentTaskRunner(Generic[AppT]):
         *,
         budget_scope: "tuple[str, RunBudget] | None" = None,
     ) -> TaskNodeRunResult:
-        execution = await self._get_execution(execution_id, invocation.principal)
+        with self._node_executor().confirm_execution_result(execution_id):
+            execution = await self._get_execution(execution_id, invocation.principal)
         await self._capture_invocation(execution, execution_id, invocation)
         result = await self._wait_execution(invocation, execution, execution_id, budget_scope)
         return _agent_task_result(result, execution_id)
@@ -752,32 +758,38 @@ class AgentTaskRunner(Generic[AppT]):
         timeout = invocation.node.timeout_seconds
         view = None
         if timeout is not None:
-            view = await inspect(execution_id, invocation.principal)
+            with self._node_executor().confirm_execution_result(execution_id):
+                view = await inspect(execution_id, invocation.principal)
             if view.started_at is None:
                 raise TaskNodeRunError(ErrorCode.STORAGE_RECOVERY_REQUIRED, execution_id)
         policy = self.deadline_policy(invocation.node, None if view is None else view.started_at, budget_scope)
         if policy is None:
-            return (await execution.wait()).result
+            with self._node_executor().confirm_execution_result(execution_id):
+                return (await execution.wait()).result
         deadline, code, details = policy
         if view is None:
-            view = await inspect(execution_id, invocation.principal)
+            with self._node_executor().confirm_execution_result(execution_id):
+                view = await inspect(execution_id, invocation.principal)
         result = None
         if view.terminal_at is None:
             remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
             if remaining > 0:
                 try:
-                    result = (await execution.wait(timeout_seconds=remaining)).result
+                    with self._node_executor().confirm_execution_result(execution_id):
+                        result = (await execution.wait(timeout_seconds=remaining)).result
                 except AIError as error:
                     if error.code not in {ErrorCode.WAIT_TIMEOUT, ErrorCode.EXECUTION_WAIT_TIMEOUT}:
                         raise
-                view = await inspect(execution_id, invocation.principal)
+                with self._node_executor().confirm_execution_result(execution_id):
+                    view = await inspect(execution_id, invocation.principal)
             if view.terminal_at is None:
                 view = await self._cancel_expired_execution(invocation, execution, execution_id)
         if view.terminal_at is None:
             raise TaskNodeRunError(ErrorCode.STORAGE_RECOVERY_REQUIRED, execution_id)
         if view.terminal_at <= deadline:
             if result is None:
-                result = (await execution.wait()).result
+                with self._node_executor().confirm_execution_result(execution_id):
+                    result = (await execution.wait()).result
             return result
         raise TaskNodeRunError(code, execution_id, error_origin="node", safe_details=details)
 
@@ -974,7 +986,10 @@ def _agent_task_result(result: object, execution_id: str) -> TaskNodeRunResult:
         except ValueError:
             code = ErrorCode.TASK_NODE_FAILED
         details = getattr(result, "safe_error_details", {})
-        raise TaskNodeRunError(code, execution_id, safe_details=details)
+        raise TaskNodeRunError(
+            code, execution_id, safe_details=details,
+            terminal_status=status if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} else None,
+        )
     try:
         output = normalize_json_value(output)
     except (TypeError, ValueError) as error:

@@ -991,22 +991,37 @@ function scheduleNativeRefresh(item) {
 async function refreshNativeRequests(view,generation) {
   if(view.loading)return;
   const current=()=>state.nativeTimeline===view && generation===state.generation && view.id===state.selectedExecution;
+  const visible=()=>state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden;
   view.loading=true;renderNativeViews();
   try {
-    for(const [key,request] of [...view.pending]) {
-      if(request.error)continue;
-      if(!(state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden))break;
-      const item=request.item;
+    const groups=new Map();
+    for(const entry of [...view.pending]) {
+      if(entry[1].error)continue;
+      const execution=entry[1].item.execution_id;
+      if(!groups.has(execution))groups.set(execution,[]);
+      groups.get(execution).push(entry);
+    }
+    const read=async(execution,entries)=>{
+      const params=new URLSearchParams(view.http?{include_client_requests:'true'}:{include_content:'true'});
+      for(const [,request] of entries)params.append('identity',`${request.item.agent_run_seq}:${request.item.model_request_seq}`);
       try {
-        const params=new URLSearchParams({limit:'1',...(view.http?{include_client_requests:'true'}:{include_content:'true'}),agent_run_seq:String(item.agent_run_seq),model_request_seq:String(item.model_request_seq)});
-        const page=await api(`/api/executions/${enc(item.execution_id)}/models?${params}`);
+        const page=await api(`/api/executions/${enc(execution)}/models-exact?${params}`);
         if(!current())return;
-        if(!page.items.some(value=>modelKey(value)===key))throw new Error('Model request record is no longer available');
+        for(const [key] of entries)if(!page.items.some(value=>modelKey(value)===key))throw new Error('Model request record is no longer available');
         view.items=mergeNativeItems(view.items,page.items);page.items.forEach(acceptLiveResponse);
-        if(view.pending.get(key)===request)view.pending.delete(key);
+        for(const [key,request] of entries)if(view.pending.get(key)===request)view.pending.delete(key);
       } catch(error){
         if(!current())return;
-        request.error=`${item.execution_id} · request ${item.model_request_seq}: ${error.message}`;
+        // Isolate unavailable identities so one missing record does not hide others.
+        if(error.code==='STORAGE_NOT_FOUND' && entries.length>1){for(const entry of entries){if(!current() || !visible())return;await read(execution,[entry]);}return;}
+        for(const [,request] of entries)request.error=`${execution} · request ${request.item.model_request_seq}: ${error.message}`;
+      }
+    };
+    for(const [execution,entries] of groups) {
+      for(let offset=0;offset<entries.length;offset+=200){
+        if(!current())return;
+        if(!visible())return;
+        await read(execution,entries.slice(offset,offset+200));
       }
     }
   } finally {

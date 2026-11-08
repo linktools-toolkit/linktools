@@ -80,12 +80,6 @@ class _SqlGroupTransaction:
     ) -> None:
         self._group = group
         self._transactions = transactions
-        record_caches: dict[bytes, dict[bytes, StoredRecord | None]] = {}
-        for transaction in transactions.values():
-            # Aliases of a physical partition must observe each other's writes.
-            transaction._record_cache = record_caches.setdefault(
-                transaction._store_digest, transaction._record_cache,
-            )
 
     def transaction(self, store: StateStore) -> "_SqlTransaction":
         if store.storage_group is not self._group:
@@ -425,22 +419,28 @@ class SqlStateStorageGroup:
             async with session.begin():
                 await self._context.dialect.begin_consistent_read(session)
                 clock = _SqlTransactionClock(session, self._context)
-                transactions = {
-                    store: _SqlTransaction(
-                        session,
-                        self._metadata,
-                        self._context,
-                        store.store_digest,
-                        clock=clock,
-                    )
-                    for store in members
-                }
+                transactions = self._create_transactions(members, session, clock)
                 group_transaction = _SqlGroupTransaction(self, transactions)
                 token = bind_state_scope(self, transactions, writable=False, record_reader=group_transaction)
                 try:
                     return await fn(active_state_group_transaction(self, members, writable=False))
                 finally:
                     reset_state_transaction(token)
+
+    def _create_transactions(
+        self, stores: Sequence["SqlStateStore"], session: "AsyncSession",
+        clock: "_SqlTransactionClock",
+    ) -> dict["SqlStateStore", "_SqlTransaction"]:
+        partitions: dict[bytes, _SqlTransaction] = {}
+        transactions: dict[SqlStateStore, _SqlTransaction] = {}
+        for store in stores:
+            digest = store.store_digest
+            if digest not in partitions:
+                partitions[digest] = _SqlTransaction(
+                    session, self._metadata, self._context, digest, clock=clock,
+                )
+            transactions[store] = partitions[digest]
+        return transactions
 
     async def mutate(
         self,
@@ -471,16 +471,7 @@ class SqlStateStorageGroup:
             clock = _SqlTransactionClock(session, self._context)
             if self._archive_on_mutation and not self._archive_scope_initialized:
                 await self._initialize_archive_scope(session, clock)
-            transactions = {
-                store: _SqlTransaction(
-                    session,
-                    self._metadata,
-                    self._context,
-                    store.store_digest,
-                    clock=clock,
-                )
-                for store in members
-            }
+            transactions = self._create_transactions(members, session, clock)
             group_transaction = _SqlGroupTransaction(self, transactions)
             token = bind_state_scope(self, transactions, record_reader=group_transaction)
             try:
@@ -1871,6 +1862,7 @@ class _SqlTransaction:
         )
         if result.rowcount != 1:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._sequence_cache[key] = expected + 1
         return expected + 1
 
     async def delete_sequence(self, key: bytes) -> None:

@@ -412,7 +412,23 @@ class SQLiteDialect:
         return tuple((await session.execute(statement)).mappings().all())
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
-        return _classify_error(error, ("unique constraint", "unique failed"))
+        import sqlite3
+
+        try:
+            code = _original_sql_error(error).sqlite_errorcode
+        except AttributeError:
+            return IntegrityViolationKind.UNKNOWN
+        if code in (
+            sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY,
+            sqlite3.SQLITE_CONSTRAINT_UNIQUE,
+            sqlite3.SQLITE_CONSTRAINT_ROWID,
+        ):
+            return IntegrityViolationKind.UNIQUE_CONFLICT
+        if code == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY:
+            return IntegrityViolationKind.FOREIGN_KEY
+        if code == sqlite3.SQLITE_CONSTRAINT_CHECK:
+            return IntegrityViolationKind.CHECK
+        return IntegrityViolationKind.UNKNOWN
 
     def classify_transaction_error(
         self,
@@ -443,6 +459,16 @@ class PostgreSQLDialect(SQLiteDialect):
         from sqlalchemy.dialects.postgresql import insert
 
         return insert(table)
+
+    def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
+        code = _read_sqlstate(_original_sql_error(error))
+        if code == "23505":
+            return IntegrityViolationKind.UNIQUE_CONFLICT
+        if code == "23503":
+            return IntegrityViolationKind.FOREIGN_KEY
+        if code == "23514":
+            return IntegrityViolationKind.CHECK
+        return IntegrityViolationKind.UNKNOWN
 
 
 class MySQLDialect(SQLiteDialect):
@@ -700,7 +726,14 @@ class MySQLDialect(SQLiteDialect):
         return tuple({column: row[column] for column in returning} for row in selected)
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
-        return _classify_error(error, ("duplicate entry", "1062"))
+        code = _read_mysql_errno(_original_sql_error(error))
+        if code == 1062:
+            return IntegrityViolationKind.UNIQUE_CONFLICT
+        if code in (1215, 1216, 1217, 1451, 1452):
+            return IntegrityViolationKind.FOREIGN_KEY
+        if code == 3819:
+            return IntegrityViolationKind.CHECK
+        return IntegrityViolationKind.UNKNOWN
 
     def classify_transaction_error(
         self,
@@ -1197,22 +1230,10 @@ def _read_mysql_errno(error: BaseException) -> "int | None":
         return None
 
 
-def _classify_error(
-    error: BaseException, unique_markers: "tuple[str, ...]"
-) -> IntegrityViolationKind:
-    message = str(error).lower()
-    if any(marker in message for marker in unique_markers):
-        return IntegrityViolationKind.UNIQUE_CONFLICT
-    if (
-        "foreign key" in message
-        or "1451" in message
-        or "1452" in message
-        or "23503" in message
-    ):
-        return IntegrityViolationKind.FOREIGN_KEY
-    if "check constraint" in message or "3819" in message or "23514" in message:
-        return IntegrityViolationKind.CHECK
-    return IntegrityViolationKind.UNKNOWN
+def _original_sql_error(error: BaseException) -> BaseException:
+    from sqlalchemy.exc import DBAPIError
+
+    return error.orig if isinstance(error, DBAPIError) else error
 
 
 __all__ = [

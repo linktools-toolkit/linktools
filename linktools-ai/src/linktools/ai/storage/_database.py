@@ -3,7 +3,9 @@
 """Domain-independent SQL context, metadata primitives, and validation."""
 
 import asyncio
+import sqlite3
 import sys
+import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from operator import index
@@ -150,7 +152,11 @@ class SqlStorageContext:
             try:
                 task.result()
             except BaseException as error:
+                _release_sqlite_error_frames(error)
                 raise cancelled from error
+            raise
+        except BaseException as error:
+            _release_sqlite_error_frames(error)
             raise
 
     async def run_mutation(
@@ -224,6 +230,7 @@ class SqlStorageContext:
                         await self.dialect.begin_consistent_read(session)
                     result = await callback(session)
                 except BaseException as error:
+                    _release_sqlite_error_frames(error)
                     disposition = self.dialect.classify_transaction_error(
                         error,
                         phase=SqlTransactionPhase.BODY,
@@ -242,6 +249,7 @@ class SqlStorageContext:
                 try:
                     await transaction.__aexit__(None, None, None)
                 except BaseException as error:
+                    _release_sqlite_error_frames(error)
                     disposition = self.dialect.classify_transaction_error(
                         error,
                         phase=SqlTransactionPhase.COMMIT,
@@ -293,6 +301,17 @@ class SqlStorageContext:
     @property
     def closed(self) -> bool:
         return self._closed
+
+
+def _release_sqlite_error_frames(error: BaseException) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    if isinstance(error, DBAPIError) and isinstance(error.orig, sqlite3.Error):
+        # A failed adapter call can retain its native cursor in exited frames.
+        # Release it before this connection can be reused for a blocking COMMIT;
+        # later GC on the event loop could otherwise prevent readers releasing.
+        # Keep exception identity, database codes and the traceback stack intact.
+        traceback.clear_frames(error.__traceback__)
 
 
 def create_sqlite_storage_context(path: str | Path) -> SqlStorageContext:

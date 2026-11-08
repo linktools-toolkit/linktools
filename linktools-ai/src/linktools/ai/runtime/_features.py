@@ -6,7 +6,7 @@ import functools
 import inspect
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import replace, dataclass, field
 from types import MappingProxyType
 from typing import Generic, Literal, TypeVar, get_type_hints
 
@@ -32,6 +32,8 @@ from ..spec import (
 from ..storage import StorageRevision
 from ..workspace import LocalWorkspaceBackend, Workspace
 from ..capability import (
+    ToolCallIdentity,
+    TraceCapability,
     AgentContext,
     AssetCapability,
     CapabilityContribution,
@@ -440,6 +442,16 @@ def _freeze_defaults(value: Mapping[str, JsonValue]) -> ImmutableJsonMapping:
     return frozen
 
 
+def _tool_context(ctx: PydanticRunContext[AgentContext[object]]) -> AgentContext[object]:
+    if ctx.run_id is None or ctx.tool_call_id is None or ctx.tool_name is None:
+        return ctx.deps
+    trace = ctx.capabilities.get(TraceCapability.id)
+    return replace(
+        ctx.deps, tool_call=ToolCallIdentity.from_context(ctx),
+        trace=trace if isinstance(trace, TraceCapability) else None,
+    )
+
+
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
     if not callable(function):
         raise TypeError("tool function must be callable")
@@ -457,7 +469,7 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
             **kwargs: object,
         ) -> object:
             return await function(
-                runtime_context.deps,
+                _tool_context(runtime_context),
                 *args,
                 **kwargs,
             )
@@ -470,7 +482,7 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
             *args: object,
             **kwargs: object,
         ) -> object:
-            return function(runtime_context.deps, *args, **kwargs)
+            return function(_tool_context(runtime_context), *args, **kwargs)
 
         invoke = functools.wraps(function)(invoke_sync)
 

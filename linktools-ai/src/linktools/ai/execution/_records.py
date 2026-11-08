@@ -265,6 +265,7 @@ class ExecutionStartClaim:
     idempotency_key_digest: str
     request_digest: str
     started_at: datetime
+    request_identity_version: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,8 +325,11 @@ class IdempotencyRecord:
     error_code: str | None
     created_at: datetime
     updated_at: datetime
+    request_identity_version: int = 1
 
     def __post_init__(self) -> None:
+        if type(self.request_identity_version) is not int or self.request_identity_version not in (1, 2):
+            raise ValueError("request identity version is unsupported")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("idempotency timestamps require timezone awareness")
 

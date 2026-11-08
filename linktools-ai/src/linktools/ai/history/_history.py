@@ -343,6 +343,15 @@ class History:
                                      self._session_cursor_signer, cache, now=lambda: time.time())
         )
 
+    async def read_model_interactions(
+        self, execution_id: str, *, principal: Principal, identities: tuple[tuple[int, int], ...],
+        include_content: bool = False, include_client_requests: bool = False,
+    ) -> tuple[ModelInteractionItem, ...]:
+        return await self._service.read_model_interactions(
+            execution_id, principal=principal, identities=identities,
+            include_content=include_content, include_client_requests=include_client_requests,
+        )
+
     async def close(self) -> None:
         """Close this reader's subscriptions, never its borrowed persistence."""
         self._closed = True
