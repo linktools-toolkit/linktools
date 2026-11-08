@@ -97,8 +97,8 @@ async def test_native_mutation_failure_does_not_claim_no_effect(
     path_open = Path.open
     failed = False
 
-    def open_with_failure(path: Path, mode: str = "r") -> BinaryIO:
-        stream = cast(BinaryIO, path_open(path, mode))
+    def open_with_failure(path: Path, mode: str = "r", *args: object, **kwargs: object) -> BinaryIO:
+        stream = cast(BinaryIO, path_open(path, mode, *args, **kwargs))
         if path != target or mode != "wb":
             return stream
         write, flush, close = stream.write, stream.flush, stream.close
@@ -142,7 +142,8 @@ async def test_native_mutation_failure_does_not_claim_no_effect(
         assert raised.value.code is code
         assert not isinstance(raised.value, WorkspaceOperationRejected)
         assert failed
-        assert target.read_bytes() == (b"" if phase == "before_write" else b"changed")
+        with target.open("rb", buffering=0) as stored:
+            assert stored.read() == (b"" if phase == "before_write" else b"changed")
     finally:
         await session.close()
 
@@ -213,10 +214,10 @@ async def test_native_open_failure_after_parent_creation_keeps_unknown_effect(
     target = tmp_path / "parent/nested/file"
     path_open = Path.open
 
-    def denied_open(path: Path, mode: str = "r") -> BinaryIO:
+    def denied_open(path: Path, mode: str = "r", *args: object, **kwargs: object) -> BinaryIO:
         if path == target and mode == "wb":
             raise PermissionError("opening refused after parent creation")
-        return cast(BinaryIO, path_open(path, mode))
+        return cast(BinaryIO, path_open(path, mode, *args, **kwargs))
 
     session = LocalWorkspaceBackend(tmp_path)
     try:

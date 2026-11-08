@@ -533,7 +533,11 @@ async def test_cleanup_retry_retains_process_identity_and_output_readers(
     try:
         if entry == "registered_stdio":
             handle = await backend.open_stdio_process(sys.executable, ("-c", "print('ready', flush=True)"))
-            assert await asyncio.wait_for(handle.read_stdout(), 5) == b"ready\n"
+            output = bytearray()
+            async with asyncio.timeout(5):
+                while chunk := await handle.read_stdout(2):
+                    output.extend(chunk)
+            assert output == b"ready\n"
             await handle._process.wait()
             monkeypatch.setattr(_local_process, "_has_owned_process_group_members", inspect)
             with pytest.raises(AIError) as initial:
