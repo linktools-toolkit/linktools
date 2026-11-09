@@ -378,6 +378,46 @@ async def test_nonshared_runtime_keeps_independent_inline_start(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("commit", (CommitPolicy.sync(), CommitPolicy.terminal()), ids=("sync", "terminal"))
+async def test_trace_without_native_checkpoints_publishes_and_seals_inline_history(
+    tmp_path: Path, backend: str, commit: CommitPolicy,
+) -> None:
+    features = RuntimeFeatures("trace-without-checkpoints")
+    features.capability(TraceCapability(commit=commit), scope="runtime")
+    features.agent("default", model="default", allow_tools=())
+
+    async def model(_messages, _info):
+        return ModelResponse(parts=[TextPart("done")])
+
+    storage = (PersistenceStorage.in_memory() if backend == "memory" else
+               PersistenceStorage.sqlite(tmp_path / "trace-only.db"))
+    async with Persistence.open("trace-without-checkpoints", storage=storage) as state:
+        async with Runtime.attach(persistence=state,
+                features=model_features(_Models(_UsageFunctionModel(model)), features)) as runtime:
+            execution = await runtime.agents.get().start("work", idempotency_key="work")
+            assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+
+        head = await state.execution.executions.get(execution.execution_id, tenant_id="default")
+        seal = await state.execution.executions.get_history_seal(execution.execution_id, tenant_id="default")
+        assert head is not None and not head.restart_checkpoints and head.durable_trace
+        assert seal is not None and head.history_seal_digest == seal.seal_digest
+        sealed_run, = seal.run_heads
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
+        run = await archive.get_agent_run(agent_run_id=sealed_run.agent_run_id)
+        assert run is not None
+        events = await archive.list_events(agent_run_id=run.agent_run_id)
+        assert sealed_run.event_count == len(events)
+        assert [event.event_index for event in events] == list(range(len(events)))
+        assert [event.event_type for event in events].count("AGENT_RUN_STARTED") == 1
+        assert events[0].event_type == "AGENT_RUN_STARTED"
+        assert events[-1].event_type == "AGENT_RUN_SUCCEEDED"
+        if backend == "sqlite":
+            raw = await _raw_events(archive, run.agent_run_id)
+            assert _decode_step_envelope(raw[0].data) == events[0]
+
+
+@pytest.mark.asyncio
 async def test_unstaged_archive_start_stays_inline(tmp_path: Path) -> None:
     async with _source(tmp_path, confirmed=False) as (state, native, run, projected_run):
         archive = state.run_store.read_store(PersistenceDomain.TRACE)

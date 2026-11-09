@@ -237,7 +237,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         return archive.native_start_receipt(run_id) if isinstance(archive, StateStepArchive) else None
 
     def _canonical_trace_run(self, run: AgentRunRecord) -> AgentRunRecord:
-        if not self.can_share_native_start(run.agent_run_id, self.step_store):
+        if (run.agent_run_id not in self._step_boundaries
+                or not self.can_share_native_start(run.agent_run_id, self.step_store)):
             return run
         source = self._staging.native_run_local(run.agent_run_id)
         if source is None:
@@ -248,9 +249,15 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     def _confirm_native_start_projection(self, events: Sequence[StepEvent]) -> None:
         archive = self._archives.get(PersistenceDomain.TRACE)
-        if isinstance(archive, StateStepArchive) and isinstance(self.step_store, SqlStepStore):
-            for receipt in archive.confirm_native_start_projection(events):
-                source = self.step_store.run_from_receipt(receipt)
+        if isinstance(archive, StateStepArchive):
+            receipts = archive.confirm_native_start_projection(events)
+            if not receipts:
+                return
+            native = self.step_store
+            if not isinstance(native, SqlStepStore):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            for receipt in receipts:
+                source = native.run_from_receipt(receipt)
                 if source is not None:
                     self.checkpoint_persistence.reader.confirm_run(source)
                     self._staging.adopt_native_run_local(OfficialStepReader.project_run(source))
