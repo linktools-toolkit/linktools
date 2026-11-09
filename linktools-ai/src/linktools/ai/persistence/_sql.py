@@ -441,6 +441,7 @@ class SqlStateStorageGroup:
     def _create_transactions(
         self, stores: Sequence["SqlStateStore"], session: "AsyncSession",
         clock: "_SqlTransactionClock",
+        observers: list[Callable[[bool], None]] | None = None,
     ) -> dict["SqlStateStore", "_SqlTransaction"]:
         partitions: dict[bytes, _SqlTransaction] = {}
         transactions: dict[SqlStateStore, _SqlTransaction] = {}
@@ -448,7 +449,7 @@ class SqlStateStorageGroup:
             digest = store.store_digest
             if digest not in partitions:
                 partitions[digest] = _SqlTransaction(
-                    session, self._metadata, self._context, digest, clock=clock,
+                    session, self._metadata, self._context, digest, clock=clock, observers=observers,
                 )
             transactions[store] = partitions[digest]
         return transactions
@@ -474,15 +475,19 @@ class SqlStateStorageGroup:
         capture_tokens: dict[SqlStateStore, object] = {}
         changed: set[SqlStateStore] = set()
         confirmed = False
+        observers: list[Callable[[bool], None]] = []
+        aborted_observers: list[Callable[[bool], None]] = []
 
         async def execute(session: "AsyncSession") -> ValueT:
             nonlocal captured_at, captures, capture_tokens, changed
+            aborted_observers.extend(observers)
+            observers.clear()
             captured_at = time()
             capture_tokens = {store: store._reads.capture_token for store in members}
             clock = _SqlTransactionClock(session, self._context)
             if self._archive_on_mutation and not self._archive_scope_initialized:
                 await self._initialize_archive_scope(session, clock)
-            transactions = self._create_transactions(members, session, clock)
+            transactions = self._create_transactions(members, session, clock, observers)
             group_transaction = _SqlGroupTransaction(self, transactions)
             token = bind_state_scope(self, transactions, record_reader=group_transaction)
             try:
@@ -575,14 +580,23 @@ class SqlStateStorageGroup:
         finally:
             if lock is not None:
                 lock.release()
-            for store in members:
-                if confirmed and store not in changed:
-                    continue
-                previous = await store._reads.invalidate()
-                # A delayed source return must not acquire a newer capture boundary.
-                if confirmed and previous is capture_tokens.get(store):
-                    for record in captures.get(store, ()):
-                        store._reads.publish_record(record, captured_at=captured_at)
+            try:
+                for store in members:
+                    if confirmed and store not in changed:
+                        continue
+                    previous = await store._reads.invalidate()
+                    # A delayed source return must not acquire a newer capture boundary.
+                    if confirmed and previous is capture_tokens.get(store):
+                        for record in captures.get(store, ()):
+                            store._reads.publish_record(record, captured_at=captured_at)
+            finally:
+                for observer in (observers if confirmed else (*aborted_observers, *observers)):
+                    try:
+                        observer(confirmed)
+                    except Exception:
+                        # Cache maintenance cannot change the durable commit outcome.
+                        _logger.warning("SQL mutation observer failed", exc_info=True)
+                observers.clear()
 
     @asynccontextmanager
     async def _session(self):
@@ -885,6 +899,7 @@ class _SqlTransaction:
         store_digest: bytes,
         *,
         clock: _SqlTransactionClock | None = None,
+        observers: list[Callable[[bool], None]] | None = None,
     ) -> None:
         if not isinstance(store_digest, bytes) or len(store_digest) != 32:
             raise ValueError("store_digest must be a 32-byte digest")
@@ -900,11 +915,27 @@ class _SqlTransaction:
         self._sequence_cache: dict[bytes, int] = {}
         self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
+        self._observers = observers
 
     def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]:
         if not is_active_state_transaction(self):
             raise StateTransactionNestingError("record cache requires its active storage transaction")
         return {key: self._record_cache[key] for key in keys if key in self._record_cache}
+
+    async def read_sql_rows(
+        self, context: SqlStorageContext, statement: "Select",
+    ) -> tuple[Mapping[str, object], ...]:
+        from sqlalchemy.sql import Select, visitors
+        from sqlalchemy.sql.dml import UpdateBase
+        from sqlalchemy.sql.elements import TextClause
+        from sqlalchemy.sql.selectable import ForUpdateArg
+
+        if (not isinstance(statement, Select) or context.engine is not self._context.engine
+                or context.closed or self._context.closed or not is_active_state_transaction(self)
+                or any(isinstance(node, (UpdateBase, TextClause, ForUpdateArg))
+                       for node in visitors.iterate(statement))):
+            raise StateTransactionNestingError("native rows require a read-only SQL plan in their active boundary")
+        return tuple(dict(row) for row in (await self._execute(statement)).mappings())
 
     async def read_joined_records(
         self, context: SqlStorageContext, statement: "Select", *, keys: Sequence[bytes] = (),
@@ -955,6 +986,11 @@ class _SqlTransaction:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((_fact_from_row(row), row))
         return tuple(result)
+
+    def observe_mutation(self, callback: Callable[[bool], None]) -> None:
+        if self._observers is None or (not is_active_state_transaction(self) or active_state_scope() is None or not active_state_scope().writable):
+            raise StateTransactionNestingError("commit observer requires its active writable SQL boundary")
+        self._observers.append(callback)
 
     async def run_sql(
         self, context: SqlStorageContext,

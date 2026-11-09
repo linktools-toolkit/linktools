@@ -9,6 +9,7 @@ is the single semantic boundary shared by the local and SQL implementations.
 from __future__ import annotations
 
 from ._archive import ArchiveRoot
+from ._message_root import NativeMessageRoot
 from ..execution import (
     RuntimePayloadRef,
     PendingDeferredCall,
@@ -360,7 +361,7 @@ class TranscriptChunk:
     codec: str
     raw_digest: str
     raw_size: int
-    content: ArchiveRoot
+    content: ArchiveRoot | NativeMessageRoot
 
 
 class TranscriptSeekDimension(str, Enum):
@@ -446,7 +447,7 @@ class LoadedContextMessage:
 @dataclass(frozen=True, slots=True)
 class LoadedModelContext:
     messages: tuple[LoadedContextMessage, ...]
-    archive_root: ArchiveRoot | None = field(default=None, compare=False)
+    archive_root: ArchiveRoot | NativeMessageRoot | None = field(default=None, compare=False)
     archive_digest: str | None = field(default=None, compare=False)
     archive_frontier: tuple[StoredRecord, ...] = field(default=(), compare=False, repr=False)
 
@@ -461,12 +462,12 @@ class InlineContextBlock:
 
 @dataclass(frozen=True, slots=True)
 class ArchivedContextBlock:
-    root: ArchiveRoot
+    root: ArchiveRoot | NativeMessageRoot
     raw_digest: str
     raw_size: int
 
     def __post_init__(self) -> None:
-        if (not isinstance(self.root, ArchiveRoot)
+        if (not isinstance(self.root, (ArchiveRoot, NativeMessageRoot))
                 or not isinstance(self.raw_digest, str) or len(self.raw_digest) != 64
                 or any(value not in "0123456789abcdef" for value in self.raw_digest)
                 or isinstance(self.raw_size, bool) or not isinstance(self.raw_size, int)

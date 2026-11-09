@@ -4,6 +4,7 @@
 
 from ..storage import StorageRetentionMode
 from ._archive import ArchiveRoot, ArchiveSlice
+from ._message_root import NativeMessageRoot, NativeMessageSlice
 
 import base64
 import binascii
@@ -343,6 +344,8 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_binding_contract", TaskBindingContract),
     ("archive_root", ArchiveRoot),
     ("archive_slice", ArchiveSlice),
+    ("native_message_root", NativeMessageRoot),
+    ("native_message_slice", NativeMessageSlice),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
     ("transcript_message_ref", TranscriptMessageRef),

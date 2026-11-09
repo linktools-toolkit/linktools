@@ -85,8 +85,8 @@ async def test_compound_failure_rolls_back_every_record_and_body_receipt(atomic_
     with pytest.raises(RuntimeError, match="reference failed"):
         await store.commit_step(run=run, events=events, snapshot=snapshot)
     event.remove(engine.sync_engine, "before_cursor_execute", fail)
-    assert not store._confirmed_messages
-    assert not store._confirmed_sequences
+    assert not store._message_proofs
+    assert not store._message_content._known_nodes
     async with engine.connect() as connection:
         for table in ("runs", "events", "snapshots", "sequences", "messages"):
             assert await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}")) == 0
@@ -120,8 +120,8 @@ async def test_compound_lost_commit_ack_requires_readback_without_cache_promotio
         with pytest.raises(AIError) as raised:
             await store.commit_step(run=run, events=events, snapshot=snapshot)
         assert raised.value.code == ErrorCode.STORAGE_COMMIT_UNKNOWN
-    assert not store._confirmed_messages
-    assert not store._confirmed_sequences
+    assert not store._message_proofs
+    assert not store._message_content._known_nodes
     cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
     try:
         assert await cold.get_run(run_id="run") == run
@@ -130,8 +130,8 @@ async def test_compound_lost_commit_ack_requires_readback_without_cache_promotio
     finally:
         await cold.close()
     await store.commit_step(events=events, snapshot=snapshot)
-    assert not store._confirmed_messages
-    assert not store._confirmed_sequences
+    assert not store._message_proofs
+    assert not store._message_content._known_nodes
     await store.commit_step(snapshot=replace(snapshot, idempotency_key="next"))
     assert traffic.message_rows == 2
     await store.commit_step(snapshot=replace(snapshot, idempotency_key="warm"))
@@ -147,8 +147,8 @@ async def test_duplicate_run_rejects_compound_group_without_publishing_tail(atom
         await store.commit_step(run=replace(run, registration_id="other"), events=events, snapshot=snapshot)
     assert await store.list_events(run_id="run") == []
     assert await store.latest_snapshot(run_id="run") is None
-    assert not store._confirmed_messages
-    assert not store._confirmed_sequences
+    assert not store._message_proofs
+    assert not store._message_content._known_nodes
 
 
 @pytest.mark.asyncio
@@ -212,14 +212,14 @@ async def test_inflight_compound_group_is_invisible_to_cold_reader_and_cache(
     try:
         await inserted.wait()
         assert not writer.done()
-        assert not store._confirmed_messages
-        assert not store._confirmed_sequences
+        assert not store._message_proofs
+        assert not store._message_content._known_nodes
         assert await cold.get_run(run_id="run") is None
         assert await cold.list_events(run_id="run") == []
         assert await cold.latest_snapshot(run_id="run") is None
         release.set()
         await writer
-        assert store._confirmed_messages
+        assert store._message_proofs
         assert await cold.get_run(run_id="run") == run
         assert await cold.list_events(run_id="run") == events
         assert await cold.latest_snapshot(run_id="run") == snapshot
@@ -247,7 +247,7 @@ async def test_native_boundary_joins_control_transaction_without_reads_or_early_
         async def commit(transaction):
             await transaction.insert_record(control)
             receipt = await native.write_prepared_step(transaction, prepared)
-            assert not native._confirmed_messages
+            assert not native._message_proofs
             return receipt
 
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
@@ -256,9 +256,9 @@ async def test_native_boundary_joins_control_transaction_without_reads_or_early_
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert len(commits) == 1
         assert not any(statement.lstrip().upper().startswith(("SELECT", "WITH")) for statement in statements)
-        assert not native._confirmed_messages
+        assert not native._message_proofs
         native.confirm_prepared_step(receipt)
-        assert native._confirmed_messages
+        assert native._message_proofs
         assert await state.read(lambda transaction: transaction.get_record(control.key_digest)) == control
         assert await native.get_run(run_id="run") == run
         assert await native.list_events(run_id="run") == events
@@ -288,7 +288,7 @@ async def test_native_boundary_failure_rolls_back_control_and_native_rows(tmp_pa
         assert await state.read(lambda transaction: transaction.get_record(control.key_digest)) is None
         assert await native.get_run(run_id="run") is None
         assert await native.latest_snapshot(run_id="run") is None
-        assert not native._confirmed_messages
+        assert not native._message_proofs
         await native.close()
 
 

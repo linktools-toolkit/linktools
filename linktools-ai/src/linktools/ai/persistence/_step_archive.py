@@ -74,6 +74,7 @@ from ._native_event_reference import NativeEventReferences
 from ._native_run_reference import NativeRunReferences, is_native_run_reference
 from ._sql import SqlStateStore
 from ._step_store import SqlStepStore, StepWriteReceipt
+from ._message_root import NativeMessageRoot
 from ._plan import PersistenceDomain
 from ._object_router import runtime_object_source_reads
 from ._step_contracts import (
@@ -1184,6 +1185,7 @@ class StateStepArchive(AgentRunStore):
                 self._native_events = NativeEventReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
 
     def bind_native_run_store(self, native: SqlStepStore) -> None:
+        self._history.bind_native_message_store(native)
         if self._native_runs is not None:
             self._native_runs.bind(native)
             self._native_events.bind(native)
@@ -1270,10 +1272,8 @@ class StateStepArchive(AgentRunStore):
             return await self._store.mutate(callback)
         group = self._store.storage_group
         if any(store.storage_group is not group for store in stores):
-            raise AIError(
-                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                "trace evidence and execution authority require one StateStorageGroup",
-            )
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                          "trace evidence and execution authority require one StateStorageGroup")
         return await group.mutate(
             stores, lambda transaction: callback(transaction.transaction(self._store)),
         )
@@ -2471,6 +2471,8 @@ class StateStepArchive(AgentRunStore):
                 transaction, run, events=events, checkpoints=prepared.checkpoints,
                 interactions=interactions, execution_id=execution_id,
             )
+            if archive is not None:
+                await self._history.publish_native_archive(transaction, archive, owner_written=True)
         await self._mutate(commit)
 
     def combine_projection_archives(
@@ -2520,6 +2522,8 @@ class StateStepArchive(AgentRunStore):
                 producer_generation=producer_generation,
                 execution_id=execution_id,
             )
+            if archive is not None:
+                await self._history.publish_native_archive(transaction, archive, owner_written=True)
         await self._mutate(commit)
 
     async def _sync_projection_in_transaction(
@@ -2653,6 +2657,8 @@ class StateStepArchive(AgentRunStore):
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         await _insert_facts(transaction, tuple(stored_facts))
+        for checkpoint in checkpoints:
+            await self._history.publish_native_archive(transaction, checkpoint.archive, owner_written=True)
         return created
 
     async def materialize_checkpoint(
@@ -2751,6 +2757,7 @@ class StateStepArchive(AgentRunStore):
             await _insert_facts(transaction, (replace(checkpoint_fact, sequence=sequence),))
         else:
             sequence = await self.checkpoint_count(agent_run_id=run.agent_run_id)
+        await self._history.publish_native_archive(transaction, checkpoint.archive, owner_written=True)
         return sequence
 
     async def materialize_checkpoint_in_transaction(
@@ -3085,7 +3092,8 @@ class StateStepArchive(AgentRunStore):
         if frozen.encoded_digest() != (block.raw_digest, block.raw_size):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archive = await self._history.content_archive()
-        frontier = archive.prepared_frontier(block.root, prepared.archive if archive_records is None else archive_records)
+        frontier = (() if isinstance(block.root, NativeMessageRoot) else
+                    archive.prepared_frontier(block.root, prepared.archive if archive_records is None else archive_records))
         context = LoadedModelContext((), block.root, block.raw_digest, frontier)
         key = await self._session_context_cache_key(prepared.stored.agent_run_id,
             checkpoint_sequence, prepared.stored.projection_digest)
@@ -3130,17 +3138,24 @@ class StateStepArchive(AgentRunStore):
             return None
         try:
             value = json.loads(content)
-            root = ArchiveRoot.from_json(value["root"])
+            wire = value["root"]
+            root = (NativeMessageRoot.from_json(wire) if wire.get("type") == "native_message_root"
+                    else ArchiveRoot.from_json(wire))
             raw = canonical_json_bytes(value["messages"])
             messages = decode_model_messages(raw)
             block = ArchivedContextBlock(root, value["digest"], len(raw))
             archive = await self._history.content_archive()
-            if (root.scope_id != archive.scope_id or root.content_scope != archive.content_scope
+            valid_scope = ((root.group_id == archive.scope_id and root.store_digest == SqlStepStore.scope_digest(
+                namespace=self._namespace, tenant_id=self._tenant_id)) if isinstance(root, NativeMessageRoot)
+                else root.scope_id == archive.scope_id and root.content_scope == archive.content_scope)
+            if (not valid_scope
                     or root.count != len(messages) or hashlib.sha256(raw).hexdigest() != block.raw_digest
                     or projection != ContextProjection((block,))):
                 return None
             frontier = tuple(decode_record(record) for record in value["frontier"])
             if frontier:
+                if isinstance(root, NativeMessageRoot):
+                    return None
                 archive.reuse_frontier(root, frontier, PreparedArchive())
             return LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in messages),
                                       root, block.raw_digest, frontier)

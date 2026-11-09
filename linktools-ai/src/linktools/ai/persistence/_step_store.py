@@ -13,10 +13,10 @@ from dataclasses import dataclass, fields, replace
 from itertools import groupby
 from typing import TYPE_CHECKING
 from uuid import uuid4
+from weakref import WeakKeyDictionary, WeakSet
 
 from pydantic import TypeAdapter
-from pydantic_ai.messages import ModelMessagesTypeAdapter
-from pydantic_ai_harness.media import MediaStore, externalize_media, restore_media
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -29,12 +29,20 @@ from linktools.core import environ
 
 from ..errors import AIError
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
-from ._archive import ImmutableSequenceNode
+from ._archive import ContentArchive, PreparedArchive
+from ._message_root import NativeMessageRoot, NativeMessageSequence, NativeMessageSlice
+from ._step_message_content import (
+    CommittedNativeMessages, NativeMessageContent, NativeMessageReceipt, PreparedMessagePayload,
+    PreparedNativeMessages,
+)
+from ._transcript_staging import MessageArchive, MessageSnapshot
+from ._payload import encode_payload_bytes
+from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, encode_model_messages
+from ..storage import StoredPayload
 from ._native_checkpoint import NativeCheckpoint
 from ._step_maintenance import StepContentCleanupResult, purge_step_content
-from ._step_sequence import build_step_sequence, step_sequence_contents
 from ._step_schema import build_step_sql_metadata
-from .state import SqlStateTransaction, StateTransaction
+from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction
 from ..steps import NativeLifecycleEvent
 
 if TYPE_CHECKING:
@@ -93,8 +101,7 @@ class PreparedStep:
     events: tuple[StepEvent, ...]
     snapshot: ContinuableSnapshot | None
     snapshot_values: "dict[str, SqlValue] | None"
-    messages: tuple[tuple[str, str], ...]
-    sequences: tuple[tuple[str, ImmutableSequenceNode], ...]
+    messages: PreparedNativeMessages | None
     managed_start: bool = False
 
 
@@ -105,6 +112,7 @@ class StepWriteReceipt:
     message_digests: tuple[str, ...]
     sequence_digests: tuple[str, ...]
     run_fields: _RunFields | None = None
+    native_messages: NativeMessageReceipt | None = None
     lifecycle_keys: tuple[str, ...] = ()
 
 
@@ -124,6 +132,8 @@ class SqlStepStore:
     Direct run replacement also requires quiescing and closing every adapter.
     """
 
+    _instances: WeakSet["SqlStepStore"] = WeakSet()
+
     def __init__(
         self,
         engine: "AsyncEngine | SqlStorageContext",
@@ -131,8 +141,6 @@ class SqlStepStore:
         namespace: str,
         tenant_id: str,
         tool_effect_store: StepStore | None = None,
-        media_store: MediaStore | None = None,
-        media_threshold_bytes: int = 64 * 1024,
         max_snapshots_per_run: int | None = None,
         max_cached_messages: int = 4096,
     ) -> None:
@@ -148,14 +156,21 @@ class SqlStepStore:
         self._metadata = build_step_sql_metadata()
         self._store_digest = store_digest
         self._tool_effect_store = tool_effect_store
-        self._media_store = media_store
-        self._media_threshold_bytes = media_threshold_bytes
         self._max_snapshots_per_run = max_snapshots_per_run
         self._initialized = False
         self._max_cached_messages = max_cached_messages
         self._confirmed_messages: OrderedDict[str, None] = OrderedDict()
         self._confirmed_sequences: OrderedDict[str, None] = OrderedDict()
+        self._message_content = NativeMessageContent(self._context, store_digest=store_digest,
+            max_cached_messages=max_cached_messages, max_cached_nodes=max_cached_messages)
+        self._message_archive: ContentArchive | None = None
+        self._message_proofs: OrderedDict[NativeMessageSequence, CommittedNativeMessages] = OrderedDict()
+        self._message_integrity: OrderedDict[NativeMessageSequence, tuple[str, int]] = OrderedDict()
+        self._prepared_integrity: WeakKeyDictionary[PreparedNativeMessages, tuple[str, int]] = WeakKeyDictionary()
+        self._message_inputs: OrderedDict[str, tuple[str, int, int, NativeMessageSequence]] = OrderedDict()
+        self._frozen_messages = MessageArchive()
         self._confirmed_runs: OrderedDict[str, _RunFields] = OrderedDict()
+        self._instances.add(self)
         self._receipt_sink: ContextVar[list[StepWriteReceipt] | None] = ContextVar("step_write_receipts", default=None)
 
     @classmethod
@@ -189,6 +204,7 @@ class SqlStepStore:
         self._confirmed_messages.clear()
         self._confirmed_sequences.clear()
         self._confirmed_runs.clear()
+        self.invalidate_message_content()
         if self._owns_context:
             await self._context.close()
 
@@ -207,12 +223,14 @@ class SqlStepStore:
             self._confirmed_messages.clear()
             self._confirmed_sequences.clear()
             try:
-                result = await purge_step_content(self._context, self._metadata, self._store_digest)
+                result = await purge_step_content(self._context, self._metadata, self._store_digest,
+                    group=None if self._message_archive is None else self._message_archive.store.storage_group,
+                    read_object=None if self._message_archive is None else self._message_archive.read_payload_object)
             finally:
                 # Cancellation or a lost commit acknowledgement must not leave
                 # the caller believing an old body still exists after reopening.
                 self._confirmed_messages.clear()
-                self._confirmed_sequences.clear()
+                self.invalidate_context(self._context)
             _logger.info("native content reclaimed: sequences=%s messages=%s",
                          result.deleted_sequences, result.deleted_messages)
             return result
@@ -691,6 +709,170 @@ class SqlStepStore:
         """The borrowed physical context used to verify same-group composition."""
         return self._context
 
+    @classmethod
+    def for_state_store(cls, store: StateStore, *, namespace: str, tenant_id: str) -> "SqlStepStore | None":
+        """Borrow a SQL owner's native message partition without opening a connection."""
+        from ._sql import SqlStateStore
+
+        if not isinstance(store, SqlStateStore):
+            return None
+        return cls(store.context, namespace=namespace, tenant_id=tenant_id)
+
+    async def prepare_archived_messages(
+        self, messages: Sequence[ModelMessage], prepared: PreparedArchive,
+    ) -> NativeMessageRoot:
+        value = await self.prepare_message_content(self._frozen_messages.snapshot(messages))
+        prepared.native_messages[value.root] = value
+        prepared.native_publishers[value.root] = self.publish_archived_messages
+        return self.message_root(value.root)
+
+    async def publish_archived_messages(self, transaction: StateTransaction, prepared: PreparedArchive) -> None:
+        """Publish dependencies inside the owner's atomic mutation, then observe commit."""
+        if not prepared.native_messages:
+            return
+        if not isinstance(transaction, SqlMutationObserver):
+            raise ValueError("native messages require an observable SQL mutation")
+        receipts = await self.publish_message_content(transaction, prepared, owner_written=True)
+        transaction.observe_mutation(lambda committed: (
+            self.confirm_message_content(receipts) if committed else self.invalidate_message_content()
+        ))
+
+    def bind_message_archive(self, archive: ContentArchive) -> None:
+        """Bind the already opened physical group scope and its object route."""
+        from ._sql import SqlStateStorageGroup
+
+        group = archive.store.storage_group
+        if not isinstance(group, SqlStateStorageGroup) or group.context.engine is not self._context.engine:
+            raise ValueError("native message archive belongs to another SQL group")
+        self._message_content.bind_group(archive.scope_id)
+        self._message_archive = archive
+        archive.bind_message_publisher(self.publish_archived_messages)
+
+    def message_root(self, sequence: NativeMessageSequence) -> NativeMessageRoot:
+        return self._message_content.scoped_root(sequence)
+
+    @classmethod
+    def invalidate_context(cls, context: SqlStorageContext) -> None:
+        """Discard all same-engine content proofs after offline reclamation."""
+        for store in tuple(cls._instances):
+            if store.storage_context.engine is context.engine:
+                store.invalidate_message_content()
+
+    def invalidate_message_content(self) -> None:
+        self._confirmed_messages.clear()
+        self._confirmed_sequences.clear()
+        self._message_content.invalidate()
+        self._message_proofs.clear()
+        self._message_integrity.clear()
+        self._prepared_integrity.clear()
+        self._message_inputs.clear()
+
+    async def _prepare_message_payload(self, raw: bytes) -> PreparedMessagePayload:
+        if self._message_archive is None:
+            compression, _digest, _size, encoded = encode_payload_bytes(raw)
+            payload = StoredPayload.inline_bytes(encoded)
+        else:
+            compression, payload, encoded = await self._message_archive.prepare_payload(raw)
+        return PreparedMessagePayload(raw, encoded=encoded, compression=compression, payload=payload)
+
+    async def prepare_message_content(
+        self, messages: MessageSnapshot, *,
+        baseline: tuple[NativeMessageRoot | NativeMessageSequence, str, int] | None = None,
+        single_sequence: bool = False,
+    ) -> PreparedNativeMessages:
+        """Use frozen bytes; mutable callers must first encode and check all inputs."""
+        base = None
+        start = 0
+        if baseline is not None:
+            root, digest, size = baseline
+            self._message_content.validate_root(root)
+            sequence = root.sequence if isinstance(root, NativeMessageRoot) else root
+            proof = self._message_proofs.get(sequence)
+            complete = (not sequence.slices or len(sequence.slices) == 1
+                        and sequence.slices[0].start == 0
+                        and sequence.slices[0].end == sequence.slices[0].count)
+            if proof is not None and (not single_sequence or complete) and sequence.count <= len(messages):
+                prefix = messages[:sequence.count]
+                if prefix.encoded_digest() == (digest, size):
+                    base, start = proof, sequence.count
+        prepared = await self._message_content.prepare_append(
+            messages[start:], prepare_payload=self._prepare_message_payload, base=base,
+        )
+        self._prepared_integrity[prepared] = messages.encoded_digest()
+        return prepared
+
+    async def publish_message_content(
+        self, transaction: StateTransaction, prepared: PreparedArchive, *, owner_written: bool,
+    ) -> tuple[NativeMessageReceipt, ...]:
+        return tuple([await self._message_content.publish_retained(
+            transaction, value, owner_written=owner_written,
+        ) for value in prepared.native_messages.values()])
+
+    def confirm_message_content(self, receipts: Sequence[NativeMessageReceipt]) -> None:
+        for receipt in receipts:
+            if receipt.root is None:
+                continue
+            proof = self._message_content.confirm_current(receipt)
+            if proof is not None:
+                self._remember_message_proof(proof, integrity=self._prepared_integrity.get(receipt.prepared))
+
+    def _remember_message_proof(
+        self, proof: CommittedNativeMessages, *, integrity: tuple[str, int] | None = None,
+    ) -> None:
+        if not self._max_cached_messages:
+            return
+        self._message_proofs[proof.root] = proof
+        self._message_proofs.move_to_end(proof.root)
+        if integrity is not None:
+            self._message_integrity[proof.root] = integrity
+        while len(self._message_proofs) > _RUN_CACHE_SIZE:
+            root, _proof = self._message_proofs.popitem(last=False)
+            self._message_integrity.pop(root, None)
+
+    def can_reuse_message_root(self, root: NativeMessageRoot, *, raw_digest: str, raw_size: int) -> bool:
+        """Reuse only an actual same-group committed/readback integrity proof."""
+        try:
+            self._message_content.validate_root(root)
+        except ValueError:
+            return False
+        for source in tuple(self._instances):
+            if (source.storage_context.engine is not self.storage_context.engine
+                    or source.store_digest != self.store_digest):
+                continue
+            try:
+                source._message_content.validate_root(root)
+            except ValueError:
+                continue
+            if (root.sequence in source._message_proofs
+                    and source._message_integrity.get(root.sequence) == (raw_digest, raw_size)):
+                return True
+        return False
+
+    async def read_message_roots(
+        self, roots: Sequence[NativeMessageRoot],
+    ) -> tuple[tuple[bytes, ...], ...]:
+        """Read all selected native bodies in one query, resolving objects after SQL."""
+        if not roots:
+            return ()
+        query = self._message_content.range_query(roots)
+        async def read(session: "AsyncSession") -> list[Mapping[str, object]]:
+            return list((await session.execute(query)).mappings().all())
+        rows = []
+        if query is not None:
+            query = query.statement
+            async with self._context.sessions() as session, session.begin():
+                await self._context.run_statement(self._context.dialect.begin_consistent_read(session))
+                rows = await self._context.run_statement(read(session))
+        readbacks = await self._message_content.read_hydrated_ranges(
+            roots, rows, read_object=(None if self._message_archive is None
+                                     else self._message_archive.read_payload_object),
+        )
+        for result in readbacks:
+            raw = combine_model_message_payloads(result.payloads)
+            self._remember_message_proof(self._message_content.adopt_read(result),
+                                         integrity=(hashlib.sha256(raw).hexdigest(), len(raw)))
+        return tuple(result.payloads for result in readbacks)
+
     async def prepare_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
         snapshot: ContinuableSnapshot | None = None, managed_start: bool = False,
@@ -704,9 +886,11 @@ class SqlStepStore:
                     or starts[0].run_id != run.run_id):
                 raise ValueError("managed start requires one keyed run_started and its registration")
         await self.initialize()
-        run, events, snapshot = deepcopy((run, tuple(events), snapshot))
-        values, messages, sequences = (None, (), ()) if snapshot is None else await self._prepare_snapshot(snapshot)
-        return PreparedStep(run, events, snapshot, values, tuple(messages), sequences, managed_start)
+        run, events = deepcopy((run, tuple(events)))
+        if snapshot is not None:
+            snapshot = replace(snapshot, messages=self._frozen_messages.snapshot(snapshot.messages))
+        values, messages = (None, None) if snapshot is None else await self._prepare_snapshot(snapshot)
+        return PreparedStep(run, events, snapshot, values, messages, managed_start)
 
     async def write_prepared_step(
         self, transaction: StateTransaction, prepared: PreparedStep, *,
@@ -775,7 +959,7 @@ class SqlStepStore:
         receipt = StepWriteReceipt((), ())
         if prepared.snapshot is not None and prepared.snapshot_values is not None:
             receipt = await self._write_snapshot(
-                session, prepared.snapshot_values, prepared.messages, prepared.sequences,
+                session, prepared.snapshot_values, prepared.messages,
             )
         return replace(receipt, run_fields=source, lifecycle_keys=tuple(
             event.idempotency_key for event in prepared.events
@@ -788,6 +972,8 @@ class SqlStepStore:
             self._confirm_run(receipt.run_fields)
         self._confirm_records(self._confirmed_messages, receipt.message_digests)
         self._confirm_records(self._confirmed_sequences, receipt.sequence_digests)
+        if receipt.native_messages is not None:
+            self.confirm_message_content((receipt.native_messages,))
 
     def _confirm_run(self, source: _RunFields) -> None:
         if source.engine is not self._context.engine or source.store_digest != self._store_digest:
@@ -852,38 +1038,38 @@ class SqlStepStore:
 
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
-    ) -> "tuple[dict[str, SqlValue], list[tuple[str, str]], tuple[tuple[str, ImmutableSequenceNode], ...]]":
+    ) -> "tuple[dict[str, SqlValue], PreparedNativeMessages]":
         if isinstance(snapshot, NativeCheckpoint):
             snapshot = NativeCheckpoint.encode(snapshot, output_retries_used=snapshot.output_retries_used)
         values = self._record_values(snapshot)
         decoded = NativeCheckpoint.decode(snapshot)
         checkpoint = None
         if isinstance(decoded, NativeCheckpoint):
-            last = json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages[-1:]))[0]
             checkpoint = {
                 "output_retries_used": decoded.output_retries_used,
-                "message_sha256": _digest(_message_body(last, sort_keys=True)),
+                "message_sha256": hashlib.sha256(encode_model_messages(snapshot.messages[-1:])).hexdigest(),
             }
-        messages = json.loads(ModelMessagesTypeAdapter.dump_json(decoded.messages))
-        if self._media_store is not None:
-            messages = await externalize_media(
-                messages, media_store=self._media_store, threshold_bytes=self._media_threshold_bytes,
-            )
-        if not isinstance(messages, list):
-            raise ValueError("snapshot messages must be a list")
-        keyed = []
-        for message in messages:
-            body = _message_body(message)
-            keyed.append((_digest(body), body))
-        values["messages"] = _snapshot_descriptor_json({"stored_messages": len(keyed), "checkpoint": checkpoint})
+        messages = self._frozen_messages.snapshot(decoded.messages)
+        previous = self._message_inputs.get(snapshot.run_id)
+        baseline = None if previous is None else (previous[3], previous[0], previous[1])
+        prepared = await self.prepare_message_content(messages, baseline=baseline, single_sequence=True)
+        sequence = prepared.root
+        if (sequence.count != len(messages) or len(sequence.slices) > 1
+                or sequence.slices and (sequence.slices[0].start != 0
+                                       or sequence.slices[0].end != sequence.slices[0].count)):
+            raise ValueError("snapshot requires one complete native message sequence")
+        values["messages"] = _snapshot_descriptor_json({"stored_messages": sequence.count, "checkpoint": checkpoint})
         values["pruned"] = False
-        values["sequence_root"], sequences = build_step_sequence(tuple(key for key, _ in keyed))
-
-        return values, keyed, sequences
+        values["sequence_root"] = sequence.slices[0].first if sequence.slices else None
+        digest, size = messages.encoded_digest()
+        self._message_inputs[snapshot.run_id] = (digest, size, len(messages), sequence)
+        self._message_inputs.move_to_end(snapshot.run_id)
+        while len(self._message_inputs) > _RUN_CACHE_SIZE:
+            self._message_inputs.popitem(last=False)
+        return values, prepared
 
     async def _write_snapshot(
-        self, session: "AsyncSession", values: "dict[str, SqlValue]", keyed: Sequence[tuple[str, str]],
-        sequences: Sequence[tuple[str, ImmutableSequenceNode]],
+        self, session: "AsyncSession", values: "dict[str, SqlValue]", prepared: PreparedNativeMessages,
     ) -> StepWriteReceipt:
         values = values | self._run_values(values["run_id"])
         values["key_digest"] = _replay_digest(self._store_digest, values["run_digest"], values["idempotency_key"])
@@ -896,34 +1082,15 @@ class SqlStepStore:
                 index_elements=("key_digest",),
             )
             if not result.inserted:
+                # A conflicting owner key proves no candidate content, even if
+                # another owner has already committed that candidate sequence.
                 return StepWriteReceipt((), ())
             snapshot_id = result.row_id
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
-        message_rows = []
-        for key, body in sorted(dict(keyed).items()):
-            if key not in self._confirmed_messages:
-                message_rows.append({"store_digest": self._store_digest, "sha256": key, "message": body})
-        for offset in range(0, len(message_rows), _BATCH_SIZE):
-            await self._context.dialect.insert_ignore_conflict_many(
-                session, table=self._table("messages"),
-                rows=message_rows[offset:offset + _BATCH_SIZE],
-                index_elements=("store_digest", "sha256"),
-            )
-        sequence_rows = [
-            {"store_digest": self._store_digest, "sha256": identity,
-             "message_sha256": node.content_id, "tree_count": node.tree_count,
-             "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
-            for identity, node in sorted(sequences) if identity not in self._confirmed_sequences
-        ]
-        for offset in range(0, len(sequence_rows), _BATCH_SIZE):
-            await self._context.dialect.insert_ignore_conflict_many(
-                session, table=self._table("sequences"),
-                rows=sequence_rows[offset:offset + _BATCH_SIZE],
-                index_elements=("store_digest", "sha256"),
-            )
+        content = await self._message_content.publish_in_session(session, prepared, owner_inserted=True)
         await self._prune_snapshots(session, values["run_id"])
-        return StepWriteReceipt(tuple(dict(keyed)), tuple(identity for identity, _ in sequences))
+        return StepWriteReceipt((), (), native_messages=content)
 
     def _confirm_records(self, cache: "OrderedDict[str, None]", confirmed: Sequence[str]) -> None:
         if self._max_cached_messages:
@@ -957,6 +1124,7 @@ class SqlStepStore:
         bound = copy(self)
         bound._tool_effect_store = store
         bound._owns_context = False
+        self._instances.add(bound)
         return bound
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
@@ -993,9 +1161,23 @@ class SqlStepStore:
                 table.c.store_digest == self._store_digest, table.c.id.in_(ids),
             ).values(pruned=True, messages="{}", sequence_root=None))
 
+    @classmethod
+    def snapshot_message_sequence(cls, snapshot: Mapping[str, object]) -> NativeMessageSequence:
+        """Read the snapshot's sole root column and bounded control descriptor."""
+        try:
+            descriptor = json.loads(snapshot["messages"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("snapshot message descriptor is invalid") from error
+        if not isinstance(descriptor, dict) or set(descriptor) != {"stored_messages", "checkpoint"}:
+            raise ValueError("snapshot message references are incomplete")
+        count, root = descriptor["stored_messages"], snapshot["sequence_root"]
+        if type(count) is not int or not 0 <= count <= (1 << 63) - 1 or (root is None) != (count == 0):
+            raise ValueError("snapshot message references are incomplete")
+        return NativeMessageSequence(() if not count else (NativeMessageSlice(root, count, 0, count),))
+
     async def _load_snapshots(
         self, run_id: str, *, include_interrupted: bool, latest: bool,
-    ) -> list[tuple[dict[str, object], list[Mapping[str, object]]]]:
+    ) -> list[tuple[dict[str, object], tuple[bytes, ...]]]:
         from sqlalchemy import select
 
         await self.initialize()
@@ -1006,116 +1188,92 @@ class SqlStepStore:
         query = query.order_by(table.c.id.desc() if latest else table.c.id)
         if latest:
             query = query.limit(1)
+        batches = []
         async with self._context.sessions() as session, session.begin():
             await self._context.run_statement(self._context.dialect.begin_consistent_read(session))
             rows = (await self._context.run_statement(session.execute(query))).mappings().all()
-            histories: dict[int, list[Mapping[str, object]]] = {}
             for offset in range(0, len(rows), _BATCH_SIZE):
-                selected = rows[offset:offset + _BATCH_SIZE]
-                query = self._sequence_query(selected)
-                if query is None:
+                selected = []
+                sequences = []
+                for row in rows[offset:offset + _BATCH_SIZE]:
+                    try:
+                        sequence = self.snapshot_message_sequence(row)
+                    except ValueError:
+                        if latest:
+                            raise
+                        _logger.warning("Skipping corrupt snapshot descriptor for run %s", run_id)
+                        continue
+                    selected.append(row)
+                    sequences.append(sequence)
+                sequences = tuple(sequences)
+                if any(sequence.count for sequence in sequences):
+                    statement = self._message_content.range_query(sequences).statement
+                    found = (await self._context.run_statement(session.execute(statement))).mappings().all()
+                else:
+                    found = ()
+                batches.append((selected, sequences, found))
+        results = []
+        verified = []
+        read_object = None if self._message_archive is None else self._message_archive.read_payload_object
+        for selected, sequences, found in batches:
+            try:
+                readbacks = await self._message_content.read_hydrated_ranges(sequences, found, read_object=read_object)
+            except (ValueError, AIError):
+                if latest:
+                    raise
+                isolated = self._message_content.partition_range_rows(sequences, found)
+                recovered = []
+                for sequence, subset in zip(sequences, isolated, strict=True):
+                    try:
+                        recovered.append((await self._message_content.read_hydrated_ranges(
+                            (sequence,), subset, read_object=read_object))[0])
+                    except (ValueError, AIError):
+                        recovered.append(None)
+                readbacks = recovered
+            for row, readback in zip(selected, readbacks, strict=True):
+                if readback is None:
+                    _logger.warning("Skipping corrupt snapshot for run %s", run_id)
                     continue
-                found = (await self._context.run_statement(session.execute(query))).mappings().all()
-                for item in found:
-                    histories.setdefault(item["snapshot_id"], []).append(item)
-        return [(self._record_data(row), histories.get(row["id"], [])) for row in rows]
+                try:
+                    if (row["store_digest"] != self._store_digest or row["run_id"] != run_id
+                            or row["run_digest"] != _digest(run_id)
+                            or row["idempotency_key"] is not None and row["key_digest"] !=
+                               _replay_digest(self._store_digest, _digest(run_id), row["idempotency_key"])):
+                        raise ValueError("snapshot owner identity is invalid")
+                    data = self._record_data(row)
+                    await self._snapshot_from_data(dict(data), readback.payloads)
+                except (ValueError, AIError):
+                    if latest:
+                        raise
+                    _logger.warning("Skipping corrupt snapshot for run %s", run_id)
+                    continue
+                verified.append(readback)
+                results.append((data, readback.payloads))
+        for readback in verified:
+            raw = combine_model_message_payloads(readback.payloads)
+            self._remember_message_proof(self._message_content.adopt_read(readback),
+                                         integrity=(hashlib.sha256(raw).hexdigest(), len(raw)))
+        return results
 
     def _sequence_query(self, snapshots: "Sequence[RowMapping]") -> "Select | None":
-        """Expand bounded immutable trees and their bodies in one SQL statement."""
-        from sqlalchemy import BigInteger, and_, case, cast, literal, select, union_all
-
-        starts = []
-        max_depth = 0
-        for snapshot in snapshots:
-            try:
-                descriptor = json.loads(snapshot["messages"])
-            except (TypeError, ValueError):
-                continue
-            count = descriptor.get("stored_messages") if isinstance(descriptor, dict) else None
-            root = snapshot["sequence_root"]
-            if type(count) is not int or not 0 <= count <= (1 << 63) - 1 or (root is None) != (count == 0):
-                continue
-            if root is None:
-                continue
-            max_depth = max(max_depth, *(index + size.bit_length() - 1
-                for index, size in enumerate(ImmutableSequenceNode.forest_weights(count))))
-            starts.append(select(
-                literal(snapshot["id"], BigInteger).label("snapshot_id"),
-                literal(root, self._table("sequences").c.sha256.type).label("sha256"),
-                literal(count, BigInteger).label("remaining"),
-                literal(0, BigInteger).label("depth"),
-                literal(True).label("forest"),
-            ))
-        if not starts:
+        sequences = tuple(self.snapshot_message_sequence(row) for row in snapshots)
+        if not any(sequence.count for sequence in sequences):
             return None
-        seeds = (starts[0] if len(starts) == 1 else union_all(*starts)).subquery("snapshot_roots")
-        nodes = self._table("sequences")
-        edges = union_all(*(select(literal(index).label("edge")) for index in range(3))).subquery("sequence_edges")
-
-        def extend(frontier):
-            child = case((edges.c.edge == 0, nodes.c.left_sha256),
-                         (edges.c.edge == 1, nodes.c.right_sha256), else_=nodes.c.next_sha256)
-            size = case((edges.c.edge == 2, frontier.c.remaining - nodes.c.tree_count),
-                        else_=cast((nodes.c.tree_count - 1) / 2, BigInteger))
-            return select(
-                frontier.c.snapshot_id, child.label("sha256"), size.label("remaining"),
-                (frontier.c.depth + 1).label("depth"), (edges.c.edge == 2).label("forest"),
-            ).select_from(frontier.join(nodes, and_(
-                nodes.c.store_digest == self._store_digest, nodes.c.sha256 == frontier.c.sha256,
-            )).join(edges, literal(True))).where(
-                child.is_not(None), frontier.c.depth < max_depth,
-                nodes.c.tree_count > 0, nodes.c.tree_count <= frontier.c.remaining,
-                (edges.c.edge < 2) | frontier.c.forest, size > 0,
-            )
-
-        if self._context.engine.dialect.name == "mysql":
-            # MySQL 5.7 has no recursive CTEs. Every derived frontier is bounded
-            # by the exact tree height; DISTINCT prevents derived-table merging.
-            levels = [seeds]
-            for depth in range(max_depth):
-                levels.append(extend(levels[-1]).distinct().subquery(f"sequence_level_{depth + 1}"))
-            closure = (select(levels[0]) if len(levels) == 1 else
-                       union_all(*(select(level) for level in levels))).subquery("snapshot_sequences")
-        else:
-            closure = select(seeds).cte("snapshot_sequences", recursive=True)
-            closure = closure.union_all(extend(closure))
-        messages = self._table("messages")
-        return select(
-            closure.c.snapshot_id, nodes.c.sha256, nodes.c.message_sha256,
-            nodes.c.tree_count, nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256,
-            messages.c.message,
-        ).select_from(closure.join(nodes, and_(
-            nodes.c.store_digest == self._store_digest, nodes.c.sha256 == closure.c.sha256,
-        )).outerjoin(messages, and_(
-            messages.c.store_digest == self._store_digest, messages.c.sha256 == nodes.c.message_sha256,
-        )))
+        return self._message_content.range_query(sequences).statement
 
     async def _snapshot_from_data(
-        self, data: dict[str, object], references: list[Mapping[str, object]],
+        self, data: dict[str, object], payloads: tuple[bytes, ...],
     ) -> ContinuableSnapshot:
+        sequence = self.snapshot_message_sequence(data)
         descriptor = json.loads(data["messages"])
-        if (not isinstance(descriptor, dict) or set(descriptor) != {"stored_messages", "checkpoint"}
-                or type(descriptor["stored_messages"]) is not int or descriptor["stored_messages"] < 0):
+        _raw, messages = decode_model_message_payloads(payloads)
+        if len(messages) != sequence.count:
             raise ValueError("snapshot message references are incomplete")
-        nodes: dict[str, ImmutableSequenceNode] = {}
-        bodies: dict[str, object] = {}
-        for row in references:
-            try:
-                node = ImmutableSequenceNode(row["message_sha256"], row["tree_count"],
-                                             row["left_sha256"], row["right_sha256"], row["next_sha256"])
-            except AIError as error:
-                raise ValueError("snapshot sequence is missing or corrupt") from error
-            body = row["message"]
-            if node.identity != row["sha256"] or body is None or _digest(body) != node.content_id:
-                raise ValueError("snapshot message references are missing or corrupt")
-            nodes[node.identity] = node
-            bodies[node.content_id] = json.loads(body)
-        contents = step_sequence_contents(data.pop("sequence_root"), descriptor["stored_messages"], nodes)
-        messages = [bodies[identity] for identity in contents]
-        if self._media_store is not None:
-            messages = await restore_media(messages, media_store=self._media_store)
-        data["messages"] = ModelMessagesTypeAdapter.validate_python(messages)
-        snapshot = _SNAPSHOT_ADAPTER.validate_python(data)
+        data.pop("sequence_root")
+        # Validate native control fields without sending canonical host/model
+        # values back through the SDK's narrower message union.
+        data["messages"] = []
+        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(data), messages=list(messages))
         checkpoint = descriptor["checkpoint"]
         if checkpoint is None:
             return snapshot
@@ -1126,8 +1284,7 @@ class SqlStepStore:
                 or not isinstance(checkpoint["message_sha256"], str)):
             raise ValueError("snapshot checkpoint state is invalid")
         restored = NativeCheckpoint.encode(snapshot, output_retries_used=checkpoint["output_retries_used"])
-        last = json.loads(ModelMessagesTypeAdapter.dump_json(restored.messages[-1:]))[0]
-        if _digest(_message_body(last, sort_keys=True)) != checkpoint["message_sha256"]:
+        if hashlib.sha256(encode_model_messages(restored.messages[-1:])).hexdigest() != checkpoint["message_sha256"]:
             raise ValueError("snapshot checkpoint state is corrupt or misbound")
         return restored
 

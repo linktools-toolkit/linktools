@@ -777,6 +777,15 @@ class FactReader(Protocol):
 
 
 @runtime_checkable
+class SqlStateRowReader(Protocol):
+    """Read immutable native rows in the active state transaction's snapshot."""
+
+    async def read_sql_rows(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[Mapping[str, object], ...]: ...
+
+
+@runtime_checkable
 class SqlStateRecordReader(Protocol):
     """Join immutable sources to scoped records within the current read boundary.
 
@@ -823,6 +832,13 @@ class SqlStateTransaction(Protocol):
     ) -> ValueT: ...
 
 
+@runtime_checkable
+class SqlMutationObserver(Protocol):
+    """Observe the real enclosing SQL commit, never a nested callback return."""
+
+    def observe_mutation(self, callback: Callable[[bool], None]) -> None: ...
+
+
 class _ReadOnlyStateTransaction(StateTransaction):
     def __init__(self, transaction: StateTransaction) -> None:
         self._transaction = transaction
@@ -840,6 +856,13 @@ class _ReadOnlyStateTransaction(StateTransaction):
         if not isinstance(self._transaction, SqlStateRecordReader):
             raise StateTransactionNestingError("joined record reads require SQL storage")
         return self._transaction.cached_records(keys)
+
+    async def read_sql_rows(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[Mapping[str, object], ...]:
+        if not isinstance(self._transaction, SqlStateRowReader):
+            raise StateTransactionNestingError("native row reads require SQL storage")
+        return await self._transaction.read_sql_rows(context, statement)
 
     async def read_joined_records(
         self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
@@ -1365,4 +1388,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

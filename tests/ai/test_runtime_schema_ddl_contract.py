@@ -206,7 +206,7 @@ def test_runtime_fact_ddl_comments_match_canonical_metadata() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("domain", (PersistenceDomain.TRACE, PersistenceDomain.EXECUTION))
+@pytest.mark.parametrize("domain", (PersistenceDomain.TRACE, PersistenceDomain.EXECUTION, PersistenceDomain.CONVERSATION))
 @pytest.mark.parametrize("dialect_name", ("sqlite", "postgresql", "mysql"))
 async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     monkeypatch: pytest.MonkeyPatch, domain: PersistenceDomain, dialect_name: str,
@@ -230,8 +230,8 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     selected = captured[0]
     assert set(selected.tables) == {
         "ai_state_records", "ai_state_aliases", "ai_state_facts",
-        "ai_state_sequences", "ai_state_operations", "ai_step_runs", "ai_step_events",
-    }
+        "ai_state_sequences", "ai_state_operations", "ai_step_messages", "ai_step_sequences",
+    } | ({"ai_step_runs", "ai_step_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
     def compile_ddl(metadata: MetaData) -> list[str]:
         statements: list[str] = []
@@ -248,3 +248,26 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
 
     # Mock-engine emission honors dialect conditions, unlike direct CreateIndex compilation.
     assert compile_ddl(selected) == compile_ddl(build_sql_schema_metadata())
+
+
+@pytest.mark.parametrize("domains", (
+    (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT),
+    (PersistenceDomain.EXECUTION, PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT),
+    (PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION),
+))
+def test_native_domain_schema_composes_without_replacing_canonical_tables(domains) -> None:
+    from sqlalchemy import MetaData
+    from linktools.ai.persistence.schema import build_step_domain_sql_metadata, build_step_sql_metadata
+
+    metadata = MetaData()
+    retained = {}
+    for domain in domains:
+        build_step_domain_sql_metadata((domain,), metadata=metadata)
+        for name, table in retained.items():
+            assert metadata.tables[name] is table
+        retained.update(metadata.tables)
+    complete = build_step_sql_metadata()
+    assert set(metadata.tables) == set(complete.tables)
+    for name, table in metadata.tables.items():
+        assert set(index.name for index in table.indexes) == set(index.name for index in complete.tables[name].indexes)
+        assert len(table.indexes) == len(complete.tables[name].indexes)

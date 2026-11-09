@@ -40,6 +40,7 @@ from ..storage import (
 from ..observe.stream import await_stream_cleanup
 from ..history import History
 from ..persistence.snapshots import (
+    snapshot_manifest_identity,
     SnapshotExclusiveGuard,
     SnapshotLimits,
     snapshot_object_ref_payload as _object_ref_payload,
@@ -1057,51 +1058,7 @@ def _read_generation_manifest(root: Path) -> Mapping[str, object]:
 def _storage_manifest_identity(
     manifest: Mapping[str, object],
 ) -> str:
-    domains = manifest.get("domains")
-    objects = manifest.get("objects")
-    if not isinstance(domains, Mapping) or not isinstance(objects, list):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    normalized_objects: list[dict[str, object]] = []
-    for raw in objects:
-        if not isinstance(raw, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        domain = raw.get("domain")
-        source = raw.get("source")
-        content = raw.get("content")
-        if (
-            not isinstance(domain, str)
-            or not isinstance(source, Mapping)
-            or not isinstance(content, Mapping)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        source_ref = _object_ref_from_payload(source)
-        content_ref = _object_ref_from_payload(content)
-        if source_ref.digest != content_ref.digest or source_ref.size != content_ref.size:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        normalized_objects.append(
-            {
-                "domain": domain,
-                "source": _object_ref_payload(source_ref),
-                "content": {
-                    "key": content_ref.key,
-                    "digest": content_ref.digest,
-                    "size": content_ref.size,
-                },
-            }
-        )
-    return canonical_sha256(
-        cast(
-            JsonValue,
-            {
-                "kind": manifest.get("kind"),
-                "format_version": manifest.get("format_version"),
-                "namespace": manifest.get("namespace"),
-                "tenant_id": manifest.get("tenant_id"),
-                "domains": domains,
-                "objects": normalized_objects,
-            },
-        )
-    )
+    return snapshot_manifest_identity(manifest)
 
 
 def _storage_snapshot_usage(
@@ -1121,6 +1078,18 @@ def _storage_snapshot_usage(
             if not isinstance(values, list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             entries += len(values)
+    for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages"))):
+        groups = manifest.get(name, [])
+        if not isinstance(groups, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for group in groups:
+            if not isinstance(group, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for field in fields:
+                rows = group.get(field)
+                if not isinstance(rows, list):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                entries += len(rows)
     for raw_object in objects:
         if not isinstance(raw_object, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

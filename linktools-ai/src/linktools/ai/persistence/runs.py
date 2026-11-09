@@ -75,6 +75,7 @@ from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, Agen
 from ._native_checkpoint import NativeCheckpoint
 from ._native_event_reference import NativeEventReferences
 from ._step_store import SqlStepStore, StepWriteReceipt
+from ._sql import SqlStateStore
 from .state import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
@@ -177,9 +178,12 @@ class RuntimeAgentRunStore(AgentRunStore):
     def bind_step_store(self, store: StepStore) -> None:
         """Use the same official StepStore as the run's StepPersistence capability."""
         self.checkpoint_persistence.bind_step_store(store)
-        archive = self._archives.get(PersistenceDomain.TRACE)
-        if isinstance(archive, StateStepArchive) and isinstance(store, SqlStepStore):
-            archive.bind_native_run_store(store)
+        if isinstance(store, SqlStepStore):
+            for archive in self._archives.values():
+                if (isinstance(archive, StateStepArchive)
+                        and isinstance(archive.state_store, SqlStateStore)
+                        and archive.state_store.context.engine is store.storage_context.engine):
+                    archive.bind_native_run_store(store)
 
     @property
     def step_store(self) -> StepStore:

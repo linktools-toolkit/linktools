@@ -6,6 +6,7 @@ import hashlib
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -13,6 +14,11 @@ from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
 from ._payload import PAYLOAD_COMPRESS_MINIMUM, decode_payload_bytes, encode_payload_bytes
 from .state import StateStore, StateTransaction, StoredRecord, record_key_digest
+
+
+if TYPE_CHECKING:
+    from ._message_root import NativeMessageSequence
+    from ._step_message_content import PreparedNativeMessages
 
 
 def _integrity() -> AIError:
@@ -201,6 +207,8 @@ class PreparedArchive:
     owner: tuple[str, str, str] | None = None
     records: dict[bytes, StoredRecord] = field(default_factory=dict)
     nodes: dict[str, ImmutableSequenceNode] = field(default_factory=dict)
+    native_messages: dict["NativeMessageSequence", "PreparedNativeMessages"] = field(default_factory=dict)
+    native_publishers: dict["NativeMessageSequence", Callable[[StateTransaction, "PreparedArchive"], Awaitable[None]]] = field(default_factory=dict, repr=False, compare=False)
     _verified_content: dict[bytes, StoredRecord] = field(default_factory=dict, repr=False, compare=False)
     _observed_content: dict[bytes, StoredRecord | None] = field(default_factory=dict, repr=False, compare=False)
 
@@ -228,6 +236,8 @@ class PreparedArchive:
                 if combined.owner is not None and combined.owner != value.owner:
                     raise _integrity()
                 combined.owner = value.owner
+            combined.native_messages.update(value.native_messages)
+            combined.native_publishers.update(value.native_publishers)
             for key, record in value.records.items():
                 previous = combined.records.get(key)
                 if previous is not None and previous != record:
@@ -259,6 +269,7 @@ class ContentArchive:
     def __init__(self, store: StateStore, scope_id: str, *, namespace: str,
                  tenant_id: str, object_store: ObjectStore | None,
                  object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None) -> None:
+        self._message_publisher: Callable[[StateTransaction, PreparedArchive], Awaitable[None]] | None = None
         self.store = store
         self.scope_id = scope_id
         self._namespace = namespace
@@ -346,21 +357,38 @@ class ContentArchive:
                     prepared.verify_content(stored)
                 prepared.records[key] = stored
                 continue
-            compression, digest, size, encoded = encode_payload_bytes(raw)
-            if self._objects is None or size < PAYLOAD_COMPRESS_MINIMUM:
-                payload = StoredPayload.inline_bytes(encoded)
-            else:
-                stored_digest = hashlib.sha256(encoded).hexdigest()
-                object_key = self._object_prefix + stored_digest
-                async def chunks(value: bytes = encoded) -> AsyncIterator[bytes]:
-                    yield value
-                stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
-                                               expected_digest=stored_digest)
-                payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
+            compression, payload, _encoded = await self.prepare_payload(raw)
+            digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
             content = ContentRecord(codec, digest, size, compression, payload)
             prepared.records[key] = self._record("archive_content", identity, content.to_json())
             prepared.verify_content(prepared.records[key])
         return identities
+
+    async def prepare_payload(self, raw: bytes) -> tuple[str, StoredPayload, bytes]:
+        """Prepare the shared representation without reading or publishing SQL rows."""
+        compression, _digest, size, encoded = encode_payload_bytes(raw)
+        if self._objects is None or size < PAYLOAD_COMPRESS_MINIMUM:
+            payload = StoredPayload.inline_bytes(encoded)
+        else:
+            stored_digest = hashlib.sha256(encoded).hexdigest()
+            object_key = self._object_prefix + stored_digest
+            async def chunks() -> AsyncIterator[bytes]:
+                yield encoded
+            stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
+                                           expected_digest=stored_digest)
+            payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
+        return compression, payload, encoded
+
+    async def read_payload_object(self, reference: ObjectRef) -> bytes:
+        """Resolve a canonical message's object through this physical archive route."""
+        if (reference.store_id != "runtime" or reference.key != self._object_prefix + reference.digest):
+            raise _integrity()
+        if self._object_reader is not None:
+            return await self._object_reader(reference)
+        if self._objects is None:
+            raise _integrity()
+        return await read_object(self._objects, reference.key,
+                                 expected_digest=reference.digest, expected_size=reference.size)
 
     async def _frontiers(
         self, transaction: StateTransaction, requests: Sequence[ArchiveNodeRead],
@@ -618,8 +646,24 @@ class ContentArchive:
                                 (node.left, node.right, node.next_forest) if child is not None)
         return dependencies
 
-    async def publish(self, transaction: StateTransaction, prepared: PreparedArchive) -> None:
+    def bind_message_publisher(
+        self, publisher: Callable[[StateTransaction, PreparedArchive], Awaitable[None]],
+    ) -> None:
+        """Bind native dependencies without making the generic archive their owner."""
+        self._message_publisher = publisher
+
+    async def publish_native(self, transaction: StateTransaction, prepared: PreparedArchive) -> None:
+        """Keep each provisional native sequence with the producer that prepared it."""
+        for root, value in prepared.native_messages.items():
+            publisher = prepared.native_publishers.get(root, self._message_publisher)
+            if publisher is None:
+                raise _integrity()
+            await publisher(transaction, PreparedArchive(native_messages={root: value}))
+
+    async def publish(self, transaction: StateTransaction, prepared: PreparedArchive, *, native: bool = True) -> None:
         """Use the archive transaction enlisted with every owner publication."""
+        if native and prepared.native_messages:
+            await self.publish_native(transaction, prepared)
         prepared.clear_verified_content()
         prepared.clear_content_observation()
         self._bind(prepared)

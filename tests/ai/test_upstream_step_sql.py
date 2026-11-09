@@ -18,7 +18,6 @@ from pydantic_ai.messages import (
     TextPart, ToolCallPart, ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
-from pydantic_ai_harness.media import DiskMediaStore
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot, InMemoryStepStore, RunRecord, SqliteStepStore,
     StepEvent, StepPersistence, StepStore, ToolEffectRecord, continue_run,
@@ -242,8 +241,7 @@ async def test_sql_concurrent_boundary_retries_publish_once(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
-    media = DiskMediaStore(directory=tmp_path / "media")
-    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore(), media_store=media)
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
     try:
         await store.initialize(local=True)
         messages = [ModelRequest(parts=[UserPromptPart("x" * 81920)])]

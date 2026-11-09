@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelMessagesTypeAdapter, ModelRequest, ModelResponse, TextPart, UserPromptPart
-from pydantic_ai_harness.media import DiskMediaStore
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -112,10 +111,9 @@ async def test_checkpoint_descriptor_rejects_corruption_and_cross_snapshot_bindi
     {"application": "保持"},
     {"payload": {"data": "YWJj", "kind": "binary", "media_type": "image/png"}},
 ))
-async def test_checkpoint_digest_roundtrips_externalized_media(tmp_path: Path, metadata) -> None:
+async def test_checkpoint_digest_roundtrips_canonical_media(tmp_path: Path, metadata) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
-    store = SqlStepStore(engine, namespace="steps", tenant_id="one",
-                         media_store=DiskMediaStore(directory=tmp_path / "media"), media_threshold_bytes=1)
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
     snapshot = NativeCheckpoint.encode(ContinuableSnapshot(run_id="run", step_index=2,
         messages=[ModelRequest(parts=[UserPromptPart([
             "查看图像", BinaryContent(data=b"synthetic-image", media_type="image/png"),

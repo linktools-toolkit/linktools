@@ -3,6 +3,7 @@
 """SQL metadata for the public upstream step-persistence records."""
 
 from typing import TYPE_CHECKING
+from collections.abc import Iterable
 
 from ..storage import (
     sql_audit_columns,
@@ -18,6 +19,7 @@ from ..storage import (
 )
 
 if TYPE_CHECKING:
+    from ._plan import PersistenceDomain
     from sqlalchemy import Column, MetaData, Table
 
 
@@ -29,8 +31,6 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
 
     if metadata is None:
         metadata = MetaData()
-    if "ai_step_runs" in metadata.tables:
-        return metadata
 
     def text(name: str, comment: str, *, nullable: bool = True) -> "Column":
         return Column(name, sql_sort_key(), nullable=nullable, comment=comment)
@@ -53,90 +53,117 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             text("run_id", "Original upstream run identifier.", nullable=False),
         )
 
-    runs = table(
-        "ai_step_runs", "Upstream agent run lineage and registration records.",
-        digest("store_digest", "Physical namespace and tenant partition."),
-        *run_columns(),
-        text("conversation_id", "Original upstream conversation identifier."),
-        digest("conversation_digest", "Physical conversation lookup digest.", nullable=True),
-        text("parent_run_id", "Original upstream parent run identifier."),
-        digest("parent_digest", "Physical parent run lookup digest.", nullable=True),
-        text("agent_name", "Upstream agent name."),
-        text("metadata", "Upstream string metadata encoded as JSON.", nullable=False),
-        Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
-        text("registration_id", "Upstream registration invocation identifier."),
-    )
-    sql_unique(runs, "store_digest", "run_digest")
-    sql_query_index(runs, "store_digest", "conversation_digest")
-    sql_query_index(runs, "store_digest", "parent_digest")
+    if "ai_step_runs" not in metadata.tables:
+        runs = table(
+            "ai_step_runs", "Upstream agent run lineage and registration records.",
+            digest("store_digest", "Physical namespace and tenant partition."),
+            *run_columns(),
+            text("conversation_id", "Original upstream conversation identifier."),
+            digest("conversation_digest", "Physical conversation lookup digest.", nullable=True),
+            text("parent_run_id", "Original upstream parent run identifier."),
+            digest("parent_digest", "Physical parent run lookup digest.", nullable=True),
+            text("agent_name", "Upstream agent name."),
+            text("metadata", "Upstream string metadata encoded as JSON.", nullable=False),
+            Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
+            text("registration_id", "Upstream registration invocation identifier."),
+        )
+        sql_unique(runs, "store_digest", "run_digest")
+        sql_query_index(runs, "store_digest", "conversation_digest")
+        sql_query_index(runs, "store_digest", "parent_digest")
 
-    events = table(
-        "ai_step_events", "Append-only upstream agent execution boundary events.",
-        digest("store_digest", "Physical namespace and tenant partition."),
-        *run_columns(),
-        Column("kind", sql_state(), nullable=False, comment="Upstream boundary event kind."),
-        Column("outcome", sql_state(), nullable=True, comment="Owned lifecycle outcome, absent for ordinary upstream events."),
-        Column("step_index", BigInteger, nullable=False, comment="Upstream graph step index."),
-        Column("timestamp", String(64), nullable=False, comment="Original ISO 8601 event time."),
-        text("conversation_id", "Original upstream conversation identifier."),
-        text("parent_run_id", "Original upstream parent run identifier."),
-        text("agent_name", "Upstream agent name."),
-        text("tool_call_id", "Upstream tool call identifier."),
-        text("tool_name", "Upstream tool name."),
-        text("error", "Upstream boundary error text."),
-        Column("metadata", JSON(none_as_null=True), nullable=True,
-               comment="Upstream string metadata encoded as JSON, unless referenced from the native run."),
-        Column("run_fields", SmallInteger().with_variant(SMALLINT(unsigned=True), "mysql"),
-               nullable=False, server_default=sql_text("0"),
-               comment="Native run field references: conversation 1, parent 2, agent 4, metadata 8."),
-        digest("body_sha256", "Integrity digest of the managed lifecycle source body.", nullable=True),
-        digest("fields_sha256", "Integrity digest of managed lifecycle fields excluding metadata.", nullable=True),
-        text("idempotency_key", "Upstream boundary replay key."),
-        digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
-    )
-    sql_unique(events, "key_digest")
-    sql_query_index(events, "store_digest", "run_digest")
+    if "ai_step_events" not in metadata.tables:
+        events = table(
+            "ai_step_events", "Append-only upstream agent execution boundary events.",
+            digest("store_digest", "Physical namespace and tenant partition."),
+            *run_columns(),
+            Column("kind", sql_state(), nullable=False, comment="Upstream boundary event kind."),
+            Column("outcome", sql_state(), nullable=True, comment="Owned lifecycle outcome, absent for ordinary upstream events."),
+            Column("step_index", BigInteger, nullable=False, comment="Upstream graph step index."),
+            Column("timestamp", String(64), nullable=False, comment="Original ISO 8601 event time."),
+            text("conversation_id", "Original upstream conversation identifier."),
+            text("parent_run_id", "Original upstream parent run identifier."),
+            text("agent_name", "Upstream agent name."),
+            text("tool_call_id", "Upstream tool call identifier."),
+            text("tool_name", "Upstream tool name."),
+            text("error", "Upstream boundary error text."),
+            Column("metadata", JSON(none_as_null=True), nullable=True,
+                   comment="Upstream string metadata encoded as JSON, unless referenced from the native run."),
+            Column("run_fields", SmallInteger().with_variant(SMALLINT(unsigned=True), "mysql"),
+                   nullable=False, server_default=sql_text("0"),
+                   comment="Native run field references: conversation 1, parent 2, agent 4, metadata 8."),
+            digest("body_sha256", "Integrity digest of the managed lifecycle source body.", nullable=True),
+            digest("fields_sha256", "Integrity digest of managed lifecycle fields excluding metadata.", nullable=True),
+            text("idempotency_key", "Upstream boundary replay key."),
+            digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
+        )
+        sql_unique(events, "key_digest")
+        sql_query_index(events, "store_digest", "run_digest")
 
-    snapshots = table(
-        "ai_step_snapshots", "Upstream complete or interrupted message-history snapshots.",
-        digest("store_digest", "Physical namespace and tenant partition."),
-        *run_columns(),
-        Column("step_index", BigInteger, nullable=False, comment="Upstream graph step index."),
-        text("conversation_id", "Original upstream conversation identifier."),
-        text("parent_run_id", "Original upstream parent run identifier."),
-        text("agent_name", "Upstream agent name."),
-        Column("timestamp", String(64), nullable=False, comment="Original ISO 8601 snapshot time."),
-        Column("state", sql_state(), nullable=False, comment="Upstream complete or interrupted state."),
-        Column("messages", sql_text_key(1024), nullable=False,
-               comment="Bounded message descriptor and native checkpoint state without message bodies."),
-        digest("sequence_root", "Immutable message sequence root retained by this snapshot.", nullable=True),
-        text("idempotency_key", "Upstream boundary replay key."),
-        digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
-        Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),
-    )
-    sql_unique(snapshots, "key_digest")
-    sql_query_index(snapshots, "store_digest", "run_digest")
+    if "ai_step_snapshots" not in metadata.tables:
+        snapshots = table(
+            "ai_step_snapshots", "Upstream complete or interrupted message-history snapshots.",
+            digest("store_digest", "Physical namespace and tenant partition."),
+            *run_columns(),
+            Column("step_index", BigInteger, nullable=False, comment="Upstream graph step index."),
+            text("conversation_id", "Original upstream conversation identifier."),
+            text("parent_run_id", "Original upstream parent run identifier."),
+            text("agent_name", "Upstream agent name."),
+            Column("timestamp", String(64), nullable=False, comment="Original ISO 8601 snapshot time."),
+            Column("state", sql_state(), nullable=False, comment="Upstream complete or interrupted state."),
+            Column("messages", sql_text_key(1024), nullable=False,
+                   comment="Bounded message descriptor and native checkpoint state without message bodies."),
+            digest("sequence_root", "Immutable message sequence root retained by this snapshot.", nullable=True),
+            text("idempotency_key", "Upstream boundary replay key."),
+            digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
+            Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),
+        )
+        sql_unique(snapshots, "key_digest")
+        sql_query_index(snapshots, "store_digest", "run_digest")
 
-    messages = table(
-        "ai_step_messages", "Deduplicated upstream ModelMessage JSON bodies.",
-        digest("store_digest", "Physical namespace and tenant partition."),
-        digest("sha256", "SHA-256 of the exact stored upstream message JSON."),
-        text("message", "One upstream ModelMessage JSON body.", nullable=False),
-    )
-    sql_unique(messages, "store_digest", "sha256")
+    if "ai_step_messages" not in metadata.tables:
+        messages = table(
+            "ai_step_messages", "Deduplicated upstream ModelMessage JSON bodies.",
+            digest("store_digest", "Physical namespace and tenant partition."),
+            digest("sha256", "SHA-256 of the exact stored upstream message JSON."),
+            text("message", "One upstream ModelMessage JSON body.", nullable=False),
+        )
+        sql_unique(messages, "store_digest", "sha256")
 
-    sequences = table(
-        "ai_step_sequences", "Shared immutable message sequence nodes for native snapshots.",
-        digest("store_digest", "Physical namespace and tenant partition."),
-        digest("sha256", "SHA-256 of the immutable sequence node."),
-        digest("message_sha256", "SHA-256 of the referenced upstream message JSON."),
-        Column("tree_count", BigInteger, nullable=False, comment="Number of ordered message occurrences in this tree."),
-        digest("left_sha256", "Immutable left subtree root.", nullable=True),
-        digest("right_sha256", "Immutable right subtree root.", nullable=True),
-        digest("next_sha256", "Next immutable tree in the sequence forest.", nullable=True),
-    )
-    sql_unique(sequences, "store_digest", "sha256")
+    if "ai_step_sequences" not in metadata.tables:
+        sequences = table(
+            "ai_step_sequences", "Shared immutable message sequence nodes for native snapshots.",
+            digest("store_digest", "Physical namespace and tenant partition."),
+            digest("sha256", "SHA-256 of the immutable sequence node."),
+            digest("message_sha256", "SHA-256 of the referenced upstream message JSON."),
+            Column("tree_count", BigInteger, nullable=False, comment="Number of ordered message occurrences in this tree."),
+            digest("left_sha256", "Immutable left subtree root.", nullable=True),
+            digest("right_sha256", "Immutable right subtree root.", nullable=True),
+            digest("next_sha256", "Next immutable tree in the sequence forest.", nullable=True),
+        )
+        sql_unique(sequences, "store_digest", "sha256")
+
     return metadata
 
 
-__all__ = ["build_step_sql_metadata"]
+def build_step_domain_sql_metadata(domains: "Iterable[PersistenceDomain]", *, metadata: "MetaData | None" = None) -> "MetaData":
+    """Keep the canonical native tables required by the selected runtime domains."""
+    from sqlalchemy import MetaData
+    from ._plan import PersistenceDomain
+
+    selected = frozenset(domains)
+    metadata = MetaData() if metadata is None else metadata
+    if not selected.intersection({PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION,
+                                  PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT}):
+        return metadata
+    existing = set(metadata.tables)
+    build_step_sql_metadata(metadata=metadata)
+    if PersistenceDomain.CHECKPOINT not in selected:
+        keep = {"ai_step_messages", "ai_step_sequences"}
+        if selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
+            keep.update({"ai_step_runs", "ai_step_events"})
+        for name in set(metadata.tables) - existing - keep:
+            metadata.remove(metadata.tables[name])
+    return metadata
+
+
+__all__ = ["build_step_sql_metadata", "build_step_domain_sql_metadata"]

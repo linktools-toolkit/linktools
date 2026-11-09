@@ -11,7 +11,7 @@ from ..asset import build_asset_sql_metadata
 from ..observe import build_metrics_sql_metadata
 from ..persistence import PersistenceDomain
 from ..persistence.objects import runtime_domain_uses_object_store
-from ..persistence.schema import build_runtime_sql_metadata, build_step_sql_metadata
+from ..persistence.schema import build_runtime_sql_metadata, build_step_sql_metadata, build_step_domain_sql_metadata
 from ..storage import build_object_sql_metadata, provision_sql
 
 _logger = environ.get_logger("ai.migrate.database")
@@ -57,14 +57,7 @@ async def provision_runtime_database(
     from sqlalchemy import MetaData
 
     metadata = MetaData()
-    if PersistenceDomain.CHECKPOINT in selected:
-        build_step_sql_metadata(metadata=metadata)
-    elif selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
-        build_step_sql_metadata(metadata=metadata)
-        # Keep canonical objects: Table.to_metadata drops dialect DDL conditions.
-        for table in tuple(metadata.tables.values()):
-            if table.name not in {"ai_step_runs", "ai_step_events"}:
-                metadata.remove(table)
+    build_step_domain_sql_metadata(selected, metadata=metadata)
     build_runtime_sql_metadata(selected, metadata=metadata)
     if object_store is None and any(
         runtime_domain_uses_object_store(domain) for domain in selected

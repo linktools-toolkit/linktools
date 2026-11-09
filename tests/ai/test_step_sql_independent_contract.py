@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelMessagesTypeAdapter, ModelRequest, ModelResponse, TextPart, ToolReturnPart
-from pydantic_ai_harness.media import DiskMediaStore
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -48,9 +47,9 @@ async def test_independent_engines_publish_prune_and_replay_consistently(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_externalized_nested_tool_files_keep_file_provenance(tmp_path: Path) -> None:
+async def test_canonical_nested_tool_files_keep_file_provenance(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
-    store = SqlStepStore(engine, namespace="media", tenant_id="one", media_store=DiskMediaStore(directory=tmp_path / 'files'))
+    store = SqlStepStore(engine, namespace="media", tenant_id="one")
     content = {"file": BinaryContent(data=b"\xff\xfe" * 40000, media_type="application/octet-stream"),
                "ordinary": {"kind": "image-url", "url": "https://example.test/caller-data.png"},
                "literal": {"__harness_external_media__": "caller data", "content": "unaltered"}}

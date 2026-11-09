@@ -123,11 +123,40 @@ class _StorageCostReports:
         },
     }
 
+    _MESSAGE_SOURCE = "tests/ai/test_native_message_ownership_cost.py::"
+    _MESSAGE_CASES = {
+        "%s[%d]" % (name, size): (case, size)
+        for name, case in (
+            ("test_shared_owner_writes_and_cold_reads_have_linear_message_cost", "shared_batch"),
+            ("test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn", "incremental_turns"),
+        ) for size in (10, 100, 1000)
+    }
+    _MESSAGE_PHASES = {
+        "shared_batch": {"shared_write", "cold_read", "checkpoint_publication", "checkpoint_recovery"},
+        "incremental_turns": {"incremental_lifecycle"},
+    }
+    _MESSAGE_COUNTERS = {
+        "materialized_rows", "returned_body_utf8_bytes", "encoded_messages", "prepared_payloads",
+        "encoded_bytes", "snapshot_digest_input_bytes", "context_history_digest_input_bytes",
+        "native_bind_json_bytes", "process_cpu_ns", "traced_peak_bytes",
+    }
+    _MESSAGE_EXTRAS = {
+        "shared_batch": {"stored_message_utf8_bytes"},
+        "incremental_turns": {
+            "incremental_stored_message_bytes", "unconfirmed_context_encoded_messages",
+            "incremental_turns_completed", "incremental_max_cold_tail_rows",
+        },
+    }
+    _MESSAGE_ENCODING_FIELDS = {
+        "delta_freeze", "mutable_snapshot_freeze", "frozen_projection", "confirmed_context",
+    }
+
     def __init__(self) -> None:
         self.reports = {}  # type: typing.Dict[bool, typing.Dict[str, typing.Any]]
         self.replay = None  # type: typing.Optional[typing.Dict[str, typing.Any]]
         self.start_reports = {}  # type: typing.Dict[typing.Tuple[str, str], typing.Dict[str, typing.Any]]
         self.terminal_reports = {}  # type: typing.Dict[str, typing.Dict[str, typing.Any]]
+        self.message_reports = {}  # type: typing.Dict[str, typing.Dict[str, typing.Any]]
 
     @classmethod
     def _count(cls, value: object) -> bool:
@@ -200,11 +229,81 @@ class _StorageCostReports:
         self.start_reports[label, report.nodeid] = result
         return True
 
+    @classmethod
+    def _message_json(cls, value: object) -> "typing.Optional[typing.Dict[str, typing.Any]]":
+        if type(value) is not str or len(value) > 4096:
+            return None
+        try:
+            def unique_pairs(pairs):
+                result = {}
+                for key, item in pairs:
+                    if key in result:
+                        raise ValueError("duplicate property")
+                    result[key] = item
+                return result
+            result = json.loads(value, object_pairs_hook=unique_pairs)
+        except (ValueError, RecursionError):
+            return None
+        return result if type(result) is dict else None
+
+    def _record_message(self, report: pytest.TestReport, outcome: str) -> bool:
+        if not report.nodeid.startswith(self._MESSAGE_SOURCE):
+            return False
+        case = self._MESSAGE_CASES.get(report.nodeid[len(self._MESSAGE_SOURCE):])
+        if case is None:
+            return False
+        label, size = case
+        phases, extras = self._MESSAGE_PHASES[label], self._MESSAGE_EXTRAS[label]
+        names = [name for name, _ in report.user_properties]
+        expected = phases | extras
+        if label == "incremental_turns":
+            expected = expected | {"incremental_encoding_phases"}
+        result = {}
+        invalid = (any(type(name) is not str or name not in expected for name in names)
+                   or len(set(names)) != len(names))
+        if not invalid:
+            for name, value in report.user_properties:
+                if name in extras:
+                    if not self._count(value):
+                        invalid = True
+                        break
+                    if name == "incremental_turns_completed" and value != size:
+                        invalid = True
+                        break
+                    result[name] = value
+                    continue
+                parsed = self._message_json(value)
+                if parsed is None:
+                    invalid = True
+                    break
+                if name == "incremental_encoding_phases":
+                    valid = (set(parsed) == self._MESSAGE_ENCODING_FIELDS
+                             and all(self._count(item) for item in parsed.values()))
+                else:
+                    statements = parsed.get("sql")
+                    valid = (set(parsed) == self._MESSAGE_COUNTERS | {"sql"}
+                             and type(statements) is dict and set(statements) <= self._STATEMENTS
+                             and all(self._count(item) for item in statements.values())
+                             and all(self._count(parsed[field]) for field in self._MESSAGE_COUNTERS))
+                if not valid:
+                    invalid = True
+                    break
+                result[name] = parsed
+        if invalid:
+            result = {"status": "invalid"}
+        elif set(names) != expected:
+            result = {"status": "unavailable"}
+        result.update({"case": label, "size": size, "test_outcome": outcome})
+        self.message_reports[report.nodeid] = result
+        return True
+
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         # xdist forwards user_properties on call reports to the controller, too.
         if report.when != "call":
             return
         outcome = report.outcome if report.outcome in {"passed", "failed", "skipped"} else "unknown"
+        if self._record_message(report, outcome):
+            return
         if self._record_start(report, outcome):
             return
         if self._record_terminal(report, outcome):
@@ -256,7 +355,8 @@ class _StorageCostReports:
         return True
 
     def pytest_terminal_summary(self, terminalreporter: object) -> None:
-        if not self.reports and self.replay is None and not self.start_reports and not self.terminal_reports:
+        if (not self.reports and self.replay is None and not self.start_reports
+                and not self.terminal_reports and not self.message_reports):
             return
         terminalreporter.section("Synthetic native storage costs")
         sha = os.environ.get("GITHUB_SHA", "")
@@ -308,6 +408,16 @@ class _StorageCostReports:
             )
             for key in sorted(self.terminal_reports):
                 terminalreporter.write_line("native_terminal_cost " + json.dumps(self.terminal_reports[key], sort_keys=True))
+        if self.message_reports:
+            terminalreporter.write_line(
+                "Message costs: shared_batch is one N-message publication; incremental_turns is N growing commits. "
+                "CPU is process_time_ns; traced peak is the observation session peak. "
+                "Native bind JSON bytes and returned body UTF-8 bytes exclude protocol framing. "
+                "Mutable input freezing and full-history digest bytes are reported separately from reuse; "
+                "no whole-lifecycle linear CPU claim or historical-version baseline."
+            )
+            for key in sorted(self.message_reports):
+                terminalreporter.write_line("native_message_cost " + json.dumps(self.message_reports[key], sort_keys=True))
 
 
 class _ManifestGroups:
