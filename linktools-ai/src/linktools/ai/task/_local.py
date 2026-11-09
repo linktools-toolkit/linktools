@@ -1542,8 +1542,10 @@ class LocalTaskGraphLauncher:
         graph_id: str, node_id: str, expected_fence: int,
     ) -> None:
         async def release_settled() -> None:
-            state = await self._repository.graph_state(graph_id, tenant_id=tenant_id)
-            current = next((item for item in state.node_states if item.node_id == node_id), None) if state is not None else None
+            states = await self._repository.get_node_states(
+                graph_id, (node_id,), tenant_id=tenant_id,
+            )
+            current = next((item for item in states if item.node_id == node_id), None)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current.fence < expected_fence:
@@ -1797,19 +1799,11 @@ class LocalTaskGraphLauncher:
     ) -> None:
         graph_id = run.request.graph_id
         tenant_id = run.request.principal.tenant_id
-        current_state = await self._repository.graph_state(
-            graph_id,
-            tenant_id=tenant_id,
+        states = await self._repository.get_node_states(
+            graph_id, (node.node_id,), tenant_id=tenant_id,
         )
-        if current_state is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current_node = next(
-            (
-                value
-                for value in current_state.node_states
-                if value.node_id == node.node_id
-            ),
-            None,
+            (value for value in states if value.node_id == node.node_id), None,
         )
         if current_node is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2211,15 +2205,11 @@ class LocalTaskGraphLauncher:
         tenant_id: str,
         expected_fence: int,
     ) -> bool:
-        graph_state = await self._repository.graph_state(
-            graph_id,
-            tenant_id=tenant_id,
+        states = await self._repository.get_node_states(
+            graph_id, (node_id,), tenant_id=tenant_id,
         )
-        if graph_state is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         state = next(
-            (value for value in graph_state.node_states if value.node_id == node_id),
-            None,
+            (value for value in states if value.node_id == node_id), None,
         )
         if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

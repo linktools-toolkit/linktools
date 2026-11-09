@@ -100,3 +100,27 @@ nested and membership-miss passes retain the full definition-read cost; changing
 graphs deliberately evicts the previous graph. These are record and SQL budgets,
 not network traffic or whole-chain latency guarantees. The scheduler still does
 O(N) state reading and graph validation.
+
+## Target-node settlement reads
+
+Execution-hold cleanup, completion readback, and waiting-recovery checks consume
+only the selected node's current state. They use the existing `get_node_states`
+operation to read that node's state and definition in a fresh read transaction.
+They do not reuse a scheduler snapshot or retain mutable state between calls.
+Execution identity, result digest, fence, terminal status, cancellation shielding
+and cleanup failure propagation retain their existing checks. A recovery write
+still applies the repository's original atomic transition and fence validation.
+
+These reads validate the consumed target records, including missing or malformed
+state and definitions. They are not whole-graph integrity scans: unrelated
+records, graph headers, summaries and event streams remain the responsibility of
+full graph readers and writers. Supported Task operations do not delete a graph
+header while retaining live nodes. Low-level damage outside the target records
+is not detected by this local read. Public `graph_state` and terminal closing
+reads remain complete and fresh.
+
+On controlled SQLite graphs of 2 and 200 nodes, a terminal hold/readback check
+reads 2 records and executes 1 SELECT, instead of reading 5 or 401 records and
+executing 4 SELECTs. Both versions use one read transaction and commit, without
+writes. These budgets exclude the producer-owned hold-release operation; they
+are not whole-operation transaction or latency claims.
