@@ -147,3 +147,60 @@ async def test_capture_reads_only_bodies_selected_by_the_shared_native_closure()
     assert [row["sha256"] for row in retained_nodes] == [nodes[0].identity]
     assert retained_bodies == [body]
     assert body_requests == [wanted]
+
+
+def _inline_native(manifest: dict, *, compressed: bool = False) -> None:
+    import zlib
+
+    raw = b"[]"
+    encoded = zlib.compress(raw) if compressed else raw
+    row = manifest["native_messages"][0]["messages"][0]
+    content = ContentRecord("model-message", row["sha256"], len(raw), "zlib" if compressed else "raw",
+                            StoredPayload.inline_bytes(encoded))
+    row["message"] = json.dumps(content.to_json())
+    manifest["objects"] = []
+
+
+@pytest.mark.parametrize("compressed", (False, True))
+@pytest.mark.parametrize("retained_inline", (False, True))
+def test_manifest_identity_merges_split_native_payload_representations(
+    compressed: bool, retained_inline: bool,
+) -> None:
+    source = _manifest("1" * 32)
+    other = _manifest("2" * 32)
+    _inline_native(other, compressed=compressed)
+    source["domains"]["conversation"] = other["domains"]["trace"]
+    other["native_messages"][0]["domain"] = "conversation"
+    source["native_messages"].extend(other["native_messages"])
+
+    merged = _manifest("3" * 32)
+    merged["domains"]["conversation"] = deepcopy(merged["domains"]["trace"])
+    if retained_inline:
+        _inline_native(merged, compressed=compressed)
+    assert snapshot_manifest_identity(source) == snapshot_manifest_identity(merged)
+
+
+def test_native_representation_normalization_keeps_shared_archive_object_dependency() -> None:
+    source = _manifest("1" * 32)
+    body = json.loads(source["native_messages"][0]["messages"][0]["message"])
+    content = ContentRecord.from_json(body)
+    record = StoredRecord(b"a" * 32, b"b" * 32, None, "archive_content", content.identity,
+                          None, 0, None, 0, None, content.to_json())
+    source["archives"] = [{"scope_id": "1" * 32, "domain": "trace", "records": [encode_record(record)]}]
+    changed = deepcopy(source)
+    _inline_native(changed)
+    changed["objects"] = deepcopy(source["objects"])
+    assert snapshot_manifest_identity(source) == snapshot_manifest_identity(changed)
+    changed["objects"] = []
+    assert snapshot_manifest_identity(source) != snapshot_manifest_identity(changed)
+
+
+def test_native_semantic_identity_still_rejects_corrupt_inline_bytes() -> None:
+    manifest = _manifest("1" * 32)
+    _inline_native(manifest)
+    row = manifest["native_messages"][0]["messages"][0]
+    content = ContentRecord("model-message", row["sha256"], 2, "raw", StoredPayload.inline_bytes(b"{}"))
+    row["message"] = json.dumps(content.to_json())
+    with pytest.raises(AIError) as rejected:
+        snapshot_manifest_identity(manifest)
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

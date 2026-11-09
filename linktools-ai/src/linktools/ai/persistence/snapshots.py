@@ -1273,6 +1273,14 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         return [unique[key] for key in sorted(unique)]
 
     archive_records = []
+    nonnative_objects = set()
+    for domain_name, values in domains.items():
+        try:
+            domain = PersistenceDomain(domain_name)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        for _, ref in iter_runtime_object_refs(values, default_domain=domain):
+            nonnative_objects.add((ref.key, ref.digest, ref.size))
     for entry in archives:
         rows = entry.get("records")
         if not isinstance(rows, list):
@@ -1280,18 +1288,32 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         for row in rows:
             record = decode_record(row)
             if record.kind == "archive_content":
+                parsed = ContentRecord.from_json(record.data)
+                if parsed.payload.ref is not None:
+                    ref = parsed.payload.ref
+                    nonnative_objects.add((ref.key, ref.digest, ref.size))
                 record = replace(record, data=content(record.data))
             archive_records.append(encode_record(record))
-    native_sequences, native_messages = [], []
+    native_sequences = []
+    native_messages = {}
+    native_objects = set()
     for entry in native:
         validate_snapshot_native_rows(entry.get("sequences"), entry.get("messages"))
         native_sequences.extend(entry["sequences"])
         for row in entry["messages"]:
-            try:
-                body = content(json.loads(row["message"]))
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            native_messages.append({**row, "message": body})
+            parsed = validate_native_message_content(row, group_id=entry["group_id"])
+            # Raw bytes, not compression or transport location, define message
+            # identity. Export/restore verify object bytes before this comparison;
+            # the shared validator also verifies inline bytes here.
+            body = {"codec": parsed.codec, "raw_digest": parsed.raw_digest, "raw_size": parsed.raw_size}
+            key = row["store_digest"], row["sha256"]
+            message = {"store_digest": key[0], "sha256": key[1], "message": body}
+            if key in native_messages and native_messages[key] != message:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            native_messages[key] = message
+            if parsed.payload.ref is not None:
+                ref = parsed.payload.ref
+                native_objects.add((ref.key, ref.digest, ref.size))
     normalized_objects = []
     for raw in objects:
         if not isinstance(raw, Mapping):
@@ -1300,6 +1322,10 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         target = _object_ref_from_payload(raw.get("content"))
         if (source["digest"], source["size"]) != (target.digest, target.size):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        original = _object_ref_from_payload(raw.get("source"))
+        identity = original.key, original.digest, original.size
+        if identity in native_objects and identity not in nonnative_objects:
+            continue
         normalized_objects.append({
             "domain": "archive" if source["key"].startswith("v1/archive/") else raw.get("domain"),
             "source": source,
@@ -1311,7 +1337,7 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         "domains": normalized_domains,
         "archives": ordered_unique(archive_records),
         "native_sequences": ordered_unique(native_sequences),
-        "native_messages": ordered_unique(native_messages),
+        "native_messages": ordered_unique(list(native_messages.values())),
         "objects": ordered_unique(normalized_objects),
     })
 
