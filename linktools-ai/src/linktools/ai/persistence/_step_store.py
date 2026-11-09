@@ -297,6 +297,8 @@ class SqlStepStore:
                         if row[name] is not None and row[name] == value:
                             row[name] = None
                             row["run_fields"] |= 1 << bit
+                if row["metadata"] is not None:
+                    row["metadata"] = json.loads(row["metadata"])
                 row["key_digest"] = _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
                 rows.append(row)
             # An unkeyed append must fail rather than silently suppress a
@@ -312,16 +314,17 @@ class SqlStepStore:
                 )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
-        from sqlalchemy import and_, case, or_, select
+        from sqlalchemy import and_, case, cast, or_, select, Text
 
         await self.initialize()
         table, runs = self._table("events"), self._table("runs")
         columns = {field.name: table.c[field.name] for field in fields(StepEvent)}
+        columns["metadata"] = cast(table.c.metadata, Text)
         invalid = [table.c.run_fields.bitwise_and((1 << len(_EVENT_RUN_FIELDS)) - 1) != table.c.run_fields,
                    and_(table.c.run_fields != 0, runs.c.id.is_(None))]
         for bit, name in enumerate(_EVENT_RUN_FIELDS):
             referenced = table.c.run_fields.bitwise_and(1 << bit) != 0
-            columns[name] = case((referenced, runs.c[name]), else_=table.c[name]).label(name)
+            columns[name] = case((referenced, runs.c[name]), else_=columns[name]).label(name)
             invalid.append(and_(referenced, or_(table.c[name].is_not(None), runs.c[name].is_(None))))
         query = select(
             *columns.values(), or_(*invalid).label("invalid_run_reference"),

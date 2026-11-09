@@ -232,6 +232,7 @@ async def test_joined_transaction_uses_source_before_commit_but_confirms_only_af
         run, first = _records()
         prepared = await adapter.prepare_step(run=run, events=(first,))
         statements, commits = [], []
+        record_commit = commits.append
 
         def capture(connection, cursor, statement, parameters, context, many):
             statements.append(statement)
@@ -242,12 +243,12 @@ async def test_joined_transaction_uses_source_before_commit_but_confirms_only_af
             return receipt
 
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
-        event.listen(engine.sync_engine, "commit", commits.append)
+        event.listen(engine.sync_engine, "commit", record_commit)
         try:
             receipt = await state.mutate(write)
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
-            event.remove(engine.sync_engine, "commit", commits.append)
+            event.remove(engine.sync_engine, "commit", record_commit)
         assert len(commits) == 1
         assert Counter(sql.split()[0] for sql in statements) == {"BEGIN": 1, "INSERT": 2}
         assert not adapter._confirmed_runs
@@ -376,6 +377,7 @@ class _InlineStepStore(SqlStepStore):
         for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
             rows = [self._run_values(item.run_id) | self._record_values(item) for item in group]
             for row in rows:
+                row["metadata"] = json.loads(row["metadata"])
                 row["key_digest"] = module._replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
             batch_size = module._BATCH_SIZE if keyed else 1
             for offset in range(0, len(rows), batch_size):
@@ -394,7 +396,7 @@ class _InlineStepStore(SqlStepStore):
             rows = (await self._context.run_statement(session.execute(select(table).where(
                 *self._run_predicates(table, run_id),
             ).order_by(table.c.id)))).mappings().all()
-        return [module._EVENT_ADAPTER.validate_python(self._record_data(row)) for row in rows]
+        return [module._EVENT_ADAPTER.validate_python(dict(row)) for row in rows]
 
 
 def _bytes(value: object) -> int:

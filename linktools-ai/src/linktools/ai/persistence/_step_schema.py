@@ -23,7 +23,9 @@ if TYPE_CHECKING:
 
 def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
     """Build scoped upstream run, event, snapshot and message tables."""
-    from sqlalchemy import BigInteger, Boolean, Column, MetaData, SmallInteger, String, Table
+    from sqlalchemy import BigInteger, Boolean, Column, JSON, MetaData, SmallInteger, String, Table
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.dialects.mysql import SMALLINT
 
     if metadata is None:
         metadata = MetaData()
@@ -81,8 +83,10 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         text("tool_call_id", "Upstream tool call identifier."),
         text("tool_name", "Upstream tool name."),
         text("error", "Upstream boundary error text."),
-        text("metadata", "Upstream string metadata encoded as JSON, unless referenced from the native run."),
-        Column("run_fields", SmallInteger, nullable=False, server_default="0",
+        Column("metadata", JSON(none_as_null=True), nullable=True,
+               comment="Upstream string metadata encoded as JSON, unless referenced from the native run."),
+        Column("run_fields", SmallInteger().with_variant(SMALLINT(unsigned=True), "mysql"),
+               nullable=False, server_default=sql_text("0"),
                comment="Native run field references: conversation 1, parent 2, agent 4, metadata 8."),
         text("idempotency_key", "Upstream boundary replay key."),
         digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
