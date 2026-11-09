@@ -149,7 +149,7 @@ class RuntimeStepStore:
         if snapshot is None:
             return None
         restored = NativeCheckpoint.decode(snapshot)
-        return replace(snapshot, messages=native_checkpoint_messages(restored.messages, restore=True))
+        return replace(restored, messages=native_checkpoint_messages(restored.messages, restore=True))
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         if not self._native_boundary:

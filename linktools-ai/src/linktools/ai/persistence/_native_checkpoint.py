@@ -47,6 +47,10 @@ class NativeCheckpoint(ContinuableSnapshot):
 
     @classmethod
     def decode(cls, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
+        # Decoded metadata belongs to the application, even when it uses the
+        # same protocol key. Reader adapters may compose without decoding twice.
+        if isinstance(snapshot, cls):
+            return snapshot
         messages = list(snapshot.messages)
         outer = None if not messages else messages[-1].metadata
         if outer is not None and not isinstance(outer, dict):

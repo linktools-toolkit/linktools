@@ -20,6 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage import StoredPayload
 from linktools.ai.persistence import Persistence, PersistenceDomain
+from linktools.ai.persistence.runs import OfficialStepReader
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.persistence.contracts import (
@@ -169,8 +170,10 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
 
     async def materialize_recovery(self, *, agent_run_id, require_complete, captured=None):
         before = await self.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
+        raw_before = await native.store.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
         await original_recovery(self, agent_run_id=agent_run_id, require_complete=require_complete, captured=captured)
         assert await self.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True) == before
+        assert await native.store.latest_snapshot(run_id=agent_run_id, include_interrupted=True) == raw_before
         if require_complete:
             assert before is not None and before.state == "complete"
             verified_snapshots.append(before)
@@ -249,7 +252,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
             assert [len(scopes) for scopes in publications] == [1]
         assert verified_snapshots
         for snapshot in verified_snapshots:
-            assert await native.store.latest_snapshot(run_id=snapshot.run_id) == snapshot
+            assert await OfficialStepReader(native.store).latest_snapshot(run_id=snapshot.run_id) == snapshot
 
 
 @pytest.mark.parametrize("foreign_scope", (False, True))

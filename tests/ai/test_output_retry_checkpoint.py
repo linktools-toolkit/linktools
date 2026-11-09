@@ -132,3 +132,30 @@ async def test_native_checkpoint_retry_state_survives_lost_commit_ack(atomic_sto
         assert (await reader.latest_checkpoint(agent_run_id="run")).output_retries_used == 4
     finally:
         await cold.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("known", (False, True))
+@pytest.mark.parametrize("messages", ([], [ModelRequest(parts=[UserPromptPart("question")], metadata={
+    "linktools.ai.checkpoint-state": {"protocol": "linktools.ai.native-checkpoint", "application": True},
+})]))
+async def test_runtime_snapshot_reader_preserves_retry_state_and_decoded_metadata(known, messages) -> None:
+    from pydantic_ai_harness.step_persistence import InMemoryStepStore
+    from linktools.ai.runtime._step_store import RuntimeStepStore
+
+    # Unknown upstream snapshots use ordinary application metadata, not an
+    # envelope claiming the Runtime protocol.
+    if not known and messages:
+        messages = [replace(messages[0], metadata={"linktools.ai.checkpoint-state": {"application": True}})]
+    snapshot = ContinuableSnapshot(run_id="run", step_index=2, messages=messages, idempotency_key="point")
+    store = InMemoryStepStore()
+    await store.register_run(RunRecord(run_id="run"))
+    await store.save_snapshot(NativeCheckpoint.encode(snapshot, output_retries_used=3) if known else snapshot)
+    runtime_store = RuntimeStepStore(store, None)
+    restored = await runtime_store.latest_snapshot(run_id="run")
+    assert restored.messages == messages
+    assert isinstance(restored, NativeCheckpoint) is known
+    projected = OfficialStepReader.project_checkpoint(RunRecord(run_id="run"), restored, include_transcript=False)
+    assert projected.output_retries_used == (3 if known else None)
+    assert OfficialStepReader.restore_snapshot(restored) == restored
+    assert (await OfficialStepReader(runtime_store).latest_snapshot(run_id="run")) == restored

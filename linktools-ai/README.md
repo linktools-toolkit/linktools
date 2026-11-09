@@ -1700,6 +1700,20 @@ async with Runtime.open("service-runtime", storage=storage, features=features) a
 Such hosts close their own adapters after Runtime exits. Native subclasses retain
 their custom hooks.
 
+The borrowed native store exposes physical checkpoint records. Runtime writes a
+`linktools.ai.native-checkpoint` envelope under the last message's
+`linktools.ai.checkpoint-state` metadata key to keep output retry usage in the
+same durable snapshot, without a second retry-state store. The envelope preserves
+the original metadata, including same-named application keys. An empty context
+uses a removable empty request carrier. Do not pass physical snapshot messages
+directly to a provider or treat them as application history. Use
+`OfficialStepReader(store)` from `linktools.ai.persistence.runs` for decoded
+snapshots and checkpoints; Runtime's SDK adapter and recovery/history readers
+perform this restoration before using messages. Decoded snapshots retain retry
+usage for the same execution. An upstream snapshot without the Runtime envelope
+has unknown retry usage, not zero. Reads and recovery do not rewrite the physical
+snapshot. Caller ownership controls resource lifetime, not the encoded wire view.
+
 The adapter uses Persistence's namespace and tenant and borrows the exact
 Execution SQL context, including a local SQLite writer owner when configured.
 Native checkpoint writes can therefore join the Runtime control transaction.
