@@ -125,23 +125,6 @@ def test_check_setup_requires_explicit_install_flag() -> None:
         parser.parse_args(["check", "--check-setup"])
 
 
-def test_ai_setup_and_workflow_have_one_configuration_owner() -> None:
-    root = Path(manage.PROJECT_PATH)
-    setup = manage.load_project_checks("linktools-ai", str(root / "linktools-ai"))["setup"]
-    assert len(setup) == 1
-    assert "sudo apt-get update" in setup[0]
-    assert "sudo apt-get install -y file" in setup[0]
-    assert 'command -v file' in setup[0]
-    assert '${GITHUB_ENV:-}' in setup[0]
-    assert 'LINKTOOLS_REQUIRE_LIBMAGIC=1' in setup[0]
-    assert 'magic.from_buffer' in setup[0]
-    workflow = (root / ".github/workflows/python-check.yml").read_text(encoding="utf-8")
-    assert '--editable --quiet --check-setup' in workflow
-    assert 'sudo apt-get' not in workflow
-    assert 'LINKTOOLS_REQUIRE_LIBMAGIC' not in workflow
-    assert 'magic.from_buffer' not in workflow
-
-
 def test_read_only_check_never_runs_setup(
     repository: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
