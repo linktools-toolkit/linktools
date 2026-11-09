@@ -14,6 +14,7 @@ from pydantic_ai_harness.planning import (
     TaskStatus,
 )
 
+from ._planning_store import PlanningStore
 from ._tool_signal import ToolCallRetry
 from ._tool_metadata import tool_metadata
 
@@ -79,4 +80,4 @@ class HarnessPlanning(Planning[None]):
         return None
 
 
-__all__ = ["HarnessPlanning"]
+__all__ = ["HarnessPlanning", "PlanningStore"]

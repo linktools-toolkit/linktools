@@ -10,9 +10,9 @@ from linktools.ai.persistence import Persistence
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.runtime._plan import (
-    PlanItem as RuntimePlanItem,
-    RuntimePlanStore,
+from linktools.ai.core.planning import PlanItem as RuntimePlanItem
+from linktools.ai.persistence.planning import (
+    PlanStateStore,
     _decode_payload,
     _validated_items,
 )
@@ -128,7 +128,7 @@ async def test_runtime_plan_persists_only_the_current_payload_shape() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="plan-shape", tenant_id="tenant")
     try:
-        store = RuntimePlanStore(
+        store = PlanStateStore(
             state.execution.executions.state_store,
             namespace="plan-shape",
             tenant_id="tenant",

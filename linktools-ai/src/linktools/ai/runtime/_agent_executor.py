@@ -127,7 +127,7 @@ from ..inputs import CanonicalUserInput
 from ..observe.journal import ModelRequestJournal
 from ._memory import MemoryStore
 from ._metric_capability import ModelObservationCapability
-from ._plan import RuntimePlanStore
+from ..capability.planning import PlanningStore
 from ._harness import (
     BindReferencedInputOrigins, ReinjectRuntimeSystemPrompt, SummaryProviderModel,
     FallbackProviderModel,
@@ -210,7 +210,7 @@ class _AgentRunScope:
     memory_store: MemoryStore | None = None
     memory_tool_names: tuple[str, ...] = ()
     plan_store_resolver: (
-        Callable[[PydanticRunContext[object]], RuntimePlanStore] | None
+        Callable[[PydanticRunContext[object]], PlanningStore] | None
     ) = None
     workspace_backend: "WorkspaceBackend | None" = None
     workspace_provider: Callable[[], Awaitable[WorkspaceBackend | None]] | None = None

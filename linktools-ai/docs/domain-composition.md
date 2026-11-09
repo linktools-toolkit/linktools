@@ -158,9 +158,10 @@ application call, port method, persisted contract or lifecycle is required.
   paths still reach multiple parts of AgentExecutionPort. Address their actual
   operation and lifetime contracts together; adding three forwarding methods
   does not complete this boundary.
-- Memory and Planning still have domain-specific projection/restore logic in
-  Runtime. Preserve Memory's admitted scope and keep model plan tools, execution
-  plan mode, and Task scheduling as three different concepts.
+- Memory still has domain-specific projection/restore logic in Runtime. Preserve
+  its admitted scope. Planning now owns its store and native projection; Runtime
+  still selects the run owner. Model plan tools, execution plan mode and Task
+  scheduling remain three different concepts.
 - The capability program covers resource capture and admitted Memory reuse;
   crash recovery, custom persistent callbacks and the remaining extension
   paths still require their own evidence. The [complete current Task port

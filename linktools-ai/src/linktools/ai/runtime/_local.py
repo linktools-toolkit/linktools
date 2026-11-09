@@ -48,7 +48,8 @@ from ..inputs import (
     stored_input_attachment_views,
     stored_user_input_view,
 )
-from ._plan import RuntimePlanStore
+from ..capability.planning import PlanningStore
+from ..persistence.planning import PlanStateStore
 from ._execution_payload import _materialize_execution_json, _materialize_execution_payloads
 from ._execution_buffer import _ExecutionPayloadBuffer, _ExecutionPayloadCapture
 from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
@@ -4673,7 +4674,7 @@ class LocalExecutionBackend:
                 input_context=accepted_context,
                 original_input=stored_user_input_view(current.stored_user_input),
             )
-            plan_store = RuntimePlanStore(
+            plan_store = PlanningStore(PlanStateStore(
                 self._session_state_store
                 if current.session_id is not None
                 else self._execution_state_store,
@@ -4681,7 +4682,7 @@ class LocalExecutionBackend:
                 tenant_id=self._tenant_id,
                 owner_kind="session" if current.session_id is not None else "execution",
                 owner_id=current.session_id or current.execution_id,
-            )
+            ))
             deferred_capability_refs: dict[str, CapabilityRef] = {}
             try:
                 result = await self._executor.execute(

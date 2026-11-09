@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-owned planning command and durable plan projection."""
+"""Durable plan projection over the existing optimistic state store."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Literal
+from ..core.planning import PlanItem, PlanOwnerKind
 
 from linktools.core import environ
 
@@ -13,24 +12,14 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..persistence.state import StateStore, StateTransaction, StoredRecord, record_key_digest
+from .state import StateStore, StateTransaction, StoredRecord, record_key_digest
 
-_logger = environ.get_logger("ai.runtime.plan")
+_logger = environ.get_logger("ai.persistence.planning")
 _OWNER_KINDS = frozenset({"session", "execution"})
 _KIND = "agent_plan"
 _VERSION = 1
 
-PlanOwnerKind = Literal["session", "execution"]
-PlanStatus = Literal["pending", "in_progress", "completed", "cancelled"]
-
-
-@dataclass(frozen=True, slots=True)
-class PlanItem:
-    content: str
-    status: PlanStatus = "pending"
-
-
-class RuntimePlanStore:
+class PlanStateStore:
     """Persist one complete plan through the existing optimistic state store."""
 
     def __init__(
@@ -227,9 +216,6 @@ def _item_payload(item: PlanItem) -> dict[str, JsonValue]:
     return {"content": item.content, "status": item.status}
 
 
-__all__ = [
-    "PlanItem",
-    "PlanOwnerKind",
-    "PlanStatus",
-    "RuntimePlanStore",
-]
+
+
+__all__ = ["PlanStateStore"]

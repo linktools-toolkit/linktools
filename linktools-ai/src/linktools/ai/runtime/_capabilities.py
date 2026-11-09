@@ -24,12 +24,10 @@ from ._tool import ToolOperationBridge
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
 from ..capability import ExecutionCapability, MemoryCapability, tool_effect_policy_from_metadata
-from ._harness import HarnessPlanStoreAdapter
-from ..capability.planning import HarnessPlanning
+from ..capability.planning import HarnessPlanning, PlanningStore
 from ._memory import MemoryStore
 from ._tool_boundary import require_tool_effects
 from ..capability import TraceCapability
-from ._plan import RuntimePlanStore
 from ._run_hooks import AgentRunCapture
 from ..spec import CapabilityRef
 from ._conversation_service import ConversationService
@@ -114,7 +112,7 @@ async def compose_platform_capabilities(
     planning: bool,
     context_target_tokens: int | None,
     parent_agent_run_id: str | None,
-    plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
+    plan_store_resolver: Callable[[PydanticRunContext[None]], PlanningStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
     deferred_capability_refs: dict[str, CapabilityRef] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
@@ -289,11 +287,11 @@ async def compose_platform_capabilities(
 
         def resolve_plan_store(
             ctx: PydanticRunContext[None],
-        ) -> HarnessPlanStoreAdapter:
+        ) -> PlanningStore:
             store = plan_store_resolver(ctx)
             if store is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return HarnessPlanStoreAdapter(store)
+            return store
 
         planning_capability = HarnessPlanning.bind(resolve_plan_store)
         capabilities.append(planning_capability)
