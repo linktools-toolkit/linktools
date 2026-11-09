@@ -3,17 +3,55 @@
 """Accepted contexts reuse verified roots without re-reading prior bodies."""
 
 import hashlib
+from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.inputs import ExecutionContextArchive
 from linktools.ai.execution import ExecutionInputContext
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, Persistence
 from linktools.ai.persistence._archive import ArchiveRoot
+from linktools.ai.persistence._archive_closure import iter_archive_content_refs, rekey_archive_roots
+from linktools.ai.persistence.codec import encode_domain
+from linktools.ai.storage import StoredPayload
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.mark.parametrize("invalid_skills", ({}, "", [None]))
+@pytest.mark.parametrize("reader", ("load", "closure", "rekey"))
+async def test_context_archive_rejects_malformed_required_skills(tmp_path, invalid_skills, reader):
+    state = Persistence(_storage("memory", tmp_path))
+    await state.initialize(namespace="context-root", tenant_id="tenant")
+    try:
+        service = ExecutionContextArchive(
+            state.execution.executions.state_store,
+            state.archive_object_store(PersistenceDomain.EXECUTION),
+            namespace="context-root", tenant_id="tenant",
+        )
+        context = ExecutionInputContext.from_messages(())
+        prepared = await service.prepare(context)
+        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        manifest = prepared.reference.payload.decode()
+        assert manifest["required_skills"] == []
+        assert await service.load(prepared.reference) == context
+        malformed = replace(prepared.reference, payload=StoredPayload.inline_json({
+            **manifest, "required_skills": invalid_skills,
+        }))
+        wire = {"$dataclass": "execution_record", "fields": {"input_context": encode_domain(malformed)}}
+        with pytest.raises(AIError) as failure:
+            if reader == "load":
+                await service.load(malformed)
+            elif reader == "closure":
+                tuple(iter_archive_content_refs(wire))
+            else:
+                rekey_archive_roots(wire, {prepared.archive.scope_id: "restored"})
+        assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
 
 
 async def test_accepted_context_reuses_verified_same_group_history_without_prefix_io(tmp_path, monkeypatch):

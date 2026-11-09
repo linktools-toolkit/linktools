@@ -47,7 +47,8 @@ def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object],
 
 
 def _context_references(manifest: Mapping[str, object]) -> Iterator[tuple[str, str, str]]:
-    values = [manifest.get("repository_instructions")]
+    instructions = manifest.get("repository_instructions")
+    values = [] if instructions is None else [instructions]
     skills = manifest["required_skills"]
     if not isinstance(skills, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -59,8 +60,6 @@ def _context_references(manifest: Mapping[str, object]) -> Iterator[tuple[str, s
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.extend(mapping.values())
     for value in values:
-        if value is None:
-            continue
         if not isinstance(value, Mapping) or set(value) != {"archive_scope", "content_scope", "content_id"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         scope, content_scope, identity = value["archive_scope"], value["content_scope"], value["content_id"]

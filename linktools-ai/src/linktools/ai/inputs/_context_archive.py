@@ -142,7 +142,10 @@ class ExecutionContextArchive:
                 instruction_index = len(references)
                 references.append(value["repository_instructions"])
             skill_indices = []
-            for skill in value["required_skills"]:
+            skills = value["required_skills"]
+            if not isinstance(skills, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for skill in skills:
                 skill_indices.append(len(references))
                 references.append(skill)
             ids = []
