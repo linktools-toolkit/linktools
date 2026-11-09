@@ -360,7 +360,7 @@ class SqlStepStore:
         for message in messages:
             body = _message_body(message)
             keyed.append((_digest(body), body))
-        values["messages"] = json.dumps({"stored_messages": len(keyed), "checkpoint": checkpoint})
+        values["messages"] = _snapshot_descriptor_json({"stored_messages": len(keyed), "checkpoint": checkpoint})
         values["pruned"] = False
         values["sequence_root"], sequences = build_step_sequence(tuple(key for key, _ in keyed))
 
@@ -649,6 +649,14 @@ def _digest(value: str) -> str:
 
 def _message_body(value: object, *, sort_keys: bool = False) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=sort_keys, separators=(",", ":"))
+
+
+def _snapshot_descriptor_json(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(value)
+    # MySQL without strict mode may truncate bounded columns instead of failing.
+    if len(encoded.encode("utf-8")) > 1024:
+        raise ValueError("snapshot message descriptor exceeds 1024 UTF-8 bytes")
+    return encoded
 
 
 def _optional_digest(value: str | None) -> str | None:

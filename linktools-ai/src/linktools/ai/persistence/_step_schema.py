@@ -13,6 +13,7 @@ from ..storage import (
     sql_sort_key,
     sql_state,
     sql_table_options,
+    sql_text_key,
     sql_unique,
 )
 
@@ -97,7 +98,8 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         text("agent_name", "Upstream agent name."),
         Column("timestamp", String(64), nullable=False, comment="Original ISO 8601 snapshot time."),
         Column("state", sql_state(), nullable=False, comment="Upstream complete or interrupted state."),
-        text("messages", "Ordered message count and bound native checkpoint state.", nullable=False),
+        Column("messages", sql_text_key(1024), nullable=False,
+               comment="Bounded message descriptor and native checkpoint state without message bodies."),
         digest("sequence_root", "Immutable message sequence root retained by this snapshot.", nullable=True),
         text("idempotency_key", "Upstream boundary replay key."),
         digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),

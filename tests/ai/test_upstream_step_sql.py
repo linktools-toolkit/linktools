@@ -398,6 +398,9 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
     metadata = build_step_sql_metadata()
     dialect = mysql.dialect()
     dialect.server_version_info = (5, 7, 44)
+    assert metadata.tables["ai_step_snapshots"].c.messages.type.compile(dialect=dialect) == (
+        "VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+    )
     for table in metadata.tables.values():
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert table.name.startswith("ai_") and table.comment
