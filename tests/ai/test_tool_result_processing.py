@@ -149,6 +149,12 @@ def _stored_bytes(root: Path) -> bytes:
         elif isinstance(value, list):
             for child in value:
                 walk(child)
+        elif isinstance(value, str):
+            blobs.append(value.encode())
+            try:
+                walk(json.loads(value))
+            except (UnicodeError, ValueError):
+                pass
 
     for raw in tuple(blobs):
         try:
