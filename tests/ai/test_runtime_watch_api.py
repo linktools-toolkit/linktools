@@ -1671,3 +1671,104 @@ async def test_graph_live_subagent_root_cursor_binds_selected_execution():
         decode_execution_watch_cursor("selected-subtree", "tenant", "lineage-root", nested.cursor,
                                       include_content=False)
     assert error.value.code is ErrorCode.CURSOR_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ("binding", "expansion"))
+@pytest.mark.parametrize("covers_later_event", (False, True))
+async def test_graph_watch_reuses_views_covering_replayed_binding_events(
+    change: str, covers_later_event: bool,
+) -> None:
+    graph_id = "covered-watch"
+    principal = Principal("owner", "tenant")
+    advance = asyncio.Event()
+    initial = (("left", None), ("right", None)) if change == "binding" else (("left", None),)
+    complete = (("left", "execution-left"), ("right", "execution-right"))
+    partial = (("left", "execution-left"), ("right", None)) if change == "binding" else complete[:1]
+    now = datetime.now(timezone.utc)
+    events = (
+        TaskEvent(1, graph_id, 1, TaskEventType.GRAPH_ADMITTED, now, TaskStatus.PENDING),
+        TaskEvent(1, graph_id, 2, TaskEventType.NODE_CHANGED, now, TaskStatus.RUNNING,
+                  TaskStatus.RUNNING, "left", "worker", 1, "execution-left"),
+        TaskEvent(1, graph_id, 3, TaskEventType.NODE_CHANGED, now, TaskStatus.RUNNING,
+                  TaskStatus.RUNNING, "right", "worker", 1, "execution-right"),
+    )
+
+    class Graph:
+        current = _graph_snapshot(graph_id, initial, event_seq=1)
+
+        async def state(self, requested, *, principal):
+            assert requested == graph_id
+            return self.current
+
+        async def list_events(self, requested, *, principal, after_event_seq=0, limit=100):
+            return Page(tuple(event for event in events if event.event_seq > after_event_seq)[:limit])
+
+        async def stream_events(self, requested, *, principal, after_event_seq=0):
+            for event in events:
+                if event.event_seq == 2:
+                    await advance.wait()
+                    self.current = _graph_snapshot(
+                        graph_id, complete if covers_later_event else partial,
+                        event_seq=3 if covers_later_event else 2,
+                    )
+                elif event.event_seq == 3:
+                    self.current = _graph_snapshot(graph_id, complete, event_seq=3)
+                if event.event_seq > after_event_seq:
+                    yield event
+
+    graph = Graph()
+    runtime = SimpleNamespace(namespace="watch-test", graph=graph, executions=_ExecutionService())
+    run = _task_graph_run(runtime, graph_id, principal, _watch_tree)
+    stream = run.watch()
+    observed = []
+    try:
+        async for item in stream:
+            observed.append(item)
+            if isinstance(item.event, TaskEvent) and item.event.event_seq == 1:
+                advance.set()
+    finally:
+        await stream.aclose()
+    assert [item.event for item in observed if isinstance(item.event, TaskEvent)] == list(events)
+    updates = [item.event.graph.event_seq for item in observed
+               if isinstance(item.event, TaskGraphProjection) and item.event.phase == "update"]
+    assert updates == ([3] if covers_later_event else [2, 3])
+    visible = {}
+    executions = []
+    for item in observed:
+        if isinstance(item.event, TaskGraphProjection):
+            visible = {state.node_id: state.execution_id for state in item.event.graph.node_states}
+        elif isinstance(item.event, ExecutionTreeEvent):
+            assert visible[item.node_id] == item.event.execution_id
+            executions.append(item.event.execution_id)
+    assert sorted(executions) == ["execution-left", "execution-right"]
+    assert observed[0].event.phase == "initial"
+    final = observed[-1].event
+    assert isinstance(final, TaskGraphProjection) and final.phase == "final"
+    assert final.coverage is not None and final.coverage.durable_events_complete and final.coverage.state_complete
+    assert decode_graph_watch_cursor("watch-test", "tenant", graph_id, observed[-1].cursor,
+                                     include_content=False) == (
+        3, {"left": {"execution-left": 1}, "right": {"execution-right": 1}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_watch_rejects_conflicting_binding_below_view_cutoff() -> None:
+    class ConflictingGraph(_TaskGraphService):
+        async def stream_events(self, graph_id, *, principal, after_event_seq=0):
+            yield TaskEvent(
+                1, graph_id, 1, TaskEventType.NODE_CHANGED, datetime.now(timezone.utc),
+                TaskStatus.RUNNING, TaskStatus.RUNNING, "node", "worker", 1, "other-execution",
+            )
+
+    runtime = _Runtime()
+    runtime.graph = ConflictingGraph()
+    run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), _watch_tree)
+    stream = run.watch()
+    try:
+        with pytest.raises(AIError) as raised:
+            _ = [item async for item in stream]
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert not isinstance(raised.value, ObservationError)
+    finally:
+        await stream.aclose()

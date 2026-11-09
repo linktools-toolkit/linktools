@@ -779,10 +779,10 @@ class TaskGraphRun(Generic[AppT]):
                     else:
                         if event.event_seq <= cursor_graph_event_seq:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        if (event.event_type is TaskEventType.GRAPH_EXPANDED
-                                and event.event_seq > graph_state.event_seq
-                                or event.execution_id is not None
-                                and execution_ids.get(event.node_id) != event.execution_id):
+                        if (event.event_seq > graph_state.event_seq
+                                and (event.event_type is TaskEventType.GRAPH_EXPANDED
+                                     or event.execution_id is not None
+                                     and execution_ids.get(event.node_id) != event.execution_id)):
                             refreshed = await self._state()
                             if refreshed.event_seq < event.event_seq:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
