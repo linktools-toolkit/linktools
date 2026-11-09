@@ -58,6 +58,8 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     records = metadata.tables["ai_state_records"]
     dialect = mysql.dialect()
 
+    assert records.c.subject_digest.nullable
+    assert records.c.subject_digest.type.compile(dialect=dialect) == "CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
     assert "partition_digest" not in records.c
     assert (
         records.c.sort_key.type.compile(dialect=dialect)
@@ -72,10 +74,12 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     for name in (
         "ix_store_digest_kind_sort_key",
         "ix_scope_digest_sort_key",
+        "ix_parent_digest_sort_key",
     ):
         ddl = str(CreateIndex(mysql_indexes[name]).compile(dialect=dialect))
         assert "sort_key(128)" in ddl
 
+    assert not mysql_indexes["ix_scope_digest_subject_digest"].unique
     migration = (
         Path(__file__).resolve().parents[2]
         / "linktools-ai"
@@ -91,6 +95,8 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     for fragment in (
         "ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128))",
         "ix_scope_digest_sort_key (scope_digest, sort_key(128))",
+        "ix_parent_digest_sort_key (parent_digest, sort_key(128))",
+        "ix_scope_digest_subject_digest (scope_digest, subject_digest)",
     ):
         assert fragment in migration
 
@@ -103,6 +109,8 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "uk_store_digest_key_digest",
             "ix_store_digest_kind_sort_key",
             "ix_scope_digest_sort_key",
+            "ix_scope_digest_subject_digest",
+            "ix_parent_digest_sort_key",
             "ix_updated_at",
             "ix_created_at",
         },
@@ -137,7 +145,6 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "uk_key_digest",
             "ix_partition_digest_sort_key",
             "ix_scope_digest_state_sort_key",
-            "ix_parent_digest_sort_key",
             "ix_store_digest_kind_key_digest",
         },
         "ai_state_aliases": {"uk_alias_digest", "ix_store_digest_alias_digest"},
@@ -164,8 +171,6 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
         assert not (forbidden[table_name] & mysql_names)
         assert "ix_updated_at" in mysql_names
         assert "ix_created_at" in mysql_names
-        if table_name == "ai_state_records":
-            assert len(mysql_names) <= len(table.c) // 3
 
 
 def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None:

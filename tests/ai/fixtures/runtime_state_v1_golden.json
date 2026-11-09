@@ -229,6 +229,7 @@
       "sort": "golden",
       "state": null,
       "storage_revision": 0,
+      "subject": null,
       "lease": {
         "owner": null,
         "fence": 0,

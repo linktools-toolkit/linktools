@@ -960,6 +960,7 @@ def _same_physical_identity(left: StoredRecord, right: StoredRecord) -> bool:
         left.key_digest == right.key_digest
         and left.scope_digest == right.scope_digest
         and left.parent_digest == right.parent_digest
+        and left.subject_digest == right.subject_digest
         and left.kind == right.kind
         and left.sort_key == right.sort_key
         and left.state == right.state

@@ -88,6 +88,12 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 grouping key used by the record kind's primary list query.",
         ),
         Column(
+            "subject_digest",
+            digest,
+            nullable=True,
+            comment="Canonical SHA-256 subject identity used for exact lookups within a record scope.",
+        ),
+        Column(
             "parent_digest",
             digest,
             nullable=True,
@@ -149,6 +155,8 @@ def build_runtime_sql_metadata(
     sql_unique(records, "store_digest", "key_digest")
     sql_query_index(records, "store_digest", "kind", "sort_key", mysql_length=128)
     sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
+    sql_query_index(records, "scope_digest", "subject_digest")
+    sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
     sql_audit_indexes(records)
 
     aliases = Table(

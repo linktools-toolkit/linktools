@@ -68,8 +68,11 @@ _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
 # One store and one stream predicate leave 997 SQLite sequence binds.
 _FACT_READ_BATCH_SIZE = 997
-# Six CASE assignments plus key/CAS predicates stay below 999 SQLite binds.
-_RECORD_REPLACE_BATCH_SIZE = 64
+# Six CASE assignments and seven identity/CAS binds plus the IN key
+# require at most 20 binds per row and one shared store bind.
+_RECORD_REPLACE_BATCH_SIZE = 49
+# Store, scope, and kind predicates leave 996 SQLite subject binds.
+_RECORD_SUBJECT_READ_BATCH_SIZE = 996
 _GROUP_RECORD_BIND_BUDGET = 999
 _ARCHIVE_READ_BIND_BUDGET = 999
 # Fixed predicates and JSON-path bindings across all eight edge branches.
@@ -993,6 +996,36 @@ class _SqlTransaction:
             if (value := self._record_cache[key]) is not None
         }
 
+    async def read_record_subjects(
+        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+    ) -> tuple[StoredRecord, ...]:
+        subjects = tuple(dict.fromkeys(subject_digests))
+        if not subjects:
+            return ()
+        from sqlalchemy import select
+
+        scope_hex = _hex(scope_digest)
+        subject_hexes = tuple(_hex(subject) for subject in subjects)
+        table = self._table("ai_state_records")
+        records: list[StoredRecord] = []
+        for offset in range(0, len(subjects), _RECORD_SUBJECT_READ_BATCH_SIZE):
+            matches = select(table.c.id).where(
+                table.c.scope_digest == scope_hex,
+                table.c.subject_digest.in_(
+                    subject_hexes[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]
+                ),
+            ).subquery("record_subjects")
+            rows = (await self._execute(
+                select(table).select_from(matches.join(table, table.c.id == matches.c.id)).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.kind == kind,
+                )
+            )).mappings().all()
+            records.extend(_record_from_row(row) for row in rows)
+        records.sort(key=lambda record: (record.sort_key, record.key_digest))
+        self._record_cache.update((record.key_digest, record) for record in records)
+        return tuple(records)
+
     async def read_archive_frontiers(
         self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
         content_keys: Sequence[bytes] = (),
@@ -1214,7 +1247,7 @@ class _SqlTransaction:
         prepared = tuple(_record_values(value.record) for value in ordered)
         columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json")
-        identity_columns = ("scope_digest", "parent_digest", "kind", "sort_key")
+        identity_columns = ("scope_digest", "parent_digest", "subject_digest", "kind", "sort_key")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
@@ -2165,7 +2198,7 @@ class _SqlTransaction:
         from sqlalchemy.dialects.mysql import BINARY
 
         conditions = []
-        for name in ("scope_digest", "parent_digest", "kind", "sort_key"):
+        for name in ("scope_digest", "parent_digest", "subject_digest", "kind", "sort_key"):
             column = table.c[name]
             # MySQL text equality may ignore case or trailing spaces even when
             # the in-memory identity contract distinguishes those values.
@@ -2202,6 +2235,9 @@ def _record_values(
         "parent_digest": None
         if record.parent_digest is None
         else _hex(record.parent_digest),
+        "subject_digest": None
+        if record.subject_digest is None
+        else _hex(record.subject_digest),
         "kind": record.kind,
         "sort_key": record.sort_key,
         "state": record.state,
@@ -2232,6 +2268,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             _row_nonnegative_int(row["lease_fence"]),
             _datetime_or_none(row["lease_expires_at"]),
             _row_mapping(row["payload_json"]),
+            subject_digest=_row_digest_or_none(row["subject_digest"]),
         )
         validate_record_identity(record)
     except AIError:

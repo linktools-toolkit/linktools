@@ -1186,6 +1186,7 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
         "key": record.key_digest.hex(),
         "scope": None if record.scope_digest is None else record.scope_digest.hex(),
         "parent": None if record.parent_digest is None else record.parent_digest.hex(),
+        "subject": None if record.subject_digest is None else record.subject_digest.hex(),
         "kind": record.kind,
         "sort": record.sort_key,
         "state": record.state,
@@ -1209,6 +1210,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             "key",
             "scope",
             "parent",
+            "subject",
             "kind",
             "sort",
             "state",
@@ -1238,6 +1240,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             _integer(lease, "fence"),
             _optional_datetime(lease["expires_at"]),
             dict(data),
+            subject_digest=_optional_digest(value["subject"]),
         )
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

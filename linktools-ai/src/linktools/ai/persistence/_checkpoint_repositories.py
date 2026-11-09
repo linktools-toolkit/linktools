@@ -33,12 +33,14 @@ from ._plan import PersistenceDomain
 from .state import (
     Observed,
     RecordQuery,
+    RecordSubjectReader,
     RecordReplacement,
     StateStore,
     StateTransaction,
     StoredAlias,
     StoredRecord,
     alias_digest,
+    subject_digest,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -832,9 +834,15 @@ class ToolRepositoryImpl(_RepositoryBase):
             return ()
 
         async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
-            records = await transaction.list_records(RecordQuery(
-                kind="tool_operation", scope_digest=self._scope("tool_operation", "agent_run", agent_run_id),
-            ))
+            scope = self._scope("tool_operation", "agent_run", agent_run_id)
+            records = None
+            if isinstance(transaction, RecordSubjectReader):
+                records = await transaction.read_record_subjects(
+                    kind="tool_operation", scope_digest=scope,
+                    subject_digests=tuple(subject_digest(call_id) for call_id in ordered),
+                )
+            if records is None:
+                records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_digest=scope))
             values = [await self._decode(record, ToolOperationRecord) for record in records]
             selected = {value.tool_call_id: value for value in values
                         if value.agent_run_id == agent_run_id and value.tool_call_id in ordered}
