@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Exact native run references reduce event bytes without extra SQL requests."""
+
+import asyncio
+import json
+import time
+from collections import Counter
+from collections.abc import AsyncIterator
+from dataclasses import replace
+from itertools import groupby
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
+from sqlalchemy import event, select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.persistence import SqlStepStore
+from linktools.ai.persistence import _step_store as module
+from linktools.ai.storage import create_sql_storage_context
+
+
+@pytest_asyncio.fixture
+async def store(tmp_path: Path) -> AsyncIterator[tuple[SqlStepStore, AsyncEngine]]:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'references.db'}")
+    adapter = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    await adapter.initialize(local=True)
+    try:
+        yield adapter, engine
+    finally:
+        await adapter.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_public_native_scope_identity_matches_physical_store(store) -> None:
+    adapter, _ = store
+    assert adapter.store_digest == SqlStepStore.scope_digest(namespace="steps", tenant_id="one")
+    assert adapter.store_digest != SqlStepStore.scope_digest(namespace="steps", tenant_id="other")
+    assert adapter.store_digest != SqlStepStore.scope_digest(namespace="other", tenant_id="one")
+
+
+@pytest.mark.parametrize("namespace, tenant_id", [("", "one"), ("steps", ""), (None, "one"), ("steps", 1)])
+def test_native_scope_identity_rejects_invalid_partition(namespace, tenant_id) -> None:
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
+
+
+def _records() -> tuple[RunRecord, StepEvent]:
+    run = RunRecord(run_id="run", registration_id="registration", conversation_id="conversation",
+                    parent_run_id="parent", agent_name="agent", metadata={"caller": "原样 " * 1024})
+    boundary = StepEvent(run_id=run.run_id, kind="tool_call_failed", step_index=3,
+                         conversation_id=run.conversation_id, parent_run_id=run.parent_run_id,
+                         agent_name=run.agent_name, metadata=dict(run.metadata),
+                         tool_call_id="call", tool_name="tool", error="original error", idempotency_key="first")
+    return run, boundary
+
+
+async def _rows(engine: AsyncEngine) -> list[dict[str, object]]:
+    async with engine.connect() as connection:
+        return [dict(row) for row in (await connection.execute(text(
+            "SELECT conversation_id, parent_run_id, agent_name, metadata, run_fields "
+            "FROM ai_step_events ORDER BY id"
+        ))).mappings()]
+
+
+@pytest.mark.asyncio
+async def test_exact_fields_reference_native_run_and_custom_null_values_stay_inline(store) -> None:
+    adapter, engine = store
+    run, first = _records()
+    custom = replace(first, conversation_id=None, parent_run_id="different parent", agent_name="agent ",
+                     metadata={"caller": "different", "run_fields": "8", "custom": "\u0000原样"}, idempotency_key="custom")
+    partial = replace(first, metadata={}, idempotency_key="partial")
+    await adapter.commit_step(run=run, events=(first, custom, partial))
+    rows = await _rows(engine)
+    assert rows[0] == dict(conversation_id=None, parent_run_id=None, agent_name=None, metadata=None, run_fields=15)
+    assert rows[1] == dict(conversation_id=None, parent_run_id="different parent", agent_name="agent ",
+                           metadata=json.dumps(custom.metadata), run_fields=0)
+    assert rows[2]["metadata"] == "{}" and rows[2]["run_fields"] == 7
+    statements = []
+
+    def capture(connection, cursor, statement, parameters, context, many):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        assert await adapter.list_events(run_id=run.run_id) == [first, custom, partial]
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+    assert len(statements) == 1 and statements[0].startswith("SELECT")
+    assert "LEFT OUTER JOIN ai_step_runs" in statements[0]
+    # The join reads the native owner inside this query; it is not a zero-read cache.
+    assert statements[0].count("JOIN ai_step_runs") == 1
+
+
+@pytest.mark.asyncio
+async def test_no_source_cold_append_and_registration_replay_never_guess_run_fields(store) -> None:
+    adapter, engine = store
+    run, first = _records()
+    await adapter.append_event(first)
+    await adapter.register_run(run)
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    try:
+        second = replace(first, idempotency_key="cold")
+        await cold.append_event(second)
+        supplied = replace(run, metadata={"caller": "changed"})
+        replayed = replace(first, metadata=dict(supplied.metadata), idempotency_key="replay")
+        statements = []
+
+        def capture(connection, cursor, statement, parameters, context, many):
+            statements.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            await cold.commit_step(run=supplied, events=(replayed,))
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        assert len([sql for sql in statements if sql.startswith("SELECT")]) == 1
+        assert all("metadata" not in sql for sql in statements if sql.startswith("SELECT"))
+        assert all(row["run_fields"] == 0 for row in await _rows(engine))
+        assert await cold.list_events(run_id=run.run_id) == [first, second, replayed]
+        # An existing public read supplies proof without an extra append-time read.
+        assert await cold.get_run(run_id=run.run_id) == run
+        await cold.append_event(replace(first, idempotency_key="after-read"))
+        assert (await _rows(engine))[-1]["run_fields"] == 15
+    finally:
+        await cold.close()
+
+
+@pytest.mark.asyncio
+async def test_native_refs_keep_first_keyed_value_and_every_unkeyed_occurrence(store) -> None:
+    adapter, _ = store
+    run, first = _records()
+    unkeyed = replace(first, idempotency_key=None)
+    await adapter.commit_step(run=run, events=(first, replace(first, metadata={"changed": "ignored"}), unkeyed, unkeyed))
+    await adapter.commit_step(events=(replace(first, agent_name="ignored"), unkeyed))
+    assert await adapter.list_events(run_id=run.run_id) == [first, unkeyed, unkeyed, unkeyed]
+
+
+@pytest.mark.asyncio
+async def test_event_source_cache_is_partitioned_detached_bounded_and_closed(store, monkeypatch) -> None:
+    adapter, engine = store
+    run, first = _records()
+    await adapter.register_run(run)
+    run.metadata["caller"] = "mutated caller object"
+    await adapter.append_event(first)
+    await adapter.append_event(replace(first, metadata=dict(run.metadata), idempotency_key="mutated"))
+    other = SqlStepStore(engine, namespace="steps", tenant_id="other")
+    try:
+        await other.append_event(replace(first, idempotency_key="other"))
+        rows = await _rows(engine)
+        assert [row["run_fields"] for row in rows] == [15, 7, 0]
+        assert await other.list_events(run_id=run.run_id) == [replace(first, idempotency_key="other")]
+    finally:
+        await other.close()
+    monkeypatch.setattr(module, "_RUN_CACHE_SIZE", 1)
+    await adapter.register_run(replace(run, run_id="second"))
+    assert list(adapter._confirmed_runs) == ["second"]
+    monkeypatch.setattr(module, "_RUN_CACHE_BYTES", 256)
+    # Oversized sources still work in the original transaction, but are not retained.
+    await adapter.close()
+    assert not adapter._confirmed_runs
+    large = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    try:
+        await large.commit_step(run=replace(run, run_id="oversized", metadata=dict(first.metadata)),
+                                events=(replace(first, run_id="oversized"),))
+        assert not large._confirmed_runs
+        await large.append_event(replace(first, run_id="oversized", idempotency_key="inline"))
+        assert [row["run_fields"] for row in (await _rows(engine))[-2:]] == [15, 0]
+        assert sum(source.byte_size for source in large._confirmed_runs.values()) <= 256
+    finally:
+        await large.close()
+
+
+@pytest.mark.asyncio
+async def test_event_source_cache_evicts_by_encoded_bytes_not_only_count(store, monkeypatch) -> None:
+    adapter, _ = store
+    monkeypatch.setattr(module, "_RUN_CACHE_BYTES", 512)
+    for index in range(5):
+        await adapter.register_run(RunRecord(run_id=str(index), metadata={"payload": "x" * 180}))
+        assert sum(source.byte_size for source in adapter._confirmed_runs.values()) <= 512
+    assert len(adapter._confirmed_runs) < 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["rollback", "lost_ack", "cancelled_ack"])
+async def test_failed_or_uncertain_commit_does_not_confirm_event_source(store, monkeypatch, failure) -> None:
+    adapter, engine = store
+    run, first = _records()
+    original = type(adapter.storage_context).run_mutation
+
+    async def fail(context, callback, **kwargs):
+        if failure == "rollback":
+            async def rollback(session):
+                await callback(session)
+                raise RuntimeError("rollback source")
+            return await original(context, rollback, **kwargs)
+        await original(context, callback, **kwargs)
+        if failure == "cancelled_ack":
+            raise asyncio.CancelledError()
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(adapter.storage_context), "run_mutation", fail)
+        expected = RuntimeError if failure == "rollback" else asyncio.CancelledError if failure == "cancelled_ack" else AIError
+        with pytest.raises(expected):
+            await adapter.commit_step(run=run, events=(first,))
+    assert not adapter._confirmed_runs
+    if failure == "rollback":
+        assert await adapter.get_run(run_id=run.run_id) is None
+        assert await _rows(engine) == []
+    else:
+        cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
+        try:
+            assert await cold.list_events(run_id=run.run_id) == [first]
+        finally:
+            await cold.close()
+    tail = replace(first, idempotency_key="after-failure")
+    await adapter.append_event(tail)
+    assert (await _rows(engine))[-1]["run_fields"] == 0
+
+
+@pytest.mark.asyncio
+async def test_joined_transaction_uses_source_before_commit_but_confirms_only_afterward(tmp_path) -> None:
+    from .test_state_group_record_batch import _database
+
+    async with _database(tmp_path / "joined.db") as (engine, state, _):
+        adapter = SqlStepStore(state.context, namespace="steps", tenant_id="one")
+        run, first = _records()
+        prepared = await adapter.prepare_step(run=run, events=(first,))
+        statements, commits = [], []
+
+        def capture(connection, cursor, statement, parameters, context, many):
+            statements.append(statement)
+
+        async def write(transaction):
+            receipt = await adapter.write_prepared_step(transaction, prepared)
+            assert not adapter._confirmed_runs
+            return receipt
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        event.listen(engine.sync_engine, "commit", commits.append)
+        try:
+            receipt = await state.mutate(write)
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+            event.remove(engine.sync_engine, "commit", commits.append)
+        assert len(commits) == 1
+        assert Counter(sql.split()[0] for sql in statements) == {"BEGIN": 1, "INSERT": 2}
+        assert not adapter._confirmed_runs
+        adapter.confirm_prepared_step(receipt)
+        assert (await _rows(engine))[0]["run_fields"] == 15
+        assert await adapter.list_events(run_id=run.run_id) == [first]
+        assert list(adapter._confirmed_runs) == [run.run_id]
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_native_reference_fails_instead_of_changing_event_values(store) -> None:
+    adapter, engine = store
+    run, first = _records()
+    await adapter.commit_step(run=run, events=(first,))
+    await adapter.close()
+    async with engine.begin() as connection:
+        await connection.execute(text("DELETE FROM ai_step_runs"))
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    try:
+        with pytest.raises(ValueError, match="event run reference is missing"):
+            await cold.list_events(run_id=run.run_id)
+    finally:
+        await cold.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["unknown_bit", "negative_mask", "fractional_mask", "inline_conflict", "null_owner"])
+async def test_invalid_native_event_reference_fails_without_returning_invented_values(store, corruption) -> None:
+    adapter, engine = store
+    run, first = _records()
+    if corruption == "fractional_mask":
+        await adapter.append_event(first)
+        await adapter.register_run(run)
+    else:
+        await adapter.commit_step(run=run, events=(first,))
+    mutations = {
+        "unknown_bit": "UPDATE ai_step_events SET run_fields = 16",
+        "negative_mask": "UPDATE ai_step_events SET run_fields = -1",
+        "fractional_mask": "UPDATE ai_step_events SET run_fields = 0.5",
+        "inline_conflict": "UPDATE ai_step_events SET conversation_id = 'conflicting inline value'",
+        "null_owner": "UPDATE ai_step_runs SET conversation_id = NULL",
+    }
+    async with engine.begin() as connection:
+        await connection.execute(text(mutations[corruption]))
+    with pytest.raises(ValueError, match="event run reference is missing or corrupt"):
+        await adapter.list_events(run_id=run.run_id)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_run_is_detached_actual_registration_proof_not_replay_input(store) -> None:
+    adapter, engine = store
+    run, first = _records()
+    assert adapter.confirmed_run(run.run_id) is None
+    await adapter.commit_step(run=run, events=(first,))
+    proof = adapter.confirmed_run(run.run_id)
+    assert proof == run
+    proof.metadata["caller"] = "changed copy"
+    assert adapter.confirmed_run(run.run_id) == run
+    await adapter.commit_step(run=replace(run, metadata={"caller": "changed replay"}))
+    assert adapter.confirmed_run(run.run_id) == run
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    try:
+        await cold.commit_step(run=replace(run, metadata={"caller": "changed replay"}))
+        assert cold.confirmed_run(run.run_id) is None
+        assert await cold.get_run(run_id=run.run_id) == run
+        assert cold.confirmed_run(run.run_id) == run
+    finally:
+        await cold.close()
+    assert cold.confirmed_run(run.run_id) is None
+
+
+@pytest.mark.asyncio
+async def test_run_receipt_cannot_confirm_another_physical_store(tmp_path) -> None:
+    engines = [create_async_engine(f"sqlite+aiosqlite:///{tmp_path / (name + '.db')}") for name in ("one", "two")]
+    stores = [SqlStepStore(engine, namespace="same", tenant_id="same") for engine in engines]
+    try:
+        for adapter in stores:
+            await adapter.initialize(local=True)
+        run, _ = _records()
+        await stores[0].register_run(run)
+        receipt = module.StepWriteReceipt(("a" * 64,), ("b" * 64,), stores[0]._confirmed_runs[run.run_id])
+        with pytest.raises(ValueError, match="another native store"):
+            stores[1].confirm_prepared_step(receipt)
+        assert stores[1].confirmed_run(run.run_id) is None
+        assert not stores[1]._confirmed_messages
+        assert not stores[1]._confirmed_sequences
+    finally:
+        for adapter in stores:
+            await adapter.close()
+        for engine in engines:
+            await engine.dispose()
+
+
+class _InlineStepStore(SqlStepStore):
+    """Pre-normalization event SQL used only as the matched CI reference."""
+
+    async def _write_run(self, session, record, *, replay=False):
+        values = self._run_values(record.run_id) | self._record_values(record)
+        values["conversation_digest"] = module._optional_digest(record.conversation_id)
+        values["parent_digest"] = module._optional_digest(record.parent_run_id)
+        result = await self._context.dialect.insert_ignore_conflict(
+            session, table=self._table("runs"), values=values,
+            index_elements=("store_digest", "run_digest"),
+        )
+        if not result.inserted:
+            if replay and record.registration_id is not None:
+                table = self._table("runs")
+                registration = await session.scalar(select(table.c.registration_id).where(
+                    *self._run_predicates(table, record.run_id),
+                ))
+                if registration == record.registration_id:
+                    return
+            raise ValueError("run_id is single-shot")
+
+    async def get_run(self, *, run_id: str) -> RunRecord | None:
+        await self.initialize()
+        table = self._table("runs")
+        async with self._context.sessions() as session:
+            row = (await self._context.run_statement(session.execute(select(table).where(
+                *self._run_predicates(table, run_id),
+            )))).mappings().first()
+        return None if row is None else module._RUN_ADAPTER.validate_python(self._record_data(row))
+
+    async def _write_events(self, session, events, *, source=None):
+        for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
+            rows = [self._run_values(item.run_id) | self._record_values(item) for item in group]
+            for row in rows:
+                row["key_digest"] = module._replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
+            batch_size = module._BATCH_SIZE if keyed else 1
+            for offset in range(0, len(rows), batch_size):
+                if not keyed:
+                    await session.execute(self._table("events").insert().values(rows[offset]))
+                else:
+                    await self._context.dialect.insert_ignore_conflict_many(
+                        session, table=self._table("events"), rows=rows[offset:offset + batch_size],
+                        index_elements=("key_digest",),
+                    )
+
+    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+        await self.initialize()
+        table = self._table("events")
+        async with self._context.sessions() as session:
+            rows = (await self._context.run_statement(session.execute(select(table).where(
+                *self._run_predicates(table, run_id),
+            ).order_by(table.c.id)))).mappings().all()
+        return [module._EVENT_ADAPTER.validate_python(self._record_data(row)) for row in rows]
+
+
+def _bytes(value: object) -> int:
+    if isinstance(value, (tuple, list)):
+        return sum(_bytes(item) for item in value)
+    if value is None:
+        return 0
+    return len(value) if isinstance(value, bytes) else len(str(value).encode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(tmp_path, monkeypatch, record_property) -> None:
+    samples = {}
+    active = None
+    original_values = SqlStepStore._record_values.__func__
+
+    def encoded(cls, record):
+        values = original_values(cls, record)
+        if active is not None:
+            active["encoded_record_bytes"] += _bytes(tuple(values.values()))
+        return values
+
+    monkeypatch.setattr(SqlStepStore, "_record_values", classmethod(encoded))
+    run, first = _records()
+    run = replace(run, metadata={"payload": "x" * 65536})
+    first = replace(first, metadata=dict(run.metadata))
+    for name, constructor in (("inline", _InlineStepStore), ("referenced", SqlStepStore)):
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / (name + '.db')}")
+        context = create_sql_storage_context(engine)
+        adapter = constructor(context, namespace="steps", tenant_id="one")
+        await adapter.initialize(local=True)
+        metrics = {"statements": Counter(), "encoded_record_bytes": 0, "bound_bytes": 0,
+                   "returned_bytes": 0, "commits": 0}
+
+        def capture(connection, cursor, statement, parameters, execution, many):
+            metrics["statements"][statement.split()[0].upper()] += 1
+            metrics["bound_bytes"] += _bytes(parameters)
+
+        def returned(connection, cursor, statement, parameters, execution, many):
+            if cursor.description:
+                metrics["returned_bytes"] += _bytes(tuple(cursor._rows))
+
+        def commit(connection):
+            metrics["commits"] += 1
+
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        event.listen(engine.sync_engine, "after_cursor_execute", returned)
+        event.listen(engine.sync_engine, "commit", commit)
+        active = metrics
+        start = time.process_time()
+        expected = [replace(first, step_index=index, idempotency_key=str(index)) for index in range(32)]
+        try:
+            await adapter.commit_step(run=run, events=expected[:1])
+            for boundary in expected[1:]:
+                await adapter.append_event(boundary)
+            await adapter.commit_step(run=run, events=(replace(expected[0], metadata={"retry": "ignored"}),))
+            await adapter.close()
+            cold = constructor(context, namespace="steps", tenant_id="one")
+            try:
+                assert await cold.get_run(run_id=run.run_id) == run
+                assert await cold.list_events(run_id=run.run_id) == expected
+            finally:
+                await cold.close()
+            metrics["cpu_seconds"] = time.process_time() - start
+        finally:
+            active = None
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+            event.remove(engine.sync_engine, "after_cursor_execute", returned)
+            event.remove(engine.sync_engine, "commit", commit)
+            await adapter.close()
+            await context.close()
+        rows = await _rows(engine)
+        metrics["stored_field_bytes"] = sum(_bytes(tuple(row.values())) for row in rows)
+        samples[name] = metrics
+        await engine.dispose()
+    baseline, candidate = samples["inline"], samples["referenced"]
+    assert candidate["statements"] == baseline["statements"] == {"BEGIN": 33, "INSERT": 35, "SELECT": 3}
+    assert candidate["commits"] == baseline["commits"] == 33
+    assert candidate["encoded_record_bytes"] == baseline["encoded_record_bytes"]
+    assert candidate["bound_bytes"] < baseline["bound_bytes"] / 8
+    assert 0 < candidate["returned_bytes"] <= baseline["returned_bytes"]
+    assert candidate["stored_field_bytes"] < baseline["stored_field_bytes"] / 100
+    # A loose CI guard catches gross CPU regressions, not a claimed speedup.
+    assert candidate["cpu_seconds"] <= baseline["cpu_seconds"] * 2 + 0.1
+    record_property("native_event_lifecycle_cost", json.dumps(samples, sort_keys=True))

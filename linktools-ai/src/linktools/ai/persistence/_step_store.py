@@ -7,7 +7,7 @@ import json
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from itertools import groupby
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -50,6 +50,30 @@ _RUN_ADAPTER = TypeAdapter(RunRecord)
 _EVENT_ADAPTER = TypeAdapter(StepEvent)
 _SNAPSHOT_ADAPTER = TypeAdapter(ContinuableSnapshot)
 _BATCH_SIZE = 128
+_RUN_CACHE_SIZE = 128
+_RUN_CACHE_BYTES = 1024 * 1024
+_EVENT_RUN_FIELDS = ("conversation_id", "parent_run_id", "agent_name", "metadata")
+
+
+@dataclass(frozen=True, slots=True)
+class _RunFields:
+    """Detached native fields from a successful insert or an existing run read."""
+
+    engine: "AsyncEngine"
+    store_digest: str
+    run_id: str
+    registration_id: str | None
+    started_at: str
+    values: "tuple[SqlValue, ...]"
+    byte_size: int
+
+    @classmethod
+    def from_row(cls, row: "Mapping[str, SqlValue]", *, engine: "AsyncEngine") -> "_RunFields":
+        values = tuple(row[name] for name in _EVENT_RUN_FIELDS)
+        byte_size = sum(len(value.encode("utf-8")) for value in (
+            row["store_digest"], row["run_id"], row["registration_id"], row["started_at"], *values,
+        ) if isinstance(value, str))
+        return cls(engine, row["store_digest"], row["run_id"], row["registration_id"], row["started_at"], values, byte_size)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,10 +90,11 @@ class PreparedStep:
 
 @dataclass(frozen=True, slots=True)
 class StepWriteReceipt:
-    """Provisional body identities, confirmed only by the outer transaction."""
+    """Provisional body identities and run fields, confirmed by the outer transaction."""
 
     message_digests: tuple[str, ...]
     sequence_digests: tuple[str, ...]
+    run_fields: _RunFields | None = None
 
 
 class SqlStepStore:
@@ -83,6 +108,9 @@ class SqlStepStore:
     Confirmed message digests are cached only after commit. Direct deletion or
     replacement of message bodies requires quiescing and closing all adapters
     before maintenance. ``max_cached_messages=0`` disables this optimization.
+    Exact run fields use a separate confirmed cache bounded by entry count and
+    UTF-8 bytes. Unknown or evicted runs keep events inline without a pre-read.
+    Direct run replacement also requires quiescing and closing every adapter.
     """
 
     def __init__(
@@ -97,10 +125,7 @@ class SqlStepStore:
         max_snapshots_per_run: int | None = None,
         max_cached_messages: int = 4096,
     ) -> None:
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("namespace must be a non-empty string")
-        if not isinstance(tenant_id, str) or not tenant_id:
-            raise ValueError("tenant_id must be a non-empty string")
+        store_digest = self.scope_digest(namespace=namespace, tenant_id=tenant_id)
         if max_snapshots_per_run is not None and (
             not isinstance(max_snapshots_per_run, int) or max_snapshots_per_run < 1
         ):
@@ -110,7 +135,7 @@ class SqlStepStore:
         self._context = engine if isinstance(engine, SqlStorageContext) else create_sql_storage_context(engine)
         self._owns_context = not isinstance(engine, SqlStorageContext)
         self._metadata = build_step_sql_metadata()
-        self._store_digest = namespace_digest(json.dumps([namespace, tenant_id], separators=(",", ":")))
+        self._store_digest = store_digest
         self._tool_effect_store = tool_effect_store
         self._media_store = media_store
         self._media_threshold_bytes = media_threshold_bytes
@@ -119,6 +144,16 @@ class SqlStepStore:
         self._max_cached_messages = max_cached_messages
         self._confirmed_messages: OrderedDict[str, None] = OrderedDict()
         self._confirmed_sequences: OrderedDict[str, None] = OrderedDict()
+        self._confirmed_runs: OrderedDict[str, _RunFields] = OrderedDict()
+
+    @classmethod
+    def scope_digest(cls, *, namespace: str, tenant_id: str) -> str:
+        """Derive the native partition identity from its logical scope."""
+        if not isinstance(namespace, str) or not namespace:
+            raise ValueError("namespace must be a non-empty string")
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise ValueError("tenant_id must be a non-empty string")
+        return namespace_digest(json.dumps([namespace, tenant_id], separators=(",", ":")))
 
     async def initialize(self, *, local: bool = False) -> None:
         """Configure the borrowed backend, optionally creating local SQLite tables."""
@@ -141,6 +176,7 @@ class SqlStepStore:
         """Release this adapter's context without closing a borrowed engine."""
         self._confirmed_messages.clear()
         self._confirmed_sequences.clear()
+        self._confirmed_runs.clear()
         if self._owns_context:
             await self._context.close()
 
@@ -172,14 +208,16 @@ class SqlStepStore:
     async def register_run(self, record: RunRecord) -> None:
         await self.initialize()
 
-        async def write(session: "AsyncSession") -> None:
-            await self._write_run(session, record)
+        async def write(session: "AsyncSession") -> _RunFields | None:
+            return await self._write_run(session, record)
 
-        await self._context.run_mutation(write, domain="steps.run")
+        source = await self._context.run_mutation(write, domain="steps.run")
+        if source is not None:
+            self._confirm_run(source)
 
     async def _write_run(
         self, session: "AsyncSession", record: RunRecord, *, replay: bool = False,
-    ) -> None:
+    ) -> _RunFields | None:
         values = self._run_values(record.run_id) | self._record_values(record)
         values["conversation_digest"] = _optional_digest(record.conversation_id)
         values["parent_digest"] = _optional_digest(record.parent_run_id)
@@ -196,10 +234,11 @@ class SqlStepStore:
                     *self._run_predicates(table, record.run_id),
                 ))
                 if registration == record.registration_id:
-                    return
+                    return None
             raise ValueError(
                 f"run_id {record.run_id!r} is already in the store; run_id is single-shot"
             )
+        return _RunFields.from_row(values, engine=self._context.engine)
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         from sqlalchemy import select
@@ -210,7 +249,11 @@ class SqlStepStore:
             row = (await self._context.run_statement(
                 session.execute(select(table).where(*self._run_predicates(table, run_id)))
             )).mappings().first()
-        return None if row is None else _RUN_ADAPTER.validate_python(self._record_data(row))
+        if row is None:
+            return None
+        record = _RUN_ADAPTER.validate_python(self._record_data(row))
+        self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
+        return record
 
     async def list_runs(
         self, *, parent_run_id: str | None = None, conversation_id: str | None = None,
@@ -226,7 +269,10 @@ class SqlStepStore:
             query = query.where(table.c.conversation_digest == _digest(conversation_id), table.c.conversation_id == conversation_id)
         async with self._context.sessions() as session:
             rows = (await self._context.run_statement(session.execute(query.order_by(table.c.id)))).mappings().all()
-        return sorted((_RUN_ADAPTER.validate_python(self._record_data(row)) for row in rows), key=lambda r: r.started_at)
+        records = [_RUN_ADAPTER.validate_python(self._record_data(row)) for row in rows]
+        for row in rows:
+            self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
+        return sorted(records, key=lambda r: r.started_at)
 
     async def append_event(self, event: StepEvent) -> None:
         await self.initialize()
@@ -236,12 +282,23 @@ class SqlStepStore:
 
         await self._context.run_mutation(write, domain="steps.event")
 
-    async def _write_events(self, session: "AsyncSession", events: Sequence[StepEvent]) -> None:
+    async def _write_events(
+        self, session: "AsyncSession", events: Sequence[StepEvent], *, source: _RunFields | None = None,
+    ) -> None:
         for keyed, group in groupby(events, key=lambda event: event.idempotency_key is not None):
-            rows = [self._run_values(event.run_id) | self._record_values(event)
-                    for event in group]
-            for row in rows:
+            rows = []
+            for event in group:
+                row = self._run_values(event.run_id) | self._record_values(event)
+                known = source if source is not None and source.run_id == event.run_id else self._confirmed_runs.get(event.run_id)
+                row["run_fields"] = 0
+                if known is not None:
+                    for bit, (name, value) in enumerate(zip(_EVENT_RUN_FIELDS, known.values)):
+                        # NULL stays an explicit event value, never an inheritance marker.
+                        if row[name] is not None and row[name] == value:
+                            row[name] = None
+                            row["run_fields"] |= 1 << bit
                 row["key_digest"] = _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
+                rows.append(row)
             # An unkeyed append must fail rather than silently suppress a
             # colliding physical occurrence identity.
             batch_size = _BATCH_SIZE if keyed else 1
@@ -255,15 +312,44 @@ class SqlStepStore:
                 )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
-        from sqlalchemy import select
+        from sqlalchemy import and_, case, or_, select
 
         await self.initialize()
-        table = self._table("events")
+        table, runs = self._table("events"), self._table("runs")
+        columns = {field.name: table.c[field.name] for field in fields(StepEvent)}
+        invalid = [table.c.run_fields.bitwise_and((1 << len(_EVENT_RUN_FIELDS)) - 1) != table.c.run_fields,
+                   and_(table.c.run_fields != 0, runs.c.id.is_(None))]
+        for bit, name in enumerate(_EVENT_RUN_FIELDS):
+            referenced = table.c.run_fields.bitwise_and(1 << bit) != 0
+            columns[name] = case((referenced, runs.c[name]), else_=table.c[name]).label(name)
+            invalid.append(and_(referenced, or_(table.c[name].is_not(None), runs.c[name].is_(None))))
+        query = select(
+            *columns.values(), or_(*invalid).label("invalid_run_reference"),
+        ).select_from(table.outerjoin(runs, and_(
+            table.c.run_fields != 0,
+            runs.c.store_digest == table.c.store_digest,
+            runs.c.run_digest == table.c.run_digest,
+            runs.c.run_id == table.c.run_id,
+        ))).where(*self._run_predicates(table, run_id)).order_by(table.c.id)
         async with self._context.sessions() as session:
-            rows = (await self._context.run_statement(session.execute(select(table).where(
-                *self._run_predicates(table, run_id),
-            ).order_by(table.c.id)))).mappings().all()
+            rows = (await self._context.run_statement(session.execute(query))).mappings().all()
+        if any(row["invalid_run_reference"] for row in rows):
+            raise ValueError("event run reference is missing or corrupt")
         return [_EVENT_ADAPTER.validate_python(self._record_data(row)) for row in rows]
+
+    def confirmed_run(self, run_id: str) -> RunRecord | None:
+        """Return detached committed run proof when retained, without reading SQL."""
+        source = self._confirmed_runs.get(run_id)
+        if source is None or self._context.closed:
+            return None
+        data = dict(zip(_EVENT_RUN_FIELDS, source.values))
+        data.update(run_id=source.run_id, registration_id=source.registration_id, started_at=source.started_at)
+        return _RUN_ADAPTER.validate_python(self._record_data(data))
+
+    @property
+    def store_digest(self) -> str:
+        """Physical namespace and tenant partition of these native records."""
+        return self._store_digest
 
     @property
     def storage_context(self) -> SqlStorageContext:
@@ -293,19 +379,33 @@ class SqlStepStore:
     async def _write_prepared_step(
         self, session: "AsyncSession", prepared: PreparedStep,
     ) -> StepWriteReceipt:
-        if prepared.run is not None:
-            await self._write_run(session, prepared.run, replay=True)
-        await self._write_events(session, prepared.events)
+        source = None if prepared.run is None else await self._write_run(session, prepared.run, replay=True)
+        await self._write_events(session, prepared.events, source=source)
+        receipt = StepWriteReceipt((), ())
         if prepared.snapshot is not None and prepared.snapshot_values is not None:
-            return await self._write_snapshot(
+            receipt = await self._write_snapshot(
                 session, prepared.snapshot_values, prepared.messages, prepared.sequences,
             )
-        return StepWriteReceipt((), ())
+        return replace(receipt, run_fields=source)
 
     def confirm_prepared_step(self, receipt: StepWriteReceipt) -> None:
-        """Advance body knowledge after the enclosing commit is confirmed."""
+        """Advance immutable source knowledge after the enclosing commit is confirmed."""
+        if receipt.run_fields is not None:
+            self._confirm_run(receipt.run_fields)
         self._confirm_records(self._confirmed_messages, receipt.message_digests)
         self._confirm_records(self._confirmed_sequences, receipt.sequence_digests)
+
+    def _confirm_run(self, source: _RunFields) -> None:
+        if source.engine is not self._context.engine or source.store_digest != self._store_digest:
+            raise ValueError("run receipt belongs to another native store")
+        if source.byte_size > _RUN_CACHE_BYTES:
+            return
+        self._confirmed_runs[source.run_id] = source
+        self._confirmed_runs.move_to_end(source.run_id)
+        size = sum(item.byte_size for item in self._confirmed_runs.values())
+        while len(self._confirmed_runs) > _RUN_CACHE_SIZE or size > _RUN_CACHE_BYTES:
+            _, evicted = self._confirmed_runs.popitem(last=False)
+            size -= evicted.byte_size
 
     async def commit_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
