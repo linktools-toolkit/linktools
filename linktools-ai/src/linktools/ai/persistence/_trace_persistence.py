@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Protocol
@@ -209,9 +210,17 @@ class TracePersistence:
         self, agent_run_id: str, *, execution_id: str,
         producer_generation: int | None,
     ) -> None:
-        await self._owned(self._defer(
-            agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
-        ))
+        async def admit() -> None:
+            # An explicit flush retires its paused buffer before new admissions.
+            # Unbuffered publication takes this boundary through stop itself.
+            boundary = (self._boundary_locks.setdefault(agent_run_id, asyncio.Lock())
+                        if self.buffered(agent_run_id) else nullcontext())
+            async with boundary:
+                await self._defer(
+                    agent_run_id, execution_id=execution_id, producer_generation=producer_generation,
+                )
+
+        await self._owned(admit())
 
     async def _defer(
         self, agent_run_id: str, *, execution_id: str,
