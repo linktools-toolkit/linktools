@@ -29,6 +29,7 @@ from ..errors import AIError
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
 from ._archive import ImmutableSequenceNode
 from ._native_checkpoint import NativeCheckpoint
+from ._step_maintenance import StepContentCleanupResult, purge_step_content
 from ._step_sequence import build_step_sequence, step_sequence_contents
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, StateTransaction
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.elements import ColumnElement
 
     from ..storage import SqlValue
+    from ._snapshot import SnapshotExclusiveGuard
 
 
 _logger = environ.get_logger("ai.persistence.steps")
@@ -141,6 +143,31 @@ class SqlStepStore:
         self._confirmed_sequences.clear()
         if self._owns_context:
             await self._context.close()
+
+    async def purge_unreferenced_content(
+        self, *, exclusive: "SnapshotExclusiveGuard",
+    ) -> StepContentCleanupResult:
+        """Reclaim retired content after quiescing every user of these tables.
+
+        Close all other adapters first so no confirmed-content cache survives
+        this maintenance window. The guard must also drain this adapter's work.
+        Snapshot roots, run records and replay tombstones are never retired here.
+        Normal reads and writes do not invoke this complete offline scan.
+        """
+        async with exclusive.offline_exclusivity():
+            await self.initialize()
+            self._confirmed_messages.clear()
+            self._confirmed_sequences.clear()
+            try:
+                result = await purge_step_content(self._context, self._metadata, self._store_digest)
+            finally:
+                # Cancellation or a lost commit acknowledgement must not leave
+                # the caller believing an old body still exists after reopening.
+                self._confirmed_messages.clear()
+                self._confirmed_sequences.clear()
+            _logger.info("native content reclaimed: sequences=%s messages=%s",
+                         result.deleted_sequences, result.deleted_messages)
+            return result
 
     async def register_run(self, record: RunRecord) -> None:
         await self.initialize()
@@ -633,4 +660,4 @@ def _replay_digest(store_digest: str, run_digest: str, value: str | None) -> str
     return _digest(json.dumps(identity))
 
 
-__all__ = ["PreparedStep", "SqlStepStore", "StepWriteReceipt"]
+__all__ = ["PreparedStep", "SqlStepStore", "StepWriteReceipt", "StepContentCleanupResult"]
