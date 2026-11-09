@@ -833,9 +833,17 @@ async def test_declaration_loaders_are_backend_agnostic(
             asset_features = RuntimeFeatures("assets")
             asset_features.capability(AssetCapability(store), scope="runtime")
             snapshot = await asset_features.resolve()
+            skill = snapshot.contributions[2].value
+            assert isinstance(skill, SkillDefinition)
+            assert skill.source_ref is not None
+            declaration = skill.source_ref.declaration
+            assert declaration is not None
+            assert declaration.path == "SKILL.md"
+            assert declaration.asset.key == AssetKey("skill", "audit/SKILL.md")
+            assert await store.read_versions((declaration.asset,)) == (values[declaration.asset.key],)
             results.append(
                 tuple(
-                    (item.kind, item.id, item.value)
+                    (item.kind, item.id, item.value.spec if isinstance(item.value, SkillDefinition) else item.value)
                     for item in snapshot.contributions
                 )
             )

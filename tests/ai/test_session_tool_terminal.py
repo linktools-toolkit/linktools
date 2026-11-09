@@ -2620,6 +2620,8 @@ async def test_conversation_preparation_failure_keeps_owner_retryable(
     ))
     conversation = state.run_store.read_store(PersistenceDomain.CONVERSATION)
 
+    original_snapshot = await native.latest_snapshot(run_id="run")
+
     async def fail_resolution(*args: Any, **kwargs: Any) -> Any:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
@@ -2630,7 +2632,9 @@ async def test_conversation_preparation_failure_keeps_owner_retryable(
                 await state.run_store.materialize_conversation(agent_run_id="run")
             assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
         assert await conversation.latest_checkpoint(agent_run_id="run") is None
-        assert (await native.latest_snapshot(run_id="run")).messages == messages
+        assert await native.latest_snapshot(run_id="run") == original_snapshot
+        reader = state.run_store.checkpoint_persistence.reader
+        assert (await reader.latest_snapshot(run_id="run")).messages == messages
         await state.run_store.materialize_conversation(agent_run_id="run")
         assert (await conversation.latest_checkpoint(agent_run_id="run")).messages == messages
     finally:

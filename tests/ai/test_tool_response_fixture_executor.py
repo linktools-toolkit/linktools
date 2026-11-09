@@ -12,7 +12,7 @@ from linktools.ai.core import PromptLimits, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor, _AgentRunScope
 from linktools.ai.capability import ToolResponseFixture
-from linktools.ai.spec import MCPServerSpec, mcp_server_selector
+from linktools.ai.spec import AgentSpec, MCPServerSpec, mcp_server_selector
 
 from .test_tool_response_fixture import _manifest, _store
 
@@ -23,14 +23,14 @@ def _scope(ref: object, fixture: ToolResponseFixture | None = None) -> _AgentRun
 
     return _AgentRunScope(
         binding=SimpleNamespace(compiled_agent=SimpleNamespace(
-            selected_tools=(), skill_definitions=(),
+            spec=AgentSpec("fixture-test"), selected_tools=(), skill_definitions=(),
             runtime_contributions=(() if fixture is None else (CapabilityContribution.from_opaque(
                 "capability", ToolResponsesCapability.id, ToolResponsesCapability(fixture), scope="runtime",
             ),)),
             mcp_servers=(MCPServerSpec("server", "never-start", revision=3),),
             mcp_policy=(mcp_server_selector("server"),),
         )),
-        context=None, workspace=None, limits=PromptLimits(), execution_cwd=None,
+        context=SimpleNamespace(input_context=None), workspace=None, limits=PromptLimits(), execution_cwd=None,
         user_prompt=None, history=[], initial_context=None,
         agent_conversation_id="conversation", run_store=None,
         agent_run_id="run", agent_run_seq=1, event_sink=sink,
