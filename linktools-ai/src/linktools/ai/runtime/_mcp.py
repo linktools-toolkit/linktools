@@ -21,6 +21,8 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..capability import (
     AgentContext,
+    ReferencedInputsCapability,
+    ToolCallIdentity,
     TOOL_MCP_SELECTOR_METADATA_KEY,
     ToolEffectPolicy,
     tool_metadata,
@@ -29,7 +31,8 @@ from ..capability import (
 )
 from ..capability.mcp import MCPToolset
 from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
-from ..core import JsonValue, ToolEffects, canonical_sha256
+from ..core import JsonValue, PromptLimits, ToolEffects, canonical_sha256
+from ..model import ReferencedContent
 from ..errors import AIError, ErrorCode
 from ..spec import (
     MCPServerSpec,
@@ -105,12 +108,20 @@ class _MCPModelToolset(WrapperToolset[object]):
         allowed_tools: frozenset[str] | None,
         required_tools: frozenset[str] = frozenset(),
         *, effect_policy: ToolEffectPolicy | None = None,
+        input_callbacks: "RunCallbacks | None" = None,
+        materializer: AssetMaterializer | None = None,
+        local_input_paths: bool = False,
+        input_limits: PromptLimits = PromptLimits(),
     ) -> None:
         super().__init__(wrapped)
         self._server_id = server_id
         self._allowed_tools = allowed_tools
         self._required_tools = required_tools
         self._effect_policy = effect_policy
+        self._input_callbacks = input_callbacks
+        self._materializer = materializer
+        self._local_input_paths = local_input_paths
+        self._input_limits = input_limits
 
     async def get_tools(
         self,
@@ -159,6 +170,51 @@ class _MCPModelToolset(WrapperToolset[object]):
                 ),
             )
         return result
+
+    async def prepare_arguments(
+        self, name: str, arguments: dict[str, Any], ctx: PydanticRunContext[AgentContext[object]],
+        tool: ToolsetTool[object],
+    ) -> dict[str, Any]:
+        """Stage explicit admitted inputs without changing durable tool arguments."""
+        if (not isinstance(tool, _MCPModelTool) or tool.projection is not self
+                or name != tool.tool_def.name):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        sources = {} if self._input_callbacks is None else self._input_callbacks.referenced_inputs()
+        selector = mcp_tool_selector(self._server_id, tool.upstream_name)
+        selected = [(source, reader) for source, reader in sources.items() if reader.has_mcp_inputs(selector)]
+        if not selected:
+            return arguments
+        if not self._local_input_paths or self._materializer is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, retryable=False,
+                          safe_details={"reason": "mcp_local_inputs_unavailable", "selector": selector})
+        context = replace(ctx.deps, tool_call=ToolCallIdentity.from_context(ctx))
+        fields: dict[str, ReferencedContent] = {}
+        for source, reader in selected:
+            resolved = await reader.resolve_mcp_inputs(context, selector, arguments)
+            for field, content in resolved.items():
+                if field in fields:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT, retryable=False,
+                                  safe_details={"reason": "mcp_input_field_conflict"})
+                if content.source != source:
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, retryable=False,
+                                  safe_details={"reason": "referenced_input_source_mismatch"})
+                fields[field] = content
+        if not fields:
+            return arguments
+        contents = tuple(fields.values())
+        if (len(contents) > self._input_limits.max_binary_input_parts
+                or sum(content.ref.size for content in contents) > self._input_limits.max_binary_input_bytes):
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE, retryable=False)
+        values = await ReferencedInputsCapability.load_selected(context, contents, sources)
+        paths = tuple(f"input-{index}" for index in range(len(contents)))
+        projection = await self._materializer.materialize_bytes({
+            path: (content.ref, data)
+            for path, content, data in zip(paths, contents, values, strict=True)
+        })
+        physical = dict(arguments)
+        for field, path in zip(fields, paths, strict=True):
+            physical[field] = str(projection.files[path])
+        return physical
 
     async def call_tool(
         self,
@@ -352,6 +408,8 @@ async def materialize_mcp_capabilities(
     tool_effects: ToolEffects = "live",
     response_fixture: "_ToolResponseManifest | None" = None,
     result_callbacks: "RunCallbacks | None" = None,
+    materializer: AssetMaterializer | None = None,
+    input_limits: PromptLimits = PromptLimits(),
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize compiler-selected MCP servers."""
     policy, required = _selector_policy(selectors)
@@ -408,6 +466,8 @@ async def materialize_mcp_capabilities(
                     allowed,
                     required.get(server.id, frozenset()),
                     effect_policy=fixed_policy,
+                    input_callbacks=result_callbacks, materializer=materializer, input_limits=input_limits,
+                    local_input_paths=server.transport == "stdio" and current_policy.get("boundary") == "host-stdio",
                 )
             boundary = BoundaryToolset(
                 (mapped,),
@@ -418,6 +478,7 @@ async def materialize_mcp_capabilities(
                     fixed_policy,
                 ),
                 result_callbacks=result_callbacks if response_fixture is None else None,
+                prepare_arguments=mapped.prepare_arguments if response_fixture is None else None,
                 tool_operations=tool_operations,
                 tool_metrics=tool_metrics,
                 budget=budget,

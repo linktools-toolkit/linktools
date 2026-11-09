@@ -161,6 +161,10 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
         result_callbacks: RunCallbacks | None = None,
+        prepare_arguments: Callable[
+            [str, dict[str, Any], PydanticRunContext[AgentContext[object]], ToolsetTool[AgentContext[object]]],
+            Awaitable[dict[str, Any]],
+        ] | None = None,
     ) -> None:
         if not isinstance(id, str) or not id:
             raise ValueError("toolset id must be non-empty")
@@ -176,6 +180,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._budget = budget
         self._repository_boundary = repository_boundary
         self._result_callbacks = result_callbacks
+        self._prepare_arguments = prepare_arguments
         self._exit_stack: AsyncExitStack | None = None
 
     @property
@@ -371,8 +376,15 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 capability_ref=descriptor.capability_ref,
             )
 
+        physical_args: dict[str, Any] | None = None
+
+        async def prepare() -> None:
+            nonlocal physical_args
+            if self._prepare_arguments is not None:
+                physical_args = await self._prepare_arguments(name, final_args, ctx, raw_tool)
+
         async def invoke(args: dict[str, Any]) -> Any:
-            result = await raw_toolset.call_tool(name, args, ctx, raw_tool)
+            result = await raw_toolset.call_tool(name, args if physical_args is None else physical_args, ctx, raw_tool)
             if processors:
                 if decision is None:
                     # Give projections the existing file occurrence to preserve;
@@ -388,6 +400,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 await self._budget.admit_tool(call_id)
             if bridge is not None and descriptor.effect_owner != "none":
                 await bridge.require_active()
+            await prepare()
             result = await self._invoke(
                 call,
                 tool.tool_def,
@@ -482,6 +495,9 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     await self._budget.admit_tool(
                         call_id, operation_id=decision.operation_id, fence=decision.fence,
                     )
+                # Input preparation is read-only and occurs before leaf entry.
+                # Completed-operation replay above neither reads nor stages files.
+                await prepare()
                 # Admission may suspend. Observe durable cancellation and
                 # producer loss after them; _invoke checks the scope at leaf entry.
                 await bridge.require_active()

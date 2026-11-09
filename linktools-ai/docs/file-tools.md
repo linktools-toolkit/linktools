@@ -280,7 +280,7 @@ from linktools.ai.capability import ReferencedInputResult, ReferencedInputsCapab
 from linktools.ai.core import PromptLimits
 
 async def read_admitted_batch(context, references):
-    # One bounded metadata/authorization query for this same-source/producer batch.
+    # One bounded metadata/authorization query for this same-source/admission batch.
     # This application operation checks the requesting context, original admission,
     # source MIME/ref membership and current revocation before reading any bodies.
     admitted = await host.authorize_original_inputs(context, references)
@@ -306,8 +306,11 @@ values are detached snapshots: changing them cannot redefine the expected batch.
 It does not authorize or read anything. An empty batch returns an empty tuple.
 
 Runtime and materialized native contributions share `load_selected`, which groups
-provider reads by exact source id/revision and original producer,
-then restores the original occurrence order in the outbound copy. A configured
+provider reads by exact source id/revision and original namespace, principal,
+execution and run. Different tool calls in that admission share one batch while
+retaining each complete origin for host verification. Different runs remain
+separate. Initial inputs without tool provenance form their own group and never
+mix with historical origins. Runtime then restores the original occurrence order in the outbound copy. A configured
 batch callback is invoked once for each such group per provider operation. There
 is no grant cache across requests, counting, compaction, retries or executions.
 Without a batch callback, the SDK keeps scalar reads and does not claim that the
@@ -339,12 +342,57 @@ reference with unknown producer fails closed instead of being treated as current
 initial input. Current-version data can be reopened by the same version; no old
 history is rewritten to invent missing provenance.
 
-This byte reader does not automatically provide a local path to an MCP server.
-The existing run resource owner still governs MCP resources. If an application
-materializes bytes for an MCP call, it must use that owner's success, failure and
-cancellation cleanup boundary and pass only a real permitted path. A descriptor,
-URL, credential or fabricated path is not a substitute. This API adds no generic
-MCP file handoff, new storage owner or persistent file permission.
+### Explicit host-local MCP file inputs
+
+An optional `mcp_inputs` mapping on the selected reader enables real temporary
+files for explicitly selected MCP arguments. Keys use exact formal selectors
+from `mcp_tool_selector`; server wildcards are not accepted. A resolver receives
+the actual consumer `AgentContext`, including the current tool identity and its
+original admitted input view, plus an immutable detached copy of the stable
+arguments. It returns only existing top-level string argument fields mapped to
+admitted `ReferencedContent` values from that reader's source.
+
+```python
+from linktools.ai.spec import mcp_tool_selector
+
+async def original_files(context, arguments):
+    # Application-owned admission lookup, never a path supplied by the model.
+    reference = await host.resolve_admitted_token(context, arguments["file"])
+    return {"file": reference}
+
+inputs = ReferencedInputsCapability(
+    authorized_load_many=read_admitted_batch,
+    mcp_inputs={mcp_tool_selector("pdf-reader", "inspect_pdf"): original_files},
+)
+```
+
+The resolver selects inputs; it does not authorize reads or tool invocation.
+The authorized reader still verifies original membership, MIME, immutable ref,
+producer claims and current revocation. Runtime checks the run's existing
+`PromptLimits` across all mapped sources before reading. Multiple readers cannot
+replace the same field. Nested arguments, newly invented fields, credentials,
+URLs and model-supplied filesystem paths are not implicit file mappings.
+
+Only local stdio servers whose existing execution policy establishes the
+`host-stdio` boundary support this projection. Remote HTTP/SSE and sandbox
+processes without a proven host path namespace reject it before source IO.
+This is not a remote upload or a new sandbox mount API.
+
+Preparation follows the tool owner's authorization and completed-result replay
+check but precedes actual leaf entry. Completed receipts are returned without
+resolving, rereading or rematerializing files. Receipt digests, result processors
+and retained model arguments use the original stable token; only the upstream
+MCP invocation receives a physical path. Pre-entry resolution failures remain
+pre-effect failures. Failure or cancellation after entry retains the existing
+unknown-effect semantics and does not replay MCP to guess an outcome.
+
+The existing `AssetMaterializer.materialize_bytes` verifies each exact ref and
+creates private, non-executable files. The run's existing MCP resource scope
+owns those paths through success, failure and cancellation. It first stops the
+owned process tree and then removes the files; an unproven close cannot release
+them early. Direct callers of `materialize_bytes` have the same responsibility
+to stop all consumers before closing their materializer. Neither operation
+creates Asset history, caches an authorization grant or adds persistent access.
 
 ## Discovery and edits
 

@@ -18,7 +18,7 @@ from pydantic_ai.tools import RunContext
 from ..agent import CompiledAgent
 from ..asset import AssetMaterializer, AssetStoreReader
 from ..capability import AgentContext, CapabilityContribution, tool_class_from_metadata, tool_effect_policy_from_metadata
-from ..core import ToolEffects
+from ..core import PromptLimits, ToolEffects
 from ..errors import AIError, ErrorCode
 from ..spec import CapabilityRef, MCPServerSpecCodec
 from ._budget import RunBudgetContext
@@ -43,6 +43,7 @@ def create_current_toolset(
     tool_metrics: ToolMetricContext | None = None,
     budget: RunBudgetContext | None = None,
     tool_effects: ToolEffects = "live",
+    input_limits: PromptLimits = PromptLimits(),
     response_fixture: _ToolResponseManifest | None = None,
     result_callbacks: RunCallbacks | None = None,
     reserved_tool_names: Sequence[str] = (),
@@ -57,7 +58,7 @@ def create_current_toolset(
     return _CurrentToolsets(
         provider, asset_readers, workspace_backend, tool_operations, tool_metrics, budget,
         response_fixture, result_callbacks, tuple(reserved_tool_names), register_cleanup, workspace_provider,
-        tool_effects,
+        tool_effects, input_limits,
     )
 
 
@@ -75,6 +76,7 @@ class _CurrentToolsets(AbstractToolset[AgentContext[object]]):
     register_cleanup: Callable[[Callable[[bool], Awaitable[None]]], None] | None
     workspace_provider: Callable[[], Awaitable[WorkspaceBackend | None]] | None
     tool_effects: ToolEffects
+    input_limits: PromptLimits
     _compiled: CompiledAgent | None = field(default=None, init=False)
     _owned: _MCPToolsetScope | None = field(default=None, init=False)
     _candidate: _MCPToolsetScope | None = field(default=None, init=False)
@@ -264,6 +266,7 @@ class _MCPToolsetScope(AbstractToolset[AgentContext[object]]):
                 tool_operations=owner.tool_operations, tool_metrics=owner.tool_metrics, budget=owner.budget,
                 tool_effects=owner.tool_effects,
                 response_fixture=owner.response_fixture, result_callbacks=owner.result_callbacks,
+                materializer=self._materializer, input_limits=owner.input_limits,
             )
             inner = await CombinedToolset(tuple(capability.get_toolset() for capability in self._mcp)).for_run(self._ctx)
             self._inner = await inner.for_run_step(self._ctx)

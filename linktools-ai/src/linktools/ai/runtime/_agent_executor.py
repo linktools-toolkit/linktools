@@ -1196,7 +1196,7 @@ async def _materialize_agent(
         current_tools, asset_readers={} if asset_sources is None else asset_sources,
         workspace_backend=scope.workspace_backend, workspace_provider=scope.workspace_provider,
         register_cleanup=scope.register_tool_cleanup, tool_operations=scope.tool_operations,
-        tool_metrics=tool_metrics, budget=scope.budget, tool_effects=scope.tool_effects,
+        tool_metrics=tool_metrics, budget=scope.budget, tool_effects=scope.tool_effects, input_limits=scope.limits,
         response_fixture=scope.response_fixture, result_callbacks=callbacks,
         reserved_tool_names=scope.memory_tool_names,
     ))

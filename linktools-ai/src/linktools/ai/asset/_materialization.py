@@ -84,27 +84,56 @@ class AssetMaterializer:
             refs = tuple(ref for _relative, ref in ordered)
             values = await reader.read_versions(refs)
             self._ensure_open()
+            return await self._materialize_values(ordered, values, modes)
+
+    async def materialize_bytes(
+        self, files: Mapping[str, tuple[AssetVersionRef, bytes]],
+    ) -> MaterializedAssets:
+        """Project already-authorized immutable bytes under this existing owner.
+
+        This operation verifies integrity, not authorization. Callers must stop
+        all processes using the returned paths before closing the materializer.
+        Files are private and non-executable, with the same relative path rules
+        and cancellation-safe cleanup as reader-backed materializations.
+        """
+        if not isinstance(files, Mapping):
+            raise TypeError("files must be a mapping")
+        selected = dict(files)
+        if any(not isinstance(value, tuple) or len(value) != 2 for value in selected.values()):
+            raise TypeError("files must map paths to (AssetVersionRef, bytes)")
+        ordered, modes = _validate_files({path: value[0] for path, value in selected.items()}, None)
+        values = tuple(selected[relative][1] for relative, _ref in ordered)
+        async with self._lock:
+            self._ensure_open()
+            return await self._materialize_values(ordered, values, modes)
+
+    async def _materialize_values(
+        self, ordered: tuple[tuple[str, AssetVersionRef], ...], values: tuple[bytes, ...],
+        modes: Mapping[str, int],
+    ) -> MaterializedAssets:
+        for (_relative, ref), data in zip(ordered, values, strict=True):
+            ref.verify_content(data)
+        try:
+            root = Path(tempfile.mkdtemp(prefix="linktools-assets-")).absolute()
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        self._roots.add(root)
+        try:
+            contents = tuple(
+                (relative, value)
+                for (relative, _ref), value in zip(ordered, values, strict=True)
+            )
+            local = await _complete_task(asyncio.create_task(
+                asyncio.to_thread(_write_files, root, contents, modes)
+            ))
+            self._ensure_open()
+        except BaseException as primary_error:
             try:
-                root = Path(tempfile.mkdtemp(prefix="linktools-assets-")).absolute()
-            except OSError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            self._roots.add(root)
-            try:
-                contents = tuple(
-                    (relative, value)
-                    for (relative, _ref), value in zip(ordered, values, strict=True)
-                )
-                local = await _complete_task(asyncio.create_task(
-                    asyncio.to_thread(_write_files, root, contents, modes)
-                ))
-                self._ensure_open()
-            except BaseException as primary_error:
-                try:
-                    await self._remove_root(root)
-                except BaseException as cleanup_error:
-                    raise primary_error from cleanup_error
-                raise
-            return MaterializedAssets(root, local)
+                await self._remove_root(root)
+            except BaseException as cleanup_error:
+                raise primary_error from cleanup_error
+            raise
+        return MaterializedAssets(root, local)
 
     async def close(self) -> None:
         """Remove all owned projections before propagating caller cancellation.

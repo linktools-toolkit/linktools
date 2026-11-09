@@ -152,12 +152,15 @@ def test_tool_producer_round_trips_in_result_history_and_native_checkpoint() -> 
 
 
 @pytest.mark.asyncio
-async def test_provider_batches_same_source_and_producer_without_impersonating_original_execution() -> None:
+async def test_provider_batches_different_calls_in_same_admission_without_impersonating_producer() -> None:
     consumer = _context()
     initial = _content()
     origin = _origin()
     historical = _content(b"historical").with_origin(origin)
-    second = _content().with_origin(origin)
+    second_origin = _origin(model_request_seq=3, tool_call_id="second-call", tool_name="other_tool")
+    second = _content().with_origin(second_origin)
+    other_origin = _origin(agent_run_id="other-run")
+    other = _content().with_origin(other_origin)
     reads = []
 
     async def scalar(context, content):
@@ -168,22 +171,24 @@ async def test_provider_batches_same_source_and_producer_without_impersonating_o
         reads.append(contents)
         # The host reauthorizes the consumer against the original producer's
         # trusted admission. Descriptor provenance alone is not a grant.
-        assert all(value.origin in (None, origin) for value in contents)
+        assert all(value.origin in (None, origin, second_origin, other_origin) for value in contents)
         return [ReferencedInputResult(value, b"historical" if value.ref == historical.ref else _BODY)
                 for value in contents]
 
     async def respond(messages, info):
         values = [item for message in messages for part in message.parts
                   for item in (part.content if isinstance(part.content, list) else [])]
-        assert [item.data for item in values if isinstance(item, BinaryContent)] == [_BODY, b"historical", _BODY]
+        assert [item.data for item in values if isinstance(item, BinaryContent)] == [_BODY, b"historical", _BODY, _BODY]
         return ModelResponse(parts=[TextPart("done")])
 
     model = SummaryProviderModel(FunctionModel(respond), context=consumer, binding=_Binding(),
                                  referenced_inputs={_SOURCE: ReferencedInputsCapability(scalar, authorized_load_many=batch)})
-    messages = [ModelRequest(parts=[UserPromptPart([initial]), ToolReturnPart("read_original", [historical, second], tool_call_id=origin.tool_call_id)])]
+    messages = [ModelRequest(parts=[UserPromptPart([initial]), ToolReturnPart("read_original", [historical], tool_call_id=origin.tool_call_id),
+                                   ToolReturnPart("other_tool", [second], tool_call_id=second_origin.tool_call_id),
+                                   ToolReturnPart("read_original", [other], tool_call_id=other_origin.tool_call_id)])]
     encoded = encode_model_messages(messages)
     await model.request(messages, None, ModelRequestParameters())
-    assert reads == [(initial,), (historical, second)]
+    assert reads == [(initial,), (historical, second), (other,)]
     assert encode_model_messages(messages) == encoded
 
 
