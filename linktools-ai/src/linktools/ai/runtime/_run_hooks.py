@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic_ai import ModelRequestNode
+from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability, AgentNode, CapabilityOrdering, NodeResult
-from pydantic_ai.messages import AgentStreamEvent, ModelMessage, ModelRequest, OutputToolResultEvent, RetryFeedbackPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, RetryFeedbackPart, ToolReturnPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import DeferredToolRequests
@@ -123,12 +123,6 @@ class AgentRunCapture(AbstractCapability[None]):
                 self.recorder.append_transcript_message(ctx.messages[-1])
         return request_context
 
-    async def on_event(self, ctx: PydanticRunContext[None], *, event: AgentStreamEvent) -> None:
-        if isinstance(event, OutputToolResultEvent) and event.part.outcome == "retried":
-            # The SDK emits settled output retries before a co-emitted approval
-            # can end the run. Run/node lifecycle contexts do not refresh retry.
-            self.context.output_retries_used += 1
-
     async def after_node_run(
         self,
         ctx: PydanticRunContext[None],
@@ -138,6 +132,19 @@ class AgentRunCapture(AbstractCapability[None]):
     ) -> NodeResult[None]:
         self._live_messages = ctx.messages
         self._last_observed_step_index = ctx.run_step
+        if isinstance(node, CallToolsNode):
+            request = result.request if isinstance(result, ModelRequestNode) else (
+                ctx.messages[-1] if ctx.messages and isinstance(ctx.messages[-1], ModelRequest) else None
+            )
+            if request is not None:
+                output_tools = {name for name, tool in ctx.tools.items() if tool.kind == "output"}
+                # Settled output retries also precede a co-emitted approval pause.
+                # Observing their durable parts does not force model streaming.
+                self.context.output_retries_used += sum(
+                    isinstance(part, ToolReturnPart)
+                    and part.tool_name in output_tools and part.outcome == "retried"
+                    for part in request.parts
+                )
         if isinstance(result, ModelRequestNode):
             for part in result.request.parts:
                 if isinstance(part, RetryFeedbackPart) and part.retry.attempt is not None:

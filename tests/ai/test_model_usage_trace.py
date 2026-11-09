@@ -584,3 +584,41 @@ async def test_streaming_records_completed_request_usage() -> None:
     assert len(values) == usage.requests == 1
     _assert_token_sum(values, usage)
     await _assert_recorded_responses(store, "stream-run", result.all_messages())
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_output_retries_are_checkpointed_before_approval_pause() -> None:
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import DeferredToolRequests
+
+    store = StagingAgentRunStore()
+    persistence = _persistence(store, "approval-run")
+    capture = next(item for item in persistence.capabilities if isinstance(item, AgentRunCapture))
+    pauses: list[int] = []
+    capture.deferred_pause_sink = pauses.append
+    requests = 0
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal requests
+        requests += 1
+        return ModelResponse(parts=[
+            ToolCallPart(info.output_tools[0].name, {"response": "invalid"}, tool_call_id="invalid-1"),
+            ToolCallPart(info.output_tools[0].name, {"response": "invalid"}, tool_call_id="invalid-2"),
+            ToolCallPart("approve", {}, tool_call_id="approval"),
+        ])
+
+    agent = Agent(FunctionModel(model), output_type=[int, DeferredToolRequests],
+                  retries={"output": 2}, capabilities=[persistence])
+
+    @agent.tool_plain(requires_approval=True)
+    def approve() -> str:
+        raise AssertionError("approval must pause before execution")
+
+    result = await agent.run("inspect")
+    assert isinstance(result.output, DeferredToolRequests)
+    assert requests == 1
+    assert len(pauses) == 1
+    checkpoint = await store.latest_checkpoint(agent_run_id="approval-run", include_interrupted=True)
+    assert checkpoint is not None
+    assert checkpoint.state == "interrupted"
+    assert checkpoint.output_retries_used == 2
