@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.state import RecordReplacement
+from linktools.ai.persistence.state import RecordQuery, RecordReplacement
 from linktools.ai.task import (
     LocalTaskGraphLauncher, TaskGraph, TaskGraphAdmission, TaskGraphLimits,
     TaskGraphRequest, TaskNode, TaskNodeView,
@@ -33,14 +33,15 @@ def _launcher(repository) -> LocalTaskGraphLauncher:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation,expected_reads", [("renew", 1), ("complete", 2)])
+@pytest.mark.parametrize("operation,expected_reads", [("renew", 1), ("complete", 2), ("bind", 1), ("handoff", 1)])
+@pytest.mark.parametrize("width", [2, 200])
 async def test_task_prefetch_definition_read_budget(
-    tmp_path: Path, operation: str, expected_reads: int,
+    tmp_path: Path, operation: str, expected_reads: int, width: int,
 ) -> None:
     async with Persistence.open(
         "prefetch", storage=PersistenceStorage.sqlite(tmp_path / "state.sqlite"), tenant_id="tenant",
     ) as state:
-        await _admit(state, (TaskNode("first"), TaskNode("unrelated")))
+        await _admit(state, (TaskNode("first"),) + tuple(TaskNode(f"unrelated-{i}") for i in range(width - 1)))
         repository = state.task.tasks
         lease = await repository.claim(
             "graph", "first", tenant_id="tenant", owner="worker", lease_seconds=30,
@@ -56,6 +57,11 @@ async def test_task_prefetch_definition_read_budget(
             if operation == "renew":
                 renewed = await repository.renew(lease, tenant_id="tenant", lease_seconds=30)
                 assert (renewed.owner, renewed.fence) == (lease.owner, lease.fence)
+            elif operation in {"bind", "handoff"}:
+                method = repository.bind_execution if operation == "bind" else repository.handoff_execution
+                node = await method(lease, tenant_id="tenant", execution_id="execution")
+                assert node.execution_id == "execution"
+                assert node.status is (TaskStatus.RUNNING if operation == "bind" else TaskStatus.WAITING)
             else:
                 terminal = await repository.complete(
                     lease, tenant_id="tenant", execution_id="execution", result_digest="a" * 64,
@@ -148,6 +154,10 @@ async def test_high_fan_in_dependency_reads_bound_parameters(tmp_path: Path) -> 
             assert {item.status for item in states.values()} == {TaskStatus.CANCELLED}
             assert reads == [513, 491]
             reads.clear()
+            results, combined_states = await _launcher(repository)._dependency_context("graph", target, tenant_id="tenant")
+            assert results == {} and combined_states == states
+            assert reads == [513, 491]
+            reads.clear()
             result_ids = dependencies + tuple(f"missing-{i}" for i in range(500))
             assert await repository.get_results("graph", result_ids, tenant_id="tenant") == {}
             assert reads == [257, 257, 257, 234]
@@ -181,16 +191,16 @@ async def test_dependency_context_rejects_missing_or_inconsistent_facts(
 
             await repository.state_store.mutate(remove)
         else:
-            original = repository.get_results
+            original = repository.get_dependency_records
 
             async def wrong_result(*args, **kwargs):
-                results = await original(*args, **kwargs)
+                states, results = await original(*args, **kwargs)
                 if fault == "result":
-                    return {}
+                    return states, {}
                 field = {"result_digest": "b" * 64} if fault == "digest" else {"execution_id": "other"}
-                return {"source": replace(results["source"], **field)}
+                return states, {"source": replace(results["source"], **field)}
 
-            monkeypatch.setattr(repository, "get_results", wrong_result)
+            monkeypatch.setattr(repository, "get_dependency_records", wrong_result)
         with pytest.raises(AIError) as raised:
             await _launcher(repository)._dependency_context("graph", target, tenant_id="tenant")
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -198,9 +208,13 @@ async def test_dependency_context_rejects_missing_or_inconsistent_facts(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", ["all_terminal", "any_succeeded"])
-async def test_dependency_context_preserves_mixed_terminal_results(policy: str) -> None:
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite", "sqlite"])
+async def test_dependency_context_preserves_mixed_terminal_results(tmp_path: Path, policy: str, backend: str) -> None:
+    storage = (PersistenceStorage.in_memory() if backend == "memory" else
+               PersistenceStorage.from_root(tmp_path, exclusive_writer=True) if backend == "local_sqlite" else
+               PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
     async with Persistence.open(
-        "dependency-terminal", storage=PersistenceStorage.in_memory(), tenant_id="tenant",
+        "dependency-terminal", storage=storage, tenant_id="tenant",
     ) as state:
         target = TaskNode("target", ("success", "failed"), dependency_policy=policy)
         await _admit(state, (TaskNode("success"), TaskNode("failed", failure_policy="isolate"), target))
@@ -227,7 +241,7 @@ async def test_dependency_context_preserves_mixed_terminal_results(policy: str) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["renew", "complete"])
+@pytest.mark.parametrize("operation", ["renew", "complete", "bind", "handoff"])
 @pytest.mark.parametrize("missing", ["graph", "state", "definition"])
 async def test_prefetch_preserves_missing_record_error_codes(operation: str, missing: str) -> None:
     async with Persistence.open(
@@ -250,9 +264,44 @@ async def test_prefetch_preserves_missing_record_error_codes(operation: str, mis
         with pytest.raises(AIError) as raised:
             if operation == "renew":
                 await repository.renew(lease, tenant_id="tenant", lease_seconds=30)
+            elif operation in {"bind", "handoff"}:
+                method = repository.bind_execution if operation == "bind" else repository.handoff_execution
+                await method(lease, tenant_id="tenant", execution_id="execution")
             else:
                 await repository.complete(
                     lease, tenant_id="tenant", execution_id="execution", result_digest="a" * 64,
                 )
         expected = ErrorCode.STORAGE_INTEGRITY_ERROR if missing == "definition" else ErrorCode.TASK_FENCE_STALE
         assert raised.value.code is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["bind", "handoff"])
+@pytest.mark.parametrize("backend", ["memory", "local_sqlite", "sqlite"])
+async def test_execution_binding_rejects_corrupt_definition_without_changes(
+    tmp_path: Path, operation: str, backend: str,
+) -> None:
+    storage = (PersistenceStorage.in_memory() if backend == "memory" else
+               PersistenceStorage.from_root(tmp_path, exclusive_writer=True) if backend == "local_sqlite" else
+               PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
+    async with Persistence.open("binding-integrity", storage=storage, tenant_id="tenant") as state:
+        await _admit(state, (TaskNode("source"),))
+        repository = state.task.tasks
+        lease = await repository.claim("graph", "source", tenant_id="tenant", owner="worker", lease_seconds=30)
+        before = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="task_node_state")))
+        events = await repository.list_events("graph", tenant_id="tenant", after_event_seq=0, limit=100)
+
+        async def corrupt(transaction):
+            records = await transaction.list_records(RecordQuery(kind="task_node_definition"))
+            assert len(records) == 1
+            record = records[0]
+            assert await transaction.delete_record(record.key_digest, expected_storage_revision=record.storage_revision)
+            await transaction.insert_record(replace(record, parent_digest=b"x" * 32))
+
+        await repository.state_store.mutate(corrupt)
+        method = repository.bind_execution if operation == "bind" else repository.handoff_execution
+        with pytest.raises(AIError) as raised:
+            await method(lease, tenant_id="tenant", execution_id="execution")
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="task_node_state"))) == before
+        assert await repository.list_events("graph", tenant_id="tenant", after_event_seq=0, limit=100) == events

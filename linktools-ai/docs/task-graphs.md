@@ -202,6 +202,17 @@ to `null`. Choose `failure_policy="isolate"` on workers whose `FAILED` or
 change those nodes' statuses or the collector's dependency policy. `CANCELLED`
 nodes can still make the graph `CANCELLED`; cancellation is not isolated.
 
+The launcher prepares dependency metadata through
+`TaskRepository.get_dependency_records(graph_id, node_ids, tenant_id=...)`.
+The repository reads only the requested node states/definitions and their
+successful result records, in one read transaction with bounded key batches.
+It returns states in request order and result metadata keyed by node ID; result
+bodies remain lazy. A mismatched tenant returns empty collections. Missing
+state/definition records or invalid stored data remain integrity errors; the
+launcher also rejects missing or inconsistent successful result metadata and
+rechecks the node's terminal dependency policy. Backend read isolation is
+unchanged; no graph-wide cache or additional durable state is introduced.
+
 ### Nested expansion is not an implicit subtree barrier
 
 If `branch` expands a `grandchild`, a collector depending only on `branch` can
