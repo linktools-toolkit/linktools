@@ -1563,7 +1563,7 @@ class StateStepArchive(AgentRunStore):
                 if projection is not None
             ))
             stored_interactions = {value.model_request_seq: value for value in existing}
-        previous_projection = (baseline if baseline is not None and not replay
+        previous_projection = (baseline if baseline is not None
                                else await self._history.load_projection(run.agent_run_id))
 
         async def prepare_context(

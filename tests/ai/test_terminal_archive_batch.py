@@ -377,8 +377,9 @@ async def test_terminal_archive_batch_does_not_open_scope_without_preparation(
 
 
 @pytest.mark.parametrize("fault", ("model", "usage", "request", "missing_body"))
+@pytest.mark.parametrize("with_baseline", (False, True))
 async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
-    tmp_path: Path, fault: str,
+    tmp_path: Path, fault: str, with_baseline: bool,
 ) -> None:
     database = tmp_path / "cold-split.db"
     state = Persistence(_split_sqlite_storage(database))
@@ -447,7 +448,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
             replayed = await archive.prepare_interactions(
                 run, (staged,), lambda _: envelope, local_message_count=3,
                 local_messages=current_messages, prepared=content_write, replay=True,
-                baseline=original[0].request_context,
+                baseline=original[0].request_context if with_baseline else None,
             )
             await archive.sync_projection(
                 run, events=(), checkpoints=(), interactions=replayed, archive=content_write,

@@ -1273,6 +1273,8 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
         async with Persistence.open('default', storage=storage) as persistence_1278, Runtime.attach(persistence=persistence_1278, features=model_features(models, group)) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())
+            continuation: asyncio.Task[object] | None = None
+            allow_archive_read_to_return = asyncio.Event()
             try:
                 await asyncio.wait_for(models.entered.wait(), timeout=5)
                 await _wait_for_committed(
@@ -1288,7 +1290,6 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                 archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
                 original_list = archive.list_model_interactions
                 archive_read_started = asyncio.Event()
-                allow_archive_read_to_return = asyncio.Event()
                 archive_snapshot: list[object] = []
 
                 async def delayed_archive_read(
@@ -1302,7 +1303,8 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                         after_model_request_seq=after_model_request_seq,
                         limit=limit,
                     )
-                    if after_model_request_seq == 1:
+                    # Pause the captured page, not persistence reads needed to finish it.
+                    if asyncio.current_task() is continuation and after_model_request_seq == 1:
                         archive_snapshot.extend(values)
                         archive_read_started.set()
                         await allow_archive_read_to_return.wait()
@@ -1346,9 +1348,11 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                     for item in durable_page.items
                 ] == [(2, "SUCCEEDED")]
             finally:
+                allow_archive_read_to_return.set()
                 models.release.set()
-                if not wait_task.done():
-                    await asyncio.gather(wait_task, return_exceptions=True)
+                await asyncio.gather(wait_task, return_exceptions=True)
+                if continuation is not None:
+                    await asyncio.gather(continuation, return_exceptions=True)
 
     asyncio.run(scenario())
 
