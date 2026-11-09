@@ -204,7 +204,8 @@ async def _load_skills(
         result.append(
             SkillDefinition(
                 value,
-                SkillSourceRef(context.group_id, logical_id, tuple(resources)),
+                SkillSourceRef(context.group_id, logical_id, tuple(resources),
+                               SkillResource(entry.key.id[len(prefix):], context.bind_versions((entry.key,))[0])),
             )
         )
     return result

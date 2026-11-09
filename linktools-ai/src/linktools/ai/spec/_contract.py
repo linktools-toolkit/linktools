@@ -204,6 +204,7 @@ class AgentSpec:
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
+    required_skills: "tuple[str, ...]" = field(default=(), kw_only=True)
     allow_subagents: "tuple[str, ...]" = ("*",)
     allow_capabilities: "tuple[str, ...]" = ("*",)
     usage_limits: "AgentUsageLimits | None" = None
@@ -254,6 +255,12 @@ class AgentSpec:
             raise ValueError("agent description must contain 1..1024 characters")
         thinking = normalize_thinking(self.thinking)
         allow_skills = canonical_selectors(self.allow_skills, field_name="allow_skills")
+        required_skills = canonical_selectors(self.required_skills, field_name="required_skills")
+        if "*" in required_skills or ("*" not in allow_skills and not set(required_skills).issubset(allow_skills)):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "required skills must be explicitly allowed ids")
+        for skill_id in required_skills:
+            validate_logical_id(skill_id)
+        object.__setattr__(self, "required_skills", required_skills)
         allow_capabilities = canonical_selectors(
             self.allow_capabilities,
             field_name="allow_capabilities",

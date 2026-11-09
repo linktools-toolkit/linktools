@@ -60,6 +60,8 @@ class AgentSpecCodec:
             "output_retries": value.output_retries,
             "output_schema": None if value.output_schema is None else dict(value.output_schema),
         }
+        if value.required_skills:
+            payload["required_skills"] = list(value.required_skills)
         return payload
 
     def to_wire_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
@@ -79,6 +81,7 @@ class AgentSpecCodec:
         instructions = raw.get("instructions", [])
         allow_tools = raw.get("allow_tools", ["*"])
         allow_skills = raw.get("allow_skills", ["*"])
+        required_skills = raw.get("required_skills", [])
         allow_subagents = raw.get("allow_subagents", ["*"])
         allow_capabilities = raw.get("allow_capabilities", ["*"])
         planning = raw.get("planning", False)
@@ -98,6 +101,7 @@ class AgentSpecCodec:
         for name, value in (
             ("allow_tools", allow_tools),
             ("allow_skills", allow_skills),
+            ("required_skills", required_skills),
             ("allow_subagents", allow_subagents),
             ("allow_capabilities", allow_capabilities),
         ):
@@ -130,6 +134,7 @@ class AgentSpecCodec:
                 instructions=tuple(instructions),
                 allow_tools=tuple(allow_tools),
                 allow_skills=tuple(allow_skills),
+                required_skills=tuple(required_skills),
                 allow_subagents=tuple(allow_subagents),
                 allow_capabilities=tuple(allow_capabilities),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),

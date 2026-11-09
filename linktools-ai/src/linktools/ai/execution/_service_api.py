@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from ..agent import AgentBinding, AgentBindingContract
 from ..asset import AssetVersionRef
+from ..capability import SkillReadReceipt
 from ..core import (
     BudgetUsage,
     RunBudget,
@@ -228,8 +229,11 @@ class ExecutionHistoryItem:
 
     part_index: int | None = None
     step_index: int | None = None
+    skill_read: SkillReadReceipt | None = None
 
     def __post_init__(self) -> None:
+        if self.skill_read is not None and (self.item_kind != "tool_result" or not isinstance(self.skill_read, SkillReadReceipt)):
+            raise ValueError("skill read receipt requires a tool result")
         if self.message_seq < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("execution history item is invalid")
         if not isinstance(self.content_included, bool):

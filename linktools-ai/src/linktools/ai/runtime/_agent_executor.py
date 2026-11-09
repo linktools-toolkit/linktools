@@ -78,6 +78,7 @@ from ..capability import (
     ReferencedInputsCapability,
     SkillCapability,
     SkillDefinition,
+    SkillInput,
     SkillSourceRegistry,
     SubagentCapability,
     SubagentDelegate,
@@ -105,7 +106,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..model import FallbackBinding, ModelBinding, model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions
+from ..spec import CapabilityRef, MCPServerSpecCodec, RepositoryInstructions, SkillSpec
 from ..workspace import (
     WorkspaceResource,
     SupportsClose,
@@ -215,6 +216,7 @@ class _AgentRunScope:
     register_tool_cleanup: Callable[[Callable[[bool], Awaitable[None]]], None] | None = None
     skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
     initial_skills: tuple[SkillDefinition, ...] | None = None
+    required_skills: tuple[SkillDefinition, ...] = ()
     mode: ExecutionMode = "run"
     planning: bool = False
     thinking: ThinkingValue = None
@@ -275,6 +277,62 @@ class AgentExecutor:
         self._metrics = metrics
         self._workspace_factory = workspace_factory
         self._tool_responses = tool_responses
+
+    async def capture_required_skills(self, binding: AgentBinding) -> tuple[Mapping[str, JsonValue], ...]:
+        """Capture required roots inside the admitted Agent's configured scope.
+
+        Execution admission owns principal authorization. Skill selection and
+        filtering define the host-configured resource scope, not per-file ACLs.
+        """
+        selected = {item.id: item for item in binding.compiled_agent.skill_definitions}
+        inputs: list[Mapping[str, JsonValue]] = []
+        for skill_id in binding.compiled_agent.spec.required_skills:
+            definition = selected.get(skill_id)
+            if definition is None or definition.source_ref is None or definition.source_ref.declaration is None:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                              safe_details={"kind": "skill", "id": skill_id})
+            item = SkillInput(CapabilityRef("skill", skill_id, definition.spec.revision),
+                              replace(definition.source_ref, resources=()))
+            data = await item.read(self._skill_sources)
+            try:
+                captured = SkillDefinition(SkillSpec(skill_id, data.decode("utf-8"), revision=item.skill.revision), item.source)
+            except UnicodeDecodeError as error:
+                raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN) from error
+            if captured.model_content != definition.model_content:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            inputs.append(item.to_payload())
+        return tuple(inputs)
+
+    async def validate_required_skill_inputs(
+        self, binding: AgentBinding, inputs: Sequence[Mapping[str, JsonValue]],
+    ) -> None:
+        """Authorize a new imported context against the admitted selection.
+
+        Caller-provided descriptors are never read. Existing execution recovery
+        uses the already admitted context and must not call this live preflight.
+        """
+        supplied = tuple(SkillInput.from_payload(value).to_payload() for value in inputs)
+        expected = await self.capture_required_skills(binding)
+        if supplied != expected:
+            raise AIError(ErrorCode.BINDING_CONFLICT,
+                          safe_details={"reason": "required_skill_inputs_mismatch"})
+
+    async def _load_required_skills(self, scope: _AgentRunScope) -> tuple[SkillDefinition, ...]:
+        context = scope.context.input_context
+        raw = () if context is None else context.required_skills
+        inputs = tuple(SkillInput.from_payload(value) for value in raw)
+        if tuple(item.skill.id for item in inputs) != scope.binding.compiled_agent.spec.required_skills:
+            raise AIError(ErrorCode.BINDING_CONFLICT,
+                          safe_details={"reason": "required_skill_inputs_mismatch"})
+        definitions: list[SkillDefinition] = []
+        for item in inputs:
+            data = await item.read(self._skill_sources)
+            try:
+                definition = SkillDefinition(SkillSpec(item.skill.id, data.decode("utf-8"), revision=item.skill.revision), item.source)
+            except UnicodeDecodeError as error:
+                raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN) from error
+            definitions.append(definition)
+        return tuple(definitions)
 
     async def validate_recovery_inputs(
         self,
@@ -493,7 +551,8 @@ class AgentExecutor:
             for server in live_mcp_servers
         )
         current_skills = scope.binding.compiled_agent.skill_definitions
-        scope = replace(scope, initial_skills=current_skills)
+        required_skills = await self._load_required_skills(scope)
+        scope = replace(scope, initial_skills=current_skills, required_skills=required_skills)
         session: WorkspaceBackend | None = None
         tool_cleanup: Callable[[bool], Awaitable[None]] | None = None
 
@@ -985,13 +1044,14 @@ async def _materialize_agent(
         current = compiled_agent if current_agent is None else await current_agent(compiled_agent)
         return current.skill_definitions
 
-    if compiled_agent.spec.allow_skills and (compiled_agent.skill_definitions or asset_sources):
+    if scope.required_skills or compiled_agent.spec.allow_skills and (compiled_agent.skill_definitions or asset_sources):
         initial_skills = compiled_agent.skill_definitions if scope.initial_skills is None else scope.initial_skills
         skill_capability = SkillCapability(
             initial_skills,
             skill_sources,
             resource_paths=scope.skill_resource_paths,
             discover=current_skills,
+            required_skills=scope.required_skills,
             mounted_resources={
                 skill.id: skill.source_ref
                 for skill in initial_skills

@@ -22,7 +22,7 @@ from ._domain import (
 from ._materialization import AssetMaterializer, MaterializedAssets, validate_materialized_path
 from ._object import AssetObjectKeyFactory
 from ._sql import SqlAssetBackend, build_asset_sql_metadata
-from ._store import AssetContentCache, AssetStore, AssetStoreReader
+from ._store import AssetContentCache, AssetStore, AssetStoreReader, RetainedAssetReader
 
 __all__ = [
     "AssetBackend",
@@ -37,6 +37,7 @@ __all__ = [
     "AssetStore",
     "AssetVersionRef",
     "AssetStoreReader",
+    "RetainedAssetReader",
     "DirectoryAssetBackend",
     "InMemoryAssetBackend",
     "MaterializedAssets",

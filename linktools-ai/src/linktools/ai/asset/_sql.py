@@ -225,6 +225,10 @@ class SqlAssetBackend:
         self._ready = False
 
     @property
+    def retains_versions(self) -> bool:
+        return True
+
+    @property
     def root(self) -> AssetRoot:
         return self._root
 

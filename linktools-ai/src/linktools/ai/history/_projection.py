@@ -31,6 +31,7 @@ from ..core import (
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
+from ..capability import SkillReadReceipt, SKILL_READ_METADATA_KEY, REQUIRED_SKILL_READS_METADATA_KEY
 from ..execution.ranges import model_interaction_update_ranges, validate_model_metadata_range
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
@@ -102,6 +103,7 @@ class _ProjectedHistoryItem:
     tool_call_id: "str | None" = None
     part_index: int | None = None
     interrupted_tool_placeholder: bool = False
+    skill_read: SkillReadReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1308,6 +1310,12 @@ class StepExecutionHistoryReader:
             ]
             if instructions:
                 request["instructions"] = instructions
+            current = request_messages[-1] if request_messages else None
+            if isinstance(current, ModelRequest) and isinstance(current.metadata, Mapping) and REQUIRED_SKILL_READS_METADATA_KEY in current.metadata:
+                raw_receipts = current.metadata[REQUIRED_SKILL_READS_METADATA_KEY]
+                if not isinstance(raw_receipts, list):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                request["required_skill_reads"] = [SkillReadReceipt.from_payload(item).to_payload() for item in raw_receipts]
         if include_content and response_messages is not None:
             projected = project_public_messages(response_messages)
             response = projected[0] if len(projected) == 1 else projected
@@ -1660,6 +1668,7 @@ class StepExecutionHistoryReader:
                             finished_at=None if metadata is None else metadata[1],
                             duration_ns=None if metadata is None else metadata[2],
                             status=status,
+                            skill_read=value.skill_read,
                         ),
                         source.record.execution_id,
                         source.agent_run_seq,
@@ -3108,6 +3117,11 @@ def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
             item.content,
             item.tool_name,
             item.tool_call_id,
+            skill_read=(
+                SkillReadReceipt.from_payload(part.metadata[SKILL_READ_METADATA_KEY])
+                if isinstance(part, ToolReturnPart) and isinstance(part.metadata, Mapping)
+                and SKILL_READ_METADATA_KEY in part.metadata else None
+            ),
             interrupted_tool_placeholder=(
                 isinstance(part, ToolReturnPart) and part.outcome == "interrupted"
                 and isinstance(part.metadata, Mapping)
