@@ -37,7 +37,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimitExceeded
 
-from ..capability import AgentContext
+from ..capability import AgentContext, SkillCapability
 from ._trace_capture import record_http_bodies_enabled
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -548,6 +548,9 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._provider_errors: dict[int, Exception] = {}
         self._pending_model_failure: Callable[[Sequence[ModelMessage]], Awaitable[None]] | None = None
         self._request_wrappers: tuple[AbstractCapability[Any], ...] = ()
+        self._model_request_context: tuple[
+            PydanticRunContext[AgentContext[object]], ModelRequestContext,
+        ] | None = None
 
     def with_request_ordering(
         self, capabilities: Sequence[AbstractCapability[Any]],
@@ -557,7 +560,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         def collect(capability: AbstractCapability[Any]) -> None:
             cls = type(capability)
             ordering = capability.get_ordering()
-            if (not isinstance(capability, ModelObservationCapability)
+            if (not isinstance(capability, (ModelObservationCapability, SkillCapability))
                     and ordering is not None and ordering.position == "innermost"
                     and cls.wrap_model_request is not AbstractCapability.wrap_model_request):
                 wrappers.append(capability)
@@ -571,7 +574,9 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     def get_ordering(self) -> CapabilityOrdering:
         # An inner handler can return a response without invoking the provider.
         # Explicit edges preserve its observation through native recomposition.
-        return CapabilityOrdering(position="innermost", wraps=self._request_wrappers)
+        return CapabilityOrdering(
+            position="innermost", wraps=self._request_wrappers, wrapped_by=(SkillCapability,),
+        )
 
     async def wrap_node_run(
         self, ctx: PydanticRunContext[AgentContext[object]], *,
@@ -603,12 +608,18 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     ) -> None:
         self._metrics.bind_execution_context(ctx.deps)
 
-    async def before_model_request(
+    async def prepare_model_request(
         self,
         ctx: PydanticRunContext[AgentContext[object]],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        model = request_context.model
+        self._model_request_context = (ctx, request_context)
+        return request_context
+
+    def get_wrapper_model(self, model: Model) -> Model | None:
+        if self._model_request_context is None:
+            return None
+        ctx, request_context = self._model_request_context
         request_sequence: int | None = None
         stream_attempt_index: int | None = None
 
@@ -629,6 +640,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             request_sequence = fact.model_request_seq
             if fact.model_request_seq in self._prepared_models:
+                self._prepared_models[fact.model_request_seq] = prepared_model
                 return self._client_recorders[fact.model_request_seq].wrap_model(model)
             self._stage_request(
                 fact,
@@ -698,8 +710,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         prepared_model = PreparedRequestModel(
             model, prepare, provider_failed, stream_observed, project_response,
         )
-        request_context.model = prepared_model
-        return request_context
+        return prepared_model
 
     async def wrap_model_request(
         self,

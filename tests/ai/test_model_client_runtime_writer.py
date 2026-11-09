@@ -81,11 +81,13 @@ async def test_agent_dispatch_without_a_logical_request_still_fails_integrity() 
         session_id=None, agent_run_id="run", agent_id="default",
     )
     context = RunContext(deps=None, model=model, usage=RunUsage(), run_step=1)
-    request = await capability.before_model_request(context, ModelRequestContext(
+    request = await capability.prepare_model_request(context, ModelRequestContext(
         model=model, messages=[], model_settings=None, model_request_parameters=ModelRequestParameters(),
     ))
+    wrapped = capability.get_wrapper_model(request.model)
+    assert wrapped is not None
     with pytest.raises(AIError) as caught:
-        await request.model.request([], None, ModelRequestParameters())
+        await wrapped.request([], None, ModelRequestParameters())
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
