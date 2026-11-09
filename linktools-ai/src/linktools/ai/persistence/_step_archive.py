@@ -81,6 +81,7 @@ from ._step_contracts import (
 )
 from .state import (
     FactQuery,
+    FactReader,
     GroupRecordReader,
     StateGroupTransaction,
     RecordQuery,
@@ -3427,6 +3428,11 @@ class StateStepArchive(AgentRunStore):
         self, transaction: StateTransaction, agent_run_id: str, ordered: Sequence[int],
     ) -> dict[int, StoredFact]:
         """Read a sorted window of selected identities without including gaps."""
+        if isinstance(transaction, FactReader):
+            facts = await transaction.get_facts(self._stream(agent_run_id, "event"), ordered)
+            if [fact.sequence for fact in facts] != list(ordered):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return {fact.sequence: fact for fact in facts}
         selected: dict[int, StoredFact] = {}
         offset = 0
         while offset < len(ordered):

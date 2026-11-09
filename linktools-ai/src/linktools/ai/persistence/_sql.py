@@ -65,6 +65,8 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
+# One store and one stream predicate leave 997 SQLite sequence binds.
+_FACT_READ_BATCH_SIZE = 997
 # Six CASE assignments plus key/CAS predicates stay below 999 SQLite binds.
 _RECORD_REPLACE_BATCH_SIZE = 64
 _GROUP_RECORD_BIND_BUDGET = 999
@@ -1902,6 +1904,25 @@ class _SqlTransaction:
             )
         )
         self._log_batch("insert_facts", len(facts), 1)
+
+    async def get_facts(
+        self, stream_digest: bytes, sequences: Sequence[int],
+    ) -> tuple[StoredFact, ...]:
+        ordered = sorted(set(sequences))
+        if not ordered:
+            return ()
+        table = self._table("ai_state_facts")
+        facts: list[StoredFact] = []
+        for offset in range(0, len(ordered), _FACT_READ_BATCH_SIZE):
+            rows = (await self._execute(
+                _select_rows(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.stream_digest == _hex(stream_digest),
+                    table.c.sequence.in_(ordered[offset:offset + _FACT_READ_BATCH_SIZE]),
+                ).order_by(table.c.sequence)
+            )).mappings().all()
+            facts.extend(_fact_from_row(row) for row in rows)
+        return tuple(facts)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         from sqlalchemy import func, select

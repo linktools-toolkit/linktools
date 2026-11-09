@@ -223,14 +223,15 @@ async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(
         await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
         expected.sort(key=lambda item: (item[1].timestamp, item[0]))
         batches: list[tuple[int, ...]] = []
-        original = _SqlTransaction.list_facts
+        for name in ("list_facts", "get_facts"):
+            original = getattr(_SqlTransaction, name)
 
-        async def capture(transaction, query):
-            facts = await original(transaction, query)
-            batches.append(tuple(fact.sequence for fact in facts))
-            return facts
+            async def capture(transaction, *args, _original=original):
+                facts = await _original(transaction, *args)
+                batches.append(tuple(fact.sequence for fact in facts))
+                return facts
 
-        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
+            monkeypatch.setattr(_SqlTransaction, name, capture)
         for page_size in (1, 33, 65):
             result = []
             after_timestamp, after_sequence = None, 0

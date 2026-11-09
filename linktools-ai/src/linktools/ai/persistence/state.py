@@ -133,7 +133,9 @@ def bind_state_scope(
         transactions
         if writable
         else {
-            store: _ReadOnlyStateTransaction(transaction)
+            store: (_ReadOnlyFactReader(transaction, transaction)
+                    if isinstance(transaction, FactReader)
+                    else _ReadOnlyStateTransaction(transaction))
             for store, transaction in transactions.items()
         }
     )
@@ -721,6 +723,23 @@ class StateTransaction(Protocol):
 
 
 @runtime_checkable
+class FactReader(Protocol):
+    """Optional exact-sequence reads in the current state transaction.
+
+    Return only found facts in this store and stream, once per requested
+    sequence, in ascending sequence order. Input order and duplicates do not
+    affect the result. Missing sequences are omitted; empty input returns an
+    empty tuple without source reads. Reuse the transaction's read view,
+    including its own writes. Parameter limits may require multiple statements;
+    this operation does not strengthen isolation or bound returned bytes.
+    """
+
+    async def get_facts(
+        self, stream_digest: bytes, sequences: Sequence[int],
+    ) -> tuple[StoredFact, ...]: ...
+
+
+@runtime_checkable
 class SqlStateTransaction(Protocol):
     """Execute prepared SQL inside the current writable storage callback.
 
@@ -970,6 +989,17 @@ class _ReadOnlyStateTransaction(StateTransaction):
         del query
         self._reject("delete_operations")
         return ()
+
+
+class _ReadOnlyFactReader(_ReadOnlyStateTransaction):
+    def __init__(self, transaction: StateTransaction, reader: FactReader) -> None:
+        super().__init__(transaction)
+        self._fact_reader = reader
+
+    async def get_facts(
+        self, stream_digest: bytes, sequences: Sequence[int],
+    ) -> tuple[StoredFact, ...]:
+        return await self._fact_reader.get_facts(stream_digest, sequences)
 
 
 StateCallback = Callable[[StateTransaction], Awaitable[ValueT]]
@@ -1232,4 +1262,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

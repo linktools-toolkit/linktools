@@ -457,6 +457,14 @@ class _MemoryTransaction:
         for fact in facts:
             await self.insert_fact(fact)
 
+    async def get_facts(
+        self, stream_digest: bytes, sequences: Sequence[int],
+    ) -> tuple[StoredFact, ...]:
+        return tuple(
+            fact for sequence in sorted(set(sequences))
+            if (fact := self.facts.get((stream_digest, sequence))) is not None
+        )
+
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         if (
             query.limit is not None and query.subject_digest is None
