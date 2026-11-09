@@ -40,6 +40,18 @@ def test_native_checkpoint_state_roundtrips_original_message_metadata(message) -
     assert NativeCheckpoint.encode(restored, output_retries_used=3) == encoded
 
 
+@pytest.mark.parametrize("extra_metadata", ({}, {"arbitrary": 1}))
+def test_raw_native_snapshot_preserves_same_named_application_metadata(extra_metadata) -> None:
+    metadata = {**extra_metadata, "linktools.ai.checkpoint-state": {"version": 999}}
+    snapshot = ContinuableSnapshot(run_id="run", step_index=2,
+        messages=[ModelRequest(parts=[UserPromptPart("question")], metadata=metadata)])
+    restored = OfficialStepReader.restore_snapshot(snapshot)
+    assert restored == snapshot
+    assert restored.messages[-1].metadata == metadata
+    checkpoint = OfficialStepReader.project_checkpoint(RunRecord(run_id="run"), restored, include_transcript=False)
+    assert checkpoint.output_retries_used is None
+
+
 @pytest.mark.parametrize(("field", "value"), (
     ("version", 2), ("run_id", "other"), ("step_index", 9), ("state", "interrupted"),
     ("idempotency_key", "other"), ("output_retries_used", -1), ("output_retries_used", True),

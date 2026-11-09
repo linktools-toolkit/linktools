@@ -11,6 +11,7 @@ from ..errors import AIError, ErrorCode
 
 
 _STATE_KEY = "linktools.ai.checkpoint-state"
+_STATE_PROTOCOL = "linktools.ai.native-checkpoint"
 
 
 @dataclass(kw_only=True)
@@ -28,6 +29,7 @@ class NativeCheckpoint(ContinuableSnapshot):
         # The native snapshot has no extension field. Message metadata is the
         # SDK's non-provider wire channel; wrap rather than overwrite app keys.
         messages[-1] = replace(last, metadata={_STATE_KEY: {
+            "protocol": _STATE_PROTOCOL,
             "version": 1,
             "empty_messages": not snapshot.messages,
             "run_id": snapshot.run_id,
@@ -53,12 +55,14 @@ class NativeCheckpoint(ContinuableSnapshot):
             # An upstream-authored snapshot has no Runtime retry fact. It can
             # supply history, but cannot restore the same execution budget.
             return snapshot
-        last = messages[-1]
-        if not isinstance(outer, dict) or set(outer) != {_STATE_KEY}:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         state = outer[_STATE_KEY]
-        if (not isinstance(state, dict) or set(state) != {
-            "version", "empty_messages", "run_id", "step_index", "state", "timestamp", "idempotency_key",
+        if not isinstance(state, dict) or state.get("protocol") != _STATE_PROTOCOL:
+            return snapshot
+        last = messages[-1]
+        if set(outer) != {_STATE_KEY}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (set(state) != {
+            "protocol", "version", "empty_messages", "run_id", "step_index", "state", "timestamp", "idempotency_key",
             "output_retries_used", "metadata",
         } or type(state["version"]) is not int or state["version"] != 1
                 or type(state["empty_messages"]) is not bool
