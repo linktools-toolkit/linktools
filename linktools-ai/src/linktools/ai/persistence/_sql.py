@@ -48,6 +48,7 @@ from .state import (
     StoredRecord,
     active_state_group_transaction,
     active_state_scope,
+    is_active_state_transaction,
     active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
@@ -898,6 +899,36 @@ class _SqlTransaction:
         self._sequence_cache: dict[bytes, int] = {}
         self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
+
+    def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]:
+        if not is_active_state_transaction(self):
+            raise StateTransactionNestingError("record cache requires its active storage transaction")
+        return {key: self._record_cache[key] for key in keys if key in self._record_cache}
+
+    async def read_joined_records(
+        self, context: SqlStorageContext, statement: "Select", *, keys: Sequence[bytes] = (),
+    ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]:
+        from sqlalchemy.sql import Select, visitors
+        from sqlalchemy.sql.dml import UpdateBase
+        from sqlalchemy.sql.elements import TextClause
+        from sqlalchemy.sql.selectable import ForUpdateArg
+
+        if (not isinstance(statement, Select) or context.engine is not self._context.engine
+                or context.closed or self._context.closed or not is_active_state_transaction(self)
+                or any(isinstance(node, (UpdateBase, TextClause, ForUpdateArg))
+                       for node in visitors.iterate(statement))):
+            raise StateTransactionNestingError("joined records require a read-only SQL plan in their active boundary")
+        rows = (await self._execute(statement)).mappings().all()
+        result: list[tuple[StoredRecord, Mapping[str, object]]] = []
+        for row in rows:
+            if row["store_digest"] != self._store_hex:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            record = _record_from_row(row)
+            self._record_cache[record.key_digest] = record
+            result.append((record, row))
+        for key in keys:
+            self._record_cache.setdefault(key, None)
+        return tuple(result)
 
     async def run_sql(
         self, context: SqlStorageContext,

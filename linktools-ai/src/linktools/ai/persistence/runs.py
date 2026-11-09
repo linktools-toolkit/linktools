@@ -72,6 +72,7 @@ from ._step_archive import (
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 from ._native_checkpoint import NativeCheckpoint
+from ._step_store import SqlStepStore
 from .state import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
@@ -173,6 +174,9 @@ class RuntimeAgentRunStore(AgentRunStore):
     def bind_step_store(self, store: StepStore) -> None:
         """Use the same official StepStore as the run's StepPersistence capability."""
         self.checkpoint_persistence.bind_step_store(store)
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if isinstance(archive, StateStepArchive) and isinstance(store, SqlStepStore):
+            archive.bind_native_run_store(store)
 
     @property
     def step_store(self) -> StepStore:
@@ -200,6 +204,9 @@ class RuntimeAgentRunStore(AgentRunStore):
         """Reuse a successful official registration only for this Runtime's owned run."""
         if record.run_id in self._execution_producers:
             self.checkpoint_persistence.reader.confirm_run(record)
+            archive = self._archives.get(PersistenceDomain.TRACE)
+            if self.execution_persistence(record.run_id)[1] and isinstance(archive, StateStepArchive):
+                archive.confirm_native_run(record)
 
     def confirm_step_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         """Reuse a successful official write without treating a failed write as confirmed."""
@@ -209,6 +216,9 @@ class RuntimeAgentRunStore(AgentRunStore):
     def invalidate_step_run(self, run_id: str) -> None:
         """Discard confirmed data when a source operation has an uncertain outcome."""
         self.checkpoint_persistence.reader.invalidate_run(run_id)
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if isinstance(archive, StateStepArchive):
+            archive.invalidate_native_run(run_id)
 
     def bind_pending_producer_guard(self, guard: Callable[[str, int, bool], bool]) -> None:
         """Bind the Runtime-owned authority for turns not yet persisted."""

@@ -20,6 +20,7 @@ from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql import Select
     from ..storage import SqlStorageContext
 
 ValueT = TypeVar("ValueT")
@@ -117,6 +118,16 @@ def _active_transaction(
 def active_state_scope() -> _ActiveStateScope | None:
     """Return the current scope for synchronization-order checks."""
     return _active_state_scope.get()
+
+
+def is_active_state_transaction(transaction: "StateTransaction") -> bool:
+    """Recognize the underlying transaction without exposing read-only wrappers."""
+    active = _active_state_scope.get()
+    return active is not None and active.task is asyncio.current_task() and any(
+        value is transaction
+        or isinstance(value, _ReadOnlyStateTransaction) and value._transaction is transaction
+        for value in active.transactions.values()
+    )
 
 
 def bind_state_scope(
@@ -766,6 +777,21 @@ class FactReader(Protocol):
 
 
 @runtime_checkable
+class SqlStateRecordReader(Protocol):
+    """Join immutable sources to scoped records within the current read boundary.
+
+    Results retain the physical record separately from joined columns. Raw
+    scans and transaction caches continue to expose the persisted record.
+    """
+
+    def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]: ...
+
+    async def read_joined_records(
+        self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+    ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]: ...
+
+
+@runtime_checkable
 class SqlStateTransaction(Protocol):
     """Execute prepared SQL inside the current writable storage callback.
 
@@ -792,6 +818,18 @@ class _ReadOnlyStateTransaction(StateTransaction):
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         return await self._transaction.get_records(keys)
+
+    def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]:
+        if not isinstance(self._transaction, SqlStateRecordReader):
+            raise StateTransactionNestingError("joined record reads require SQL storage")
+        return self._transaction.cached_records(keys)
+
+    async def read_joined_records(
+        self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+    ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]:
+        if not isinstance(self._transaction, SqlStateRecordReader):
+            raise StateTransactionNestingError("joined record reads require SQL storage")
+        return await self._transaction.read_joined_records(context, statement, keys=keys)
 
     async def read_record_subjects(
         self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
@@ -1303,4 +1341,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

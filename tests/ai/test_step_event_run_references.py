@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
-from sqlalchemy import event, select, text
+from sqlalchemy import Text, event, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
@@ -343,41 +343,68 @@ async def test_run_receipt_cannot_confirm_another_physical_store(tmp_path) -> No
             await engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["cold", "matching", "different"])
+async def test_event_metadata_json_encodes_only_for_comparison_or_binding(tmp_path, monkeypatch, source) -> None:
+    counts = Counter()
+    active = False
+    original_dumps, original_loads = json.dumps, json.loads
+
+    def encoded(value, *args, **kwargs):
+        if active and isinstance(value, dict):
+            counts["comparison"] += 1
+        return original_dumps(value, *args, **kwargs)
+
+    def decoded(value, *args, **kwargs):
+        if active:
+            counts["decode"] += 1
+        return original_loads(value, *args, **kwargs)
+
+    def bind_json(value):
+        if active:
+            counts["bind"] += 1
+        return original_dumps(value)
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'encoding.db'}", json_serializer=bind_json)
+    adapter = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    try:
+        await adapter.initialize(local=True)
+        run, boundary = _records()
+        if source != "cold":
+            await adapter.register_run(run)
+        if source == "different":
+            boundary = replace(boundary, metadata={"caller": "different", "arbitrary.key": "原样"})
+        monkeypatch.setattr(module.json, "dumps", encoded)
+        monkeypatch.setattr(module.json, "loads", decoded)
+        active = True
+        await adapter.append_event(boundary)
+        active = False
+        assert counts["decode"] == 0
+        assert counts["comparison"] == (0 if source == "cold" else 1)
+        assert counts["bind"] == (0 if source == "matching" else 1)
+        assert await adapter.list_events(run_id=run.run_id) == [boundary]
+    finally:
+        active = False
+        await adapter.close()
+        await engine.dispose()
+
+
+def test_event_metadata_values_are_detached_without_json_round_trip() -> None:
+    _, boundary = _records()
+    values = SqlStepStore._event_values(boundary)
+    assert values["metadata"] == boundary.metadata
+    assert values["metadata"] is not boundary.metadata
+    boundary.metadata["caller"] = "changed after capture"
+    assert values["metadata"] != boundary.metadata
+
+
 class _InlineStepStore(SqlStepStore):
-    """Pre-normalization event SQL used only as the matched CI reference."""
-
-    async def _write_run(self, session, record, *, replay=False):
-        values = self._run_values(record.run_id) | self._record_values(record)
-        values["conversation_digest"] = module._optional_digest(record.conversation_id)
-        values["parent_digest"] = module._optional_digest(record.parent_run_id)
-        result = await self._context.dialect.insert_ignore_conflict(
-            session, table=self._table("runs"), values=values,
-            index_elements=("store_digest", "run_digest"),
-        )
-        if not result.inserted:
-            if replay and record.registration_id is not None:
-                table = self._table("runs")
-                registration = await session.scalar(select(table.c.registration_id).where(
-                    *self._run_predicates(table, record.run_id),
-                ))
-                if registration == record.registration_id:
-                    return
-            raise ValueError("run_id is single-shot")
-
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        await self.initialize()
-        table = self._table("runs")
-        async with self._context.sessions() as session:
-            row = (await self._context.run_statement(session.execute(select(table).where(
-                *self._run_predicates(table, run_id),
-            )))).mappings().first()
-        return None if row is None else module._RUN_ADAPTER.validate_python(self._record_data(row))
+    """Current JSON inline policy, not the historical TEXT encoding path."""
 
     async def _write_events(self, session, events, *, source=None):
         for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
-            rows = [self._run_values(item.run_id) | self._record_values(item) for item in group]
+            rows = [self._run_values(item.run_id) | self._event_values(item) for item in group]
             for row in rows:
-                row["metadata"] = json.loads(row["metadata"])
                 row["key_digest"] = module._replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
             batch_size = module._BATCH_SIZE if keyed else 1
             for offset in range(0, len(rows), batch_size):
@@ -399,6 +426,27 @@ class _InlineStepStore(SqlStepStore):
         return [module._EVENT_ADAPTER.validate_python(dict(row)) for row in rows]
 
 
+class _TextInlineStepStore(_InlineStepStore):
+    """Former TEXT event codec only; all modes share the current Run lifecycle."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._table("events").c.metadata.type = Text()
+
+    @classmethod
+    def _event_values(cls, event):
+        return cls._record_values(event)
+
+    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+        await self.initialize()
+        table = self._table("events")
+        async with self._context.sessions() as session:
+            rows = (await self._context.run_statement(session.execute(select(table).where(
+                *self._run_predicates(table, run_id),
+            ).order_by(table.c.id)))).mappings().all()
+        return [module._EVENT_ADAPTER.validate_python(self._record_data(row)) for row in rows]
+
+
 def _bytes(value: object) -> int:
     if isinstance(value, (tuple, list)):
         return sum(_bytes(item) for item in value)
@@ -408,35 +456,65 @@ def _bytes(value: object) -> int:
 
 
 @pytest.mark.asyncio
-async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(tmp_path, monkeypatch, record_property) -> None:
+@pytest.mark.parametrize("metadata_matches_run", [True, False])
+async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(
+    tmp_path, monkeypatch, record_property, metadata_matches_run,
+) -> None:
     samples = {}
     active = None
-    original_values = SqlStepStore._record_values.__func__
+    original_dumps, original_loads = json.dumps, json.loads
 
-    def encoded(cls, record):
-        values = original_values(cls, record)
+    def encoded(value, *args, **kwargs):
+        result = original_dumps(value, *args, **kwargs)
+        if active is not None and isinstance(value, dict):
+            active["application_metadata_encodes"] += 1
+            active["application_metadata_encoded_bytes"] += len(result.encode("utf-8"))
+        return result
+
+    def decoded(value, *args, **kwargs):
+        result = original_loads(value, *args, **kwargs)
+        if active is not None and isinstance(result, dict):
+            active["application_metadata_decodes"] += 1
+        return result
+
+    def bind_json(value):
+        result = original_dumps(value)
         if active is not None:
-            active["encoded_record_bytes"] += _bytes(tuple(values.values()))
-        return values
+            active["json_bind_encodes"] += 1
+            active["json_bind_encoded_bytes"] += len(result.encode("utf-8"))
+        return result
 
-    monkeypatch.setattr(SqlStepStore, "_record_values", classmethod(encoded))
+    def read_json(value):
+        if active is not None:
+            active["json_result_decodes"] += 1
+        return original_loads(value)
+
+    monkeypatch.setattr(module.json, "dumps", encoded)
+    monkeypatch.setattr(module.json, "loads", decoded)
     run, first = _records()
     run = replace(run, metadata={"payload": "x" * 65536})
-    first = replace(first, metadata=dict(run.metadata))
-    for name, constructor in (("inline", _InlineStepStore), ("referenced", SqlStepStore)):
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / (name + '.db')}")
+    first = replace(first, metadata=dict(run.metadata) if metadata_matches_run else {"payload": "y" * 65536})
+    for name, constructor in (("text_inline", _TextInlineStepStore), ("json_inline", _InlineStepStore),
+                              ("referenced", SqlStepStore)):
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / (name + '.db')}",
+                                     json_serializer=bind_json, json_deserializer=read_json)
         context = create_sql_storage_context(engine)
         adapter = constructor(context, namespace="steps", tenant_id="one")
         await adapter.initialize(local=True)
-        metrics = {"statements": Counter(), "encoded_record_bytes": 0, "bound_bytes": 0,
-                   "returned_bytes": 0, "commits": 0}
+        metrics = {"statements": Counter(), "bound_bytes": 0, "returned_bytes": 0, "commits": 0,
+                   "sql_text_bytes": 0, "returned_rows": 0,
+                   "application_metadata_encodes": 0, "application_metadata_encoded_bytes": 0,
+                   "application_metadata_decodes": 0, "json_bind_encodes": 0,
+                   "json_bind_encoded_bytes": 0, "json_result_decodes": 0}
 
         def capture(connection, cursor, statement, parameters, execution, many):
             metrics["statements"][statement.split()[0].upper()] += 1
+            metrics["sql_text_bytes"] += len(statement.encode("utf-8"))
             metrics["bound_bytes"] += _bytes(parameters)
 
         def returned(connection, cursor, statement, parameters, execution, many):
             if cursor.description:
+                metrics["returned_rows"] += len(cursor._rows)
                 metrics["returned_bytes"] += _bytes(tuple(cursor._rows))
 
         def commit(connection):
@@ -472,13 +550,28 @@ async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(tmp_path
         metrics["stored_field_bytes"] = sum(_bytes(tuple(row.values())) for row in rows)
         samples[name] = metrics
         await engine.dispose()
-    baseline, candidate = samples["inline"], samples["referenced"]
-    assert candidate["statements"] == baseline["statements"] == {"BEGIN": 33, "INSERT": 35, "SELECT": 3}
-    assert candidate["commits"] == baseline["commits"] == 33
-    assert candidate["encoded_record_bytes"] == baseline["encoded_record_bytes"]
-    assert candidate["bound_bytes"] < baseline["bound_bytes"] / 8
+    text_baseline, baseline, candidate = samples["text_inline"], samples["json_inline"], samples["referenced"]
+    assert candidate["statements"] == baseline["statements"] == text_baseline["statements"] == {"BEGIN": 33, "INSERT": 35, "SELECT": 3}
+    assert candidate["commits"] == baseline["commits"] == text_baseline["commits"] == 33
+    assert text_baseline["application_metadata_encodes"] == candidate["application_metadata_encodes"] == 35
+    assert baseline["application_metadata_encodes"] == 2
+    assert text_baseline["json_bind_encodes"] == 0
+    assert baseline["json_bind_encodes"] == 33
+    # Even a matching workload includes one differing replay payload; it still binds once.
+    assert candidate["json_bind_encodes"] == (1 if metadata_matches_run else 33)
+    assert text_baseline["application_metadata_decodes"] == candidate["application_metadata_decodes"] == 33
+    assert baseline["application_metadata_decodes"] == 1
+    assert baseline["json_result_decodes"] == 32
+    assert text_baseline["json_result_decodes"] == candidate["json_result_decodes"] == 0
+    assert (text_baseline["application_metadata_encoded_bytes"]
+            == baseline["application_metadata_encoded_bytes"] + baseline["json_bind_encoded_bytes"])
+    assert candidate["application_metadata_encoded_bytes"] == text_baseline["application_metadata_encoded_bytes"]
+    assert candidate["bound_bytes"] < baseline["bound_bytes"] / (8 if metadata_matches_run else 1)
     assert 0 < candidate["returned_bytes"] <= baseline["returned_bytes"]
-    assert candidate["stored_field_bytes"] < baseline["stored_field_bytes"] / 100
-    # A loose CI guard catches gross CPU regressions, not a claimed speedup.
+    assert candidate["stored_field_bytes"] < baseline["stored_field_bytes"] / (100 if metadata_matches_run else 1)
+    # Compare the JSON reference policy and format cost separately, not a whole-release speedup.
     assert candidate["cpu_seconds"] <= baseline["cpu_seconds"] * 2 + 0.1
-    record_property("native_event_lifecycle_cost", json.dumps(samples, sort_keys=True))
+    assert baseline["cpu_seconds"] <= text_baseline["cpu_seconds"] * 2 + 0.1
+    record_property("native_event_lifecycle_cost", json.dumps({
+        "metadata_matches_native_run": metadata_matches_run, "samples": samples,
+    }, sort_keys=True))

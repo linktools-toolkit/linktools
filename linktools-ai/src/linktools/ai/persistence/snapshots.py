@@ -19,6 +19,8 @@ from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, ObjectStoreInspection, StoredPayload, read_object
 from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
+from ._native_run_reference import NativeRunReferences
+from ._sql import SqlStateStore
 from ._archive import ContentRecord
 from ._archive_closure import (
     ArchiveClosure,
@@ -92,8 +94,10 @@ class _SnapshotReader(Protocol):
 
 
 class _StateSnapshotReader:
-    def __init__(self, store: StateStore) -> None:
+    def __init__(self, store: StateStore, *, native_run_scope: tuple[str, str] | None = None) -> None:
         self._store = store
+        self._native_runs = (NativeRunReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
+                             if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return await self._store.read(lambda tx: tx.get_operation(key))
@@ -101,6 +105,8 @@ class _StateSnapshotReader:
     async def scan_records_page(
         self, *, after: RecordScanCursor | None, limit: int,
     ) -> tuple[StoredRecord, ...]:
+        if self._native_runs is not None:
+            return await self._store.read(lambda tx: self._native_runs.read(tx, scan=(after, limit)))
         return await self._store.read(lambda tx: tx.scan_records_page(after=after, limit=limit))
 
     async def scan_facts_page(
@@ -218,7 +224,9 @@ class RuntimeSnapshotOperations:
 
         source = _SnapshotExportSource(
             namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
-            readers={domain: _StateSnapshotReader(self._resources.stores[domain])
+            readers={domain: _StateSnapshotReader(self._resources.stores[domain],
+                        native_run_scope=((self._resources.namespace, self._resources.tenant_id)
+                                          if domain is PersistenceDomain.TRACE else None))
                      for domain in self._resources.durable_domains},
             archives=archives(), object_stores=self._resources.object_stores,
             archive_object_stores=(self._resources.archive_object_stores

@@ -288,17 +288,16 @@ class SqlStepStore:
         for keyed, group in groupby(events, key=lambda event: event.idempotency_key is not None):
             rows = []
             for event in group:
-                row = self._run_values(event.run_id) | self._record_values(event)
+                row = self._run_values(event.run_id) | self._event_values(event)
                 known = source if source is not None and source.run_id == event.run_id else self._confirmed_runs.get(event.run_id)
                 row["run_fields"] = 0
                 if known is not None:
                     for bit, (name, value) in enumerate(zip(_EVENT_RUN_FIELDS, known.values)):
                         # NULL stays an explicit event value, never an inheritance marker.
-                        if row[name] is not None and row[name] == value:
+                        candidate = json.dumps(row[name]) if name == "metadata" else row[name]
+                        if candidate is not None and candidate == value:
                             row[name] = None
                             row["run_fields"] |= 1 << bit
-                if row["metadata"] is not None:
-                    row["metadata"] = json.loads(row["metadata"])
                 row["key_digest"] = _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
                 rows.append(row)
             # An unkeyed append must fail rather than silently suppress a
@@ -727,6 +726,13 @@ class SqlStepStore:
 
     def _run_predicates(self, table: "Table", run_id: str) -> "tuple[ColumnElement[bool], ...]":
         return (table.c.store_digest == self._store_digest, table.c.run_digest == _digest(run_id), table.c.run_id == run_id)
+
+    @classmethod
+    def _event_values(cls, event: StepEvent) -> dict[str, object]:
+        values = {field.name: getattr(event, field.name) for field in fields(event)}
+        values["timestamp"] = event.timestamp.isoformat()
+        values["metadata"] = dict(event.metadata)
+        return values
 
     @classmethod
     def _record_values(cls, record: RunRecord | StepEvent | ContinuableSnapshot) -> "dict[str, SqlValue]":
