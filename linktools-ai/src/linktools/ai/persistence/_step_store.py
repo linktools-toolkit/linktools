@@ -5,7 +5,9 @@
 import hashlib
 import json
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import copy, deepcopy
 from dataclasses import dataclass, fields, replace
 from itertools import groupby
@@ -66,6 +68,7 @@ class _RunFields:
     started_at: str
     values: "tuple[SqlValue, ...]"
     byte_size: int
+    started_body: str | None = None
 
     @classmethod
     def from_row(cls, row: "Mapping[str, SqlValue]", *, engine: "AsyncEngine") -> "_RunFields":
@@ -86,6 +89,7 @@ class PreparedStep:
     snapshot_values: "dict[str, SqlValue] | None"
     messages: tuple[tuple[str, str], ...]
     sequences: tuple[tuple[str, ImmutableSequenceNode], ...]
+    managed_start: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +149,7 @@ class SqlStepStore:
         self._confirmed_messages: OrderedDict[str, None] = OrderedDict()
         self._confirmed_sequences: OrderedDict[str, None] = OrderedDict()
         self._confirmed_runs: OrderedDict[str, _RunFields] = OrderedDict()
+        self._receipt_sink: ContextVar[list[StepWriteReceipt] | None] = ContextVar("step_write_receipts", default=None)
 
     @classmethod
     def scope_digest(cls, *, namespace: str, tenant_id: str) -> str:
@@ -208,16 +213,48 @@ class SqlStepStore:
     async def register_run(self, record: RunRecord) -> None:
         await self.initialize()
 
-        async def write(session: "AsyncSession") -> _RunFields | None:
+        async def write(session: "AsyncSession") -> _RunFields:
             return await self._write_run(session, record)
 
         source = await self._context.run_mutation(write, domain="steps.run")
-        if source is not None:
-            self._confirm_run(source)
+        receipt = StepWriteReceipt((), (), source)
+        self.confirm_prepared_step(receipt)
+        self._publish_receipt(receipt)
+
+    async def register_run_receipt(self, record: RunRecord) -> StepWriteReceipt:
+        """Observe the public registration operation, including custom overrides."""
+        with self._capture_receipts() as receipts:
+            await self.register_run(record)
+        receipt = self._matching_receipt(receipts, run_id=record.run_id)
+        self._publish_receipt(receipt)
+        return receipt
+
+    @contextmanager
+    def _capture_receipts(self) -> Iterator[list[StepWriteReceipt]]:
+        receipts: list[StepWriteReceipt] = []
+        token = self._receipt_sink.set(receipts)
+        try:
+            yield receipts
+        finally:
+            self._receipt_sink.reset(token)
+
+    def _publish_receipt(self, receipt: StepWriteReceipt) -> None:
+        sink = self._receipt_sink.get()
+        if sink is not None:
+            sink.append(receipt)
+
+    def _matching_receipt(self, receipts: Sequence[StepWriteReceipt], *, run_id: str | None) -> StepWriteReceipt:
+        if run_id is None:
+            return replace(receipts[-1], run_fields=None) if receipts else StepWriteReceipt((), ())
+        for receipt in reversed(receipts):
+            if receipt.run_fields is not None and receipt.run_fields.run_id == run_id:
+                return receipt
+        raise RuntimeError("native store override did not confirm the run registration")
 
     async def _write_run(
         self, session: "AsyncSession", record: RunRecord, *, replay: bool = False,
-    ) -> _RunFields | None:
+        started: StepEvent | None = None,
+    ) -> _RunFields:
         values = self._run_values(record.run_id) | self._record_values(record)
         values["conversation_digest"] = _optional_digest(record.conversation_id)
         values["parent_digest"] = _optional_digest(record.parent_run_id)
@@ -227,14 +264,37 @@ class SqlStepStore:
         )
         if not result.inserted:
             if replay and record.registration_id is not None:
-                from sqlalchemy import select
+                from sqlalchemy import and_, select
 
-                table = self._table("runs")
-                registration = await session.scalar(select(table.c.registration_id).where(
-                    *self._run_predicates(table, record.run_id),
-                ))
-                if registration == record.registration_id:
-                    return None
+                table, events = self._table("runs"), self._table("events")
+                query = select(
+                    table.c.store_digest, table.c.run_id, table.c.registration_id, table.c.started_at,
+                    *(table.c[name] for name in _EVENT_RUN_FIELDS),
+                )
+                source_names = tuple(field.name for field in fields(StepEvent)) + (
+                    "store_digest", "run_digest", "key_digest", "run_fields", "body_sha256", "fields_sha256",
+                )
+                if started is not None:
+                    query = query.add_columns(
+                        table.c.run_digest,
+                        *(events.c[name].label("start_" + name) for name in source_names),
+                    )
+                    query = query.select_from(table.outerjoin(events, and_(
+                        events.c.key_digest == self.event_key_digest(started),
+                        events.c.store_digest == table.c.store_digest,
+                        events.c.run_digest == table.c.run_digest,
+                        events.c.run_id == table.c.run_id,
+                    )))
+                row = (await session.execute(query.where(*self._run_predicates(table, record.run_id)))).mappings().first()
+                if row is not None and row["registration_id"] == record.registration_id:
+                    source = _RunFields.from_row(row, engine=self._context.engine)
+                    if started is not None:
+                        event = self.decode_started_source(
+                            {name: row["start_" + name] for name in source_names}, run=row,
+                        )
+                        source = self._with_started(source, event)
+                        self._validate_started_replay(record, started, source)
+                    return source
             raise ValueError(
                 f"run_id {record.run_id!r} is already in the store; run_id is single-shot"
             )
@@ -284,12 +344,18 @@ class SqlStepStore:
 
     async def _write_events(
         self, session: "AsyncSession", events: Sequence[StepEvent], *, source: _RunFields | None = None,
+        started: StepEvent | None = None,
     ) -> None:
-        for keyed, group in groupby(events, key=lambda event: event.idempotency_key is not None):
+        for (keyed, managed), group in groupby(
+            events, key=lambda event: (event.idempotency_key is not None, event is started),
+        ):
             rows = []
             for event in group:
                 row = self._run_values(event.run_id) | self._event_values(event)
                 known = source if source is not None and source.run_id == event.run_id else self._confirmed_runs.get(event.run_id)
+                if event is started:
+                    row["body_sha256"] = _digest(self._started_body(event))
+                    row["fields_sha256"] = _digest(self._started_fields_body(event))
                 row["run_fields"] = 0
                 if known is not None:
                     for bit, (name, value) in enumerate(zip(_EVENT_RUN_FIELDS, known.values)):
@@ -302,9 +368,9 @@ class SqlStepStore:
                 rows.append(row)
             # An unkeyed append must fail rather than silently suppress a
             # colliding physical occurrence identity.
-            batch_size = _BATCH_SIZE if keyed else 1
+            batch_size = _BATCH_SIZE if keyed and not managed else 1
             for offset in range(0, len(rows), batch_size):
-                if not keyed:
+                if not keyed or managed:
                     await session.execute(self._table("events").insert().values(rows[offset]))
                     continue
                 await self._context.dialect.insert_ignore_conflict_many(
@@ -312,9 +378,20 @@ class SqlStepStore:
                     index_elements=("key_digest",),
                 )
 
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+    async def list_events(
+        self, *, run_id: str, started_receipt: StepWriteReceipt | None = None,
+    ) -> list[StepEvent]:
+        """Read events, optionally verifying a provisional start in the same query.
+
+        UNKNOWN readback must establish the physical locator and stored integrity
+        proof, not merely equality of the reconstructed event. Reading does not
+        confirm the supplied receipt or advance the committed source cache.
+        """
         from sqlalchemy import and_, case, cast, or_, select, Text
 
+        expected = None if started_receipt is None else self.started_from_receipt(started_receipt)
+        if expected is not None and expected.run_id != run_id:
+            raise ValueError("start receipt belongs to another run")
         await self.initialize()
         table, runs = self._table("events"), self._table("runs")
         columns = {field.name: table.c[field.name] for field in fields(StepEvent)}
@@ -325,8 +402,12 @@ class SqlStepStore:
             referenced = table.c.run_fields.bitwise_and(1 << bit) != 0
             columns[name] = case((referenced, runs.c[name]), else_=columns[name]).label(name)
             invalid.append(and_(referenced, or_(table.c[name].is_not(None), runs.c[name].is_(None))))
+        source_columns = () if expected is None else (
+            table.c.store_digest, table.c.run_digest, table.c.key_digest,
+        )
         query = select(
-            *columns.values(), or_(*invalid).label("invalid_run_reference"),
+            *columns.values(), table.c.body_sha256, table.c.fields_sha256, or_(*invalid).label("invalid_run_reference"),
+            *source_columns,
         ).select_from(table.outerjoin(runs, and_(
             table.c.run_fields != 0,
             runs.c.store_digest == table.c.store_digest,
@@ -337,16 +418,179 @@ class SqlStepStore:
             rows = (await self._context.run_statement(session.execute(query))).mappings().all()
         if any(row["invalid_run_reference"] for row in rows):
             raise ValueError("event run reference is missing or corrupt")
-        return [_EVENT_ADAPTER.validate_python(self._record_data(row)) for row in rows]
+        result = []
+        matched = 0
+        for row in rows:
+            event = _EVENT_ADAPTER.validate_python(self._record_data(row))
+            if expected is not None and event.idempotency_key == expected.idempotency_key:
+                verified = self.decode_started_source(dict(row) | {"run_fields": 0})
+                if self._started_body(verified) != self._started_body(expected):
+                    raise ValueError("native start readback differs from the receipt")
+                matched += 1
+            if row["body_sha256"] is not None or row["fields_sha256"] is not None:
+                if (_digest(self._started_body(event)) != row["body_sha256"]
+                        or _digest(self._started_fields_body(event)) != row["fields_sha256"]):
+                    raise ValueError("native event body is corrupt")
+            result.append(event)
+        if expected is not None and matched != 1:
+            raise ValueError("native start readback is missing or ambiguous")
+        return result
 
     def confirmed_run(self, run_id: str) -> RunRecord | None:
         """Return detached committed run proof when retained, without reading SQL."""
         source = self._confirmed_runs.get(run_id)
         if source is None or self._context.closed:
             return None
+        return self.run_from_receipt(StepWriteReceipt((), (), source))
+
+    def run_from_receipt(self, receipt: StepWriteReceipt) -> RunRecord | None:
+        """Detach a source from this store's receipt, independently of cache limits.
+
+        A prepared-write receipt is provisional until its enclosing transaction
+        commits. Callers must resolve that outcome before confirming projections.
+        """
+        source = receipt.run_fields
+        if source is None:
+            return None
+        if source.engine is not self._context.engine or source.store_digest != self._store_digest:
+            raise ValueError("run receipt belongs to another native store")
         data = dict(zip(_EVENT_RUN_FIELDS, source.values))
         data.update(run_id=source.run_id, registration_id=source.registration_id, started_at=source.started_at)
         return _RUN_ADAPTER.validate_python(self._record_data(data))
+
+    @classmethod
+    def _started_body(cls, event: StepEvent) -> str:
+        if event.kind != "run_started" or event.idempotency_key is None:
+            raise ValueError("managed source requires a keyed run_started event")
+        return json.dumps(cls._event_values(event), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _started_fields_body(cls, event: StepEvent) -> str:
+        if event.kind != "run_started" or event.idempotency_key is None:
+            raise ValueError("managed source requires a keyed run_started event")
+        values = {field.name: getattr(event, field.name) for field in fields(event) if field.name != "metadata"}
+        values["timestamp"] = event.timestamp.isoformat()
+        return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _with_started(cls, source: _RunFields, event: StepEvent) -> _RunFields:
+        body = cls._started_body(event)
+        previous = 0 if source.started_body is None else len(source.started_body.encode("utf-8"))
+        return replace(source, started_body=body, byte_size=source.byte_size - previous + len(body.encode("utf-8")))
+
+    def _validate_started_replay(
+        self, run: RunRecord, started: StepEvent, source: _RunFields,
+    ) -> None:
+        """Reuse authoritative linked metadata without weakening source identity."""
+        receipt = StepWriteReceipt((), (), source)
+        actual_run = self.run_from_receipt(receipt)
+        actual_start = self.started_from_receipt(receipt)
+        if actual_run is None or replace(actual_run, metadata={}) != replace(run, metadata={}):
+            raise ValueError("run replay body differs from its registration")
+        if (actual_start is None or self._started_body(replace(actual_start, metadata={}))
+                != self._started_body(replace(started, metadata={}))):
+            raise ValueError("run_started replay body differs from its source")
+        if actual_run.metadata != run.metadata or actual_start.metadata != started.metadata:
+            if started.metadata != run.metadata or actual_start.metadata != actual_run.metadata:
+                raise ValueError("run_started replay body differs from its linked metadata source")
+
+    def event_key_digest(self, event: StepEvent) -> str:
+        """Exact native locator for a keyed event in this store's partition."""
+        if event.idempotency_key is None:
+            raise ValueError("an event locator requires an idempotency key")
+        return _replay_digest(self._store_digest, _digest(event.run_id), event.idempotency_key)
+
+    def started_from_receipt(self, receipt: StepWriteReceipt) -> StepEvent | None:
+        """Detach the immutable start source; outer-transaction receipts are provisional."""
+        self.run_from_receipt(receipt)
+        source = receipt.run_fields
+        if source is None or source.started_body is None:
+            return None
+        return _EVENT_ADAPTER.validate_python(json.loads(source.started_body))
+
+    def confirmed_started(self, run_id: str) -> StepEvent | None:
+        """Return a retained committed start source without a SQL read."""
+        source = self._confirmed_runs.get(run_id)
+        if source is None or self._context.closed:
+            return None
+        return self.started_from_receipt(StepWriteReceipt((), (), source))
+
+    def decode_started_source(
+        self, event: Mapping[str, object], *, run: Mapping[str, object] | None = None,
+    ) -> StepEvent:
+        """Verify a joined native source row and resolve its inherited run fields.
+
+        The caller supplies native SQL columns unchanged, including locator and
+        body_sha256. This performs no query and never confirms a provisional row.
+        """
+        return self.decode_started_row(event, expected_store_digest=self._store_digest, run=run)
+
+    @classmethod
+    def decode_started_row(
+        cls, event: Mapping[str, object], *, expected_store_digest: str,
+        run: Mapping[str, object] | None = None,
+    ) -> StepEvent:
+        """Validate joined source columns without constructing or opening a store."""
+        data = dict(event)
+        if data.get("store_digest") != expected_store_digest:
+            raise ValueError("native start source is missing or belongs to another store")
+        run_id = data.get("run_id")
+        if not isinstance(run_id, str) or data.get("run_digest") != _digest(run_id):
+            raise ValueError("native start source run identity is corrupt")
+        mask = data.get("run_fields")
+        if type(mask) is not int or not 0 <= mask < (1 << len(_EVENT_RUN_FIELDS)):
+            raise ValueError("native start source run fields are corrupt")
+        if mask:
+            if run is None or any(run.get(name) != data.get(name) for name in ("store_digest", "run_digest", "run_id")):
+                raise ValueError("native start source run reference is missing or corrupt")
+        for bit, name in enumerate(_EVENT_RUN_FIELDS):
+            if mask & (1 << bit):
+                if data.get(name) is not None or run.get(name) is None:
+                    raise ValueError("native start source run reference is corrupt")
+                data[name] = run[name]
+        if isinstance(data.get("metadata"), str):
+            data["metadata"] = json.loads(data["metadata"])
+        names = tuple(field.name for field in fields(StepEvent))
+        if any(name not in data for name in names):
+            raise ValueError("native start source body is incomplete")
+        raw_body = json.dumps({name: data[name] for name in names}, ensure_ascii=False,
+                              sort_keys=True, separators=(",", ":"))
+        result = _EVENT_ADAPTER.validate_python(data)
+        body = cls._started_body(result)
+        if raw_body != body:
+            raise ValueError("native start source body has noncanonical field types")
+        locator = _replay_digest(expected_store_digest, _digest(result.run_id), result.idempotency_key)
+        if (data.get("key_digest") != locator or data.get("body_sha256") != _digest(body)
+                or data.get("fields_sha256") != _digest(cls._started_fields_body(result))):
+            raise ValueError("native start source body or locator is corrupt")
+        return result
+
+    @classmethod
+    def decode_started_fields(
+        cls, event: Mapping[str, object], *, expected_store_digest: str,
+    ) -> StepEvent:
+        """Verify a metadata-free Trace projection, never a complete source proof.
+
+        Supply SQL-resolved event fields except metadata, plus native scope,
+        run/key digests and fields_sha256. Metadata is intentionally not read or
+        authenticated here; full source readback uses decode_started_row instead.
+        """
+        names = tuple(field.name for field in fields(StepEvent) if field.name != "metadata")
+        if any(name not in event for name in names):
+            raise ValueError("native start projected fields are incomplete")
+        data = {name: event[name] for name in names}
+        data["metadata"] = {}
+        result = _EVENT_ADAPTER.validate_python(data)
+        raw_body = json.dumps({name: event[name] for name in names}, ensure_ascii=False,
+                              sort_keys=True, separators=(",", ":"))
+        body = cls._started_fields_body(result)
+        locator = _replay_digest(expected_store_digest, _digest(result.run_id), result.idempotency_key)
+        if (event.get("store_digest") != expected_store_digest
+                or event.get("run_digest") != _digest(result.run_id)
+                or event.get("key_digest") != locator
+                or event.get("fields_sha256") != _digest(body) or raw_body != body):
+            raise ValueError("native start projected fields or locator are corrupt")
+        return result
 
     @property
     def store_digest(self) -> str:
@@ -360,29 +604,77 @@ class SqlStepStore:
 
     async def prepare_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
-        snapshot: ContinuableSnapshot | None = None,
+        snapshot: ContinuableSnapshot | None = None, managed_start: bool = False,
     ) -> PreparedStep:
-        """Capture native records and perform encoding/media work before SQL."""
+        """Capture native records; only an explicitly owned start mints source proof."""
+        if type(managed_start) is not bool:
+            raise ValueError("managed_start must be a bool")
+        if managed_start:
+            starts = [event for event in events if event.kind == "run_started"]
+            if (run is None or len(starts) != 1 or starts[0].idempotency_key is None
+                    or starts[0].run_id != run.run_id):
+                raise ValueError("managed start requires one keyed run_started and its registration")
         await self.initialize()
         run, events, snapshot = deepcopy((run, tuple(events), snapshot))
         values, messages, sequences = (None, (), ()) if snapshot is None else await self._prepare_snapshot(snapshot)
-        return PreparedStep(run, events, snapshot, values, tuple(messages), sequences)
+        return PreparedStep(run, events, snapshot, values, tuple(messages), sequences, managed_start)
 
     async def write_prepared_step(
-        self, transaction: StateTransaction, prepared: PreparedStep,
+        self, transaction: StateTransaction, prepared: PreparedStep, *,
+        confirmed: StepWriteReceipt | None = None,
     ) -> StepWriteReceipt:
-        """Join the existing same-engine transaction without opening another."""
+        """Join the existing same-engine transaction without opening another.
+
+        A caller-held receipt may outlive the bounded cache. Supply it only after
+        its enclosing transaction committed; provisional receipts are not proof.
+        """
         if not isinstance(transaction, SqlStateTransaction):
             raise TypeError("native SQL records require a SQL state transaction")
         return await transaction.run_sql(
-            self._context, lambda session: self._write_prepared_step(session, prepared),
+            self._context, lambda session: self._write_prepared_step(
+                session, prepared, confirmed=confirmed,
+            ),
         )
 
     async def _write_prepared_step(
-        self, session: "AsyncSession", prepared: PreparedStep,
+        self, session: "AsyncSession", prepared: PreparedStep, *,
+        confirmed: StepWriteReceipt | None = None,
     ) -> StepWriteReceipt:
-        source = None if prepared.run is None else await self._write_run(session, prepared.run, replay=True)
-        await self._write_events(session, prepared.events, source=source)
+        started = None
+        if prepared.managed_start:
+            starts = [event for event in prepared.events if event.kind == "run_started"]
+            if (prepared.run is None or len(starts) != 1 or starts[0].idempotency_key is None
+                    or starts[0].run_id != prepared.run.run_id):
+                raise ValueError("managed start requires one keyed run_started and its registration")
+            started = starts[0]
+        elif confirmed is not None:
+            raise ValueError("a source receipt requires an explicitly managed start")
+        source = None
+        if confirmed is not None:
+            self.run_from_receipt(confirmed)
+            if prepared.run is None or started is None or confirmed.run_fields is None:
+                raise ValueError("confirmed receipt does not prove the supplied run_started source")
+            self._validate_started_replay(prepared.run, started, confirmed.run_fields)
+        if prepared.run is not None:
+            known = (confirmed.run_fields if confirmed is not None
+                     else self._confirmed_runs.get(prepared.run.run_id))
+            if (started is not None and known is not None and known.started_body is not None
+                    and (confirmed is not None or prepared.run.registration_id is not None)):
+                self._validate_started_replay(prepared.run, started, known)
+                source = known
+            else:
+                source = await self._write_run(session, prepared.run, replay=True, started=started)
+        events = prepared.events
+        fresh = started
+        if started is not None and source is not None and source.started_body is not None:
+            events = tuple(event for event in events if event is not started)
+            fresh = None
+        if fresh is None:
+            await self._write_events(session, events, source=source)
+        else:
+            await self._write_events(session, events, source=source, started=fresh)
+        if fresh is not None and source is not None:
+            source = self._with_started(source, fresh)
         receipt = StepWriteReceipt((), ())
         if prepared.snapshot is not None and prepared.snapshot_values is not None:
             receipt = await self._write_snapshot(
@@ -400,6 +692,10 @@ class SqlStepStore:
     def _confirm_run(self, source: _RunFields) -> None:
         if source.engine is not self._context.engine or source.store_digest != self._store_digest:
             raise ValueError("run receipt belongs to another native store")
+        known = self._confirmed_runs.get(source.run_id)
+        if known is not None and known.started_body is not None and source.started_body is None:
+            if replace(known, started_body=None, byte_size=source.byte_size) == source:
+                source = known
         if source.byte_size > _RUN_CACHE_BYTES:
             return
         self._confirmed_runs[source.run_id] = source
@@ -426,6 +722,18 @@ class SqlStepStore:
             lambda session: self._write_prepared_step(session, prepared), domain="steps.boundary",
         )
         self.confirm_prepared_step(receipt)
+        self._publish_receipt(receipt)
+
+    async def commit_step_receipt(
+        self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
+        snapshot: ContinuableSnapshot | None = None,
+    ) -> StepWriteReceipt:
+        """Observe the public boundary operation without bypassing overrides."""
+        with self._capture_receipts() as receipts:
+            await self.commit_step(run=run, events=events, snapshot=snapshot)
+        receipt = self._matching_receipt(receipts, run_id=None if run is None else run.run_id)
+        self._publish_receipt(receipt)
+        return receipt
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         await self.initialize()

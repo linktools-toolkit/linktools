@@ -20,6 +20,7 @@ from ..storage import ObjectRef, ObjectStore, ObjectStoreInspection, StoredPaylo
 from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
 from ._native_run_reference import NativeRunReferences
+from ._native_event_reference import NativeEventReferences
 from ._sql import SqlStateStore
 from ._archive import ContentRecord
 from ._archive_closure import (
@@ -98,6 +99,8 @@ class _StateSnapshotReader:
         self._store = store
         self._native_runs = (NativeRunReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
                              if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
+        self._native_events = (NativeEventReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
+                               if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return await self._store.read(lambda tx: tx.get_operation(key))
@@ -112,6 +115,8 @@ class _StateSnapshotReader:
     async def scan_facts_page(
         self, *, after: FactScanCursor | None, limit: int,
     ) -> tuple[StoredFact, ...]:
+        if self._native_events is not None:
+            return await self._store.read(lambda tx: self._native_events.read(tx, scan=(after, limit)))
         return await self._store.read(lambda tx: tx.scan_facts_page(after=after, limit=limit))
 
     async def scan_operations_page(

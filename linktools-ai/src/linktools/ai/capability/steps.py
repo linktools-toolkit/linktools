@@ -130,6 +130,84 @@ def _has_model_response(messages: list[ModelMessage]) -> bool:
     return any(isinstance(message, ModelResponse) for message in messages)
 
 
+@dataclass(kw_only=True)
+class StepRunRegistration:
+    """Prepare one native registration for all views of an owned attempt.
+
+    Preparation is not commit confirmation. The native durable operation supplies
+    the replay token; consumers may project the other fields before publication.
+    """
+
+    run_id: str
+    parent_run_id: str | None
+    agent_name: str | None
+    metadata: dict[str, str]
+    share_started: bool = False
+    _record: RunRecord | None = field(default=None, init=False, repr=False)
+    _started: StepEvent | None = field(default=None, init=False, repr=False)
+    _prepare_token: Callable[[], Awaitable[tuple[str, datetime]]] | None = field(default=None, init=False, repr=False)
+
+    def bind_registration(self, prepare_token: Callable[[], Awaitable[tuple[str, datetime]]]) -> None:
+        """Use the native registration's existing durable identity operation."""
+        self._prepare_token = prepare_token
+
+    async def prepare_started(self, *, conversation_id: str | None, step_index: int) -> tuple[RunRecord, StepEvent]:
+        """Derive the canonical start from one replay-stable registration clock."""
+        if not self.share_started or self._prepare_token is None:
+            raise RuntimeError("native start producer is not bound")
+        if self._started is None:
+            token, timestamp = await self._prepare_token()
+            if (not isinstance(token, str) or not token or not isinstance(timestamp, datetime)
+                    or timestamp.tzinfo is None):
+                raise ValueError("native registration seed is invalid")
+            record = self.prepare(conversation_id=conversation_id, registration_id=token, started_at=timestamp)
+            self._started = StepEvent(
+                run_id=record.run_id, kind="run_started", step_index=step_index,
+                timestamp=timestamp, conversation_id=record.conversation_id,
+                parent_run_id=record.parent_run_id, agent_name=record.agent_name,
+                metadata=dict(record.metadata), idempotency_key=f"0:{step_index}:run_started:",
+            )
+        elif self._started.step_index != step_index or self._started.conversation_id != conversation_id:
+            raise ValueError("native start boundary changed")
+        prepared = self.prepared_started()
+        assert prepared is not None
+        return prepared
+
+    def prepared_started(self) -> tuple[RunRecord, StepEvent] | None:
+        """Return a prepared source, including before the native before_run hook."""
+        return None if self._record is None or self._started is None else deepcopy((self._record, self._started))
+
+    def bind(self, *, run_id: str, parent_run_id: str | None, agent_name: str | None) -> None:
+        """Retain lineage resolved by the native capability before hooks run."""
+        if run_id != self.run_id:
+            raise ValueError("native registration run identity changed")
+        if self._record is not None and (parent_run_id, agent_name) != (
+                self._record.parent_run_id, self._record.agent_name):
+            raise ValueError("native registration lineage changed after preparation")
+        self.parent_run_id, self.agent_name = parent_run_id, agent_name
+
+    def prepare(self, *, conversation_id: str | None, registration_id: str | None = None,
+                started_at: datetime | None = None) -> RunRecord:
+        record = self._record
+        if record is None:
+            record = RunRecord(
+                run_id=self.run_id, conversation_id=conversation_id,
+                parent_run_id=self.parent_run_id, agent_name=self.agent_name,
+                metadata=dict(self.metadata), registration_id=registration_id,
+                **({} if started_at is None else {"started_at": started_at}),
+            )
+        elif record.conversation_id != conversation_id:
+            raise ValueError("native registration conversation changed")
+        elif started_at is not None and record.started_at != started_at:
+            raise ValueError("native registration clock changed after preparation")
+        elif registration_id is not None:
+            if record.registration_id not in (None, registration_id):
+                raise ValueError("native registration replay identity changed")
+            record = replace(record, registration_id=registration_id)
+        self._record = record
+        return deepcopy(record)
+
+
 @dataclass
 class AtomicStepPersistence(StepPersistence[AgentDepsT]):
     """Prepare native facts and publish explicit Runtime node boundaries.
@@ -139,11 +217,14 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
     Standalone agents use the original StepPersistence capability.
     """
 
+    run_registration: StepRunRegistration | None = field(default=None, repr=False, compare=False)
+
     _atomic_model_context: RunContext[AgentDepsT] | None = field(default=None, init=False, repr=False)
     _atomic_model_wrappers: tuple[type[AbstractCapability[Any]], ...] = field(default=(), repr=False)
     _atomic_pending_run: RunRecord | None = field(default=None, init=False, repr=False)
     _atomic_pending_events: list[StepEvent] = field(default_factory=list, init=False, repr=False)
 
+    _atomic_start_published: bool = field(default=False, init=False, repr=False)
     _atomic_event_sequence: int = field(default=0, init=False, repr=False)
     _atomic_snapshot_sequence: int = field(default=0, init=False, repr=False)
     _atomic_last_snapshot_messages: list[ModelMessage] | None = field(
@@ -158,6 +239,12 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         bound = await super().for_run(ctx)
         if not isinstance(bound, AtomicStepPersistence):
             raise TypeError("native run binding changed the step capability")
+        if bound.run_registration is not None:
+            bound.run_registration.bind(
+                run_id=bound._atomic_effective_run_id(ctx),
+                parent_run_id=bound.parent_run_id, agent_name=bound.agent_name,
+            )
+            bound.run_registration.bind_registration(bound._atomic_registration_seed)
         wrappers: list[type[AbstractCapability[Any]]] = []
 
         def collect(capability: AbstractCapability[Any]) -> None:
@@ -198,8 +285,10 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         raise RuntimeError("StepPersistence run id was not materialized by `for_run`.")
 
     @durable_operation("atomic_registration_id")
-    async def _atomic_registration_id(self) -> str:
-        return str(uuid4())
+    async def _atomic_registration_seed(self) -> tuple[str, datetime]:
+        # Reuse the one registration operation. Durable backends retain only
+        # identity and clock, never another copy of the run or event body.
+        return str(uuid4()), datetime.now(UTC)
 
     def _atomic_prepare_event(
         self,
@@ -210,6 +299,8 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         tool_name: str | None = None,
         error: str | None = None,
     ) -> StepEvent:
+        if self.run_registration is not None and self.run_registration.share_started:
+            self._atomic_event_sequence = max(1, self._atomic_event_sequence)
         event_index = self._atomic_event_sequence
         self._atomic_event_sequence += 1
         return StepEvent(
@@ -258,10 +349,19 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         if not isinstance(self.store, RuntimeStepBoundaryStore) or not self.store.runtime_bound:
             raise TypeError("AtomicStepPersistence requires a Runtime-bound step store")
         prepared_run = run if run is not None else self._atomic_pending_run
-        prepared_events = (*self._atomic_pending_events, *events)
+        pending_events = tuple(self._atomic_pending_events)
+        shared_start = self.run_registration is not None and self.run_registration.share_started
+        if shared_start and not self._atomic_start_published and prepared_run is None:
+            prepared = self.run_registration.prepared_started()
+            if prepared is not None:
+                prepared_run, started = prepared
+                pending_events = (started, *pending_events)
+        prepared_events = (*pending_events, *events)
         await self._atomic_write(run=prepared_run, events=prepared_events, snapshot=snapshot)
         self._atomic_pending_run = None
         self._atomic_pending_events.clear()
+        if shared_start:
+            self._atomic_start_published = True
 
     @durable_operation("commit_boundary")
     async def _atomic_write(
@@ -427,14 +527,27 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         if not isinstance(self.store, RuntimeStepBoundaryStore) or not self.store.runtime_bound:
             raise TypeError("AtomicStepPersistence requires a Runtime-bound step store; standalone agents use StepPersistence")
-        self._atomic_pending_run = RunRecord(
-            run_id=self._atomic_effective_run_id(ctx),
-            conversation_id=ctx.conversation_id,
-            parent_run_id=self.parent_run_id,
-            agent_name=self.agent_name,
-            metadata=dict(self.metadata),
-            registration_id=await self._atomic_registration_id(),
-        )
+        if self.run_registration is not None and self.run_registration.share_started:
+            self._atomic_pending_run, started = await self.run_registration.prepare_started(
+                conversation_id=ctx.conversation_id, step_index=ctx.run_step,
+            )
+            self._atomic_pending_events.append(started)
+            self._atomic_event_sequence = max(1, self._atomic_event_sequence)
+            return
+        registration_id, _ = await self._atomic_registration_seed()
+        if self.run_registration is None:
+            self._atomic_pending_run = RunRecord(
+                run_id=self._atomic_effective_run_id(ctx),
+                conversation_id=ctx.conversation_id,
+                parent_run_id=self.parent_run_id,
+                agent_name=self.agent_name,
+                metadata=dict(self.metadata),
+                registration_id=registration_id,
+            )
+        else:
+            self._atomic_pending_run = self.run_registration.prepare(
+                conversation_id=ctx.conversation_id, registration_id=registration_id,
+            )
         self._atomic_pending_events.append(self._atomic_prepare_event(ctx, kind="run_started"))
 
 
@@ -465,4 +578,4 @@ class StepBoundaryCapabilities(CombinedCapability[AgentDepsT]):
         return rebound
 
 
-__all__ = ["AtomicStepPersistence", "AtomicStepStore", "RuntimeStepBoundaryStore", "StepBoundaryCapabilities"]
+__all__ = ["AtomicStepPersistence", "AtomicStepStore", "RuntimeStepBoundaryStore", "StepBoundaryCapabilities", "StepRunRegistration"]

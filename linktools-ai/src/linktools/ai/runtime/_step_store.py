@@ -17,6 +17,7 @@ from pydantic_ai_harness.step_persistence import (
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ..model.messages import native_checkpoint_messages
 from ..capability.steps import AtomicStepStore
+from ..persistence import SqlStepStore, StepWriteReceipt
 from ..persistence.runs import NativeCheckpoint
 
 if TYPE_CHECKING:
@@ -27,7 +28,7 @@ class StepBoundaryCommitter(Protocol):
     async def __call__(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
         snapshot: ContinuableSnapshot | None = None,
-    ) -> None:
+    ) -> StepWriteReceipt | None:
         """Return only after the complete Runtime boundary commit is confirmed."""
         ...
 
@@ -59,28 +60,35 @@ class RuntimeStepStore:
     ) -> None:
         writer = self._commit_boundary
         if writer is None:
-            writer = (self._store.commit_step if isinstance(self._store, AtomicStepStore)
+            writer = (self._store.commit_step_receipt if isinstance(self._store, SqlStepStore)
+                      else self._store.commit_step if isinstance(self._store, AtomicStepStore)
                       else self._commit_split_step)
         stored_snapshot = None if snapshot is None else self._encode_snapshot(snapshot)
         try:
-            await writer(run=run, events=events, snapshot=stored_snapshot)
+            receipt = await writer(run=run, events=events, snapshot=stored_snapshot)
         except BaseException:
             if self._working_set is not None:
                 for run_id in {record.run_id for record in (run, snapshot, *events) if record is not None}:
                     self._working_set.invalidate_step_run(run_id)
             raise
-        if run is not None and self._native_boundary and isinstance(self._tool_operations, RuntimeToolOperationBridge):
-            self._tool_operations.confirm_native_run(run)
+        source = None if run is None else (self._store.run_from_receipt(receipt)
+                  if isinstance(self._store, SqlStepStore) and isinstance(receipt, StepWriteReceipt)
+                  else receipt if isinstance(receipt, RunRecord) else run)
+        if source is not None and source.run_id != run.run_id:
+            raise ValueError("native receipt changed the requested run identity")
+        if source is not None and self._native_boundary and isinstance(self._tool_operations, RuntimeToolOperationBridge):
+            self._tool_operations.confirm_native_run(source)
         if self._working_set is not None:
-            if run is not None:
-                self._working_set.confirm_step_run(run)
+            if source is not None:
+                self._working_set.confirm_step_run(source, receipt=(
+                    receipt if isinstance(receipt, StepWriteReceipt) else None))
             if snapshot is not None:
                 self._working_set.confirm_step_snapshot(stored_snapshot)
 
     async def _commit_split_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
         snapshot: ContinuableSnapshot | None = None,
-    ) -> None:
+    ) -> RunRecord | None:
         """Publish original individual writes for a caller-owned native store.
 
         This adapter is deliberately non-atomic. Each successful native write
@@ -92,20 +100,27 @@ class RuntimeStepStore:
                 await self._store.register_run(run)
             elif existing.registration_id != run.registration_id:
                 raise ValueError("native run_id is single-shot")
+            else:
+                run = existing
         for event in events:
             await self._store.append_event(event)
         if snapshot is not None:
             await self._store.save_snapshot(snapshot)
+        return run
 
     async def register_run(self, record: RunRecord) -> None:
+        receipt = None
         try:
-            await self._store.register_run(record)
+            if isinstance(self._store, SqlStepStore):
+                receipt = await self._store.register_run_receipt(record)
+            else:
+                await self._store.register_run(record)
         except BaseException:
             if self._working_set is not None:
                 self._working_set.invalidate_step_run(record.run_id)
             raise
         if self._working_set is not None:
-            self._working_set.confirm_step_run(record)
+            self._working_set.confirm_step_run(record, receipt=receipt)
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         return await self._store.get_run(run_id=run_id)

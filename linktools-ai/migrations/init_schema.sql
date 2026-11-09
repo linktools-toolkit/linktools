@@ -204,6 +204,8 @@ CREATE TABLE ai_step_events (
 	error LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary error text.',
 	metadata JSON COMMENT 'Upstream string metadata encoded as JSON, unless referenced from the native run.',
 	run_fields SMALLINT UNSIGNED NOT NULL COMMENT 'Native run field references: conversation 1, parent 2, agent 4, metadata 8.' DEFAULT 0,
+	body_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Integrity digest of the managed run-start source body.',
+	fields_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Integrity digest of managed run-start fields excluding metadata.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
 	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

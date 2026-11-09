@@ -19,6 +19,7 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.step_persistence import StepPersistence
 
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.spec import AgentUsageLimits
 from linktools.ai.core import ExecutionStatus
@@ -51,7 +52,26 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
 
-    path, execution_id, _standalone_id = _restore_fixture(tmp_path)
+    path = tmp_path / "current-history.db"
+    accepted = RuntimeFeatures("application")
+    accepted.agent("default", model="default", allow_tools=(), usage_limits=AgentUsageLimits(output_tokens=250))
+    accepted.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    accepted.capability(TraceCapability(), scope="runtime")
+    async with Persistence.open("older-history", storage=PersistenceStorage.sqlite(path)) as persistence:
+        native = await persistence.create_step_store()
+        accepted.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+        try:
+            async with Runtime.attach(
+                persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), accepted),
+            ) as runtime:
+                execution = await runtime.agents.get().session("session").start("retained older question")
+                assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+                assert await execution.budget_usage() is None
+                execution_id = execution.execution_id
+            run, = await native.list_runs()
+            assert any(event.kind == "run_started" for event in await native.list_events(run_id=run.run_id))
+        finally:
+            await native.close()
     async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_52, History.open(persistence=history_persistence_52) as history:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=create_app(history=history)),

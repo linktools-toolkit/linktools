@@ -61,7 +61,9 @@ async def provision_runtime_database(
     if PersistenceDomain.CHECKPOINT in selected:
         build_step_sql_metadata(metadata=metadata)
     elif selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
-        build_step_sql_metadata().tables["ai_step_runs"].to_metadata(metadata)
+        native = build_step_sql_metadata()
+        for name in ("ai_step_runs", "ai_step_events"):
+            native.tables[name].to_metadata(metadata)
     if object_store is None and any(
         runtime_domain_uses_object_store(domain) for domain in selected
     ):

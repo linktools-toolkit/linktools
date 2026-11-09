@@ -58,6 +58,7 @@ from .state import (
 )
 
 if TYPE_CHECKING:
+    from ..storage import SqlValue
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
     from sqlalchemy.sql import ColumnElement, Executable, Select
@@ -928,6 +929,31 @@ class _SqlTransaction:
             result.append((record, row))
         for key in keys:
             self._record_cache.setdefault(key, None)
+        return tuple(result)
+
+    async def read_joined_facts(
+        self, context: SqlStorageContext, statement: "Select",
+    ) -> tuple[tuple[StoredFact, Mapping[str, "SqlValue"]], ...]:
+        from sqlalchemy.sql import Select, visitors
+        from sqlalchemy.sql.dml import UpdateBase
+        from sqlalchemy.sql.elements import TextClause
+        from sqlalchemy.sql.selectable import ForUpdateArg
+
+        if (not isinstance(statement, Select) or context.engine is not self._context.engine
+                or context.closed or self._context.closed
+                or context.dialect.name != self._context.dialect.name
+                or not is_active_state_transaction(self)
+                or any(isinstance(node, (UpdateBase, TextClause, ForUpdateArg))
+                       for node in visitors.iterate(statement))):
+            raise StateTransactionNestingError(
+                "joined facts require a read-only SQL plan in their active boundary"
+            )
+        rows = (await self._execute(statement)).mappings().all()
+        result: list[tuple[StoredFact, Mapping[str, "SqlValue"]]] = []
+        for row in rows:
+            if row["store_digest"] != self._store_hex:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result.append((_fact_from_row(row), row))
         return tuple(result)
 
     async def run_sql(

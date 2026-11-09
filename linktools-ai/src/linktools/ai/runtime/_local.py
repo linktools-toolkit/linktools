@@ -159,7 +159,7 @@ from ..persistence.commands import RuntimeRecoveryCommands
 from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
 from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction
-from ..persistence import SqlStepStore
+from ..persistence import SqlStepStore, StepWriteReceipt
 from ..storage import SqlStorageContext
 
 
@@ -5524,12 +5524,18 @@ class LocalExecutionBackend:
         if generation is None or claim_id is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
-        async def verify_native(*, run, events, snapshot) -> bool:
-            if run is not None and await native.get_run(run_id=run.run_id) != run:
-                return False
+        async def verify_native(*, run, events, snapshot, receipt: StepWriteReceipt) -> bool:
+            if run is not None:
+                source = native.run_from_receipt(receipt)
+                if source is None or await native.get_run(run_id=run.run_id) != source:
+                    return False
             if events:
-                actual_events = await native.list_events(run_id=events[0].run_id)
-                if any(event not in actual_events for event in events):
+                started = native.started_from_receipt(receipt)
+                actual_events = (await native.list_events(run_id=events[0].run_id) if started is None else
+                                 await native.list_events(run_id=events[0].run_id, started_receipt=receipt))
+                expected_events = tuple(started if started is not None and event.idempotency_key == started.idempotency_key
+                                        else event for event in events)
+                if any(event not in actual_events for event in expected_events):
                     return False
             if snapshot is not None:
                 actual_snapshot = await native.latest_snapshot(run_id=snapshot.run_id, include_interrupted=True)
@@ -5537,10 +5543,16 @@ class LocalExecutionBackend:
                     return False
             return True
 
-        async def commit_boundary(*, run=None, events=(), snapshot=None) -> None:
+        async def commit_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
+            async with self._run_store.native_start_publication(agent_run_id):
+                return await publish_boundary(run=run, events=events, snapshot=snapshot)
+
+        async def publish_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
             if run is None and not events and snapshot is None:
                 return
-            prepared = await native.prepare_step(run=run, events=events, snapshot=snapshot)
+            managed = run is not None and self._run_store.has_pending_native_start(run.run_id)
+            prepared = (await native.prepare_step(run=run, events=events, snapshot=snapshot, managed_start=True)
+                        if managed else await native.prepare_step(run=run, events=events, snapshot=snapshot))
             async with owner.boundary:
                 self._require_turn_dispatch(owner)
                 if owner.observed is None or owner.attempt is None:
@@ -5562,7 +5574,9 @@ class LocalExecutionBackend:
                         transaction, observed, next_record=next_record,
                         expected_producer_generation=generation, expected_producer_claim_id=claim_id,
                     )
-                    written = await native.write_prepared_step(transaction, prepared)
+                    source_receipt = self._run_store.step_start_receipt(run.run_id) if managed else None
+                    written = (await native.write_prepared_step(transaction, prepared, confirmed=source_receipt)
+                               if source_receipt is not None else await native.write_prepared_step(transaction, prepared))
                     return receipt
 
                 async def persist():
@@ -5579,7 +5593,7 @@ class LocalExecutionBackend:
                                 if (actual is not None and actual.value == next_record
                                         and actual.storage_revision == observed.storage_revision + 1
                                         and written is not None
-                                        and await verify_native(run=run, events=events, snapshot=snapshot)):
+                                        and await verify_native(run=run, events=events, snapshot=snapshot, receipt=written)):
                                     return actual
                             elif (error.code is ErrorCode.STORAGE_CONFLICT and written is None
                                     and actual is not None and actual.value == observed.value
@@ -5606,8 +5620,12 @@ class LocalExecutionBackend:
                 if written is None:
                     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 native.confirm_prepared_step(written)
+                source = native.run_from_receipt(written)
+                if source is not None:
+                    self._run_store.confirm_step_run(source, receipt=written)
                 if cancelled is not None:
                     raise cancelled
+                return written
 
         initial_observed = owner.observed
 

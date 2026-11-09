@@ -180,12 +180,12 @@ async def test_unknown_tool_fact_and_native_failure_event_share_storage(
     class NativeStore(SqlStepStore):
         interrupted = False
 
-        async def _write_events(self, session, events, *, source=None):
+        async def _write_events(self, session, events, *, source=None, started=None):
             if (fail_native_once and not self.interrupted
                     and any(event.error == ErrorCode.TOOL_EFFECT_UNKNOWN.value for event in events)):
                 self.interrupted = True
                 raise OSError("native event storage failed")
-            await super()._write_events(session, events, source=source)
+            await super()._write_events(session, events, source=source, started=started)
 
         async def append_event(self, event):
             raise AssertionError("same-group unknown publication must join the effect transaction")

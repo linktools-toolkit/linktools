@@ -184,7 +184,7 @@ async def test_native_run_reference_fails_closed_when_source_is_missing_or_chang
 
 
 @pytest.mark.asyncio
-async def test_source_confirmation_does_not_accept_changed_registration_replay(tmp_path: Path) -> None:
+async def test_source_confirmation_uses_original_registration_after_changed_replay(tmp_path: Path) -> None:
     async with _source(tmp_path, confirmed=False) as (state, native, source, run):
         await native.register_run(source)
         changed = replace(source, metadata={**source.metadata, "shared": "different"})
@@ -192,7 +192,8 @@ async def test_source_confirmation_does_not_accept_changed_registration_replay(t
         state.run_store.confirm_step_run(changed)
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
-        assert not is_native_run_reference((await _raw_run(archive)).data)
+        assert is_native_run_reference((await _raw_run(archive)).data)
+        assert await state.run_store.checkpoint_persistence.reader.get_run(run_id="run") == source
         assert await archive.get_agent_run(agent_run_id="run") == run
 
 
@@ -224,8 +225,21 @@ async def test_selected_trace_schema_provisions_its_native_run_read_dependency(t
         await provision_runtime_database(engine, domains=(PersistenceDomain.EXECUTION, PersistenceDomain.TRACE))
         async with engine.connect() as connection:
             names = await connection.run_sync(lambda sync: inspect(sync).get_table_names())
-        assert "ai_step_runs" in names
+        assert {"ai_step_runs", "ai_step_events"}.issubset(names)
         assert "ai_step_snapshots" not in names
+        from linktools.ai.persistence._sql import SqlStateStore
+        from linktools.ai.persistence.runs import StateStepArchive
+
+        store = SqlStateStore(engine, runtime_domain=PersistenceDomain.TRACE)
+        archive = StateStepArchive(store, object_store=None, namespace="selected", tenant_id="one",
+                                   runtime_domain=PersistenceDomain.TRACE)
+        archive.enable_native_run_reads()
+        await store.initialize()
+        try:
+            assert await archive.list_events(agent_run_id="absent") == []
+        finally:
+            await archive.close()
+            await store.close()
     finally:
         await engine.dispose()
 

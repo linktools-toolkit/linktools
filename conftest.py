@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Explicit test tiers and manifest-owned package groups."""
+"""Test selection and allowlisted synthetic storage cost reporting."""
 
 import json
+import math
 import os
+import re
+import sqlite3
+import sys
 import typing
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -28,6 +32,215 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(_ManifestGroups(config), "linktools-manifest-groups")
+    if not hasattr(config, "workerinput"):
+        config.pluginmanager.register(_StorageCostReports(), "linktools-storage-cost-reports")
+
+
+class _StorageCostReports:
+    """Only publish allowlisted numeric schemas from synthetic native storage fixtures."""
+
+    _PROPERTY = "native_event_lifecycle_cost"
+    _TEST = (
+        "tests/ai/test_step_event_run_references.py::"
+        "test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu"
+    )
+    _MODES = {"text_inline", "json_inline", "referenced"}
+    _COUNTERS = {
+        "bound_bytes", "returned_bytes", "commits", "sql_text_bytes", "returned_rows",
+        "application_metadata_encodes", "application_metadata_encoded_bytes",
+        "application_metadata_decodes", "json_bind_encodes", "json_bind_encoded_bytes",
+        "json_result_decodes", "stored_field_bytes",
+    }
+    _STATEMENTS = {"BEGIN", "SELECT", "INSERT", "UPDATE", "DELETE", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE"}
+    _REPLAY_TEST = (
+        "tests/ai/test_native_run_producer.py::"
+        "test_cold_registration_replay_confirms_original_without_another_select"
+    )
+    _REPLAY_COUNTERS = {
+        "replay_selects", "replay_inserts", "replay_parameter_bytes", "replay_returned_source_bytes",
+        "former_registration_only_payload_bytes", "replay_additional_source_payload_bytes",
+        "replay_cpu_ns", "replay_peak_traced_bytes",
+    }
+    _START_LIFECYCLE_TEST = (
+        "tests/ai/test_native_start_projection.py::test_start_sharing_matches_inline_workload_sql_budget"
+    )
+    _START_CASES = {
+        "[0-success]": (0, "success"), "[0-shortcircuit]": (0, "shortcircuit"),
+        "[65537-success]": (65537, "success"), "[65537-shortcircuit]": (65537, "shortcircuit"),
+    }
+    _START_LIFECYCLE_FIELDS = {
+        "%s_%s" % (backend, field) for backend in ("owned", "subclass") for field in (
+            "select", "insert", "update", "delete", "sql_text_bytes", "bound_text_binary_bytes",
+            "scenario_wall_ns", "scenario_cpu_ns", "tracemalloc_session_peak_bytes", "tracemalloc_inherited_session",
+        )
+    } | {
+        "shared_start_sidecar_logical_json_bytes", "shared_start_added_proof_ascii_bytes",
+        "shared_start_former_inline_logical_json_bytes", "shared_start_signed_logical_byte_delta",
+        "shared_total_dml", "inline_total_dml", "shared_native_event_insert_statements", "inline_native_event_insert_statements",
+    }
+    _START_READ_TEST = (
+        "tests/ai/test_native_start_projection.py::test_large_metadata_is_not_returned_by_cold_trace_select"
+    )
+    _START_READ_FIELDS = {
+        "metadata_%d_%s" % (size, field) for size in (0, 65537) for field in (
+            "select", "insert", "update", "delete", "sql_text_bytes", "bound_text_binary_bytes",
+            "returned_sql_text_binary_bytes",
+        )
+    }
+    _START_PROOF_TEST = (
+        "tests/ai/test_native_started_source.py::test_managed_start_write_records_proof_encoding_cost"
+    )
+    _START_PROOF_FIELDS = {
+        "managed_start_%s_%s" % (label, field) for label in ("body", "fields")
+        for field in ("calls", "encoded_bytes", "cpu_ns")
+    } | {"managed_start_write_cpu_ns", "managed_start_metadata_utf8_bytes", "managed_start_selects_sqlite"}
+    _START_FLAGS = {"owned_tracemalloc_inherited_session", "subclass_tracemalloc_inherited_session"}
+
+    def __init__(self) -> None:
+        self.reports = {}  # type: typing.Dict[bool, typing.Dict[str, typing.Any]]
+        self.replay = None  # type: typing.Optional[typing.Dict[str, typing.Any]]
+        self.start_reports = {}  # type: typing.Dict[typing.Tuple[str, str], typing.Dict[str, typing.Any]]
+
+    @classmethod
+    def _count(cls, value: object) -> bool:
+        return type(value) is int and 0 <= value <= 2 ** 63 - 1
+
+    @classmethod
+    def _start_value(cls, name: str, value: object) -> bool:
+        if name in cls._START_FLAGS:
+            return type(value) is bool
+        if name == "shared_start_signed_logical_byte_delta":
+            return type(value) is int and -(2 ** 63) <= value <= 2 ** 63 - 1
+        return cls._count(value)
+
+    @classmethod
+    def _parse(cls, value: object, matches: bool) -> "typing.Optional[typing.Dict[str, typing.Any]]":
+        if not isinstance(value, str) or len(value) > 16384:
+            return None
+        try:
+            data = json.loads(value)
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(data, dict) or set(data) != {"metadata_matches_native_run", "samples"}:
+            return None
+        if data["metadata_matches_native_run"] is not matches:
+            return None
+        samples = data["samples"]
+        if not isinstance(samples, dict) or set(samples) != cls._MODES:
+            return None
+        for metrics in samples.values():
+            if not isinstance(metrics, dict) or set(metrics) != cls._COUNTERS | {"statements", "cpu_seconds"}:
+                return None
+            statements = metrics["statements"]
+            if not isinstance(statements, dict) or not statements or not set(statements) <= cls._STATEMENTS:
+                return None
+            counts = list(statements.values()) + [metrics[name] for name in cls._COUNTERS]
+            if not all(cls._count(count) for count in counts):
+                return None
+            cpu = metrics["cpu_seconds"]
+            if type(cpu) not in (int, float) or not 0 <= cpu <= 2 ** 63 - 1 or not math.isfinite(cpu):
+                return None
+        return data
+
+    def _record_start(self, report: pytest.TestReport, outcome: str) -> bool:
+        identity = {}
+        if report.nodeid.startswith(self._START_LIFECYCLE_TEST):
+            case = self._START_CASES.get(report.nodeid[len(self._START_LIFECYCLE_TEST):])
+            if case is None:
+                return False
+            identity = {"metadata_bytes": case[0], "scenario_outcome": case[1]}
+            label, fields = "native_start_lifecycle_cost", self._START_LIFECYCLE_FIELDS
+        elif report.nodeid == self._START_READ_TEST:
+            label, fields = "native_start_read_cost", self._START_READ_FIELDS
+        elif report.nodeid == self._START_PROOF_TEST:
+            label, fields = "native_start_proof_cost", self._START_PROOF_FIELDS
+        else:
+            return False
+        values = report.user_properties
+        names = [name for name, _ in values]
+        if (any(type(name) is not str or name not in fields for name in names)
+                or len(set(names)) != len(names)):
+            result = {"status": "invalid"}
+        elif not all(self._start_value(name, value) for name, value in values):
+            result = {"status": "invalid"}
+        elif set(names) != fields:
+            result = {"status": "unavailable"}
+        else:
+            result = dict(values)
+        result.update(identity)
+        result["test_outcome"] = outcome
+        self.start_reports[label, report.nodeid] = result
+        return True
+
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        # xdist forwards user_properties on call reports to the controller, too.
+        if report.when != "call":
+            return
+        outcome = report.outcome if report.outcome in {"passed", "failed", "skipped"} else "unknown"
+        if self._record_start(report, outcome):
+            return
+        if report.nodeid == self._REPLAY_TEST:
+            values = [(name, value) for name, value in report.user_properties
+                      if isinstance(name, str) and name in self._REPLAY_COUNTERS]
+            self.replay = {"status": "invalid" if values else "unavailable"}
+            if (len(values) == len(self._REPLAY_COUNTERS)
+                    and {name for name, _ in values} == self._REPLAY_COUNTERS
+                    and all(self._count(value) for _, value in values)):
+                self.replay = dict(values)
+            self.replay["test_outcome"] = outcome
+            return
+        if report.nodeid not in (self._TEST + "[True]", self._TEST + "[False]"):
+            return
+        matches = report.nodeid.endswith("[True]")
+        result = {"metadata_matches_native_run": matches, "status": "unavailable"}
+        values = [value for name, value in report.user_properties if name == self._PROPERTY]
+        if values:
+            parsed = self._parse(values[0], matches) if len(values) == 1 else None
+            result = parsed if parsed is not None else {"metadata_matches_native_run": matches, "status": "invalid"}
+        result["test_outcome"] = outcome
+        self.reports[matches] = result
+
+    def pytest_terminal_summary(self, terminalreporter: object) -> None:
+        if not self.reports and self.replay is None and not self.start_reports:
+            return
+        terminalreporter.section("Synthetic native storage costs")
+        sha = os.environ.get("GITHUB_SHA", "")
+        terminalreporter.write_line("storage_cost_context " + json.dumps({
+            "backend": "sqlite+aiosqlite",
+            "sqlite_version": sqlite3.sqlite_version,
+            "python": "%d.%d.%d" % sys.version_info[:3],
+            "checkout_sha": sha if re.fullmatch("[0-9a-fA-F]{40}", sha) else "unknown",
+        }, sort_keys=True))
+        terminalreporter.write_line(
+            "CPU: event process_time seconds; replay/START process_time_ns. "
+            "Replay and START lifecycle enable tracemalloc. "
+            "Not strictly comparable across machines. "
+            "Bytes: counted fields/parameters/results, not database-file or network-wire size."
+        )
+        if self.reports:
+            terminalreporter.write_line(
+                "Event baselines: json_inline=current JSON inline; text_inline=former TEXT event codec only. "
+                "All modes use the current Run lifecycle, not a whole-release comparison."
+            )
+        for matches in sorted(self.reports):
+            terminalreporter.write_line(self._PROPERTY + " " + json.dumps(self.reports[matches], sort_keys=True))
+        if self.replay is not None:
+            terminalreporter.write_line(
+                "Replay baseline: former_registration_only_payload_bytes counts only the original registration ID; "
+                "not a measured old-release SQL/CPU run. replay_peak_traced_bytes is traced Python allocation."
+            )
+            terminalreporter.write_line("native_registration_replay_cost " + json.dumps(self.replay, sort_keys=True))
+        if self.start_reports:
+            terminalreporter.write_line(
+                "START lifecycle baseline: owned vs unchanged subclass using the current algorithm, not a historical-version "
+                "benchmark. The added 128-byte proof may offset savings for a short start."
+            )
+            terminalreporter.write_line(
+                "START lifecycle timing: whole-scenario wall/CPU nanoseconds; SQL counters cover the runtime listener window. "
+                "Tracemalloc peak is session-wide when inherited_session=true, not an isolated allocation increment."
+            )
+            for key in sorted(self.start_reports):
+                terminalreporter.write_line(key[0] + " " + json.dumps(self.start_reports[key], sort_keys=True))
 
 
 class _ManifestGroups:

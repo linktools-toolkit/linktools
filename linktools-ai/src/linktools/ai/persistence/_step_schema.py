@@ -88,6 +88,8 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         Column("run_fields", SmallInteger().with_variant(SMALLINT(unsigned=True), "mysql"),
                nullable=False, server_default=sql_text("0"),
                comment="Native run field references: conversation 1, parent 2, agent 4, metadata 8."),
+        digest("body_sha256", "Integrity digest of the managed run-start source body.", nullable=True),
+        digest("fields_sha256", "Integrity digest of managed run-start fields excluding metadata.", nullable=True),
         text("idempotency_key", "Upstream boundary replay key."),
         digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
     )

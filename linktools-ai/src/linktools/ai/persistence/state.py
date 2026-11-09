@@ -21,7 +21,7 @@ from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.sql import Select
-    from ..storage import SqlStorageContext
+    from ..storage import SqlStorageContext, SqlValue
 
 ValueT = TypeVar("ValueT")
 
@@ -792,6 +792,23 @@ class SqlStateRecordReader(Protocol):
 
 
 @runtime_checkable
+class SqlStateFactReader(Protocol):
+    """Join immutable sources to physical facts in the current read boundary.
+
+    Select all physical fact columns under their original names and give
+    joined columns distinct labels. The caller owns store/stream predicates,
+    ordering and pagination. Results keep the persisted fact separate from
+    joined source columns; projections never replace physical fact data.
+    Each call executes only the supplied read-only Select, without follow-up
+    reads or writes.
+    """
+
+    async def read_joined_facts(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[tuple[StoredFact, Mapping[str, "SqlValue"]], ...]: ...
+
+
+@runtime_checkable
 class SqlStateTransaction(Protocol):
     """Execute prepared SQL inside the current writable storage callback.
 
@@ -830,6 +847,13 @@ class _ReadOnlyStateTransaction(StateTransaction):
         if not isinstance(self._transaction, SqlStateRecordReader):
             raise StateTransactionNestingError("joined record reads require SQL storage")
         return await self._transaction.read_joined_records(context, statement, keys=keys)
+
+    async def read_joined_facts(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[tuple[StoredFact, Mapping[str, "SqlValue"]], ...]:
+        if not isinstance(self._transaction, SqlStateFactReader):
+            raise StateTransactionNestingError("joined fact reads require SQL storage")
+        return await self._transaction.read_joined_facts(context, statement)
 
     async def read_record_subjects(
         self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
@@ -1341,4 +1365,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

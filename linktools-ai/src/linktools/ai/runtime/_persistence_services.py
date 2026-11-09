@@ -58,7 +58,14 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
     async def before_run(self, ctx: PydanticRunContext[AgentContext[AppT]]) -> None:
         capture = self._bound_capture()
         await capture.before_run(ctx)
-        await capture.recorder.record_event("AGENT_RUN_STARTED", ctx.run_step)
+        registration = capture.native_registration
+        if registration is not None and registration.share_started:
+            run, event = await registration.prepare_started(
+                conversation_id=ctx.conversation_id, step_index=ctx.run_step,
+            )
+            await capture.recorder.record_native_start(run, event)
+        else:
+            await capture.recorder.record_event("AGENT_RUN_STARTED", ctx.run_step)
 
     async def after_run(
         self,

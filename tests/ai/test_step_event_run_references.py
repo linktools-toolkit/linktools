@@ -119,11 +119,12 @@ async def test_no_source_cold_append_and_registration_replay_never_guess_run_fie
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert len([sql for sql in statements if sql.startswith("SELECT")]) == 1
-        assert all("metadata" not in sql for sql in statements if sql.startswith("SELECT"))
-        assert all(row["run_fields"] == 0 for row in await _rows(engine))
+        assert all("metadata" in sql for sql in statements if sql.startswith("SELECT"))
+        assert [row["run_fields"] for row in await _rows(engine)] == [0, 0, 7]
+        assert cold.confirmed_run(run.run_id) == run
         assert await cold.list_events(run_id=run.run_id) == [first, second, replayed]
-        # An existing public read supplies proof without an extra append-time read.
-        assert await cold.get_run(run_id=run.run_id) == run
+        # The replay's existing SELECT supplies the original source, not caller metadata.
+        assert cold.confirmed_run(run.run_id) == run
         await cold.append_event(replace(first, idempotency_key="after-read"))
         assert (await _rows(engine))[-1]["run_fields"] == 15
     finally:
@@ -313,7 +314,7 @@ async def test_confirmed_run_is_detached_actual_registration_proof_not_replay_in
     cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
     try:
         await cold.commit_step(run=replace(run, metadata={"caller": "changed replay"}))
-        assert cold.confirmed_run(run.run_id) is None
+        assert cold.confirmed_run(run.run_id) == run
         assert await cold.get_run(run_id=run.run_id) == run
         assert cold.confirmed_run(run.run_id) == run
     finally:
@@ -401,7 +402,8 @@ def test_event_metadata_values_are_detached_without_json_round_trip() -> None:
 class _InlineStepStore(SqlStepStore):
     """Current JSON inline policy, not the historical TEXT encoding path."""
 
-    async def _write_events(self, session, events, *, source=None):
+    async def _write_events(self, session, events, *, source=None, started=None):
+        assert started is None, "the inline comparison does not own managed starts"
         for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
             rows = [self._run_values(item.run_id) | self._event_values(item) for item in group]
             for row in rows:
@@ -550,6 +552,9 @@ async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(
         metrics["stored_field_bytes"] = sum(_bytes(tuple(row.values())) for row in rows)
         samples[name] = metrics
         await engine.dispose()
+    record_property("native_event_lifecycle_cost", json.dumps({
+        "metadata_matches_native_run": metadata_matches_run, "samples": samples,
+    }, sort_keys=True))
     text_baseline, baseline, candidate = samples["text_inline"], samples["json_inline"], samples["referenced"]
     assert candidate["statements"] == baseline["statements"] == text_baseline["statements"] == {"BEGIN": 33, "INSERT": 35, "SELECT": 3}
     assert candidate["commits"] == baseline["commits"] == text_baseline["commits"] == 33
@@ -572,6 +577,3 @@ async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(
     # Compare the JSON reference policy and format cost separately, not a whole-release speedup.
     assert candidate["cpu_seconds"] <= baseline["cpu_seconds"] * 2 + 0.1
     assert baseline["cpu_seconds"] <= text_baseline["cpu_seconds"] * 2 + 0.1
-    record_property("native_event_lifecycle_cost", json.dumps({
-        "metadata_matches_native_run": metadata_matches_run, "samples": samples,
-    }, sort_keys=True))
