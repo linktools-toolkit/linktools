@@ -69,6 +69,7 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
     ) -> AgentRunResult[Any]:
         if self._capture is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+        self._capture.capture_interrupted_node()
         self._capture.recorder.finish_transcript(interrupted=True)
         await self._capture.context.save_checkpoint(
             ctx,

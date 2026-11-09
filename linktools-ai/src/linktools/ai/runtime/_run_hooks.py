@@ -66,6 +66,14 @@ class AgentRunCapture(AbstractCapability[None]):
         compare=False,
     )
 
+    _pending_tool_node: tuple[PydanticRunContext[None], int] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+
+    _counted_tool_request: ModelRequest | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+
     context: RunContextCapture = field(init=False, repr=False)
 
     @property
@@ -123,6 +131,39 @@ class AgentRunCapture(AbstractCapability[None]):
                 self.recorder.append_transcript_message(ctx.messages[-1])
         return request_context
 
+    async def before_node_run(
+        self, ctx: PydanticRunContext[None], *, node: AgentNode[None],
+    ) -> AgentNode[None]:
+        self._live_messages = ctx.messages
+        self._pending_tool_node = (ctx, len(ctx.messages)) if isinstance(node, CallToolsNode) else None
+        return node
+
+    def _capture_output_retries(self, ctx: PydanticRunContext[None], request: ModelRequest) -> None:
+        if self._counted_tool_request is request:
+            return
+        output_tools = {name for name, tool in ctx.tools.items() if tool.kind == "output"}
+        self.context.output_retries_used += sum(
+            isinstance(part, ToolReturnPart)
+            and part.tool_name in output_tools and part.outcome == "retried"
+            for part in request.parts
+        )
+        self._counted_tool_request = request
+
+    def capture_interrupted_node(self) -> None:
+        """Capture only settled returns appended by the active tool batch."""
+        pending = self._pending_tool_node
+        if pending is not None:
+            ctx, start = pending
+            self._live_messages = ctx.messages
+            if len(ctx.messages) > start and isinstance(request := ctx.messages[start], ModelRequest):
+                self._capture_output_retries(ctx, request)
+                self._pending_tool_node = None
+
+    def checkpoint_output_retries_used(self) -> int:
+        """Include current partial returns before a checkpoint owner writes."""
+        self.capture_interrupted_node()
+        return self.context.output_retries_used
+
     async def after_node_run(
         self,
         ctx: PydanticRunContext[None],
@@ -133,18 +174,15 @@ class AgentRunCapture(AbstractCapability[None]):
         self._live_messages = ctx.messages
         self._last_observed_step_index = ctx.run_step
         if isinstance(node, CallToolsNode):
+            pending = self._pending_tool_node
             request = result.request if isinstance(result, ModelRequestNode) else (
-                ctx.messages[-1] if ctx.messages and isinstance(ctx.messages[-1], ModelRequest) else None
+                ctx.messages[pending[1]] if pending is not None and len(ctx.messages) > pending[1] else None
             )
-            if request is not None:
-                output_tools = {name for name, tool in ctx.tools.items() if tool.kind == "output"}
+            if isinstance(request, ModelRequest):
                 # Settled output retries also precede a co-emitted approval pause.
                 # Observing their durable parts does not force model streaming.
-                self.context.output_retries_used += sum(
-                    isinstance(part, ToolReturnPart)
-                    and part.tool_name in output_tools and part.outcome == "retried"
-                    for part in request.parts
-                )
+                self._capture_output_retries(ctx, request)
+            self._pending_tool_node = None
         if isinstance(result, ModelRequestNode):
             for part in result.request.parts:
                 if isinstance(part, RetryFeedbackPart) and part.retry.attempt is not None:
@@ -182,6 +220,7 @@ class AgentRunCapture(AbstractCapability[None]):
         *,
         error: BaseException,
     ) -> AgentRunResult[Any]:
+        self.capture_interrupted_node()
         self.recorder.finish_transcript(interrupted=True)
         raise error
 

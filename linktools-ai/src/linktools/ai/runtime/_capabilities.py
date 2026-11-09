@@ -228,7 +228,7 @@ async def compose_platform_capabilities(
                 store=capability.store if tool_operations is None else RuntimeStepStore(
                     capability.store, tool_operations,
                     native_boundary=isinstance(capability, AtomicStepPersistence),
-                    output_retries_used=lambda: persistence.context.output_retries_used,
+                    output_retries_used=persistence.checkpoint_output_retries_used,
                     working_set=run_store if isinstance(run_store, RuntimeAgentRunStore) else None,
                     commit_boundary=(run_store.step_boundary(agent_run_id)
                                      if isinstance(run_store, RuntimeAgentRunStore)
