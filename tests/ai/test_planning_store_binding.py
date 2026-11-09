@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.planning import InMemoryPlanStore, PlanItem
@@ -72,7 +72,8 @@ async def test_invalid_plan_retries_before_changing_store() -> None:
         if calls == 2:
             assert [item.content for item in await store.get_items()] == ["original plan"]
             assert any(
-                isinstance(part, (RetryPromptPart, ToolReturnPart))
+                isinstance(part, ToolReturnPart)
+                and part.outcome == "retried"
                 and part.tool_call_id == "invalid-plan"
                 and "ids must be unique" in str(part.content)
                 for message in messages for part in message.parts

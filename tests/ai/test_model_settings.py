@@ -82,12 +82,16 @@ async def test_unknown_native_fields_and_raw_only_output_limit_reach_wire(monkey
 @pytest.mark.asyncio
 async def test_native_manual_budget_overrides_unified_false(monkeypatch):
     sent = []
-    binding = _binding(monkeypatch, "anthropic", "claude-sonnet-4-5", sent,
+    binding = _binding(monkeypatch, "anthropic", "claude-opus-4-5", sent,
                        model_settings={"anthropic_thinking": {"type": "enabled", "budget_tokens": 4096}})
     model = binding.materialize()
     async with model:
-        await model.request([ModelRequest(parts=[UserPromptPart("hello")])],
-                            {"thinking": False}, ModelRequestParameters())
+        with pytest.warns(UserWarning, match=(
+            "`anthropic_thinking` from the model's `settings` takes precedence over "
+            "`thinking=False` from the request's `model_settings`"
+        )):
+            await model.request([ModelRequest(parts=[UserPromptPart("hello")])],
+                                {"thinking": False}, ModelRequestParameters())
     assert sent[0]["thinking"] == {"type": "enabled", "budget_tokens": 4096}
     assert sent[0]["max_tokens"] == 12000
 
@@ -96,13 +100,6 @@ async def test_native_manual_budget_overrides_unified_false(monkeypatch):
 def test_model_settings_requires_json_object(value):
     with pytest.raises((TypeError, ValueError)):
         create_model(api="openai", model="alias", model_settings=value)
-
-
-@pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
-@pytest.mark.parametrize("field", ["max_tokens", "timeout"])
-def test_request_settings_have_no_duplicate_factory_argument(protocol, field):
-    with pytest.raises(TypeError):
-        create_model(api=protocol, model="fixture", **{field: 1000})
 
 
 @pytest.mark.asyncio

@@ -234,7 +234,7 @@ async def test_snapshot_checks_expiry_clock_for_each_cached_source(
 async def test_snapshot_revalidates_sources_before_releasing_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
 ) -> None:
-    async with completed(tmp_path) as (evaluations, storage, run, _scorer, _policy):
+    async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
         repository = storage.evaluation.records
         initial = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
