@@ -18,6 +18,7 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceStorage, SqlStepStore
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.persistence.runs import OfficialStepReader
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
@@ -73,7 +74,8 @@ async def test_runtime_resolves_all_model_wrappers_before_placing_publication_le
         order.append("provider")
         runs = await native.list_runs()
         assert len(runs) == 1
-        snapshot = await native.latest_snapshot(run_id=runs[0].run_id)
+        snapshot = await OfficialStepReader(native).latest_snapshot(run_id=runs[0].run_id)
+        assert messages[-1].metadata == {"final_wrapper": True}
         assert snapshot.messages[-1].metadata == {"final_wrapper": True}
         return ModelResponse(parts=[TextPart("done")])
 

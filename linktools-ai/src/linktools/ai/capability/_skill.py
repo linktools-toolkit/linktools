@@ -2,21 +2,30 @@
 # -*- coding: utf-8 -*-
 """Vendor-neutral Skill definition and function-call capability."""
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import hashlib
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pydantic_ai.capabilities import AbstractCapability
+from typing import Any
+
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
+from pydantic_ai.messages import ToolReturn, ModelMessage, ModelRequest, ModelResponse, InstructionPart
+from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
+from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..core import JsonValue
-from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode
-from ..spec import SkillSpec, SkillSpecCodec
+from ..spec import CapabilityRef, SkillSpec, SkillSpecCodec
 from ._context import AgentContext
 from ._resource_path import SKILL_DECLARATION_FILES
 from ._skill_source import (
     SkillLocation,
-    SkillResource,
+    SkillReadReceipt,
+    SKILL_READ_METADATA_KEY,
+    PRELOAD_SKILL_READS_METADATA_KEY,
     SkillSourceView,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -49,20 +58,7 @@ class SkillDefinition:
     def contract(self) -> "dict[str, JsonValue]":
         contract = SkillSpecCodec().to_wire_payload(self.spec)
         if self.source_ref is not None:
-            source: dict[str, JsonValue] = {
-                "source_id": self.source_ref.source_id,
-                "root": self.source_ref.root,
-            }
-            if self.source_ref.resources:
-                source["resources"] = [
-                    {
-                        "path": item.path,
-                        "asset": item.asset.to_payload(),
-                        "executable_bits": item.executable_bits,
-                    }
-                    for item in self.source_ref.resources
-                ]
-            contract["source"] = source
+            contract["source"] = self.source_ref.to_payload()
         return contract
 
     @classmethod
@@ -80,45 +76,7 @@ class SkillDefinition:
         if source is None:
             source_ref = None
         elif isinstance(source, Mapping):
-            source_id = source.get("source_id")
-            root = source.get("root")
-            raw_resources = source.get("resources")
-            resources: tuple[SkillResource, ...] = ()
-            if raw_resources is not None:
-                if not isinstance(raw_resources, list):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                parsed_resources: list[SkillResource] = []
-                try:
-                    for raw in raw_resources:
-                        if not isinstance(raw, Mapping):
-                            raise ValueError
-                        path = raw.get("path")
-                        asset = raw.get("asset")
-                        mode = raw.get("executable_bits", 0)
-                        if (
-                            not isinstance(path, str)
-                            or isinstance(mode, bool)
-                            or not isinstance(mode, int)
-                        ):
-                            raise ValueError
-                        parsed_resources.append(
-                            SkillResource(
-                                path,
-                                AssetVersionRef.from_payload(asset),
-                                mode,
-                            )
-                        )
-                except (TypeError, ValueError) as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                resources = tuple(sorted(parsed_resources, key=lambda item: item.path))
-            try:
-                source_ref = SkillSourceRef(
-                    source_id,
-                    root,
-                    resources,
-                )
-            except AIError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            source_ref = SkillSourceRef.from_payload(source)
         else:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return cls(specification, source_ref)
@@ -133,6 +91,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         resource_paths: Mapping[str, "str | None"] | None = None,
         discover: Callable[[], Awaitable[Sequence[SkillDefinition]]] | None = None,
         mounted_resources: Mapping[str, SkillSourceRef] | None = None,
+        preload_skills: Sequence[SkillDefinition] = (),
     ) -> None:
         self.id = "linktools.ai.skills"
         if not isinstance(sources, SkillSourceRegistry):
@@ -143,6 +102,10 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         ids = tuple(item.id for item in ordered)
         if len(ids) != len(set(ids)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        preload = tuple(preload_skills)
+        if any(not isinstance(item, SkillDefinition) for item in preload) or len({item.id for item in preload}) != len(preload):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        self._preload_skills = {item.id: item for item in preload}
         self._skills = ordered
         self._sources = sources
         self._resource_paths = None if resource_paths is None else dict(resource_paths)
@@ -174,10 +137,11 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             _ctx: PydanticRunContext[AgentContext[object]],
             skill_id: str,
             path: str | None = None,
-        ) -> dict[str, str | list[str]]:
+        ) -> ToolReturn[dict[str, str | list[str]]]:
             """Load skill instructions or one relative text resource."""
             try:
-                return await self.load_skill(skill_id, path)
+                result, receipt = await self._read_skill(skill_id, path)
+                return ToolReturn(return_value=result, metadata={SKILL_READ_METADATA_KEY: receipt.to_payload()})
             except AIError as error:
                 if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
                     raise ToolCallRetry(
@@ -222,8 +186,8 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
     def get_serialization_name(cls) -> str | None:
         return None
 
-    def get_instructions(self) -> str | None:
-        if not self._skills and self._discover is None:
+    def get_instructions(self) -> str | Sequence[str | InstructionPart] | None:
+        if not self._skills and not self._preload_skills and self._discover is None:
             return None
         lines = [
             "The following skills are available for this agent run.",
@@ -234,7 +198,58 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         lines.extend(
             f"- {item.id}: {_skill_description(item.spec)}" for item in self._skills
         )
-        return "\n".join(lines)
+        directory = "\n".join(lines)
+        if not self._preload_skills:
+            return directory
+        return (directory, *(InstructionPart(content=definition.model_content, name=f"preload-skill-{hashlib.sha256(definition.id.encode()).hexdigest()}")
+                             for definition in self._preload_skills.values()))
+
+    def get_ordering(self) -> CapabilityOrdering | None:
+        return CapabilityOrdering(position="innermost") if self._preload_skills else None
+
+    def get_wrapper_model(self, model: Model) -> Model | None:
+        if not self._preload_skills:
+            return None
+        return _PreloadSkillModel(model, self._prepare_model_request)
+
+    def _prepare_model_request(
+        self, messages: Sequence[ModelMessage], parameters: ModelRequestParameters,
+    ) -> None:
+        current = messages[-1] if messages else None
+        if isinstance(current, ModelResponse) and current.state == "suspended":
+            current = messages[-2] if len(messages) > 1 else None
+        if not isinstance(current, ModelRequest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        parts = parameters.instruction_parts
+        # Native continuation can restore a joined, unnamed prefix. Unset
+        # parts use the request's rendering; an empty list removes it.
+        instructions = current.instructions if parts is None else InstructionPart.join(parts)
+        receipts = []
+        for definition in self._preload_skills.values():
+            expected = InstructionPart.join([InstructionPart(content=definition.model_content)]) or ""
+            if expected not in (instructions or ""):
+                raise AIError(ErrorCode.BINDING_CONFLICT,
+                              safe_details={"reason": "preload_skill_instructions_removed", "id": definition.id})
+            receipts.append(self._root_receipt(definition).to_payload())
+        # Record only the request that is about to be sent, after all hooks.
+        metadata = dict(current.metadata or {})
+        previous = metadata.get(PRELOAD_SKILL_READS_METADATA_KEY)
+        if previous is not None and previous != receipts:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metadata[PRELOAD_SKILL_READS_METADATA_KEY] = receipts
+        current.metadata = metadata
+
+    @classmethod
+    def _root_receipt(cls, definition: SkillDefinition) -> SkillReadReceipt:
+        source = definition.source_ref
+        declaration = None if source is None else source.declaration
+        return SkillReadReceipt(
+            CapabilityRef("skill", definition.id, definition.spec.revision),
+            hashlib.sha256(definition.model_content.encode("utf-8")).hexdigest(),
+            None if source is None else source.source_id,
+            None if declaration is None else declaration.path,
+            None if declaration is None else declaration.asset,
+        )
 
     async def _current_skills(self) -> tuple[SkillDefinition, ...]:
         if self._discover is None:
@@ -245,24 +260,33 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         return values
 
     async def list_skills(self) -> "list[dict[str, str]]":
-        return [
-            {"id": item.id, "description": _skill_description(item.spec)}
-            for item in await self._current_skills()
-        ]
+        values = {item.id: item for item in await self._current_skills()}
+        values.update(self._preload_skills)
+        return [{"id": item.id, "description": _skill_description(item.spec)}
+                for item in sorted(values.values(), key=lambda item: item.id)]
 
     async def load_skill(
         self,
         skill_id: str,
         path: "str | None" = None,
     ) -> "dict[str, str | list[str]]":
-        definition = next((item for item in await self._current_skills() if item.id == skill_id), None)
+        result, _receipt = await self._read_skill(skill_id, path)
+        return result
+
+    async def _read_skill(
+        self, skill_id: str, path: str | None,
+    ) -> tuple[dict[str, str | list[str]], SkillReadReceipt]:
+        definition = self._preload_skills.get(skill_id) if path is None else None
+        if definition is None:
+            definition = next((item for item in await self._current_skills() if item.id == skill_id), None)
         if definition is None:
             raise AIError(
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                 safe_details={"skill_id": skill_id},
             )
         if path is None:
-            return await self._load_root(definition)
+            result = await self._load_root(definition)
+            return result, self._root_receipt(definition)
         relative = require_skill_resource_path(path)
         if relative in SKILL_DECLARATION_FILES:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -271,6 +295,9 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         source = self._sources.resolve(source_ref.source_id)
         data = await source.read(source_ref, relative)
+        resource = next((item for item in source_ref.resources if item.path == relative), None)
+        if resource is not None:
+            resource.asset.verify_content(data)
         try:
             content = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -278,11 +305,11 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
                 ErrorCode.ASSET_CODEC_UNKNOWN,
                 safe_details={"skill_id": skill_id, "path": relative},
             ) from error
-        return {
-            "id": definition.id,
-            "path": relative,
-            "content": content,
-        }
+        return {"id": definition.id, "path": relative, "content": content}, SkillReadReceipt(
+            CapabilityRef("skill", definition.id, definition.spec.revision),
+            hashlib.sha256(data).hexdigest(), source_ref.source_id, relative,
+            None if resource is None else resource.asset,
+        )
 
     async def _load_root(
         self,
@@ -298,6 +325,23 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if source_ref is None:
             return result
         source = self._sources.resolve(source_ref.source_id)
+        if source_ref.declaration is not None:
+            data = await source.read(source_ref, source_ref.declaration.path)
+            source_ref.declaration.asset.verify_content(data)
+            try:
+                actual = SkillSpecCodec().model_content(SkillSpec(definition.id, data.decode("utf-8")))
+            except UnicodeDecodeError as error:
+                raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN) from error
+            if actual != definition.model_content:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if definition.id in self._preload_skills:
+            current = next((item for item in await self._current_skills() if item.id == definition.id), None)
+            if current is None or current.source_ref is None:
+                result["resource_status"] = "unavailable"
+                return result
+            source_ref = current.source_ref
+            source = self._sources.resolve(source_ref.source_id)
+            result["resource_status"] = "current"
         view = await source.inspect(source_ref)
         _validate_view(view)
         if self._resource_paths is not None:
@@ -345,6 +389,36 @@ def _usage_hint(view: SkillSourceView) -> str:
         "Resources are relative to the virtual skill location. Use `load_skill(skill_id, path)` to read them. "
         "Virtual paths are not operating-system paths and must not be passed directly to filesystem or shell tools."
     )
+
+
+class _PreloadSkillModel(WrapperModel):
+    """Validate delivery after request hooks, including each retry's preparation."""
+
+    def __init__(
+        self, wrapped: Model,
+        prepare: Callable[[Sequence[ModelMessage], ModelRequestParameters], None],
+    ) -> None:
+        super().__init__(wrapped)
+        self._prepare = prepare
+
+    async def request(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        self._prepare(messages, model_request_parameters)
+        return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+    @asynccontextmanager
+    async def request_stream(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: PydanticRunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        self._prepare(messages, model_request_parameters)
+        async with self.wrapped.request_stream(
+            messages, model_settings, model_request_parameters, run_context,
+        ) as response:
+            yield response
 
 
 __all__ = ["SkillCapability", "SkillDefinition"]

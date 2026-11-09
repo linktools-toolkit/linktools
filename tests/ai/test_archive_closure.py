@@ -65,7 +65,8 @@ async def test_archive_closure_preserves_partial_visible_content_and_shared_dag(
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-async def test_archive_closure_keys_content_roots_by_logical_tenant_scope() -> None:
+@pytest.mark.parametrize("field", ("session_metadata", "preload_skills"))
+async def test_archive_closure_keys_content_roots_by_logical_tenant_scope(field: str) -> None:
     owner = InMemoryStateStore()
     await owner.initialize()
     scope, store = await owner.storage_group.open_archive(create=True)
@@ -77,7 +78,9 @@ async def test_archive_closure_keys_content_roots_by_logical_tenant_scope() -> N
     closure = ArchiveClosure(scope, records)
     direct = {"archive_scope": scope, "content_scope": canonical_sha256(["archive", "first"]), "content_id": identities[0]}
     manifest = {"kind": "execution-context", "version": 1, "history": root.to_json(),
-                "session_metadata": {"value": direct}, "memory": None, "repository_instructions": None,
+                "session_metadata": {"value": direct} if field == "session_metadata" else {},
+                "preload_skills": [direct] if field == "preload_skills" else [],
+                "memory": None, "repository_instructions": None,
                 "semantic_digest": "digest", "replace_history_system_prompt": False, "unavailable_reason": None}
     wire = {"$dataclass": "execution_record", "fields": {"input_context": encode_domain(
         RuntimePayloadRef(StoredPayload.inline_json(manifest), PersistenceDomain.EXECUTION))}}
@@ -89,7 +92,10 @@ async def test_archive_closure_keys_content_roots_by_logical_tenant_scope() -> N
     rewritten = rekey_archive_roots(wire, {scope: "restored"})
     assert tuple(iter_archive_content_refs(rewritten))[0][0] == "restored"
     repaired = decode_domain(rewritten["fields"]["input_context"], RuntimePayloadRef)
-    assert repaired.payload.decode()["session_metadata"]["value"]["archive_scope"] == "restored"
+    restored_manifest = repaired.payload.decode()
+    restored_reference = (restored_manifest["session_metadata"]["value"] if field == "session_metadata"
+                          else restored_manifest["preload_skills"][0])
+    assert restored_reference["archive_scope"] == "restored"
     assert tuple(iter_archive_roots(rewritten))[0].scope_id == "restored"
     block = ArchivedContextBlock(root, hashlib.sha256(b"semantic").hexdigest(), 8)
     block_wire = encode_domain(block)

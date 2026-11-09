@@ -41,7 +41,6 @@ def build_runtime_sql_metadata(
 ) -> "MetaData":
     """Build the five canonical Runtime primitive tables."""
     from sqlalchemy import (
-        JSON,
         TIMESTAMP,
         BigInteger,
         Boolean,
@@ -87,6 +86,12 @@ def build_runtime_sql_metadata(
             digest,
             nullable=True,
             comment="Canonical SHA-256 grouping key used by the record kind's primary list query.",
+        ),
+        Column(
+            "subject_digest",
+            digest,
+            nullable=True,
+            comment="Canonical SHA-256 subject identity used for exact lookups within a record scope.",
         ),
         Column(
             "parent_digest",
@@ -139,9 +144,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            JSON,
+            sql_sort_key(),
             nullable=False,
-            comment="Versioned canonical domain payload not needed by SQL identity, query, CAS, or lease predicates.",
+            comment="Canonical domain JSON text preserving numeric representations.",
         ),
         *_audit(),
         comment=_RECORD_COMMENT,
@@ -150,6 +155,8 @@ def build_runtime_sql_metadata(
     sql_unique(records, "store_digest", "key_digest")
     sql_query_index(records, "store_digest", "kind", "sort_key", mysql_length=128)
     sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
+    sql_query_index(records, "scope_digest", "subject_digest")
+    sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
     sql_audit_indexes(records)
 
     aliases = Table(
@@ -230,9 +237,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            JSON,
+            sql_sort_key(),
             nullable=False,
-            comment="Versioned canonical immutable fact payload.",
+            comment="Canonical immutable fact JSON text preserving numeric representations.",
         ),
         *_audit(),
         comment=_FACT_COMMENT,
@@ -314,9 +321,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            JSON,
+            sql_sort_key(),
             nullable=False,
-            comment="Versioned canonical operation request, result, error, resource identity, and semantic timestamps.",
+            comment="Canonical operation JSON text preserving numeric representations.",
         ),
         *_audit(),
         comment=_OPERATION_COMMENT,

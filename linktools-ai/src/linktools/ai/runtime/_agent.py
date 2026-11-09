@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, TypeVar
 
 from pydantic import BaseModel
+from ..session import SessionContext
 from ..core import RunBudget, JsonValue, Page, Principal, ThinkingValue
 from ..observe import WaitResult
 from ..execution import Execution
@@ -45,6 +46,7 @@ class Session(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -57,6 +59,7 @@ class Session(Generic[AppT]):
         return await self._definition().start(
             user_prompt,
             files=files,
+            session_context=session_context,
             budget=budget,
             output=output,
             principal=principal or self._principal,
@@ -72,6 +75,7 @@ class Session(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -91,6 +95,7 @@ class Session(Generic[AppT]):
         execution = await self.start(
             user_prompt,
             files=files,
+            session_context=session_context,
             budget=budget,
             output=output,
             principal=principal,
@@ -110,6 +115,7 @@ class Session(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -128,6 +134,7 @@ class Session(Generic[AppT]):
         return await self._definition().plan(
             user_prompt,
             files=files,
+            session_context=session_context,
             budget=budget,
             output=output,
             principal=principal or self._principal,
@@ -295,6 +302,7 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -310,6 +318,7 @@ class Agent(Generic[AppT]):
         return await self.execution_port.start(
             prompt,
             files=files,
+            session_context=session_context,
             budget=budget,
             output=output,
             principal=principal,
@@ -327,6 +336,7 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -348,6 +358,7 @@ class Agent(Generic[AppT]):
         execution = await self.start(
             user_prompt,
             files=files,
+            session_context=session_context,
             budget=budget,
             output=output,
             principal=principal,
@@ -369,6 +380,7 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        session_context: SessionContext = "all",
         budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
@@ -389,6 +401,7 @@ class Agent(Generic[AppT]):
         execution = await self.execution_port.start(
             prompt,
             files=files,
+            session_context=session_context,
             budget=budget,
             output=output,
             principal=principal,

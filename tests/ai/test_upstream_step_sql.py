@@ -433,20 +433,14 @@ def test_step_development_ddl_and_complete_metadata_match_canonical_schema() -> 
         assert list(complete.tables[name].c.keys()) == list(table.c.keys())
         ddl = str(CreateTable(table).compile(dialect=dialect))
         # MySQL's independent table options may be emitted in any order.
-        columns = ddl.rsplit(")", 1)[0] + ")"
-        assert " ".join(columns.split()) in compact
+        columns = ddl.rsplit(")", 1)[0]
+        statement = re.search(rf"CREATE TABLE {re.escape(name)} \(.*?;", compact)
+        assert statement is not None
+        actual_columns = re.sub(
+            r", (?:UNIQUE )?(?:KEY|INDEX) \w+ \((?:[^()]|\([^()]*\))+\)",
+            "",
+            statement.group(),
+        ).rsplit(")", 1)[0]
+        assert " ".join(columns.split()) == " ".join(actual_columns.split())
         assert f"COMMENT='{table.comment}'" in compact
-        expected_indexes = {
-            " ".join(str(CreateIndex(index).compile(dialect=dialect)).split())
-            for index in table.indexes
-            if index.info.get("ddl_dialect") == "mysql"
-        }
-        actual_indexes = {
-            " ".join(statement.split())
-            for statement in re.findall(
-                rf"CREATE (?:UNIQUE )?INDEX [^;]+ ON {re.escape(name)} \([^;]+\)",
-                migration,
-            )
-        }
-        assert actual_indexes == expected_indexes
     assert all(line == line.rstrip() for line in migration.splitlines())

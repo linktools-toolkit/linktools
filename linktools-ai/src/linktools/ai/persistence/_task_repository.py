@@ -58,6 +58,7 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
+    active_state_scope,
     sortable_identity,
     stream_digest,
 )
@@ -75,6 +76,7 @@ from ._task_events import (
     _task_graph_event_drafts,
     _task_node_event_drafts,
 )
+from ._task_summary import _TaskSummary
 from ._task_state import (
     _aggregate_graph_status,
     _effective_graph_status,
@@ -375,6 +377,7 @@ class TaskRepositoryImpl(RepositoryBase):
         super().__init__(
             store, namespace=namespace, tenant_id=tenant_id, domain=PersistenceDomain.TASK
         )
+        self._scheduler_definitions: tuple[str, tuple[TaskNode, ...]] | None = None
 
     def _graph_key(self, graph_id: str) -> bytes:
         return self._key("task_graph", graph_id)
@@ -743,26 +746,14 @@ class TaskRepositoryImpl(RepositoryBase):
         self,
         transaction: StateTransaction,
         graph_id: str,
+        cached_definitions: tuple[TaskNode, ...] | None = None,
     ) -> tuple[tuple[TaskNode, ...], tuple[TaskNodeView, ...]]:
-        definition_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._definition_parent(graph_id),
-                kind="task_node_definition",
-            )
-        )
         state_records = await transaction.list_records(
             RecordQuery(
                 parent_digest=self._state_parent(graph_id),
                 kind="task_node_state",
             )
         )
-        definitions: dict[str, TaskNode] = {}
-        for record in definition_records:
-            value = await self._decode(record, TaskNode)
-            self._validate_definition_record(record, graph_id, value.node_id)
-            if value.node_id in definitions:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            definitions[value.node_id] = value
         states: dict[str, TaskNodeView] = {}
         for record in state_records:
             value = await self._decode(record, TaskNodeView)
@@ -770,6 +761,23 @@ class TaskRepositoryImpl(RepositoryBase):
             if value.node_id in states:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             states[value.node_id] = value
+        definitions = {
+            node.node_id: node for node in cached_definitions or ()
+        }
+        if cached_definitions is None or set(definitions) != set(states):
+            definition_records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=self._definition_parent(graph_id),
+                    kind="task_node_definition",
+                )
+            )
+            definitions = {}
+            for record in definition_records:
+                value = await self._decode(record, TaskNode)
+                self._validate_definition_record(record, graph_id, value.node_id)
+                if value.node_id in definitions:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                definitions[value.node_id] = value
         if set(definitions) != set(states):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         ordered = tuple(sorted(definitions))
@@ -798,9 +806,56 @@ class TaskRepositoryImpl(RepositoryBase):
         current: TaskNodeView,
         value: TaskNodeView,
         node_record: StoredRecord,
+        graph_record: StoredRecord | None = None,
     ) -> None:
+        if current.status is not value.status:
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            summary = _TaskSummary.read(graph_record)
+            if summary is None:
+                before = await self._event_state_in_transaction(transaction, current.graph_id)
+                if before is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                summary = _TaskSummary.build(before.node_states, before.graph.nodes)
+            definition_record = await transaction.get_record(self._definition_key(current.graph_id, current.node_id))
+            if definition_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_definition_record(definition_record, current.graph_id, current.node_id)
+            definition = await self._decode(definition_record, TaskNode)
+            summary = await self._transition_summary_in_transaction(
+                transaction, graph_record, summary, current, value, definition,
+            )
+            if not await transaction.replace_record(summary.attach(replace(
+                graph_record, storage_revision=graph_record.storage_revision + 1,
+            )), expected_storage_revision=graph_record.storage_revision):
+                raise _TaskEventAppendConflict()
         replacement = await self._node_replacement(current, value, node_record)
         await replace_checked(transaction, replacement.record, replacement.expected_storage_revision)
+
+    async def _transition_summary_in_transaction(
+        self,
+        transaction: StateTransaction,
+        graph_record: StoredRecord,
+        summary: _TaskSummary,
+        current: TaskNodeView,
+        value: TaskNodeView,
+        definition: TaskNode,
+    ) -> _TaskSummary:
+        try:
+            return summary.transition(current, value, definition)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                raise
+            # A cached header and a later target read can straddle another
+            # writer in READ COMMITTED. Prove the generation before reporting
+            # a derived-count inconsistency; a successful guard is rolled back.
+            guarded = await transaction.guard_record(
+                graph_record.key_digest,
+                expected_storage_revision=graph_record.storage_revision,
+            )
+            if guarded is None:
+                raise _TaskEventAppendConflict() from error
+            raise
 
     async def _node_replacement(
         self, current: TaskNodeView, value: TaskNodeView, node_record: StoredRecord,
@@ -833,6 +888,7 @@ class TaskRepositoryImpl(RepositoryBase):
         self,
         transaction: StateTransaction,
         graph_id: str,
+        cached_definitions: tuple[TaskNode, ...] | None = None,
     ) -> _TaskEventState | None:
         graph_record = await transaction.get_record(self._graph_key(graph_id))
         if graph_record is None:
@@ -841,16 +897,21 @@ class TaskRepositoryImpl(RepositoryBase):
         header = await self._decode(graph_record, TaskGraphView)
         _require_canonical_graph_status(header.status)
         definitions, states = await self._nodes_with_definitions_in_transaction(
-            transaction, graph_id
+            transaction, graph_id, cached_definitions
         )
         graph = TaskGraph(graph_id, definitions)
         if tuple(state.node_id for state in states) != tuple(
             node.node_id for node in graph.nodes
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        summary = _TaskSummary.read(graph_record)
+        scope = active_state_scope()
+        if summary is not None and (scope is None or not scope.writable):
+            summary.validate(states, definitions)
         return _TaskEventState(
             TaskGraphView(graph.graph_id, header.status, graph.nodes),
             states,
+            graph_record.storage_revision,
         )
 
     async def _graph_state_in_transaction(
@@ -963,12 +1024,29 @@ class TaskRepositoryImpl(RepositoryBase):
             drafts.extend(_task_node_event_drafts(current, value))
         drafts.extend(_task_graph_event_drafts(before.graph, view))
         event_drafts = tuple(drafts)
-        if event_drafts:
-            graph_record = await _guard_task_event_owner(
-                transaction,
-                self._graph_key(before.graph.graph_id),
-                missing_code=ErrorCode.STORAGE_NOT_FOUND,
-            )
+        summary = _TaskSummary.build(next_nodes, before.graph.nodes)
+        previous_summary = _TaskSummary.read(graph_record)
+        if changes or graph_changed:
+            expected_revision = before.graph_storage_revision
+            if expected_revision is None or graph_record.storage_revision != expected_revision:
+                raise _TaskEventAppendConflict()
+            if graph_changed or summary != previous_summary:
+                if not await transaction.replace_record(
+                    summary.attach(projected_record(
+                        self, graph_record, replace(before.graph, status=next_status),
+                    )),
+                    expected_storage_revision=expected_revision,
+                ):
+                    raise _TaskEventAppendConflict()
+            else:
+                guarded = await transaction.guard_record(
+                    self._graph_key(before.graph.graph_id),
+                    expected_storage_revision=expected_revision,
+                )
+                if guarded is None:
+                    raise _TaskEventAppendConflict()
+            if previous_summary is not None:
+                previous_summary.validate(before.node_states, before.graph.nodes)
 
         replacements: list[RecordReplacement] = []
         if changes:
@@ -1003,17 +1081,6 @@ class TaskRepositoryImpl(RepositoryBase):
                         node_record.storage_revision,
                     )
                 )
-        if graph_changed:
-            replacements.append(
-                RecordReplacement(
-                    projected_record(
-                        self,
-                        graph_record,
-                        replace(before.graph, status=next_status),
-                    ),
-                    graph_record.storage_revision,
-                )
-            )
         if replacements:
             await transaction.replace_records(tuple(replacements))
         await _append_task_events(
@@ -1445,14 +1512,14 @@ class TaskRepositoryImpl(RepositoryBase):
                 next_attempt_at=None,
                 occupies_concurrency=occupies_concurrency,
             )
-            guarded_graph_record = await transaction.guard_record(
-                graph_key,
-                expected_storage_revision=graph_record.storage_revision,
-            )
-            if guarded_graph_record is None:
-                raise _TaskEventAppendConflict()
+            if node.status is value.status:
+                guarded = await transaction.guard_record(
+                    graph_key, expected_storage_revision=graph_record.storage_revision,
+                )
+                if guarded is None:
+                    raise _TaskEventAppendConflict()
             await self._update_node_in_transaction(
-                transaction, node, value, node_record
+                transaction, node, value, node_record, graph_record,
             )
             await _append_task_events(
                 transaction,
@@ -2091,8 +2158,16 @@ class TaskRepositoryImpl(RepositoryBase):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
+        # Nested mutations can roll back after this call returns. Only committed
+        # top-level reads may reuse or publish definitions across transactions.
+        top_level = active_state_scope() is None
+        cached = self._scheduler_definitions if top_level else None
+        definitions = cached[1] if cached is not None and cached[0] == graph_id else None
+
         async def mutate(transaction: StateTransaction) -> TaskGraphState:
-            before = await self._event_state_in_transaction(transaction, graph_id)
+            before = await self._event_state_in_transaction(
+                transaction, graph_id, definitions,
+            )
             if before is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             graph_record = await transaction.get_record(self._graph_key(graph_id))
@@ -2120,7 +2195,7 @@ class TaskRepositoryImpl(RepositoryBase):
             )
 
         try:
-            return await self._mutate_with_event_retry(mutate)
+            state = await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
@@ -2135,8 +2210,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 )
                 if state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return state
-            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+            elif error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise AIError(
                     ErrorCode.STORAGE_RECOVERY_REQUIRED,
                     safe_details={
@@ -2144,7 +2218,16 @@ class TaskRepositoryImpl(RepositoryBase):
                         "graph_id": graph_id,
                     },
                 ) from error
-            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            else:
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        if top_level:
+            # Definitions are immutable within this repository's source lifetime;
+            # expansion adds nodes and triggers a full definition read next time.
+            if state.status in _TERMINAL_TASK_STATUSES or state.status is TaskStatus.RECOVERY_REQUIRED:
+                self._scheduler_definitions = None
+            else:
+                self._scheduler_definitions = (graph_id, state.nodes)
+        return state
 
     async def cancel_node(
         self,
@@ -2594,14 +2677,14 @@ class TaskRepositoryImpl(RepositoryBase):
                 next_attempt_at=None,
                 occupies_concurrency=False,
             )
-            guarded_graph_record = await transaction.guard_record(
-                graph_key,
-                expected_storage_revision=graph_record.storage_revision,
-            )
-            if guarded_graph_record is None:
-                raise _TaskEventAppendConflict()
+            if node.status is value.status:
+                guarded = await transaction.guard_record(
+                    graph_key, expected_storage_revision=graph_record.storage_revision,
+                )
+                if guarded is None:
+                    raise _TaskEventAppendConflict()
             await self._update_node_in_transaction(
-                transaction, node, value, node_record
+                transaction, node, value, node_record, graph_record,
             )
             await _append_task_events(
                 transaction,
@@ -2731,6 +2814,10 @@ class TaskRepositoryImpl(RepositoryBase):
             definition = await self._decode(record, TaskNode)
             self._validate_definition_record(record, graph_id, definition.node_id)
             definitions[definition_id] = definition
+        summary = _TaskSummary.read(graph_record)
+        scope = active_state_scope()
+        if summary is not None and (scope is None or not scope.writable):
+            summary.validate(tuple(states), tuple(definitions.values()))
         return _TaskEventState(
             replace(header, nodes=tuple(definitions.values())),
             tuple(
@@ -2797,10 +2884,23 @@ class TaskRepositoryImpl(RepositoryBase):
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             self._validate_graph_record(graph_record, target_graph_id)
             self._validate_state_record(node_record, target_graph_id, target_node_id)
+            summary = _TaskSummary.read(graph_record)
             if expanded:
                 before = await self._event_state_in_transaction(
                     transaction, target_graph_id,
                 )
+            elif summary is not None:
+                definition_record = records.get(self._definition_key(target_graph_id, target_node_id))
+                if definition_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._validate_definition_record(definition_record, target_graph_id, target_node_id)
+                definition = await self._decode(definition_record, TaskNode)
+                header = await self._decode(graph_record, TaskGraphView)
+                _require_canonical_graph_status(header.status)
+                target = replace(await self._decode(node_record, TaskNodeView), dependencies=definition.dependencies)
+                if header.graph_id != target_graph_id or target.graph_id != target_graph_id or target.node_id != target_node_id or definition.node_id != target_node_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                before = _TaskEventState(replace(header, nodes=(definition,)), (target,))
             else:
                 before = await self._terminal_state_in_transaction(
                     transaction, graph_record, target_graph_id, target_node_id,
@@ -2981,13 +3081,14 @@ class TaskRepositoryImpl(RepositoryBase):
                     None,
                 )
             after_states = tuple(state_by_id.values())
-            after_status = (
-                _isolated_graph_status(after_states, next_nodes)
-                if expanded else _aggregate_graph_status(
-                    after_states,
-                    {value.node_id: value.failure_policy for value in next_nodes},
+            summary = (
+                await self._transition_summary_in_transaction(
+                    transaction, graph_record, summary, node, source_value, next_nodes[0],
                 )
+                if summary is not None and not expanded
+                else _TaskSummary.build(after_states, next_nodes)
             )
+            after_status = summary.status()
             after = _TaskEventState(
                 TaskGraphView(target_graph_id, after_status, next_nodes),
                 after_states,
@@ -2998,27 +3099,18 @@ class TaskRepositoryImpl(RepositoryBase):
                 source_node_id=target_node_id,
                 added_node_ids=tuple(value.node_id for value in added),
             )
-            guarded_graph_record = await transaction.guard_record(
-                graph_key,
+            if not await transaction.replace_record(
+                summary.attach(projected_record(
+                    self, graph_record, replace(before.graph, status=after_status),
+                )),
                 expected_storage_revision=graph_record.storage_revision,
-            )
-            if guarded_graph_record is None:
-                raise _TaskEventAppendConflict()
-            replacements: list[RecordReplacement] = []
-            if (
-                after_status is not before.graph.status
-                or guarded_graph_record.state != after_status.value
             ):
-                replacements.append(
-                    RecordReplacement(
-                        projected_record(
-                            self,
-                            guarded_graph_record,
-                            replace(before.graph, status=after_status),
-                        ),
-                        guarded_graph_record.storage_revision,
-                    )
-                )
+                raise _TaskEventAppendConflict()
+            if expanded:
+                previous_summary = _TaskSummary.read(graph_record)
+                if previous_summary is not None:
+                    previous_summary.validate(before.node_states, before.graph.nodes)
+            replacements: list[RecordReplacement] = []
             if current_result is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if resolved_execution_id is None:
@@ -3282,12 +3374,6 @@ class TaskRepositoryImpl(RepositoryBase):
                 next_attempt_at=None,
                 occupies_concurrency=False,
             )
-            guarded_graph_record = await transaction.guard_record(
-                graph_key,
-                expected_storage_revision=graph_record.storage_revision,
-            )
-            if guarded_graph_record is None:
-                raise _TaskEventAppendConflict()
             after_states = tuple(
                 value if state.node_id == target_node_id else state
                 for state in before.node_states
@@ -3300,24 +3386,19 @@ class TaskRepositoryImpl(RepositoryBase):
                 TaskGraphView(target_graph_id, after_status, before.graph.nodes),
                 after_states,
             )
-            graph_replacement: RecordReplacement | None = None
-            if (
-                after_status is not before.graph.status
-                or guarded_graph_record.state != after_status.value
+            summary = _TaskSummary.build(after_states, before.graph.nodes)
+            if not await transaction.replace_record(
+                summary.attach(projected_record(
+                    self, graph_record, replace(before.graph, status=after_status),
+                )),
+                expected_storage_revision=graph_record.storage_revision,
             ):
-                graph_replacement = RecordReplacement(
-                    projected_record(
-                        self,
-                        guarded_graph_record,
-                        replace(before.graph, status=after_status),
-                    ),
-                    guarded_graph_record.storage_revision,
-                )
+                raise _TaskEventAppendConflict()
+            previous_summary = _TaskSummary.read(graph_record)
+            if previous_summary is not None:
+                previous_summary.validate(before.node_states, before.graph.nodes)
             node_replacement = await self._node_replacement(node, value, node_record)
-            await transaction.replace_records(
-                (node_replacement,) if graph_replacement is None
-                else (node_replacement, graph_replacement)
-            )
+            await transaction.replace_records((node_replacement,))
             await _append_task_events(
                 transaction,
                 namespace=self._namespace,

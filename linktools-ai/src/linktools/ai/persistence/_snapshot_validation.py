@@ -54,6 +54,7 @@ from .contracts import (
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
+from ._task_summary import _TaskSummary
 from ._plan import PersistenceDomain
 from ._repository_common import (
     canonical_record_identity,
@@ -243,6 +244,18 @@ def validate_snapshot_domain(
         domain,
         values,
     )
+    if domain is PersistenceDomain.TASK:
+        for record in records:
+            if record.kind != "task_graph":
+                continue
+            summary = _TaskSummary.read(record)
+            if summary is None:
+                continue
+            graph = values[record.key_digest]
+            states = tuple(value for value in values.values() if isinstance(value, TaskNodeView) and value.graph_id == graph.graph_id)
+            definition_parent = parent_digest(namespace, tenant_id, domain.value, "task_node_definition", "graph", graph.graph_id)
+            definitions = tuple(values[item.key_digest] for item in records if item.kind == "task_node_definition" and item.parent_digest == definition_parent)
+            summary.validate(states, definitions)
     associations = _history_association_records(namespace, tenant_id, domain, facts, values)
     associations_by_owner: dict[bytes | None, dict[bytes, StoredRecord]] = {}
     for key, association in associations.items():
@@ -947,6 +960,7 @@ def _same_physical_identity(left: StoredRecord, right: StoredRecord) -> bool:
         left.key_digest == right.key_digest
         and left.scope_digest == right.scope_digest
         and left.parent_digest == right.parent_digest
+        and left.subject_digest == right.subject_digest
         and left.kind == right.kind
         and left.sort_key == right.sort_key
         and left.state == right.state

@@ -86,10 +86,11 @@ async def seed_native_snapshot(
             run_id=run_id, conversation_id=conversation_id, agent_name=agent_name,
             metadata={"linktools.transcript_start": "0", **(metadata or {})},
         ))
-    await store.save_snapshot(ContinuableSnapshot(
+    from linktools.ai.persistence.runs import NativeCheckpoint
+    await store.save_snapshot(NativeCheckpoint.encode(ContinuableSnapshot(
         run_id=run_id, messages=messages, step_index=step_index, state=state,
         conversation_id=conversation_id, agent_name=agent_name, idempotency_key=uuid4().hex,
-    ))
+    ), output_retries_used=0))
 
 
 def _persistence_capabilities(*, restart: bool = False, trace: bool = False) -> RuntimeFeatures:

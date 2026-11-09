@@ -71,8 +71,14 @@ class AgentRunCheckpoint:
     context_messages: list[ModelMessage] | None = None
     transcript_message_count_before: int | None = None
     pending_request_index: int | None = None
+    output_retries_used: int | None = None
+    """Consumed execution budget; None denotes history without a recovery fact."""
 
     def __post_init__(self) -> None:
+        if self.output_retries_used is not None and (
+            type(self.output_retries_used) is not int or self.output_retries_used < 0
+        ):
+            raise ValueError("checkpoint output retry count is invalid")
         if (
             self.transcript_message_count_before is not None
             and (

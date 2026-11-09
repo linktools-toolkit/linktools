@@ -42,6 +42,7 @@ class _TaskEventDraft:
 class _TaskEventState:
     graph: TaskGraphView
     node_states: tuple[TaskNodeView, ...]
+    graph_storage_revision: int | None = None
 
 
 def _task_event_stream(

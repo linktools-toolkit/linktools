@@ -24,7 +24,7 @@ from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import AgentContext, ReferencedInputsCapability
 from linktools.ai.core import service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelClientRequestRecorder, ReferencedContent
+from linktools.ai.model import ReferencedInputOrigin, ModelClientRequestRecorder, ReferencedContent
 from linktools.ai.runtime._harness import SummaryProviderModel
 from linktools.ai.model.messages import binary_content_usage, decode_model_messages, encode_model_messages, project_transient_binary_content
 from linktools.ai.model._tool_return_codec import decode_tool_return_content, encode_tool_return_content
@@ -58,6 +58,11 @@ def _reference(body: bytes = _IMAGE, media_type: str = "image/png", representati
                         hashlib.sha256(body).hexdigest(), len(body)),
         media_type=media_type, representation=representation, source=_SOURCE,
         source_parameters={"selector": "private-reconstruction-parameter"},
+        origin=ReferencedInputOrigin(
+            namespace="native-files", principal=service_principal("tenant", "admitted-owner"),
+            execution_id="run", agent_run_id="producer-run", agent_run_seq=1,
+            model_request_seq=1, tool_call_id="call-file", tool_name="read_file",
+        ),
     )
 
 

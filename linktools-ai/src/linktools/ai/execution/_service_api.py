@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from ..agent import AgentBinding, AgentBindingContract
 from ..asset import AssetVersionRef
+from ..capability import SkillReadReceipt
 from ..core import (
     BudgetUsage,
     RunBudget,
@@ -60,6 +61,7 @@ from ..core import (
     validate_page_limit,
     validate_resource_id,
 )
+from ..session import SessionContext, normalize_session_context
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..model import ModelClientRequest
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent, TaskGraphInfo
@@ -112,11 +114,13 @@ class ExecutionRequest:
     budget: RunBudget | None = None
     tool_response_ref: AssetVersionRef | None = None
     tool_effects: ToolEffects = "live"
+    session_context: SessionContext = "all"
     # Ephemeral admission state; never included in durable request projections.
     resolved_binding: AgentBinding | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         normalize_tool_effects(self.tool_effects)
+        normalize_session_context(self.session_context)
         if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
@@ -228,8 +232,11 @@ class ExecutionHistoryItem:
 
     part_index: int | None = None
     step_index: int | None = None
+    skill_read: SkillReadReceipt | None = None
 
     def __post_init__(self) -> None:
+        if self.skill_read is not None and (self.item_kind != "tool_result" or not isinstance(self.skill_read, SkillReadReceipt)):
+            raise ValueError("skill read receipt requires a tool result")
         if self.message_seq < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("execution history item is invalid")
         if not isinstance(self.content_included, bool):

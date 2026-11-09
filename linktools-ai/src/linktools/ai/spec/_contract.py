@@ -204,6 +204,7 @@ class AgentSpec:
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
+    preload_skills: "tuple[str, ...]" = field(default=(), kw_only=True)
     allow_subagents: "tuple[str, ...]" = ("*",)
     allow_capabilities: "tuple[str, ...]" = ("*",)
     usage_limits: "AgentUsageLimits | None" = None
@@ -254,6 +255,12 @@ class AgentSpec:
             raise ValueError("agent description must contain 1..1024 characters")
         thinking = normalize_thinking(self.thinking)
         allow_skills = canonical_selectors(self.allow_skills, field_name="allow_skills")
+        preload_skills = canonical_selectors(self.preload_skills, field_name="preload_skills")
+        if "*" in preload_skills:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "preload skills must be explicit ids")
+        for skill_id in preload_skills:
+            validate_logical_id(skill_id)
+        object.__setattr__(self, "preload_skills", preload_skills)
         allow_capabilities = canonical_selectors(
             self.allow_capabilities,
             field_name="allow_capabilities",

@@ -360,3 +360,132 @@ async def test_native_context_recovery_does_not_invent_unpublished_trace_history
             assert page.items == ()
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite", "transient"))
+async def test_model_subscription_ignores_non_model_projection_flushes(
+    tmp_path: Path, backend: str,
+) -> None:
+    from linktools.ai.persistence import PersistencePlan
+    from linktools.ai.persistence._step_contracts import StepEvent
+    from linktools.ai.storage import StorageRoute
+
+    storage = (PersistenceStorage(PersistencePlan(execution=StorageRoute.transient()))
+               if backend == "transient" else _storage(backend, tmp_path))
+    state = Persistence(storage)
+    await state.initialize(namespace="model-notifications", tenant_id="tenant")
+    try:
+        await state.execution.executions.create_execution(_execution())
+        store = state.run_store
+        await store.register_agent_run(AgentRunRecord("run", agent_conversation_id="conversation"))
+        subscription = store.subscribe_model_interactions("conversation")
+        try:
+            now = datetime.now(timezone.utc)
+            running = StagedModelInteraction(
+                "run", 1, 1, "agent", None, {}, None, None, None,
+                "RUNNING", None, None, None, now, None,
+            )
+            store.stage_model_interaction(running)
+            await store.flush_execution_projection("run", execution_id="execution")
+            generation = await asyncio.wait_for(subscription.wait(0), 1)
+            await store.append_event(StepEvent("run", "TOOL_CALL_SUCCEEDED", 1))
+            store.stage_transcript("run", StagedTranscript((ModelRequest(parts=[UserPromptPart("tool result")]),)))
+            await store.flush_execution_projection("run", execution_id="execution")
+            await store.flush_execution_projection("run", execution_id="execution")
+            assert subscription.generation == generation
+            finished = replace(running, status="FAILED", error_code="MODEL_API_ERROR", duration_ns=1, finished_at=now)
+            store.stage_model_interaction(finished)
+            await store.flush_execution_projection("run", execution_id="execution")
+            assert await asyncio.wait_for(subscription.wait(generation), 1) > generation
+            reader = store if backend == "transient" else store.read_store(PersistenceDomain.TRACE)
+            values = await reader.list_model_interactions(agent_run_id="run")
+            assert [(value.model_request_seq, value.status) for value in values] == [(1, "FAILED")]
+            assert len(await reader.list_events(agent_run_id="run")) == 1
+        finally:
+            await subscription.close()
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
+async def test_model_subscription_retains_changes_staged_after_projection_capture(
+    tmp_path: Path, backend: str,
+) -> None:
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace="model-capture-notifications", tenant_id="tenant")
+    try:
+        await state.execution.executions.create_execution(_execution())
+        store = state.run_store
+        await store.register_agent_run(AgentRunRecord("run", agent_conversation_id="conversation"))
+        subscription = store.subscribe_model_interactions("conversation")
+        try:
+            now = datetime.now(timezone.utc)
+            running = StagedModelInteraction(
+                "run", 1, 1, "agent", None, {}, None, None, None,
+                "RUNNING", None, None, None, now, None,
+            )
+            store.stage_model_interaction(running)
+            captured, flight = await store.capture_execution_projection("run")
+            store.stage_model_interaction(replace(
+                running, status="FAILED", error_code="MODEL_API_ERROR", duration_ns=1, finished_at=now,
+            ))
+            await store.commit_captured_execution_projection(captured, flight, execution_id="execution")
+            generation = await asyncio.wait_for(subscription.wait(0), 1)
+            archive = store.read_store(PersistenceDomain.TRACE)
+            assert (await archive.list_model_interactions(agent_run_id="run"))[0].status == "RUNNING"
+            await store.flush_execution_projection("run", execution_id="execution")
+            assert await asyncio.wait_for(subscription.wait(generation), 1) > generation
+            assert (await archive.list_model_interactions(agent_run_id="run"))[0].status == "FAILED"
+        finally:
+            await subscription.close()
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
+async def test_model_subscription_announces_first_empty_run_publication(
+    tmp_path: Path, backend: str,
+) -> None:
+    from linktools.ai.core import HmacCursorSigner, agent_conversation_id, agent_run_id
+    from linktools.ai.execution import UsageReadCutoff
+    from linktools.ai.history._projection import StepExecutionHistoryReader
+    from linktools.ai.persistence._step_contracts import StepEvent
+
+    namespace = "empty-run-notification"
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace=namespace, tenant_id="tenant")
+    try:
+        await state.execution.executions.create_execution(_execution())
+        store = state.run_store
+        conversation = agent_conversation_id(namespace=namespace, tenant_id="tenant", execution_id="execution")
+        run = agent_run_id(namespace=namespace, tenant_id="tenant", execution_id="execution", agent_run_seq=1)
+        subscription = store.subscribe_model_interactions(conversation)
+        try:
+            await store.register_agent_run(AgentRunRecord(
+                run, agent_conversation_id=conversation, metadata={"agent_run_seq": "1"},
+            ))
+            generation = await asyncio.wait_for(subscription.wait(0), 1)
+            reader = StepExecutionHistoryReader(
+                namespace=namespace, executions=state.execution.executions,
+                store=store.read_store(PersistenceDomain.TRACE),
+                cursor_signer=HmacCursorSigner(namespace, b"model-notification-test"),
+            )
+            before = await reader.capture_model_interaction_cutoffs("execution", tenant_id="tenant")
+            assert not before.durable_history_available and before.cutoffs == ()
+            await store.append_event(StepEvent(run, "AGENT_RUN_STARTED", 1))
+            await store.flush_execution_projection(run, execution_id="execution")
+            generation = await asyncio.wait_for(subscription.wait(generation), 1)
+            after = await reader.capture_model_interaction_cutoffs("execution", tenant_id="tenant")
+            assert after.durable_history_available
+            assert after.cutoffs == (UsageReadCutoff("execution", 1, 0),)
+            await store.append_event(StepEvent(run, "TOOL_CALL_SUCCEEDED", 2))
+            await store.flush_execution_projection(run, execution_id="execution")
+            assert subscription.generation == generation
+            assert await reader.capture_model_interaction_cutoffs("execution", tenant_id="tenant") == after
+        finally:
+            await subscription.close()
+    finally:
+        await state.close()

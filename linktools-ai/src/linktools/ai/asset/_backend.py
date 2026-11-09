@@ -48,6 +48,10 @@ class InMemoryAssetBackend:
         self._lock = asyncio.Lock()
 
     @property
+    def retains_versions(self) -> bool:
+        return True
+
+    @property
     def root(self) -> AssetRoot:
         return self._root
 

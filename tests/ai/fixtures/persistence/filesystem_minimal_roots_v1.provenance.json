@@ -1,5 +1,9 @@
 {
-  "description": "Two independent minimal legacy roots matching run-only and object-backed Memory receipt migration contracts; neither contains checkpoint archive state. Written and exported through unchanged legacy persistence APIs.",
+  "description": "Current record envelopes in the filesystem reader layout; Two independent minimal legacy roots matching run-only and object-backed Memory receipt migration contracts; neither contains checkpoint archive state. Written and exported through unchanged legacy persistence APIs.",
+  "record_codec_commit": "c81e0b9aa4f153dc12433d421dde2f6a19b7baf0",
+  "record_codec_note": "Synthetic filesystem-layout fixture: known non-tool record identities were authored with current StoredRecord/encode_record and subject=None. Original domain payloads, objects, facts, receipts and layout are unchanged. This is not an old-data reader or migration.",
+  "source_writer_commit": "97a6632aab3348af35d855907e602fa2706ea7d7",
+  "source_zip_sha256": "83662f84cf1a7851c9f192741d07ae93c71a074c8daa6eee7b64a4316b62101f",
   "variants": {
     "memory": {
       "business_file_sha256": {
@@ -22,7 +26,7 @@
         "memory/c980ce17ac9db5ba14c70f390aa194ca12fb74bfbf037b03596849df73b50480/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/record-index/complete": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
         "memory/c980ce17ac9db5ba14c70f390aa194ca12fb74bfbf037b03596849df73b50480/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/record-index/memory/b4cb80835b66dcc2cf98cc8c619aa06e892623165b23abeba10d48c32edc7074/nodes/c4/c411ff61214922509e9d85b5a4431551cddd532d7f4847ba8039c583de9489cb.json": "bb8118ba6b6ac3d1ee8af1a9a0c9967d6f7c86709e627d5cdb9f8f24b0fb9fbc",
         "memory/c980ce17ac9db5ba14c70f390aa194ca12fb74bfbf037b03596849df73b50480/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/record-index/memory/b4cb80835b66dcc2cf98cc8c619aa06e892623165b23abeba10d48c32edc7074/nodes/e3/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.json": "889d985a57b79c687d45380e87beb7cd121c80b3beddc4466aca0b4fd6fb1c36",
-        "memory/c980ce17ac9db5ba14c70f390aa194ca12fb74bfbf037b03596849df73b50480/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/records/memory/b1/b12a693491175f67ff87de6484f5601aed3d0688293b3481274447f7d35f3d34.json": "6b9c50798a6fb7b153877bd2d746efc2f5a382807f82bc725d7854f669813509",
+        "memory/c980ce17ac9db5ba14c70f390aa194ca12fb74bfbf037b03596849df73b50480/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/records/memory/b1/b12a693491175f67ff87de6484f5601aed3d0688293b3481274447f7d35f3d34.json": "916bf22116cc1f870bbb212e470a8c08f581d94297e3f4cb7a07a0379077bca2",
         "memory/c980ce17ac9db5ba14c70f390aa194ca12fb74bfbf037b03596849df73b50480/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/sequences/7a/7a9d6a44d10fbb8c98bad0e6a7a39bc58fe1f8f9122ef4bceed3d50b8b5db7b6.json": "eb6239f1668184176cae7244dc7027457706d76237f9cacbc36b3bcd79beb86c",
         "memory/objects/eb/eb969f5dbb46af7f875fd32dce855fa984c9124c2040a9fb6ee57f7599f7156b/data": "bb4efc3ef95bd04e2a0d9c480629c29c0d841b67c23e189398d90d18a679098a",
         "memory/objects/eb/eb969f5dbb46af7f875fd32dce855fa984c9124c2040a9fb6ee57f7599f7156b/metadata.json": "79c33035264583cd660ecce9490d0b91d591a3903cd1736f6d7d3998ac22a8a8",
@@ -38,7 +42,7 @@
       "memory_digest": "bb4efc3ef95bd04e2a0d9c480629c29c0d841b67c23e189398d90d18a679098a",
       "memory_version": "m1:4dbf510fd1719f8b087c071a3f792477fac07995bc66c0786b967cfd8a665359",
       "namespace": "memory-migration",
-      "snapshot_digest": "ec59e0c42d7fadd034e6dfbdc266f252b71f9b06262a82833a828ad96c03f15c",
+      "snapshot_digest": "4132fdd329a6762a8244f6a904f0a62742d8a30ea57e30920b9581b4bb4c9c4e",
       "snapshot_object_store_id": "root-fixture-snapshot",
       "tenant_id": "tenant"
     },
@@ -50,8 +54,8 @@
         "artifact/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/manifest.json": "2eebfbe4adcec7574b0110d3416bb6be92dc82bbab958cd3520b73269054b6f8",
         "checkpoint/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/generation": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
         "checkpoint/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/manifest.json": "eb3bb6ef39ed2f262e81db550016e51bdf6cf653852b749533f644603b1809b1",
-        "checkpoint/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/records/agent_run/7a/7af7d4b6f220ea7e1ffb94feb4d43fa91027cc7e713b87bfbcfea0647b02b1f8.json": "5ee2c7d7bde9eaefd147667ccf08750852128d0799508c092142df0001629736",
-        "checkpoint/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/records/transcript_head/ee/ee55f3933414d02810000f161f29e2fb5b73580a988a20712e6453eff1147626.json": "fd5cf0d5680e19c2a723e613408a69f306719bf626992ad57fd1d28226598ca2",
+        "checkpoint/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/records/agent_run/7a/7af7d4b6f220ea7e1ffb94feb4d43fa91027cc7e713b87bfbcfea0647b02b1f8.json": "eeae988bee90569db78d86f541c069c98f962a84d69d5a3c6670cdb0729cc68d",
+        "checkpoint/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/records/transcript_head/ee/ee55f3933414d02810000f161f29e2fb5b73580a988a20712e6453eff1147626.json": "50b9b5b63ce0371af6b089c00e73f18027d9ad43373125778ccb05e7b674b9d9",
         "conversation/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/generation": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
         "conversation/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/manifest.json": "234efc58b22b645ec6e9488f56c5ce5064c299d72cfa4a096e61897f659f5ac6",
         "evaluation/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/generation": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
@@ -69,11 +73,10 @@
         "trace/e645fc8f0102ea6ba76efaf39aebf8b6353f8cc26ab6e1b62612946539956c49/bde7e378c5b73a6860ef1ef2331a98c58dedc6efe2e746a195b8640795827731/manifest.json": "326c0d2f201062db6e5c959159a740673fd1567ea878bb80943494179ee134db"
       },
       "namespace": "root-migration",
-      "snapshot_digest": "e4cf07cbb2609adfd323cf79eed2a68a1c55623d4d9ec6e85a591cb72b4898f0",
+      "snapshot_digest": "bc451c07e50ed19ae3d6f73d5f28137702a279fbab2076c1535f841206a6f476",
       "snapshot_object_store_id": "root-fixture-snapshot",
       "tenant_id": "tenant"
     }
   },
-  "writer_commit": "97a6632aab3348af35d855907e602fa2706ea7d7",
-  "zip_sha256": "83662f84cf1a7851c9f192741d07ae93c71a074c8daa6eee7b64a4316b62101f"
+  "zip_sha256": "551dfd74637c881499829ce476df9302ef7e8e924fb5341b70b0c61a173214d2"
 }

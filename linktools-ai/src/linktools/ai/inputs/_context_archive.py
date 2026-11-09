@@ -89,6 +89,10 @@ class ExecutionContextArchive:
         if instructions is not None:
             instruction_index = len(values)
             values.append(("json", canonical_json_bytes(instructions)))
+        skill_indices = []
+        for skill in semantic["preload_skills"]:
+            skill_indices.append(len(values))
+            values.append(("json", canonical_json_bytes(skill)))
         identities = await archive.prepare_content(values, prepared)
 
         def reference(index: int) -> dict[str, JsonValue]:
@@ -101,6 +105,7 @@ class ExecutionContextArchive:
             "replace_history_system_prompt": context.replace_history_system_prompt,
             "unavailable_reason": context.unavailable_reason,
             "repository_instructions": None if instruction_index is None else reference(instruction_index),
+            "preload_skills": [reference(index) for index in skill_indices],
         }
         for name, fields in components.items():
             manifest[name] = None if fields is None else {key: reference(index) for key, index in fields}
@@ -136,6 +141,13 @@ class ExecutionContextArchive:
             if value["repository_instructions"] is not None:
                 instruction_index = len(references)
                 references.append(value["repository_instructions"])
+            skill_indices = []
+            skills = value["preload_skills"]
+            if not isinstance(skills, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for skill in skills:
+                skill_indices.append(len(references))
+                references.append(skill)
             ids = []
             for item in references:
                 if (not isinstance(item, Mapping) or item.get("archive_scope") != archive.scope_id
@@ -149,7 +161,8 @@ class ExecutionContextArchive:
                 session_metadata=fields["session_metadata"], memory=fields["memory"],
                 repository_instructions=None if instruction_index is None else bodies[instruction_index],
                 replace_history_system_prompt=value["replace_history_system_prompt"],
-                unavailable_reason=value["unavailable_reason"])
+                unavailable_reason=value["unavailable_reason"],
+                preload_skills=tuple(bodies[index] for index in skill_indices))
             if result.digest != value["semantic_digest"]:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return result

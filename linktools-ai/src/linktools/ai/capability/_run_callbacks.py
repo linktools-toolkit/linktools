@@ -275,15 +275,15 @@ class _NativeExecutionScope(RunCallbackScope):
         if request_context.model is self._provider_view:
             return request_context
 
-        async def load(content: ReferencedContent) -> bytes:
-            sources = self.callbacks.referenced_inputs()
-            source = sources.get(content.source)
-            if source is None:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                              safe_details={"reason": "referenced_input_source_mismatch"})
-            return await source.load(ctx.deps, content)
+        async def load_many(contents: tuple[ReferencedContent, ...]) -> tuple[bytes, ...]:
+            return await ReferencedInputsCapability.load_selected(
+                ctx.deps, contents, self.callbacks.referenced_inputs(),
+            )
 
-        self._provider_view = ReferencedInputModel(request_context.model, load=load)
+        async def load(content: ReferencedContent) -> bytes:
+            return (await load_many((content,)))[0]
+
+        self._provider_view = ReferencedInputModel(request_context.model, load=load, load_many=load_many)
         return replace(request_context, model=self._provider_view)
 
     async def wrap_model_request(

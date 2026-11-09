@@ -19,7 +19,7 @@ from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from tests.ai._runtime_test_helpers import native_checkpoint, seed_native_snapshot
 from linktools.ai.observe.journal import ModelRequestJournal
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
-from linktools.ai.persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
+from linktools.ai.persistence.runs import OfficialStepReader, RuntimeAgentRunStore, StagingAgentRunStore
 
 from .test_step_projection import _execution
 
@@ -95,7 +95,8 @@ async def test_trace_reopen_preserves_each_tool_result_once_with_its_original_po
         before = (await archive.capture_history(("run",), include_pending=True))["run"]
         assert before.message_count == 3
         snapshot = await first.step_store.latest_snapshot(run_id="run")
-        assert snapshot is not None and snapshot.messages == [user, response]
+        assert snapshot is not None
+        assert OfficialStepReader.restore_snapshot(snapshot).messages == [user, response]
 
         second = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",

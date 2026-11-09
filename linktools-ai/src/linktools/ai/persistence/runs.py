@@ -71,6 +71,7 @@ from ._step_archive import (
     _sync_projection,
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
+from ._native_checkpoint import NativeCheckpoint
 from .state import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
@@ -1555,7 +1556,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if offset.observation_task is None:
                     offset.observation_execution_id = None
                     offset.observation_producer_generation = None
-        self._publish_model_interaction_change(flight.agent_run_id)
+        # The first publication also makes the run available to metadata readers.
+        # Later event/transcript-only commits do not change their captured view.
+        if captured.interactions or not any((
+            captured.base_event_offset, captured.base_checkpoint_offset,
+            captured.base_interaction_offset, captured.base_message_index,
+        )):
+            self._publish_model_interaction_change(flight.agent_run_id)
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.debug(
@@ -1688,6 +1695,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                 local_message_count=local_count,
                 local_messages=captured.local_messages,
                 prepared=interaction_archive,
+                replay=any(value.model_request_seq <= captured.base_interaction_offset
+                           for value in captured.interactions),
                 baseline=self.trace_persistence.offsets.get(
                     captured.run.agent_run_id, _ProjectionOffset(),
                 ).request_projection,
@@ -1877,7 +1886,6 @@ class RuntimeAgentRunStore(AgentRunStore):
             # A transient route is observable only through its local staging
             # owner; there is no archive projection to commit or acknowledge.
             self.trace_persistence.dirty.discard(agent_run_id)
-            self._publish_model_interaction_change(agent_run_id)
             return
         offset = self.trace_persistence.offsets.get(agent_run_id)
         if (agent_run_id in self.trace_persistence.dirty and offset is not None
@@ -2405,4 +2413,4 @@ from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._step_contracts import AgentRunHistoryCapture, CheckpointState, StepEventType, TOOL_ERROR_CODE_METADATA_KEY
 from ._views import SESSION_HISTORY_VIEW_V1, project_execution_transcript_message, project_session_history_message
 
-__all__ = ['AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'OfficialStepReader', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']
+__all__ = ['NativeCheckpoint', 'AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'OfficialStepReader', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']

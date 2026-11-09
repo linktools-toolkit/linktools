@@ -51,10 +51,12 @@ class ReferencedInputModel(WrapperModel):
 
     def __init__(
         self, model: Model, *, load: Callable[[ReferencedContent], Awaitable[bytes]],
+        load_many: Callable[[tuple[ReferencedContent, ...]], Awaitable[Sequence[bytes]]] | None = None,
         binding: ModelBinding | None = None, preserve_errors: bool = False,
     ) -> None:
         super().__init__(model)
         self._load = load
+        self._load_many = load_many
         self._binding = binding
         self._preserve_errors = preserve_errors
 
@@ -98,11 +100,39 @@ class ReferencedInputModel(WrapperModel):
         """Project host-owned message parts before ephemeral input lowering."""
         return messages
 
+    async def load_references(self, messages: Sequence[ModelMessage]) -> tuple[bytes, ...]:
+        """Load request occurrences together, preserving their exact order."""
+        contents = tuple(
+            item for message in messages if isinstance(message, ModelRequest)
+            for part in message.parts for item in model_input_content(part)
+            if isinstance(item, ReferencedContent)
+        )
+        if not contents:
+            return ()
+        references = tuple(content.ref for content in contents)
+        values = (await self._load_many(contents) if self._load_many is not None
+                  else tuple([await self._load(content) for content in contents]))
+        if (not isinstance(values, Sequence) or isinstance(values, (str, bytes))
+                or len(values) != len(contents)):
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH, retryable=False,
+                          safe_details={"reason": "referenced_input_batch_cardinality"})
+        for reference, data in zip(references, values, strict=True):
+            if not isinstance(data, bytes):
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH, retryable=False)
+            try:
+                reference.verify_content(data)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    raise
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH, retryable=False) from error
+        return tuple(values)
+
     async def _provider_messages(self, messages: list[ModelMessage]) -> list[ModelMessage]:
         messages = self.project_messages(messages)
         if self.content_omission_reason(messages) is None:
             return messages
         ModelClientRequestRecorder.omit_current_http_bodies("referenced_content_lifecycle")
+        loaded = iter(await self.load_references(messages))
         result: list[ModelMessage] = []
         for message in messages:
             if not isinstance(message, ModelRequest):
@@ -117,7 +147,7 @@ class ReferencedInputModel(WrapperModel):
                 content = []
                 for item in model_input_content(part):
                     if isinstance(item, ReferencedContent):
-                        data = await self._load(item)
+                        data = next(loaded)
                         if item.representation == "text":
                             try:
                                 item = data.decode("utf-8")

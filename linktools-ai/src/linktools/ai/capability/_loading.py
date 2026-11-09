@@ -85,6 +85,11 @@ class _CapabilityAssetReader:
             for key in keys
         )
 
+    async def require_retained_versions(
+        self, refs: Sequence[AssetVersionRef],
+    ) -> tuple[bytes, ...]:
+        return await self._store.require_retained_versions(refs)
+
     async def capture_metadata(self) -> "tuple[AssetInfo, ...]":
         return self._metadata
 

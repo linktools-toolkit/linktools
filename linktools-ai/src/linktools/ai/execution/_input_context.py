@@ -20,6 +20,7 @@ class ExecutionInputContext:
     repository_instructions: Mapping[str, JsonValue] | None = None
     replace_history_system_prompt: bool = False
     unavailable_reason: str | None = None
+    preload_skills: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
         decode_model_messages(self.history)
@@ -31,6 +32,13 @@ class ExecutionInputContext:
             raise ValueError("context unavailability reason is invalid")
         if not isinstance(self.replace_history_system_prompt, bool):
             raise ValueError("context history replacement flag is invalid")
+        if (not isinstance(self.preload_skills, Sequence)
+                or isinstance(self.preload_skills, (str, bytes))
+                or any(not isinstance(value, Mapping) for value in self.preload_skills)):
+            raise TypeError("context preload skills must be mappings")
+        object.__setattr__(self, "preload_skills", tuple(
+            ImmutableJsonMapping(value) for value in self.preload_skills
+        ))
 
     @classmethod
     def from_messages(cls, history: Sequence[ModelMessage], **kwargs: object) -> "ExecutionInputContext":
@@ -49,7 +57,8 @@ class ExecutionInputContext:
                 "memory": None if self.memory is None else dict(self.memory),
                 "repository_instructions": None if self.repository_instructions is None else dict(self.repository_instructions),
                 "replace_history_system_prompt": self.replace_history_system_prompt,
-                "unavailable_reason": self.unavailable_reason}
+                "unavailable_reason": self.unavailable_reason,
+                "preload_skills": [dict(value) for value in self.preload_skills]}
 
     @classmethod
     def from_payload(cls, value: Mapping[str, JsonValue]) -> "ExecutionInputContext":
@@ -57,7 +66,8 @@ class ExecutionInputContext:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         try:
             return cls(canonical_json_bytes(value["history"]), value["session_metadata"], value["memory"],
-                       value["repository_instructions"], value["replace_history_system_prompt"], value["unavailable_reason"])
+                       value["repository_instructions"], value["replace_history_system_prompt"], value["unavailable_reason"],
+                       value.get("preload_skills", ()))
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 

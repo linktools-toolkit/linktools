@@ -178,6 +178,10 @@ class DirectoryAssetBackend:
         self._revision = _store_revision(())
 
     @property
+    def retains_versions(self) -> bool:
+        return False
+
+    @property
     def root(self) -> AssetRoot:
         return self._root
 

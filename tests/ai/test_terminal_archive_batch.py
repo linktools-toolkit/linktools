@@ -20,6 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage import StoredPayload
 from linktools.ai.persistence import Persistence, PersistenceDomain
+from linktools.ai.persistence.runs import OfficialStepReader
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.persistence.contracts import (
@@ -169,8 +170,10 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
 
     async def materialize_recovery(self, *, agent_run_id, require_complete, captured=None):
         before = await self.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
+        raw_before = await native.store.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
         await original_recovery(self, agent_run_id=agent_run_id, require_complete=require_complete, captured=captured)
         assert await self.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True) == before
+        assert await native.store.latest_snapshot(run_id=agent_run_id, include_interrupted=True) == raw_before
         if require_complete:
             assert before is not None and before.state == "complete"
             verified_snapshots.append(before)
@@ -249,7 +252,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
             assert [len(scopes) for scopes in publications] == [1]
         assert verified_snapshots
         for snapshot in verified_snapshots:
-            assert await native.store.latest_snapshot(run_id=snapshot.run_id) == snapshot
+            assert await OfficialStepReader(native.store).latest_snapshot(run_id=snapshot.run_id) == snapshot
 
 
 @pytest.mark.parametrize("foreign_scope", (False, True))
@@ -377,8 +380,9 @@ async def test_terminal_archive_batch_does_not_open_scope_without_preparation(
 
 
 @pytest.mark.parametrize("fault", ("model", "usage", "request", "missing_body"))
+@pytest.mark.parametrize("with_baseline", (False, True))
 async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
-    tmp_path: Path, fault: str,
+    tmp_path: Path, fault: str, with_baseline: bool,
 ) -> None:
     database = tmp_path / "cold-split.db"
     state = Persistence(_split_sqlite_storage(database))
@@ -447,7 +451,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
             replayed = await archive.prepare_interactions(
                 run, (staged,), lambda _: envelope, local_message_count=3,
                 local_messages=current_messages, prepared=content_write, replay=True,
-                baseline=original[0].request_context,
+                baseline=original[0].request_context if with_baseline else None,
             )
             await archive.sync_projection(
                 run, events=(), checkpoints=(), interactions=replayed, archive=content_write,

@@ -83,6 +83,25 @@ class AssetStoreReader(Protocol):
         ...
 
 
+@runtime_checkable
+class RetainedAssetReader(Protocol):
+    """Verify versions whose owner retains bytes independently of current heads.
+
+    The host keeps that owner available for the execution's recovery lifetime.
+    This operation does not copy resources or create a new retention lifecycle.
+    """
+
+    async def require_retained_versions(
+        self, refs: Sequence[AssetVersionRef],
+    ) -> tuple[bytes, ...]: ...
+
+
+@runtime_checkable
+class _RetainedAssetBackend(Protocol):
+    @property
+    def retains_versions(self) -> bool: ...
+
+
 class AssetContentCache:
     """Bind a borrowed cache backend to immutable Asset metadata and bytes."""
 
@@ -444,6 +463,33 @@ class AssetStore:
         finally:
             self._version_reads.discard(completed)
             completed.set_result(None)
+
+    async def require_retained_versions(
+        self, refs: Sequence[AssetVersionRef],
+    ) -> tuple[bytes, ...]:
+        """Read exact versions only from layers that retain historical bytes.
+
+        In-memory backends retain bytes for their own lifetime. The host must
+        preserve or reopen the same history owner for durable execution recovery.
+        Directory-backed versions must first be published to a retaining owner,
+        such as an Asset snapshot; their current-file integrity is insufficient.
+        """
+        self._ensure_ready()
+        refs = tuple(refs)
+        for ref in refs:
+            if not isinstance(ref, AssetVersionRef):
+                raise TypeError("refs must contain AssetVersionRef values")
+            if ref.layer_id == "primary":
+                backend = self._storage.primary
+            else:
+                layers = tuple(layer.backend for layer in self._storage.layers if layer.id == ref.layer_id)
+                if len(layers) != 1:
+                    raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
+                backend = layers[0]
+            if not isinstance(backend, _RetainedAssetBackend) or not backend.retains_versions:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                              safe_details={"reason": "asset_history_not_retained", "layer_id": ref.layer_id})
+        return await self.read_versions(refs)
 
     async def _read_version(self, backend: AssetBackend, ref: AssetVersionRef) -> bytes:
         identity = (id(backend), ref)
@@ -866,6 +912,11 @@ class _SnapshotAssetStore(AssetStore):
             values.append(value)
         return tuple(values)
 
+    async def require_retained_versions(
+        self, refs: Sequence[AssetVersionRef],
+    ) -> tuple[bytes, ...]:
+        return await self.read_versions(refs)
+
     async def list_info_with_locations(
         self,
         *,
@@ -1114,4 +1165,4 @@ def _info_key(value: "AssetInfo | StorageLocatedInfo[AssetInfo]") -> AssetKey:
     return value.info.key if isinstance(value, StorageLocatedInfo) else value.key
 
 
-__all__ = ["AssetContentCache", "AssetStore"]
+__all__ = ["AssetContentCache", "AssetStore", "AssetStoreReader", "RetainedAssetReader"]

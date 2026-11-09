@@ -81,7 +81,7 @@ async def test_small_history_and_trace_pages_bound_materialized_rows(
             )
         await history.state.run_store.flush_execution_projection(recorder.agent_run_id, execution_id="execution")
         materialized = 0
-        for name in ("list_facts", "list_records", "get_records"):
+        for name in ("list_facts", "get_facts", "list_records", "get_records"):
             original = getattr(_MemoryTransaction, name)
 
             async def count_rows(self, *args, _original=original, **kwargs):
@@ -134,6 +134,8 @@ async def test_exact_memory_fact_lookup_does_not_enumerate_other_facts(
     ):
         result = await store.read(lambda tx: tx.list_facts(query))
         assert tuple(fact.sequence for fact in result) == expected
+    selected = await store.read(lambda tx: tx.get_facts(stream, (5, 2, 5, 4)))
+    assert tuple(fact.sequence for fact in selected) == (2, 5)
     assert examined == 0, "direct fact identities must not enumerate the entire fact map"
     sparse = await store.read(lambda tx: tx.list_facts(FactQuery(stream, after_sequence=3, limit=1)))
     assert tuple(fact.sequence for fact in sparse) == (5,)
@@ -266,7 +268,6 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
     try:
         archive, run_id = await _seed_trace(storage, page_size * 2, reverse_timestamps=reverse_timestamps)
         batches: list[int] = []
-        original = _SqlTransaction.list_facts
         original_fact = _sql._fact_from_row
         alive = maximum_alive = 0
         fact_selects = logical_json_bytes = 0
@@ -289,17 +290,21 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
             weakref.finalize(tracked, released)
             return tracked
 
-        async def capture(self, query):
-            rows = await original(self, query)
-            batches.append(len(rows))
-            return rows
+        for name in ("list_facts", "get_facts"):
+            original = getattr(_SqlTransaction, name)
+
+            async def capture(self, *args, _original=original):
+                rows = await _original(self, *args)
+                batches.append(len(rows))
+                return rows
+
+            monkeypatch.setattr(_SqlTransaction, name, capture)
 
         def capture_sql(_connection, _cursor, statement, _parameters, _context, _many):
             nonlocal fact_selects
             if statement.lstrip().upper().startswith("SELECT") and "FROM AI_STATE_FACTS" in statement.upper():
                 fact_selects += 1
 
-        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
         monkeypatch.setattr(_sql, "_fact_from_row", materialize)
         sql_event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
         try:
@@ -341,14 +346,15 @@ async def test_ordered_sparse_trace_pages_keep_contiguous_fact_batches(
             ), execution_id="execution")
         await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
         batches: list[tuple[int, ...]] = []
-        original = _SqlTransaction.list_facts
+        for name in ("list_facts", "get_facts"):
+            original = getattr(_SqlTransaction, name)
 
-        async def capture(transaction, query):
-            facts = await original(transaction, query)
-            batches.append(tuple(fact.sequence for fact in facts))
-            return facts
+            async def capture(transaction, *args, _original=original):
+                facts = await _original(transaction, *args)
+                batches.append(tuple(fact.sequence for fact in facts))
+                return facts
 
-        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
+            monkeypatch.setattr(_SqlTransaction, name, capture)
         rows = await archive.list_trace_events(
             agent_run_id=run_id, event_high_water=96,
             after_timestamp=None, after_sequence=0, limit=100,
@@ -391,3 +397,50 @@ async def test_run_release_scans_owned_cleanup_data_once_per_batch(monkeypatch: 
             await storage.close()
     assert costs[1] <= costs[0] * 2.25
     assert costs[2] <= costs[1] * 2.25
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected_count,sparse", ((32, False), (65, False), (65, True)))
+async def test_history_associations_batch_only_selected_source_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_count: int, sparse: bool,
+) -> None:
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "association-page.db"))
+    try:
+        archive, run_id = await _seed_trace(storage, selected_count * 2)
+        selected = tuple(range(1, selected_count * 2, 2)) if sparse else tuple(range(1, selected_count + 1))
+        batches: list[tuple[int, ...]] = []
+        fact_selects = 0
+
+        for name in ("list_facts", "get_facts"):
+            original = getattr(_SqlTransaction, name)
+
+            async def capture(transaction, *args, _original=original):
+                facts = await _original(transaction, *args)
+                batches.append(tuple(fact.sequence for fact in facts))
+                return facts
+
+            monkeypatch.setattr(_SqlTransaction, name, capture)
+
+        def capture_sql(_connection, _cursor, statement, _parameters, _context, _many):
+            nonlocal fact_selects
+            if statement.lstrip().upper().startswith("SELECT") and "FROM AI_STATE_FACTS" in statement.upper():
+                fact_selects += 1
+
+        engine = archive.state_store.storage_group.context.engine.sync_engine
+        sql_event.listen(engine, "before_cursor_execute", capture_sql)
+        try:
+            values = await archive.read_history_associations(
+                agent_run_id=run_id, message_seqs=(),
+                tool_call_ids=tuple(f"call-{sequence - 1}" for sequence in reversed(selected)),
+                event_high_water=selected[-1],
+            )
+        finally:
+            sql_event.remove(engine, "before_cursor_execute", capture_sql)
+        assert [value.tool_call_id for value in values] == [f"call-{sequence - 1}" for sequence in selected]
+        assert tuple(sequence for batch in batches for sequence in batch) == selected
+        assert all(len(batch) <= 32 for batch in batches)
+        assert fact_selects <= (selected_count + 31) // 32
+        print("HISTORY_SELECTED_FACTS " + json.dumps({"selected_count": selected_count, "sparse": sparse,
+              "fact_selects": fact_selects, "fact_rows": sum(map(len, batches))}))
+    finally:
+        await storage.close()

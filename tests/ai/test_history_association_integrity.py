@@ -223,14 +223,15 @@ async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(
         await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
         expected.sort(key=lambda item: (item[1].timestamp, item[0]))
         batches: list[tuple[int, ...]] = []
-        original = _SqlTransaction.list_facts
+        for name in ("list_facts", "get_facts"):
+            original = getattr(_SqlTransaction, name)
 
-        async def capture(transaction, query):
-            facts = await original(transaction, query)
-            batches.append(tuple(fact.sequence for fact in facts))
-            return facts
+            async def capture(transaction, *args, _original=original):
+                facts = await _original(transaction, *args)
+                batches.append(tuple(fact.sequence for fact in facts))
+                return facts
 
-        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
+            monkeypatch.setattr(_SqlTransaction, name, capture)
         for page_size in (1, 33, 65):
             result = []
             after_timestamp, after_sequence = None, 0
@@ -324,6 +325,75 @@ async def test_trace_pages_reject_corrupt_facts_across_batches(
             await archive.list_trace_events(
                 agent_run_id=run_id, event_high_water=66,
                 after_timestamp=None, after_sequence=0, limit=65,
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("corruption", ("missing", "payload", "locator"))
+async def test_association_source_batches_reject_corruption_only_inside_cutoff(
+    tmp_path: Path, backend: str, corruption: str,
+) -> None:
+    storage = Persistence(
+        PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "association-corrupt.db"),
+    )
+    try:
+        archive, run_id = await _seed_trace(storage, 66)
+        stream = archive._stream(run_id, "event")
+
+        async def corrupt(transaction) -> None:
+            if corruption == "locator":
+                key = archive._history_association_key(run_id, "TOOL_CALL_STARTED", "call-32")
+                record = await transaction.get_record(key)
+                assert record is not None
+                await transaction.delete_record(key)
+                await transaction.insert_record(replace(record, data={"sequence": 33}, sort_key="bad"))
+                return
+            facts = await transaction.list_facts(FactQuery(stream))
+            owner = await transaction.get_record(archive._agent_run_key(run_id))
+            assert owner is not None
+            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.delete_fact_streams(archive._agent_run_key(run_id))
+            await transaction.insert_facts(tuple(
+                replace(fact, data={"invalid": True}) if fact.sequence == 33 else fact
+                for fact in facts if corruption != "missing" or fact.sequence != 33
+            ))
+
+        await archive.state_store.mutate(corrupt)
+        arguments = dict(agent_run_id=run_id, message_seqs=(),
+                         tool_call_ids=tuple(f"call-{index}" for index in range(65)))
+        prior = await archive.read_history_associations(**arguments, event_high_water=32)
+        assert [value.tool_call_id for value in prior] == [f"call-{index}" for index in range(32)]
+        with pytest.raises(AIError) as raised:
+            await archive.read_history_associations(**arguments, event_high_water=65)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_associations_validate_each_locator_for_reused_source_fact(tmp_path: Path, backend: str) -> None:
+    storage = Persistence(
+        PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "association-alias.db"),
+    )
+    try:
+        archive, run_id = await _seed_trace(storage, 1)
+        key = archive._history_association_key(run_id, "TOOL_CALL_STARTED", "call-0")
+        alias = archive._history_association_key(run_id, "TOOL_CALL_SUCCEEDED", "call-0")
+
+        async def corrupt(transaction) -> None:
+            record = await transaction.get_record(key)
+            assert record is not None
+            await transaction.insert_record(replace(record, key_digest=alias))
+
+        await archive.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as raised:
+            await archive.read_history_associations(
+                agent_run_id=run_id, message_seqs=(), tool_call_ids=("call-0",), event_high_water=1,
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:

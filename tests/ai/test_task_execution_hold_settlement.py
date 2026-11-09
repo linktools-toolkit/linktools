@@ -44,6 +44,10 @@ class _Repository:
         assert (graph_id, tenant_id) == ("graph", "tenant")
         return self.state
 
+    async def get_node_states(self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str) -> tuple[TaskNodeView, ...]:
+        assert (graph_id, node_ids, tenant_id) == ("graph", ("node",), "tenant")
+        return self.state.node_states
+
     async def complete(self, lease, **kwargs) -> None:
         assert lease is None
         assert kwargs["execution_id"] == "execution"

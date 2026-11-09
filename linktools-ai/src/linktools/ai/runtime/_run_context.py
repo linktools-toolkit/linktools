@@ -29,6 +29,8 @@ class RunContextCapture:
     agent_run_id: str
     agent_id: str
     parent_agent_run_id: str | None
+    output_retries_used: int = 0
+    _last_checkpoint_output_retries_used: int | None = field(default=None, init=False)
     _last_checkpoint_transcript_count: int = field(default=0, init=False)
     _last_checkpoint_context: tuple[ModelMessage, ...] | None = field(default=None, init=False)
     _last_checkpoint_state: CheckpointState | None = field(default=None, init=False)
@@ -57,11 +59,13 @@ class RunContextCapture:
             and self._last_checkpoint_transcript_count == len(raw)
             and self._last_checkpoint_state == state
             and self._last_checkpoint_pending_index == pending_index
+            and self._last_checkpoint_output_retries_used == self.output_retries_used
         ):
             return
         previous_context = self._last_checkpoint_context
         if (
             prepared_request
+            and self._last_checkpoint_output_retries_used == self.output_retries_used
             and state == self._last_checkpoint_state == "complete"
             and pending_index is None
             and previous_context
@@ -104,12 +108,14 @@ class RunContextCapture:
                 context_messages=context_messages,
                 transcript_message_count_before=self._last_checkpoint_transcript_count,
                 pending_request_index=pending_index,
+                output_retries_used=self.output_retries_used,
             )
         )
         self._last_checkpoint_transcript_count = len(raw)
         self._last_checkpoint_context = frozen_context
         self._last_checkpoint_state = state
         self._last_checkpoint_pending_index = pending_index
+        self._last_checkpoint_output_retries_used = self.output_retries_used
 
 
 class RunContextProjection:

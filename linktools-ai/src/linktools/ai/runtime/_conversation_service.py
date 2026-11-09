@@ -69,6 +69,7 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
     ) -> AgentRunResult[Any]:
         if self._capture is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+        self._capture.capture_interrupted_node()
         self._capture.recorder.finish_transcript(interrupted=True)
         await self._capture.context.save_checkpoint(
             ctx,
@@ -153,7 +154,10 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
                 checkpoint_sequence=session.continuation.checkpoint_sequence,
                 projection_digest=session.continuation.projection_digest,
                 tenant_id=tenant_id,
+                include_content=execution.session_context == "all",
             )
+        if execution.session_context == "current_turn":
+            return LoadedModelContext(())
         return await run_store.load_loaded_model_context(
             PersistenceDomain.CONVERSATION, owner
         )

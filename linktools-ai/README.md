@@ -1257,6 +1257,25 @@ second = (await session.run(
 history = await session.history()
 ```
 
+`Session.start/run/plan` and their Agent equivalents accept
+`session_context="all"` (the default) or `"current_turn"` for session-bound
+calls. `all` loads the committed continuation context, including any context
+compaction already performed by native hooks. `current_turn` validates the
+committed checkpoint metadata but does not load its old message bodies before
+starting the new turn. The current user input, later model requests and tool
+results within that turn remain intact. The selection is admitted with the
+execution and participates in request idempotency; recovery reuses the accepted
+context/checkpoint rather than discarding current-run messages again.
+
+This is a model-context selection, not history deletion: retained session turns,
+original user inputs and outputs remain available through History/timeline.
+The selected turn becomes the next committed continuation, so a later `all`
+continues that context; it does not resurrect earlier omitted messages. Use
+History when the model needs an earlier authoritative answer. Selection does not
+bypass Session authorization or make an unretained Session resumable. A
+non-default selection requires a Session; independent executions use their
+existing input-context contract.
+
 A Session owns conversation continuity and the stable Agent id. Every new execution binds the current compiled Agent to that execution's output contract. Retry, fork, durable recovery, evaluation, and Task execution use the exact binding contract/digest required by their contract rather than re-running current selector discovery.
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
@@ -1680,6 +1699,29 @@ async with Runtime.open("service-runtime", storage=storage, features=features) a
 `StepPersistenceCapability(store=steps)` or native `StepPersistence(store=steps)`.
 Such hosts close their own adapters after Runtime exits. Native subclasses retain
 their custom hooks.
+
+The borrowed native store exposes physical checkpoint records. Runtime writes a
+`linktools.ai.native-checkpoint` envelope under the last message's
+`linktools.ai.checkpoint-state` metadata key to keep output retry usage in the
+same durable snapshot, without a second retry-state store. The envelope preserves
+the original metadata, including same-named application keys. An empty context
+uses a removable empty request carrier. Do not pass physical snapshot messages
+directly to a provider or treat them as application history. Use
+`OfficialStepReader(store)` from `linktools.ai.persistence.runs` for decoded
+snapshots and checkpoints; Runtime's SDK adapter and recovery/history readers
+perform this restoration before using messages. Decoded snapshots retain retry
+usage for the same execution. An upstream snapshot without the Runtime envelope
+has unknown retry usage, not zero. Reads and recovery do not rewrite the physical
+snapshot. Caller ownership controls resource lifetime, not the encoded wire view.
+
+The SQL adapter keeps checkpoint retry usage in the snapshot descriptor and
+deduplicates the underlying business messages independently. It reconstructs the
+same native envelope when reading, checking the original envelope-message digest
+to reject changed retry usage or snapshot bindings. Message JSON uses UTF-8
+without ASCII escaping. This changes only the SQL storage representation, not
+the native store's returned snapshots, conversation retention, or recovery budget.
+Provision new data with the current writer and reader; no older development-data
+migration is performed.
 
 The adapter uses Persistence's namespace and tenant and borrows the exact
 Execution SQL context, including a local SQLite writer owner when configured.

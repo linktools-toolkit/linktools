@@ -124,6 +124,7 @@ async def compose_platform_capabilities(
     runtime_capabilities: Sequence[AbstractCapability[None]] = (),
     capability_revisions: Mapping[str, int] | None = None,
     transcript_start: int = 0,
+    initial_output_retries_used: int = 0,
     tool_operations: ToolOperationBridge | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
@@ -163,6 +164,7 @@ async def compose_platform_capabilities(
 
     persistence = AgentRunCapture(
         recorder=run_recorder,
+        initial_output_retries_used=initial_output_retries_used,
         agent_id=agent_id,
         agent_run_id=agent_run_id,
         parent_agent_run_id=parent_agent_run_id,
@@ -226,6 +228,7 @@ async def compose_platform_capabilities(
                 store=capability.store if tool_operations is None else RuntimeStepStore(
                     capability.store, tool_operations,
                     native_boundary=isinstance(capability, AtomicStepPersistence),
+                    output_retries_used=persistence.checkpoint_output_retries_used,
                     working_set=run_store if isinstance(run_store, RuntimeAgentRunStore) else None,
                     commit_boundary=(run_store.step_boundary(agent_run_id)
                                      if isinstance(run_store, RuntimeAgentRunStore)

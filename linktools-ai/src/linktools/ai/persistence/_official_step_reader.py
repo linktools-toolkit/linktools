@@ -11,6 +11,7 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord,
 
 from ..model.messages import native_checkpoint_messages
 from ..errors import AIError, ErrorCode
+from ._native_checkpoint import NativeCheckpoint
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, StepEventType
 from .contracts import LoadedContextMessage, LoadedModelContext
 
@@ -73,7 +74,7 @@ class OfficialStepReader:
         if key in confirmed.snapshot_keys:
             return
         confirmed.snapshot_keys.add(key)
-        confirmed.latest = deepcopy(snapshot)
+        confirmed.latest = self.restore_snapshot(deepcopy(snapshot))
         if snapshot.state == "complete":
             confirmed.complete = confirmed.latest
 
@@ -96,9 +97,12 @@ class OfficialStepReader:
         if confirmed is not None:
             return deepcopy(confirmed.latest if include_interrupted else confirmed.complete)
         snapshot = await self.step_store.latest_snapshot(run_id=run_id, include_interrupted=include_interrupted)
-        return None if snapshot is None else replace(
-            snapshot, messages=native_checkpoint_messages(snapshot.messages, restore=True),
-        )
+        return None if snapshot is None else self.restore_snapshot(snapshot)
+
+    @classmethod
+    def restore_snapshot(cls, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
+        restored = NativeCheckpoint.decode(snapshot)
+        return replace(restored, messages=native_checkpoint_messages(restored.messages, restore=True))
 
     async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
         record = await self.get_run(run_id=agent_run_id)
@@ -168,6 +172,7 @@ class OfficialStepReader:
             parent_agent_run_id=snapshot.parent_run_id, agent_id=snapshot.agent_name,
             timestamp=snapshot.timestamp, state=snapshot.state,
             idempotency_key=snapshot.idempotency_key,
+            output_retries_used=snapshot.output_retries_used if isinstance(snapshot, NativeCheckpoint) else None,
         )
 
     async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:

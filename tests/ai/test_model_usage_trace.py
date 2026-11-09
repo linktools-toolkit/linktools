@@ -111,6 +111,7 @@ def _persistence(
     agent_run_id: str,
     *,
     reverse_registration: bool = False,
+    initial_output_retries_used: int = 0,
 ) -> CombinedCapability[object]:
     journal = ModelRequestJournal(
         source_namespace="workspace",
@@ -127,6 +128,7 @@ def _persistence(
         recorder=run_recorder,
         agent_id="usage-test",
         agent_run_id=agent_run_id,
+        initial_output_retries_used=initial_output_retries_used,
     )
     observation = ModelObservationCapability(
         None,
@@ -584,3 +586,167 @@ async def test_streaming_records_completed_request_usage() -> None:
     assert len(values) == usage.requests == 1
     _assert_token_sum(values, usage)
     await _assert_recorded_responses(store, "stream-run", result.all_messages())
+
+
+@pytest.mark.asyncio
+async def test_non_streamed_output_retries_are_checkpointed_before_approval_pause() -> None:
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import DeferredToolRequests
+
+    store = StagingAgentRunStore()
+    persistence = _persistence(store, "approval-run")
+    capture = next(item for item in persistence.capabilities if isinstance(item, AgentRunCapture))
+    pauses: list[int] = []
+    capture.deferred_pause_sink = pauses.append
+    requests = 0
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal requests
+        requests += 1
+        return ModelResponse(parts=[
+            ToolCallPart(info.output_tools[0].name, {"response": "invalid"}, tool_call_id="invalid-1"),
+            ToolCallPart(info.output_tools[0].name, {"response": "invalid"}, tool_call_id="invalid-2"),
+            ToolCallPart("approve", {}, tool_call_id="approval"),
+        ])
+
+    agent = Agent(FunctionModel(model), output_type=[int, DeferredToolRequests],
+                  retries={"output": 2}, capabilities=[persistence])
+
+    @agent.tool_plain(requires_approval=True)
+    def approve() -> str:
+        raise AssertionError("approval must pause before execution")
+
+    result = await agent.run("inspect")
+    assert isinstance(result.output, DeferredToolRequests)
+    assert requests == 1
+    assert len(pauses) == 1
+    checkpoint = await store.latest_checkpoint(agent_run_id="approval-run", include_interrupted=True)
+    assert checkpoint is not None
+    assert checkpoint.state == "interrupted"
+    assert checkpoint.output_retries_used == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("streamed", "cancelled"), ((False, False), (True, False), (True, True)))
+@pytest.mark.parametrize("trace", (False, True))
+async def test_partial_output_retries_are_checkpointed_before_run_failure(
+    streamed: bool, cancelled: bool, trace: bool,
+) -> None:
+    from pydantic_ai.messages import OutputToolResultEvent, ToolCallPart, ToolReturnPart
+    from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
+
+    from linktools.ai.persistence.runs import NativeCheckpoint
+    from linktools.ai.runtime._step_store import RuntimeStepStore
+    from ._runtime_test_helpers import _UsageFunctionModel
+
+    store = StagingAgentRunStore()
+    persistence = _persistence(store, "partial-run")
+    capture = next(item for item in persistence.capabilities if isinstance(item, AgentRunCapture))
+    if not trace:
+        from linktools.ai.capability import ExecutionCapability
+        from linktools.ai.runtime._conversation_service import ConversationService
+        persistence = CombinedCapability([
+            *[item for item in persistence.capabilities if not isinstance(item, TraceCapability)],
+            ExecutionCapability().bind(ConversationService(capture), retain_history=True),
+        ])
+    native = InMemoryStepStore()
+    boundary = RuntimeStepStore(native, InMemoryStepStore(),
+                               output_retries_used=capture.checkpoint_output_retries_used)
+    started = asyncio.Event()
+    settled = asyncio.Event()
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[
+            ToolCallPart(info.output_tools[0].name, {"response": "invalid"}, tool_call_id="invalid"),
+            ToolCallPart("fail", {}, tool_call_id="fail"),
+        ])
+
+    agent = Agent(_UsageFunctionModel(model) if streamed else FunctionModel(model), output_type=int,
+                  retries={"output": 2}, capabilities=[persistence, StepPersistence(store=boundary)])
+
+    @agent.tool_plain
+    async def fail() -> str:
+        started.set()
+        if cancelled:
+            await asyncio.Event().wait()
+        raise RuntimeError("same-batch failure")
+
+    async def run() -> None:
+        if streamed:
+            async with agent.run_stream_events("inspect", run_id="partial-run") as events:
+                async for event in events:
+                    if isinstance(event, OutputToolResultEvent) and event.part.outcome == "retried":
+                        settled.set()
+        else:
+            await agent.run("inspect", run_id="partial-run")
+
+    task = asyncio.create_task(run())
+    try:
+        if cancelled:
+            await asyncio.wait_for(asyncio.gather(started.wait(), settled.wait()), 5)
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    checkpoint = await store.latest_checkpoint(agent_run_id="partial-run", include_interrupted=True)
+    assert checkpoint is not None
+    assert any(isinstance(part, ToolReturnPart) and part.tool_call_id == "invalid" and part.outcome == "retried"
+               for message in checkpoint.context_messages for part in message.parts), checkpoint.context_messages
+    assert checkpoint.output_retries_used == 1
+    snapshot = await native.latest_snapshot(run_id="partial-run", include_interrupted=True)
+    assert snapshot is not None
+    restored = NativeCheckpoint.decode(snapshot)
+    assert restored.output_retries_used == 1
+    assert any(isinstance(part, ToolReturnPart) and part.tool_call_id == "invalid" and part.outcome == "retried"
+               for message in restored.messages for part in message.parts)
+
+
+@pytest.mark.asyncio
+async def test_repeated_deferred_pause_does_not_charge_inherited_output_retries() -> None:
+    from pydantic_ai import CallDeferred
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
+
+    requests = 0
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal requests
+        requests += 1
+        return ModelResponse(parts=[
+            ToolCallPart(info.output_tools[0].name, {"response": "invalid"}, tool_call_id="invalid"),
+            ToolCallPart("approve", {}, tool_call_id="approval"),
+        ])
+
+    messages: list[ModelMessage] = []
+    for resumed in (False, True):
+        store = StagingAgentRunStore()
+        persistence = _persistence(store, "repeated-pause", initial_output_retries_used=int(resumed))
+        capture = next(item for item in persistence.capabilities if isinstance(item, AgentRunCapture))
+        pauses: list[int] = []
+        capture.deferred_pause_sink = pauses.append
+        agent = Agent(FunctionModel(model), output_type=[int, DeferredToolRequests],
+                      retries={"output": 2 - int(resumed)}, capabilities=[persistence])
+
+        @agent.tool_plain(requires_approval=True)
+        def approve() -> str:
+            raise CallDeferred()
+
+        result = await agent.run(
+            None if resumed else "inspect", message_history=messages,
+            deferred_tool_results=DeferredToolResults(approvals={"approval": True}) if resumed else None,
+        )
+        assert isinstance(result.output, DeferredToolRequests)
+        assert len(pauses) == 1
+        if resumed:
+            assert result.output.calls[0].tool_call_id == "approval"
+            assert len(result.all_messages()) == len(messages)
+        else:
+            assert result.output.approvals[0].tool_call_id == "approval"
+        messages = result.all_messages()
+        checkpoint = await store.latest_checkpoint(agent_run_id="repeated-pause", include_interrupted=True)
+        assert checkpoint is not None
+        assert checkpoint.output_retries_used == 1
+    assert requests == 1

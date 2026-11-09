@@ -389,8 +389,9 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
         async def read_deferred_payload(self, payload: StoredPayload) -> object:
             return payload.decode()
 
-        async def load_interrupted_messages(self, agent_run_id: str, *, execution: ExecutionRecord) -> tuple[object, ...]:
-            return ()
+        async def load_interrupted_checkpoint(self, agent_run_id: str, *, execution: ExecutionRecord):
+            from linktools.ai.persistence.runs import AgentRunCheckpoint
+            return AgentRunCheckpoint(agent_run_id, 1, [], output_retries_used=0)
 
     coordinator = _RecoveryCoordinator(Port(), None)
     if path == "terminal_cleanup":

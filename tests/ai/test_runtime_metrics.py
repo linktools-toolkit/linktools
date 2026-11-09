@@ -456,6 +456,16 @@ class _CommitUnknownTaskRepository:
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         return await self.reconcile_graph(graph_id, tenant_id=tenant_id)
 
+    async def get_node_states(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskNodeView, ...]:
+        assert node_ids == ("node",)
+        return await self.list_nodes(graph_id, tenant_id=tenant_id)
+
     async def list_nodes(
         self,
         graph_id: str,

@@ -17,17 +17,19 @@ from pydantic_ai_harness.step_persistence import (
     InMemoryStepStore, RunRecord, StepPersistence, ToolEffectRecord, annotate_tool_effect,
 )
 
-from linktools.ai.core import HmacCursorSigner, ToolOperationStatus
+from linktools.ai.core import ExecutionStatus, Principal, ToolOperationStatus, agent_conversation_id, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.runs import StepEvent as HistoryStepEvent
-from linktools.ai.history._projection import StepExecutionHistoryReader
+from linktools.ai.persistence.runs import AgentRunRecord
+from linktools.ai.history import History
+from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime._step_store import RuntimeStepStore
 from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
+from .test_history_projection_conformance import _record
 
 
 @pytest_asyncio.fixture(params=["memory", "sqlite"])
@@ -255,37 +257,51 @@ async def test_official_terminal_hook_uses_committed_receipt(state: Persistence,
 
 @pytest.mark.asyncio
 async def test_recovered_effect_queries_keep_canonical_owner_and_exclude_siblings(state: Persistence) -> None:
+    original_id, resumed_id, sibling_id = (
+        agent_run_id(namespace="native-effects", tenant_id="tenant", execution_id="execution", agent_run_seq=sequence)
+        for sequence in (1, 2, 3)
+    )
+    await state.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 2))
     call = ToolCallPart("create", {}, tool_call_id="call")
-    original = _bridge(state)
+    original = _bridge(state, run_id=original_id)
     decision = await original.begin(tool_run_context(), call, ToolDefinition(name="create"), {}, False)
     assert decision is not None
     with pytest.raises(AIError):
         await original.unknown(decision, RuntimeError("uncertain"))
-    sibling = _bridge(state, run_id="sibling")
+    sibling = _bridge(state, run_id=sibling_id)
     other = await sibling.begin(tool_run_context(), call, ToolDefinition(name="create"), {}, False)
     assert other is not None and other.operation_id != decision.operation_id
-    resumed = _bridge(state, run_id="resumed", source_run_id="run")
+    resumed = _bridge(state, run_id=resumed_id, source_run_id=original_id)
     await RuntimeStepStore(InMemoryStepStore(), resumed).record_tool_effect(ToolEffectRecord(
-        run_id="resumed", tool_call_id="call", tool_name="create", status="started",
+        run_id=resumed_id, tool_call_id="call", tool_name="create", status="started",
     ))
     with pytest.raises(AIError) as recovery:
         await resumed.begin(tool_run_context(), call, ToolDefinition(name="create"), {}, False)
     assert recovery.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     operations = await resumed.list_operations()
     assert len(operations) == 1
-    assert operations[0].agent_run_id == "run" and operations[0].tool_operation_id == decision.operation_id
-    reader = StepExecutionHistoryReader(
-        namespace="native-effects", executions=state.execution.executions,
-        store=state.run_store, cursor_signer=HmacCursorSigner("native-effects", b"effect-history"),
-        tool_operations=state.checkpoint.tools,
-    )
-    metadata = await reader._tool_call_metadata(
-        "resumed", execution_id="execution", tenant_id="tenant", events=[HistoryStepEvent(
-            "resumed", "TOOL_CALL_STARTED", 1, tool_call_id="call", tool_name="create",
-        )],
-    )
-    assert metadata["call"][3] == "EFFECT_UNKNOWN"
-    assert metadata["call"][5] == decision.operation_id
+    assert operations[0].agent_run_id == original_id and operations[0].tool_operation_id == decision.operation_id
+    recorder = AgentRunRecorder(state.run_store, execution_id="execution", agent_run_id=resumed_id)
+    await recorder.register_agent_run(AgentRunRecord(
+        resumed_id,
+        agent_conversation_id=agent_conversation_id(
+            namespace="native-effects", tenant_id="tenant", execution_id="execution",
+        ),
+        agent_id="default", metadata={"agent_run_seq": "2", "agent_id": "default"},
+    ))
+    recorder.append_transcript_message(ModelResponse(parts=[call]))
+    await recorder.record_tool_start(call, 1)
+    await recorder.commit_history_boundary()
+    await state.run_store.flush_execution_projection(resumed_id, execution_id="execution")
+    async with History.open(persistence=state) as history:
+        page = await history.history(
+            "execution", principal=Principal("reader", "tenant"), agent_run_seq=2,
+            tool_call_id="call", include_content=True, limit=10,
+        )
+    assert len(page.items) == 1
+    assert page.items[0].status == "EFFECT_UNKNOWN"
+    assert page.items[0].tool_operation_id == decision.operation_id
+    assert page.items[0].tool_operation_id != other.operation_id
 
 
 @pytest.mark.asyncio

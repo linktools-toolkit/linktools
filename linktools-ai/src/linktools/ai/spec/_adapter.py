@@ -345,6 +345,7 @@ def _decode_agent_mapping(raw: Mapping[str, object]) -> AgentSpec:
         "instructions": raw.get("instructions", []),
         "allow_tools": raw.get("allow_tools", ["*"]),
         "allow_skills": raw.get("allow_skills", ["*"]),
+        "preload_skills": raw.get("preload_skills", []),
         "allow_subagents": raw.get("allow_subagents", ["*"]),
         "output_schema": raw.get("output_schema"),
         "output_retries": raw.get("output_retries"),
@@ -416,6 +417,7 @@ def _canonicalize_agent_fields(
     aliases = {
         "allow-tools": "allow_tools",
         "allow-skills": "allow_skills",
+        "preload-skills": "preload_skills",
         "allow-subagents": "allow_subagents",
     }
     result: dict[str, object] = {}

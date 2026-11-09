@@ -6,6 +6,7 @@ CREATE TABLE ai_state_records (
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the persisted runtime record.',
     scope_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping key used by the record kind''s primary list query.',
+    subject_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 subject identity used for exact lookups within a record scope.',
     parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 identity of the logical parent used by hierarchical list queries.',
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
     sort_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
@@ -14,12 +15,14 @@ CREATE TABLE ai_state_records (
     lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
     lease_fence BIGINT NOT NULL DEFAULT 0 COMMENT 'Monotonic fencing token for the current durable record lease.',
     lease_expires_at TIMESTAMP(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
-    payload_json JSON NOT NULL COMMENT 'Versioned canonical domain payload not needed by SQL identity, query, CAS, or lease predicates.',
+    payload_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical domain JSON text preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest),
     KEY ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128)),
     KEY ix_scope_digest_sort_key (scope_digest, sort_key(128)),
+    KEY ix_scope_digest_subject_digest (scope_digest, subject_digest),
+    KEY ix_parent_digest_sort_key (parent_digest, sort_key(128)),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current durable state for runtime and step resources persisted as versioned records.';
 
@@ -44,7 +47,7 @@ CREATE TABLE ai_state_facts (
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.',
     subject_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping identity for multiple facts of one logical subject such as a tool call.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.',
-    payload_json JSON NOT NULL COMMENT 'Versioned canonical immutable fact payload.',
+    payload_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical immutable fact JSON text preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
@@ -71,7 +74,7 @@ CREATE TABLE ai_state_operations (
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current durable operation state used by replay and completion logic.',
     compactable BOOLEAN NOT NULL COMMENT 'Whether a terminal operation may be removed by ledger compaction.',
-    payload_json JSON NOT NULL COMMENT 'Versioned canonical operation request, result, error, resource identity, and semantic timestamps.',
+    payload_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical operation JSON text preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
@@ -204,16 +207,11 @@ CREATE TABLE ai_step_events (
 	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	KEY ix_store_digest_run_digest (store_digest, run_digest),
+	UNIQUE KEY uk_key_digest (key_digest),
+	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Append-only upstream agent execution boundary events.' COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_created_at ON ai_step_events (created_at);
-
-CREATE INDEX ix_store_digest_run_digest ON ai_step_events (store_digest, run_digest);
-
-CREATE INDEX ix_updated_at ON ai_step_events (updated_at);
-
-CREATE UNIQUE INDEX uk_key_digest ON ai_step_events (key_digest);
 
 CREATE TABLE ai_step_message_refs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -222,14 +220,10 @@ CREATE TABLE ai_step_message_refs (
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	UNIQUE KEY uk_snapshot_id_position (snapshot_id, position),
+	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Ordered message references belonging to upstream snapshots.' COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_created_at ON ai_step_message_refs (created_at);
-
-CREATE INDEX ix_updated_at ON ai_step_message_refs (updated_at);
-
-CREATE UNIQUE INDEX uk_snapshot_id_position ON ai_step_message_refs (snapshot_id, position);
 
 CREATE TABLE ai_step_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -238,14 +232,10 @@ CREATE TABLE ai_step_messages (
 	message LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'One upstream ModelMessage JSON body.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	UNIQUE KEY uk_store_digest_sha256 (store_digest, sha256),
+	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Deduplicated upstream ModelMessage JSON bodies.' COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_created_at ON ai_step_messages (created_at);
-
-CREATE INDEX ix_updated_at ON ai_step_messages (updated_at);
-
-CREATE UNIQUE INDEX uk_store_digest_sha256 ON ai_step_messages (store_digest, sha256);
 
 CREATE TABLE ai_step_runs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -262,18 +252,12 @@ CREATE TABLE ai_step_runs (
 	registration_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream registration invocation identifier.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	KEY ix_store_digest_conversation_digest (store_digest, conversation_digest),
+	KEY ix_store_digest_parent_digest (store_digest, parent_digest),
+	UNIQUE KEY uk_store_digest_run_digest (store_digest, run_digest),
+	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_created_at ON ai_step_runs (created_at);
-
-CREATE INDEX ix_store_digest_conversation_digest ON ai_step_runs (store_digest, conversation_digest);
-
-CREATE INDEX ix_store_digest_parent_digest ON ai_step_runs (store_digest, parent_digest);
-
-CREATE INDEX ix_updated_at ON ai_step_runs (updated_at);
-
-CREATE UNIQUE INDEX uk_store_digest_run_digest ON ai_step_runs (store_digest, run_digest);
 
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -286,19 +270,14 @@ CREATE TABLE ai_step_snapshots (
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 snapshot time.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
-	messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream stored_messages count for the ordered references.',
+    messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Ordered message count and bound native checkpoint state.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
 	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	pruned BOOL NOT NULL COMMENT 'Retired snapshot identity without retained message references.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	KEY ix_store_digest_run_digest (store_digest, run_digest),
+	UNIQUE KEY uk_key_digest (key_digest),
+	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream complete or interrupted message-history snapshots.' COLLATE utf8mb4_bin;
-
-CREATE INDEX ix_created_at ON ai_step_snapshots (created_at);
-
-CREATE INDEX ix_store_digest_run_digest ON ai_step_snapshots (store_digest, run_digest);
-
-CREATE INDEX ix_updated_at ON ai_step_snapshots (updated_at);
-
-CREATE UNIQUE INDEX uk_key_digest ON ai_step_snapshots (key_digest);

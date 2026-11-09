@@ -39,7 +39,7 @@ def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object],
         return None
     if (manifest.get("version") != 1 or set(manifest) != {
         "kind", "version", "history", "semantic_digest", "replace_history_system_prompt",
-        "unavailable_reason", "repository_instructions", "session_metadata", "memory",
+        "unavailable_reason", "repository_instructions", "session_metadata", "memory", "preload_skills",
     }):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     ArchiveRoot.from_json(manifest["history"])
@@ -47,7 +47,12 @@ def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object],
 
 
 def _context_references(manifest: Mapping[str, object]) -> Iterator[tuple[str, str, str]]:
-    values = [manifest.get("repository_instructions")]
+    instructions = manifest.get("repository_instructions")
+    values = [] if instructions is None else [instructions]
+    skills = manifest["preload_skills"]
+    if not isinstance(skills, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    values.extend(skills)
     for name in ("session_metadata", "memory"):
         mapping = manifest.get(name)
         if mapping is not None:
@@ -55,8 +60,6 @@ def _context_references(manifest: Mapping[str, object]) -> Iterator[tuple[str, s
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.extend(mapping.values())
     for value in values:
-        if value is None:
-            continue
         if not isinstance(value, Mapping) or set(value) != {"archive_scope", "content_scope", "content_id"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         scope, content_scope, identity = value["archive_scope"], value["content_scope"], value["content_id"]
@@ -296,6 +299,7 @@ def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValu
                     manifest[name] = {key: rewrite(item) for key, item in manifest[name].items()}
             if manifest.get("repository_instructions") is not None:
                 manifest["repository_instructions"] = rewrite(manifest["repository_instructions"])
+            manifest["preload_skills"] = [rewrite(item) for item in manifest["preload_skills"]]
             payload = StoredPayload.inline_json(manifest)
             encoded = _encode_persisted_domain(payload) if "schema" in wire else encode_domain(payload)
             result["fields"]["input_context"]["fields"]["payload"] = encoded

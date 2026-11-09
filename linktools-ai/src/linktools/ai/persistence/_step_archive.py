@@ -81,6 +81,7 @@ from ._step_contracts import (
 )
 from .state import (
     FactQuery,
+    FactReader,
     GroupRecordReader,
     StateGroupTransaction,
     RecordQuery,
@@ -1563,7 +1564,7 @@ class StateStepArchive(AgentRunStore):
                 if projection is not None
             ))
             stored_interactions = {value.model_request_seq: value for value in existing}
-        previous_projection = (baseline if baseline is not None and not replay
+        previous_projection = (baseline if baseline is not None
                                else await self._history.load_projection(run.agent_run_id))
 
         async def prepare_context(
@@ -2159,6 +2160,7 @@ class StateStepArchive(AgentRunStore):
                         archive_base + len(incoming),
                         checkpoint.context_messages is not None,
                         checkpoint.pending_request_index,
+                        checkpoint.output_retries_used,
                     ),
                     chunks,
                     projection,
@@ -3010,6 +3012,7 @@ class StateStepArchive(AgentRunStore):
     async def load_committed_session_model_context(
         self, *, agent_run_id: str,
         checkpoint_sequence: int, projection_digest: str, tenant_id: str,
+        include_content: bool = True,
     ) -> LoadedModelContext:
         require_no_run_history_lock("StateStepArchive.load_committed_session_model_context")
         self._ensure_open()
@@ -3027,6 +3030,8 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
         if stored.projection_digest != projection_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not include_content:
+            return LoadedModelContext(())
         key = None
         if self._context_cache is not None:
             key = await self._session_context_cache_key(
@@ -3082,6 +3087,7 @@ class StateStepArchive(AgentRunStore):
             and stored.has_context_projection
             == (checkpoint.context_messages is not None)
             and stored.pending_request_index == checkpoint.pending_request_index
+            and stored.output_retries_used == checkpoint.output_retries_used
             and (self._runtime_domain is PersistenceDomain.CONVERSATION
                  or stored.transcript_message_count == len(checkpoint.messages))
             and context.model_messages() == tuple(expected_messages)
@@ -3140,6 +3146,7 @@ class StateStepArchive(AgentRunStore):
             state=latest.state,
             context_messages=context_messages,
             pending_request_index=latest.pending_request_index,
+            output_retries_used=latest.output_retries_used,
         )
         return latest if include_interrupted or latest.state == "complete" else None
 
@@ -3383,6 +3390,7 @@ class StateStepArchive(AgentRunStore):
             ) -> None:
                 if indexed is None:
                     indexed = await transaction.get_records(index_keys)
+                locators: list[tuple[bytes, StoredRecord, int]] = []
                 for key in index_keys:
                     record = indexed.get(key)
                     if record is None:
@@ -3392,19 +3400,20 @@ class StateStepArchive(AgentRunStore):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if sequence > event_high_water:
                         continue
-                    event = selected.get(sequence)
-                    if event is None:
-                        facts = await transaction.list_facts(FactQuery(
-                            self._stream(agent_run_id, "event"), after_sequence=sequence - 1, limit=1,
-                        ))
-                        if len(facts) != 1 or facts[0].sequence != sequence:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        event = _decode_step(facts[0].data)
+                    locators.append((key, record, sequence))
+                missing = sorted({sequence for _, _, sequence in locators if sequence not in selected})
+                for offset in range(0, len(missing), 32):
+                    facts = await self._read_selected_history_facts(transaction, agent_run_id, missing[offset:offset + 32])
+                    for sequence, fact in facts.items():
+                        event = _decode_step(fact.data)
                         if not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        selected[sequence] = event
+                    del facts, fact
+                for key, record, sequence in locators:
+                    event = selected[sequence]
                     if self._history_association_records(agent_run_id, ((sequence, event),)).get(key) != record:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    selected[sequence] = event
 
             await resolve(keys, records)
             requests = tuple(dict.fromkeys(
@@ -3420,6 +3429,31 @@ class StateStepArchive(AgentRunStore):
             return [selected[sequence] for sequence in sorted(selected)]
 
         return await self._store.read(read)
+
+    async def _read_selected_history_facts(
+        self, transaction: StateTransaction, agent_run_id: str, ordered: Sequence[int],
+    ) -> dict[int, StoredFact]:
+        """Read a sorted window of selected identities without including gaps."""
+        if isinstance(transaction, FactReader):
+            facts = await transaction.get_facts(self._stream(agent_run_id, "event"), ordered)
+            if [fact.sequence for fact in facts] != list(ordered):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return {fact.sequence: fact for fact in facts}
+        selected: dict[int, StoredFact] = {}
+        offset = 0
+        while offset < len(ordered):
+            end = offset + 1
+            while end < len(ordered) and ordered[end] == ordered[end - 1] + 1:
+                end += 1
+            facts = await transaction.list_facts(FactQuery(
+                self._stream(agent_run_id, "event"),
+                after_sequence=ordered[offset] - 1, limit=end - offset,
+            ))
+            if [fact.sequence for fact in facts] != list(ordered[offset:end]):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            selected.update((fact.sequence, fact) for fact in facts)
+            offset = end
+        return selected
 
     async def list_trace_events(
         self, *, agent_run_id: str, event_high_water: int,
@@ -3507,22 +3541,7 @@ class StateStepArchive(AgentRunStore):
                     window_end = end
                 window = sequences[start:window_end]
                 ordered = sorted(set(window))
-                selected: dict[int, StoredFact] = {}
-                offset = 0
-                # Read only selected contiguous facts, independently of timestamp order.
-                while offset < len(ordered):
-                    end = offset + 1
-                    while end < len(ordered) and ordered[end] == ordered[end - 1] + 1:
-                        end += 1
-                    facts = await transaction.list_facts(FactQuery(
-                        self._stream(agent_run_id, "event"),
-                        after_sequence=ordered[offset] - 1, limit=end - offset,
-                    ))
-                    if [fact.sequence for fact in facts] != ordered[offset:end]:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    selected.update((fact.sequence, fact) for fact in facts)
-                    del facts
-                    offset = end
+                selected = await self._read_selected_history_facts(transaction, agent_run_id, ordered)
                 for index, sequence in enumerate(window, start):
                     record, fact = records[index], selected[sequence]
                     event = _decode_step(fact.data)
@@ -3651,6 +3670,7 @@ def _conversation_relocated_checkpoint_matches(
         or observed.state != source.state
         or observed.idempotency_key != source.idempotency_key
         or observed.pending_request_index != source.pending_request_index
+        or observed.output_retries_used != source.output_retries_used
         or observed.context_messages != source.context_messages
     ):
         return False

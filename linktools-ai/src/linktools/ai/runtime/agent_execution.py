@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from pydantic import BaseModel
 from linktools.core import environ
 from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledAgent, OutputBinding, bind_output
+from ..session import SessionContext, normalize_session_context
 from ..capability import MemoryCapability
 from ._capabilities import runtime_feature_leaves
 from ..core import (OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
@@ -159,8 +160,12 @@ class AgentExecutionPort(Generic[AppT]):
         budget: RunBudget | None = None,
         budget_scope_id: str | None = None,
         tool_effects: ToolEffects = "live",
+        session_context: SessionContext = "all",
     ) -> "Execution[AppT]":
         self.operations.ensure_open()
+        normalize_session_context(session_context)
+        if session_context != "all" and session_id is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "session_context_requires_session"})
         key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
         validate_idempotency_key(key)
         if input_context is not None and session_id is not None:
@@ -220,6 +225,7 @@ class AgentExecutionPort(Generic[AppT]):
             input_context=input_context,
             budget=budget,
             tool_effects=tool_effects,
+            session_context=session_context,
         )
         if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -246,6 +252,7 @@ class AgentExecutionPort(Generic[AppT]):
                 files=request.files,
                 budget=request.budget,
                 tool_effects=request.tool_effects,
+                session_context=request.session_context,
             )
             handle = await self.sessions.resume(
                 compiled_agent.spec.id,

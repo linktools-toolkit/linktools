@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from linktools.core import environ
 
+from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
@@ -65,8 +66,13 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
-# Six CASE assignments plus key/CAS predicates stay below 999 SQLite binds.
-_RECORD_REPLACE_BATCH_SIZE = 64
+# One store and one stream predicate leave 997 SQLite sequence binds.
+_FACT_READ_BATCH_SIZE = 997
+# Six CASE assignments and seven identity/CAS binds plus the IN key
+# require at most 20 binds per row and one shared store bind.
+_RECORD_REPLACE_BATCH_SIZE = 49
+# Store, scope, and kind predicates leave 996 SQLite subject binds.
+_RECORD_SUBJECT_READ_BATCH_SIZE = 996
 _GROUP_RECORD_BIND_BUDGET = 999
 _ARCHIVE_READ_BIND_BUDGET = 999
 # Fixed predicates and JSON-path bindings across all eight edge branches.
@@ -160,10 +166,10 @@ class _SqlGroupTransaction:
     def _record_read_statement(
         self, requests: Mapping[StateStore, Sequence[bytes]],
     ) -> "Select":
-        from sqlalchemy import and_, or_
+        from sqlalchemy import and_, or_, select
 
         table = self._group.metadata.tables["ai_state_records"]
-        return _select_rows(table).where(or_(*(and_(
+        return select(table).where(or_(*(and_(
             table.c.store_digest == self.transaction(store)._store_hex,
             table.c.key_digest.in_(tuple(_hex(key) for key in keys)),
         ) for store, keys in requests.items())))
@@ -933,13 +939,15 @@ class _SqlTransaction:
         return await self._clock.now()
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
+        from sqlalchemy import select
+
         if key in self._record_cache:
             return self._record_cache[key]
         table = self._table("ai_state_records")
         row = (
             (
                 await self._execute(
-                    _select_rows(table).where(
+                    select(table).where(
                         table.c.store_digest == self._store_hex,
                         table.c.key_digest == _hex(key),
                     )
@@ -956,6 +964,8 @@ class _SqlTransaction:
         return value
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        from sqlalchemy import select
+
         if not keys:
             return {}
 
@@ -967,7 +977,7 @@ class _SqlTransaction:
             rows = (
                 (
                     await self._execute(
-                        _select_rows(table).where(
+                        select(table).where(
                             table.c.store_digest == self._store_hex,
                             table.c.key_digest.in_(tuple(_hex(key) for key in missing))
                         )
@@ -985,6 +995,36 @@ class _SqlTransaction:
             for key in unique_keys
             if (value := self._record_cache[key]) is not None
         }
+
+    async def read_record_subjects(
+        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+    ) -> tuple[StoredRecord, ...]:
+        subjects = tuple(dict.fromkeys(subject_digests))
+        if not subjects:
+            return ()
+        from sqlalchemy import select
+
+        scope_hex = _hex(scope_digest)
+        subject_hexes = tuple(_hex(subject) for subject in subjects)
+        table = self._table("ai_state_records")
+        records: list[StoredRecord] = []
+        for offset in range(0, len(subjects), _RECORD_SUBJECT_READ_BATCH_SIZE):
+            matches = select(table.c.id).where(
+                table.c.scope_digest == scope_hex,
+                table.c.subject_digest.in_(
+                    subject_hexes[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]
+                ),
+            ).subquery("record_subjects")
+            rows = (await self._execute(
+                select(table).select_from(matches.join(table, table.c.id == matches.c.id)).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.kind == kind,
+                )
+            )).mappings().all()
+            records.extend(_record_from_row(row) for row in rows)
+        records.sort(key=lambda record: (record.sort_key, record.key_digest))
+        self._record_cache.update((record.key_digest, record) for record in records)
+        return tuple(records)
 
     async def read_archive_frontiers(
         self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
@@ -1047,6 +1087,14 @@ class _SqlTransaction:
         if nodes or contents:
             yield tuple(nodes), tuple(contents)
 
+    def _payload_field(self, column: "ColumnElement", field: str) -> "ColumnElement":
+        from sqlalchemy import JSON, cast, type_coerce
+
+        # Parse only archive string links in SQL; authoritative payloads stay text.
+        payload = (cast(column, JSON) if self._context.dialect.name == "postgresql"
+                   else type_coerce(column, JSON))
+        return payload[field].as_string()
+
     def _archive_read_statement(
         self, scope_hex: str, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
     ) -> "Select":
@@ -1063,7 +1111,7 @@ class _SqlTransaction:
             body_keys = tuple(_hex(item.key_digest) for item in requests if item.content_slots & slot)
             if not metadata_keys and not body_keys:
                 continue
-            identity = current.c.sort_key if field is None else current.c.payload_json[field].as_string()
+            identity = current.c.sort_key if field is None else self._payload_field(current.c.payload_json, field)
             if metadata_keys:
                 branches.append(select(literal("archive_sequence").label("kind"), identity.label("identity")).where(
                     current_scope, current.c.key_digest.in_(metadata_keys),
@@ -1078,7 +1126,7 @@ class _SqlTransaction:
                     node.c.kind == "archive_sequence", node.c.sort_key == identity,
                 ))
             branches.append(select(literal("archive_content").label("kind"),
-                                   node.c.payload_json["content"].as_string().label("identity"))
+                                   self._payload_field(node.c.payload_json, "content").label("identity"))
                             .select_from(joined).where(current_scope, current.c.key_digest.in_(body_keys)))
         if content_keys:
             content = table.alias("archive_direct_content")
@@ -1088,7 +1136,7 @@ class _SqlTransaction:
             ))
         keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
         # Keep the bounded identity set on the driving side of the row lookup.
-        return _select_rows(table).select_from(keys.outerjoin(table, and_(
+        return select(table).select_from(keys.outerjoin(table, and_(
             table.c.store_digest == self._store_hex, table.c.scope_digest == scope_hex,
             table.c.kind == keys.c.kind, table.c.sort_key == keys.c.identity,
         )))
@@ -1199,7 +1247,7 @@ class _SqlTransaction:
         prepared = tuple(_record_values(value.record) for value in ordered)
         columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json")
-        identity_columns = ("scope_digest", "parent_digest", "kind", "sort_key")
+        identity_columns = ("scope_digest", "parent_digest", "subject_digest", "kind", "sort_key")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
@@ -1489,7 +1537,7 @@ class _SqlTransaction:
         return result.rowcount == 1
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
-        from sqlalchemy import and_, or_
+        from sqlalchemy import and_, or_, select
 
         table = self._table("ai_state_records")
         conditions = [table.c.store_digest == self._store_hex]
@@ -1517,7 +1565,7 @@ class _SqlTransaction:
                 )
             )
         statement = (
-            _select_rows(table)
+            select(table)
             .where(*conditions)
             .order_by(
                 table.c.sort_key,
@@ -1532,10 +1580,12 @@ class _SqlTransaction:
         return values
 
     async def scan_records(self) -> tuple[StoredRecord, ...]:
+        from sqlalchemy import select
+
         table = self._table("ai_state_records")
         rows = (
             await self._execute(
-                _select_rows(table).where(table.c.store_digest == self._store_hex)
+                select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
         return tuple(_record_from_row(row) for row in rows)
@@ -1546,10 +1596,12 @@ class _SqlTransaction:
         after: RecordScanCursor | None,
         limit: int,
     ) -> tuple[StoredRecord, ...]:
+        from sqlalchemy import select
+
         _require_scan_limit(limit)
 
         table = self._table("ai_state_records")
-        statement = _select_rows(table).where(table.c.store_digest == self._store_hex)
+        statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
             statement = statement.where(
                 table.c.key_digest > _hex(after.key_digest)
@@ -1903,6 +1955,27 @@ class _SqlTransaction:
         )
         self._log_batch("insert_facts", len(facts), 1)
 
+    async def get_facts(
+        self, stream_digest: bytes, sequences: Sequence[int],
+    ) -> tuple[StoredFact, ...]:
+        from sqlalchemy import select
+
+        ordered = sorted(set(sequences))
+        if not ordered:
+            return ()
+        table = self._table("ai_state_facts")
+        facts: list[StoredFact] = []
+        for offset in range(0, len(ordered), _FACT_READ_BATCH_SIZE):
+            rows = (await self._execute(
+                select(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.stream_digest == _hex(stream_digest),
+                    table.c.sequence.in_(ordered[offset:offset + _FACT_READ_BATCH_SIZE]),
+                ).order_by(table.c.sequence)
+            )).mappings().all()
+            facts.extend(_fact_from_row(row) for row in rows)
+        return tuple(facts)
+
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         from sqlalchemy import func, select
 
@@ -1922,7 +1995,7 @@ class _SqlTransaction:
                 .group_by(table.c.subject_digest)
             )
             statement = (
-                _select_rows(table)
+                select(table)
                 .where(
                     table.c.store_digest == self._store_hex,
                     table.c.stream_digest == _hex(query.stream_digest),
@@ -1933,10 +2006,10 @@ class _SqlTransaction:
         else:
             if query.latest:
                 statement = (
-                    _select_rows(table).where(*conditions).order_by(table.c.sequence.desc())
+                    select(table).where(*conditions).order_by(table.c.sequence.desc())
                 )
             else:
-                statement = _select_rows(table).where(*conditions).order_by(table.c.sequence)
+                statement = select(table).where(*conditions).order_by(table.c.sequence)
         if query.limit is not None:
             statement = statement.limit(1 if query.latest else query.limit)
         elif query.latest:
@@ -1945,10 +2018,12 @@ class _SqlTransaction:
         return tuple(_fact_from_row(row) for row in rows)
 
     async def scan_facts(self) -> tuple[StoredFact, ...]:
+        from sqlalchemy import select
+
         table = self._table("ai_state_facts")
         rows = (
             await self._execute(
-                _select_rows(table).where(table.c.store_digest == self._store_hex)
+                select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
         return tuple(_fact_from_row(row) for row in rows)
@@ -1959,6 +2034,8 @@ class _SqlTransaction:
         after: FactScanCursor | None,
         limit: int,
     ) -> tuple[StoredFact, ...]:
+        from sqlalchemy import select
+
         _require_scan_limit(limit)
         from sqlalchemy import and_, or_
 
@@ -1975,7 +2052,7 @@ class _SqlTransaction:
                 )
             )
         statement = (
-            _select_rows(table)
+            select(table)
             .where(*conditions)
             .order_by(table.c.stream_digest, table.c.sequence)
             .limit(limit)
@@ -2003,11 +2080,13 @@ class _SqlTransaction:
         )
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
+        from sqlalchemy import select
+
         table = self._table("ai_state_operations")
         row = (
             (
                 await self._execute(
-                    _select_rows(table).where(
+                    select(table).where(
                         table.c.store_digest == self._store_hex,
                         table.c.key_digest == _hex(key),
                     )
@@ -2042,6 +2121,8 @@ class _SqlTransaction:
     async def list_operations(
         self, query: OperationQuery
     ) -> tuple[StoredOperation, ...]:
+        from sqlalchemy import select
+
         table = self._table("ai_state_operations")
         conditions = [table.c.store_digest == self._store_hex]
         if query.stream_digest is not None:
@@ -2055,7 +2136,7 @@ class _SqlTransaction:
         if query.compactable is not None:
             conditions.append(table.c.compactable == query.compactable)
         statement = (
-            _select_rows(table)
+            select(table)
             .where(*conditions)
             .order_by(table.c.sequence, table.c.key_digest)
         )
@@ -2065,10 +2146,12 @@ class _SqlTransaction:
         return tuple(_operation_from_row(row) for row in rows)
 
     async def scan_operations(self) -> tuple[StoredOperation, ...]:
+        from sqlalchemy import select
+
         table = self._table("ai_state_operations")
         rows = (
             await self._execute(
-                _select_rows(table).where(table.c.store_digest == self._store_hex)
+                select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
@@ -2079,10 +2162,12 @@ class _SqlTransaction:
         after: OperationScanCursor | None,
         limit: int,
     ) -> tuple[StoredOperation, ...]:
+        from sqlalchemy import select
+
         _require_scan_limit(limit)
 
         table = self._table("ai_state_operations")
-        statement = _select_rows(table).where(table.c.store_digest == self._store_hex)
+        statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
             statement = statement.where(table.c.key_digest > _hex(after.key_digest))
         statement = statement.order_by(table.c.key_digest).limit(limit)
@@ -2113,7 +2198,7 @@ class _SqlTransaction:
         from sqlalchemy.dialects.mysql import BINARY
 
         conditions = []
-        for name in ("scope_digest", "parent_digest", "kind", "sort_key"):
+        for name in ("scope_digest", "parent_digest", "subject_digest", "kind", "sort_key"):
             column = table.c[name]
             # MySQL text equality may ignore case or trailing spaces even when
             # the in-memory identity contract distinguishes those values.
@@ -2139,16 +2224,6 @@ class _SqlTransaction:
         )
 
 
-def _select_rows(table: "Table") -> "Select":
-    from sqlalchemy import Text, cast, select
-
-    # Keep the database's JSON text rather than a driver's numeric coercions.
-    return select(*(
-        cast(column, Text).label(column.name) if column.name == "payload_json" else column
-        for column in table.c
-    ))
-
-
 def _record_values(
     record: StoredRecord, *, updating: bool = False
 ) -> dict[str, object]:
@@ -2160,6 +2235,9 @@ def _record_values(
         "parent_digest": None
         if record.parent_digest is None
         else _hex(record.parent_digest),
+        "subject_digest": None
+        if record.subject_digest is None
+        else _hex(record.subject_digest),
         "kind": record.kind,
         "sort_key": record.sort_key,
         "state": record.state,
@@ -2167,7 +2245,7 @@ def _record_values(
         "lease_owner": record.lease_owner,
         "lease_fence": record.lease_fence,
         "lease_expires_at": record.lease_expires_at,
-        "payload_json": dict(record.data),
+        "payload_json": canonical_json_bytes(dict(record.data)).decode("utf-8"),
     }
     if updating:
         from sqlalchemy import func
@@ -2190,6 +2268,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             _row_nonnegative_int(row["lease_fence"]),
             _datetime_or_none(row["lease_expires_at"]),
             _row_mapping(row["payload_json"]),
+            subject_digest=_row_digest_or_none(row["subject_digest"]),
         )
         validate_record_identity(record)
     except AIError:
@@ -2209,7 +2288,7 @@ def _fact_values(fact: StoredFact) -> dict[str, object]:
         if fact.subject_digest is None
         else _hex(fact.subject_digest),
         "state": fact.state,
-        "payload_json": dict(fact.data),
+        "payload_json": canonical_json_bytes(dict(fact.data)).decode("utf-8"),
     }
 
 
@@ -2239,7 +2318,7 @@ def _operation_values(
         "sequence": value.sequence,
         "state": value.state,
         "compactable": value.compactable,
-        "payload_json": dict(value.data),
+        "payload_json": canonical_json_bytes(dict(value.data)).decode("utf-8"),
     }
     if updating:
         from sqlalchemy import func
@@ -2317,8 +2396,9 @@ def _row_bool(value: object) -> bool:
 
 
 def _row_mapping(value: object) -> dict[str, object]:
-    if isinstance(value, (str, bytes)):
-        value = json.loads(value)
+    if not isinstance(value, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    value = json.loads(value)
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return dict(value)

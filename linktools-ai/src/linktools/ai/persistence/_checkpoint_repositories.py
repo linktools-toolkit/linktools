@@ -32,12 +32,15 @@ from .contracts import (
 from ._plan import PersistenceDomain
 from .state import (
     Observed,
+    RecordQuery,
+    RecordSubjectReader,
     RecordReplacement,
     StateStore,
     StateTransaction,
     StoredAlias,
     StoredRecord,
     alias_digest,
+    subject_digest,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -829,15 +832,24 @@ class ToolRepositoryImpl(_RepositoryBase):
             raise ValueError("tool_call_ids must contain non-empty strings")
         if not ordered:
             return ()
-        records = await self._records("tool_operation", scope=self._scope("tool_operation", "agent_run", agent_run_id))
-        values = [await self._decode(record, ToolOperationRecord) for record in records]
-        selected = {value.tool_call_id: value for value in values
-                    if value.agent_run_id == agent_run_id and value.tool_call_id in ordered}
-        missing = tuple(call_id for call_id in ordered if call_id not in selected)
-        if missing:
-            aliases = tuple(alias_digest(self._namespace, self._tenant_id, self._domain.value,
-                                         "tool_call", [agent_run_id, call_id]) for call_id in missing)
-            async def read(transaction: StateTransaction) -> None:
+
+        async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
+            scope = self._scope("tool_operation", "agent_run", agent_run_id)
+            records = None
+            if isinstance(transaction, RecordSubjectReader):
+                records = await transaction.read_record_subjects(
+                    kind="tool_operation", scope_digest=scope,
+                    subject_digests=tuple(subject_digest(call_id) for call_id in ordered),
+                )
+            if records is None:
+                records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_digest=scope))
+            values = [await self._decode(record, ToolOperationRecord) for record in records]
+            selected = {value.tool_call_id: value for value in values
+                        if value.agent_run_id == agent_run_id and value.tool_call_id in ordered}
+            missing = tuple(call_id for call_id in ordered if call_id not in selected)
+            if missing:
+                aliases = tuple(alias_digest(self._namespace, self._tenant_id, self._domain.value,
+                                             "tool_call", [agent_run_id, call_id]) for call_id in missing)
                 resolved = await transaction.resolve_aliases(aliases)
                 keys = tuple(dict.fromkeys(resolved.values()))
                 sources = await transaction.get_records(keys) if keys else {}
@@ -852,8 +864,9 @@ class ToolRepositoryImpl(_RepositoryBase):
                     if value.tool_call_id != call_id:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     selected[call_id] = value
-            await self._store.read(read)
-        return tuple(selected[call_id] for call_id in ordered if call_id in selected)
+            return tuple(selected[call_id] for call_id in ordered if call_id in selected)
+
+        return await self._store.read(read)
 
     async def get_by_call(
         self, agent_run_id: str, tool_call_id: str, *, tenant_id: str,

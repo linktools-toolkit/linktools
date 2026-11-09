@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
     BinaryContent, FilePart, InstructionBaselinePart, InstructionDeltaPart, InstructionDigest,
     InstructionId, InstructionPart, SerializedInstructionId, ModelMessage, ModelMessagesTypeAdapter, ModelRequest,
     ModelRequestAttempt, ModelResponse, NativeToolReturnPart,
-    SpeechPart, SystemPromptPart, TextContent, ToolReturnPart, UserContent, UserPromptPart,
+    SpeechPart, SystemPromptPart, TextContent, ToolReturn, ToolReturnPart, UserContent, UserPromptPart,
 )
 
 try:
@@ -35,7 +35,7 @@ except ImportError:
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from . import model_input_content, ReferencedContent, project_model_attempts, project_model_response_attempts
+from . import model_input_content, ReferencedContent, ReferencedInputOrigin, project_model_attempts, project_model_response_attempts
 from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import RetiredReferencedContent, decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
@@ -176,6 +176,27 @@ def project_transient_binary_content(
         return values
     projected_reversed.reverse()
     return tuple(projected_reversed)
+
+
+def bind_referenced_input_origin(result: object, origin: ReferencedInputOrigin) -> object:
+    """Project an actual tool invocation onto direct referenced return positions.
+
+    Existing origins stay with forwarded references. JSON snapshots and nested
+    data are not interpreted as descriptors or assigned invented provenance.
+    """
+    def bind(value: object) -> object:
+        if isinstance(value, ReferencedContent) and value.origin is None:
+            return value.with_origin(origin)
+        return value
+
+    if isinstance(result, ToolReturn):
+        value = result.return_value
+        content = result.content
+        return replace(result,
+                       return_value=[bind(item) for item in value] if isinstance(value, list) else bind(value),
+                       content=[bind(item) for item in content]
+                       if isinstance(content, Sequence) and not isinstance(content, str) else content)
+    return [bind(item) for item in result] if isinstance(result, list) else bind(result)
 
 
 def binary_content_usage(messages: Sequence[ModelMessage]) -> tuple[int, int]:
@@ -831,7 +852,7 @@ def _encode_datetime(value: datetime | None) -> JsonValue:
 
 
 
-__all__ = ['RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'native_checkpoint_messages', 'model_response_usage', 'project_model_response_attempts', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
+__all__ = ['bind_referenced_input_origin', 'RetiredReferencedContent', 'SummaryPromptPart', 'UnsupportedUserContentKind', 'binary_attachment_text', 'binary_content_usage', 'bind_tool_return_attachments', 'combine_model_message_payloads', 'decode_model_message_payloads', 'decode_model_messages', 'decode_tool_return_content', 'decode_user_content_item', 'encode_model_messages', 'encode_tool_return_content', 'encode_user_content_item', 'file_tool_result_metadata', 'freeze_model_messages', 'has_binary_attachment_metadata', 'input_attachment_views', 'is_binary_attachment_text', 'model_attempts_details', 'model_attempts_usage', 'model_input_content', 'native_checkpoint_messages', 'model_response_usage', 'project_model_response_attempts', 'project_user_content_identity', 'project_provider_messages', 'project_transient_binary_content', 'rehydrate_deferred_tool_results', 'request_attachment_facts', 'stable_json_snapshot', 'tool_return_content_digest', 'tool_return_content_matches', 'without_history_system_prompts']
 
 from ._attachment import (binary_attachment_text, bind_tool_return_attachments, file_tool_result_metadata, has_binary_attachment_metadata, input_attachment_views, is_binary_attachment_text, request_attachment_facts)
 

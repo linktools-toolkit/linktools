@@ -236,11 +236,11 @@ async def test_dependency_hold_release_preserves_failure_and_repeated_cancellati
             raise failure
 
     class Repository:
-        async def graph_state(self, graph_id: str, *, tenant_id: str) -> TaskGraphState:
-            assert (graph_id, tenant_id) == ("graph", "tenant")
+        async def get_node_states(self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str) -> tuple[TaskNodeView, ...]:
+            assert (graph_id, node_ids, tenant_id) == ("graph", ("node",), "tenant")
             node = TaskNodeView("graph", "node", (), TaskStatus.SUCCEEDED, None, 1, None,
                                 "a" * 64, None, None, execution_id="execution")
-            return TaskGraphState("graph", TaskStatus.SUCCEEDED, (TaskNode("node"),), (node,))
+            return (node,)
 
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._repository = Repository()

@@ -90,6 +90,7 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
         error: BaseException,
     ) -> AgentRunResult[Any]:
         capture = self._bound_capture()
+        capture.capture_interrupted_node()
         capture.recorder.finish_transcript(interrupted=True)
         await capture.context.save_checkpoint(
             ctx, messages=capture.live_messages or ctx.messages, state="interrupted"

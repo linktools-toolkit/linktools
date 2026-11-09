@@ -46,6 +46,7 @@ from ..inputs import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
     stored_input_attachment_views,
+    stored_user_input_view,
 )
 from ._plan import RuntimePlanStore
 from ._execution_payload import _materialize_execution_json, _materialize_execution_payloads
@@ -2442,6 +2443,7 @@ class LocalExecutionBackend:
             correlation=current.correlation,
             tool_response_ref=current.tool_response_ref,
             tool_effects=current.tool_effects,
+            session_context=current.session_context,
             resolved_binding=decision.binding,
         )
         if not self._prepare_recovery_relaunch(current.execution_id):
@@ -2628,11 +2630,11 @@ class LocalExecutionBackend:
             tenant_id=tenant_id,
         )
 
-    async def load_interrupted_messages(
+    async def load_interrupted_checkpoint(
         self,
         agent_run_id: str,
         *, execution: ExecutionRecord,
-    ) -> tuple[ModelMessage, ...]:
+    ) -> AgentRunCheckpoint:
         domain = (PersistenceDomain.CHECKPOINT if execution.restart_checkpoints else
                   PersistenceDomain.TRACE if execution.durable_trace else PersistenceDomain.CONVERSATION)
         archive = self._run_stores[domain]
@@ -2643,11 +2645,7 @@ class LocalExecutionBackend:
             )
         if checkpoint is None or checkpoint.state != "interrupted":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(
-            checkpoint.messages
-            if checkpoint.context_messages is None
-            else checkpoint.context_messages
-        )
+        return checkpoint
 
     async def claim_deferred_resume(
         self,
@@ -4089,6 +4087,11 @@ class LocalExecutionBackend:
             if current.status is ToolOperationStatus.CLAIMED:
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
 
+    async def validate_preload_skill_inputs(
+        self, binding: AgentBinding, inputs: tuple[Mapping[str, JsonValue], ...],
+    ) -> None:
+        await self._executor.validate_preload_skill_inputs(binding, inputs)
+
     async def load_input_context(self, reference: RuntimePayloadRef | None) -> ExecutionInputContext | None:
         if reference is None:
             return None
@@ -4302,6 +4305,7 @@ class LocalExecutionBackend:
             )
             deferred_tool_results = None if resume is None else resume.results
             resumed_deferred_attempt = deferred_tool_results is not None
+            output_retries_used = 0 if resume is None else resume.output_retries_used
             exact_recovery_context = checkpoint.recovery.source_agent_run_id is not None
             recovery_history_agent_run_id = checkpoint.recovery.source_agent_run_id
             if recovery_history_agent_run_id is not None:
@@ -4380,6 +4384,9 @@ class LocalExecutionBackend:
                 if source_replay_history is not None:
                     history = source_replay_history
                 elif recovery_history_agent_run_id is not None:
+                    output_retries_used = recovery_history_checkpoint.output_retries_used
+                    if output_retries_used is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     context_messages = recovery_history_checkpoint.context_messages
                     if context_messages is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4401,6 +4408,7 @@ class LocalExecutionBackend:
                 resume = await self._recovery_coordinator.restore_resumed_deferred(
                     current, history=tuple(history),
                     producer_generation=producer_generation, binding=binding,
+                    output_retries_used=output_retries_used,
                 )
                 deferred_tool_results = resume.results
                 resumed_deferred_attempt = True
@@ -4458,10 +4466,18 @@ class LocalExecutionBackend:
                         memory_capture = await memory.capture()
                     else:
                         reason = "memory_store_has_no_consistent_capture"
+                try:
+                    preload_skills = await self._executor.capture_preload_skills(binding)
+                except AIError as error:
+                    failed = await self._commit_failure(current, error, producer_generation=producer_generation)
+                    metric_status = failed.status.value
+                    metric_error_code = failed.error_code
+                    return
                 accepted_context = ExecutionInputContext.from_messages(history, session_metadata=session_metadata,
                     memory=memory_capture,
                     repository_instructions=None if initial_repository_instructions is None else initial_repository_instructions.to_payload(),
-                    replace_history_system_prompt=session_history_start, unavailable_reason=reason)
+                    replace_history_system_prompt=session_history_start, unavailable_reason=reason,
+                    preload_skills=preload_skills)
                 proposed_context = accepted_context
                 if prepared_admission is not None:
                     if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
@@ -4654,6 +4670,8 @@ class LocalExecutionBackend:
                 parent_execution_id=current.parent_execution_id,
                 agent_id=binding.compiled_agent.spec.id,
                 agent_run_seq=current.agent_run_seq,
+                input_context=accepted_context,
+                original_input=stored_user_input_view(current.stored_user_input),
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store
@@ -4678,6 +4696,7 @@ class LocalExecutionBackend:
                             current.stored_user_input
                         ),
                         history=history,
+                        output_retries_used=output_retries_used,
                         initial_context=loaded_context,
                         agent_conversation_id=agent_conversation_id,
                         run_store=self._run_store,

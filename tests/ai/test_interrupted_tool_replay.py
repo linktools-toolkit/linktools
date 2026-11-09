@@ -290,8 +290,15 @@ async def test_pending_placeholder_cursor_keeps_selected_keys_after_request_reor
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("corruption", ("call", "request", "duration", "conflicting-request"))
-async def test_unknown_attempts_still_validate_tool_identity_and_coordinates(corruption: str) -> None:
+async def test_unknown_attempts_still_validate_tool_identity_and_coordinates(
+    corruption: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async with _history() as history:
+        recorder, = history.recorders
+        recorder.append_transcript_message(ModelResponse(parts=[ToolCallPart("echo", {}, tool_call_id="call")]))
+        await recorder.commit_history_boundary()
+        archive = history.state.run_store.read_store(PersistenceDomain.TRACE)
+        original = archive.capture_history
         metadata = {
             TOOL_ERROR_CODE_METADATA_KEY: ErrorCode.TOOL_EFFECT_UNKNOWN.value,
             MODEL_REQUEST_SEQ_METADATA_KEY: "1",
@@ -303,16 +310,20 @@ async def test_unknown_attempts_still_validate_tool_identity_and_coordinates(cor
         elif corruption == "conflicting-request":
             metadata[MODEL_REQUEST_SEQ_METADATA_KEY] = "2"
         events = [StepEvent(
-            "run", "TOOL_CALL_STARTED", 1, tool_call_id="call",
+            recorder.agent_run_id, "TOOL_CALL_STARTED", 1, tool_call_id="call",
             metadata={MODEL_REQUEST_SEQ_METADATA_KEY: "1"},
         ), StepEvent(
-            "run", "TOOL_CALL_FAILED", 1,
+            recorder.agent_run_id, "TOOL_CALL_FAILED", 1,
             tool_call_id="" if corruption == "call" else "call", metadata=metadata,
         )]
+        async def capture(agent_run_ids, *, include_pending=False):
+            captures = await original(agent_run_ids, include_pending=include_pending)
+            return {run_id: replace(value, event_count=len(events), inline_events=tuple(events))
+                    for run_id, value in captures.items()}
+
+        monkeypatch.setattr(archive, "capture_history", capture)
         with pytest.raises(AIError) as raised:
-            await history.reader._tool_call_metadata(
-                "run", execution_id="execution", tenant_id="tenant", events=events,
-            )
+            await history.reader.history("execution", tenant_id="tenant", cursor=None, limit=10)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

@@ -31,6 +31,7 @@ from ..core import (
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
+from ..capability import SkillReadReceipt, SKILL_READ_METADATA_KEY, PRELOAD_SKILL_READS_METADATA_KEY
 from ..execution.ranges import model_interaction_update_ranges, validate_model_metadata_range
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
@@ -102,6 +103,7 @@ class _ProjectedHistoryItem:
     tool_call_id: "str | None" = None
     part_index: int | None = None
     interrupted_tool_placeholder: bool = False
+    skill_read: SkillReadReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1308,6 +1310,12 @@ class StepExecutionHistoryReader:
             ]
             if instructions:
                 request["instructions"] = instructions
+            current = request_messages[-1] if request_messages else None
+            if isinstance(current, ModelRequest) and isinstance(current.metadata, Mapping) and PRELOAD_SKILL_READS_METADATA_KEY in current.metadata:
+                raw_receipts = current.metadata[PRELOAD_SKILL_READS_METADATA_KEY]
+                if not isinstance(raw_receipts, list):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                request["preload_skill_reads"] = [SkillReadReceipt.from_payload(item).to_payload() for item in raw_receipts]
         if include_content and response_messages is not None:
             projected = project_public_messages(response_messages)
             response = projected[0] if len(projected) == 1 else projected
@@ -1352,13 +1360,8 @@ class StepExecutionHistoryReader:
             stream_attempts=stream_attempts,
         )
 
-    async def _tool_call_metadata(
-        self,
-        agent_run_id: str,
-        *,
-        execution_id: str,
-        tenant_id: str,
-        events: Sequence[StepEvent],
+    def _tool_call_metadata(
+        self, events: Sequence[StepEvent],
     ) -> dict[
         str,
         tuple[
@@ -1367,7 +1370,6 @@ class StepExecutionHistoryReader:
             int | None,
             str,
             int | None,
-            str | None,
         ],
     ]:
         values: dict[str, list[object | None]] = {}
@@ -1382,11 +1384,11 @@ class StepExecutionHistoryReader:
             call_id = event.tool_call_id
             if call_id is None or not call_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            model_request_seq = _event_model_request_seq(event)
-            if model_request_seq is not None:
-                if call_id in requests and requests[call_id] != model_request_seq:
+            event_request_seq = _event_model_request_seq(event)
+            if event_request_seq is not None:
+                if call_id in requests and requests[call_id] != event_request_seq:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                requests[call_id] = model_request_seq
+                requests[call_id] = event_request_seq
             timestamp = _event_timestamp(event)
             raw_duration = event.metadata.get(DURATION_NS_METADATA_KEY)
             if raw_duration is not None and not raw_duration.isdigit():
@@ -1394,9 +1396,9 @@ class StepExecutionHistoryReader:
             if (event.event_type == "TOOL_CALL_FAILED"
                     and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value):
                 continue
-            value = values.setdefault(call_id, [None, None, None, "STARTED", None, None])
-            if model_request_seq is not None:
-                value[4] = model_request_seq
+            value = values.setdefault(call_id, [None, None, None, "STARTED", None])
+            if event_request_seq is not None:
+                value[4] = event_request_seq
             if event.event_type == "TOOL_CALL_STARTED":
                 if value[0] is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1409,26 +1411,6 @@ class StepExecutionHistoryReader:
                 value[2] = int(raw_duration)
             value[3] = "SUCCEEDED" if event.event_type == "TOOL_CALL_SUCCEEDED" else "FAILED"
 
-        if self._tool_operations is not None and values:
-            operations = await self._tool_operations.get_by_call_ids(
-                agent_run_id, tuple(values), tenant_id=tenant_id,
-            )
-            by_call: dict[str, ToolOperationRecord] = {}
-            for operation in operations:
-                if operation.execution_id != execution_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if operation.tool_call_id in by_call:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                by_call[operation.tool_call_id] = operation
-            for call_id, value in values.items():
-                operation = by_call.get(call_id)
-                if operation is not None:
-                    value[5] = operation.tool_operation_id
-                    if operation.status is ToolOperationStatus.EFFECT_UNKNOWN:
-                        value[3] = "EFFECT_UNKNOWN"
-                    elif operation.status is ToolOperationStatus.CANCELLED:
-                        value[3] = "CANCELLED"
-
         return {
             call_id: (
                 cast("datetime | None", value[0]),
@@ -1436,7 +1418,6 @@ class StepExecutionHistoryReader:
                 cast("int | None", value[2]),
                 cast(str, value[3]),
                 cast("int | None", value[4]),
-                cast("str | None", value[5]),
             )
             for call_id, value in values.items()
         }
@@ -1484,7 +1465,7 @@ class StepExecutionHistoryReader:
             iterator = self._iter_history_source(
                 source, tenant_id=tenant_id, start_message_index=start_message_index,
                 end_message_index=message_high_water, event_high_water=event_high_water,
-                message_batch_size=limit + 1,
+                message_batch_size=limit + 1 - len(page),
                 start_item_offset=start_item_offset, from_cursor=source is cursor_source,
                 tail_keys=tail_keys, tool_call_id=tool_call_id,
                 model_request_seq=model_request_seq, step_index=step_index,
@@ -1549,148 +1530,182 @@ class StepExecutionHistoryReader:
         if inline_events is not None:
             inline_events = inline_events[:event_high_water]
             responses, request_steps, replayed_parts = _request_associations(inline_events)
-            tool_metadata = await self._tool_call_metadata(
-                agent_run_id, execution_id=source.record.execution_id,
-                tenant_id=tenant_id, events=inline_events,
-            )
-        first = True
-        message_index = start_message_index
+            tool_metadata = self._tool_call_metadata(inline_events)
         saw_message = False
-        async for message in messages:
-            saw_message = True
-            if inline_events is None:
-                message_events = await self._store_for(source.record).read_history_associations(
-                    agent_run_id=agent_run_id, message_seqs=(message_index + 1,),
-                    tool_call_ids=(), event_high_water=event_high_water,
-                )
-                responses, request_steps, replayed_parts = _request_associations(message_events)
-                tool_metadata = await self._tool_call_metadata(
-                    agent_run_id, execution_id=source.record.execution_id,
-                    tenant_id=tenant_id, events=message_events,
-                )
-            replayed_indices = replayed_parts.get(message_index + 1, ())
-            if replayed_indices and (
-                not isinstance(message, ModelResponse)
-                or any(index >= len(message.parts) or not isinstance(message.parts[index], ToolCallPart)
-                       for index in replayed_indices)
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            projected = _history_parts(
-                message,
-                staged_keys=(
-                    source.capture.pending_keys
-                    if message_index == source.capture.transcript_message_count else ()
-                ),
-                selected_keys=tail_keys
-                if message_index == end_message_index - 1
-                else (),
-            )
-            item_offset = start_item_offset if first else 0
-            if first and item_offset > len(projected):
-                raise AIError(ErrorCode.CURSOR_INVALID)
-            first = False
-            for projected_offset in range(item_offset, len(projected)):
-                value = projected[projected_offset]
-                if value.part_index in replayed_indices:
-                    continue
-                if tool_call_id is not None and value.tool_call_id != tool_call_id:
-                    continue
-                if (
-                    message_seq is not None
-                    and message_index + 1 != message_seq
-                ):
-                    continue
-                if part_index is not None and value.part_index != part_index:
-                    continue
-                if inline_events is None and value.tool_call_id is not None and value.tool_call_id not in tool_metadata:
-                    call_events = await self._store_for(source.record).read_history_associations(
-                        agent_run_id=agent_run_id, message_seqs=(),
-                        tool_call_ids=(value.tool_call_id,), event_high_water=event_high_water,
-                    )
-                    call_responses, call_steps, _call_replays = _request_associations(call_events)
-                    for response_sequence, response_request in call_responses.items():
-                        if response_sequence in responses and responses[response_sequence] != response_request:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        responses[response_sequence] = response_request
-                    for request_sequence, request_step in call_steps.items():
-                        if request_sequence in request_steps and request_steps[request_sequence] != request_step:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        request_steps[request_sequence] = request_step
-                    tool_metadata.update(await self._tool_call_metadata(
-                        agent_run_id, execution_id=source.record.execution_id,
-                        tenant_id=tenant_id, events=call_events,
-                    ))
-                metadata = (
-                    None
-                    if value.tool_call_id is None
-                    else tool_metadata.get(value.tool_call_id)
-                )
-                origin_request = (
-                    responses.get(message_index + 1)
-                    if isinstance(message, ModelResponse)
-                    else None
-                )
-                tool_request = None if metadata is None else metadata[4]
-                if value.item_kind == "tool_call" and origin_request is None and tool_request is not None:
-                    original_sequences = tuple(sequence for sequence, request in responses.items()
-                                               if request == tool_request and sequence < message_index + 1)
-                    if len(original_sequences) > 1:
+
+        async def candidates() -> AsyncGenerator[tuple[int, object, int, _ProjectedHistoryItem | None], None]:
+            nonlocal saw_message
+            first = True
+            message_index = start_message_index
+            async for message in messages:
+                saw_message = True
+                if inline_events is not None:
+                    replayed_indices = replayed_parts.get(message_index + 1, ())
+                    if replayed_indices and (
+                        not isinstance(message, ModelResponse)
+                        or any(index >= len(message.parts) or not isinstance(message.parts[index], ToolCallPart)
+                               for index in replayed_indices)
+                    ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if original_sequences:
-                        original_messages = [original async for original in self._store_for(source.record).iter_message_range(
-                            agent_run_id=agent_run_id, start=original_sequences[0] - 1, end=original_sequences[0],
-                        )]
-                        if len(original_messages) != 1 or not isinstance(original_messages[0], ModelResponse):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        original_calls = [part for part in original_messages[0].parts
-                                          if isinstance(part, ToolCallPart) and part.tool_call_id == value.tool_call_id]
-                        if (len(original_calls) != 1 or original_calls[0].tool_name != value.tool_name
-                                or original_calls[0].args_as_dict() != value.content):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        continue
-                if origin_request is not None and tool_request is not None and origin_request != tool_request:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if origin_request is None:
-                    origin_request = tool_request
-                origin_step = None if origin_request is None else request_steps.get(origin_request)
-                if model_request_seq is not None and origin_request != model_request_seq:
-                    continue
-                if step_index is not None and origin_step != step_index:
-                    continue
-                status = None if metadata is None else metadata[3]
-                if status == "STARTED" and source.record.status in {
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
-                    status = source.record.status.value
-                if value.interrupted_tool_placeholder:
-                    status = "INTERRUPTED"
-                yield _HistoryOccurrence(
-                    ExecutionHistoryItem(
-                        execution_id=source.record.execution_id,
-                        message_seq=message_index + 1,
-                        item_kind=value.item_kind,
-                        content=value.content,
-                        tool_name=value.tool_name,
-                        tool_call_id=value.tool_call_id,
-                        content_included=True,
-                        part_index=value.part_index,
-                        agent_run_seq=source.agent_run_seq,
-                        model_request_seq=origin_request,
-                        step_index=origin_step,
-                        tool_operation_id=None if metadata is None else metadata[5],
-                        started_at=None if metadata is None else metadata[0],
-                        finished_at=None if metadata is None else metadata[1],
-                        duration_ns=None if metadata is None else metadata[2],
-                        status=status,
+                projected = _history_parts(
+                    message,
+                    staged_keys=(
+                        source.capture.pending_keys
+                        if message_index == source.capture.transcript_message_count else ()
                     ),
-                    source.record.execution_id,
-                    source.agent_run_seq,
-                    message_index,
-                    projected_offset,
-                    (*source.merge_prefix, message_index, projected_offset),
+                    selected_keys=tail_keys if message_index == end_message_index - 1 else (),
                 )
-            message_index += 1
+                item_offset = start_item_offset if first else 0
+                if first and item_offset > len(projected):
+                    raise AIError(ErrorCode.CURSOR_INVALID)
+                first = False
+                if tool_call_id is None and part_index is None and item_offset == len(projected):
+                    yield message_index, message, item_offset, None
+                for projected_offset in range(item_offset, len(projected)):
+                    value = projected[projected_offset]
+                    if tool_call_id is not None and value.tool_call_id != tool_call_id:
+                        continue
+                    if part_index is not None and value.part_index != part_index:
+                        continue
+                    yield message_index, message, projected_offset, value
+                message_index += 1
+
+        candidate_items = candidates()
+        remaining = message_batch_size
+        try:
+            while remaining:
+                # Bound associations by the remaining output and lookahead budget,
+                # including when one response contains many tool calls.
+                window = []
+                for _ in range(min(remaining, 32)):
+                    candidate = await anext(candidate_items, None)
+                    if candidate is None:
+                        break
+                    window.append(candidate)
+                if not window:
+                    break
+                call_ids = {value.tool_call_id for _, _, _, value in window
+                            if value is not None and value.tool_call_id is not None}
+                events = inline_events
+                if events is None:
+                    events = await self._store_for(source.record).read_history_associations(
+                        agent_run_id=agent_run_id,
+                        message_seqs=tuple(dict.fromkeys(index + 1 for index, _, _, _ in window)),
+                        tool_call_ids=tuple(sorted(call_ids)), event_high_water=event_high_water,
+                    )
+                    responses, request_steps, replayed_parts = _request_associations(events)
+                    tool_metadata = self._tool_call_metadata(events)
+                selected: list[_HistoryOccurrence] = []
+                for message_index, message, projected_offset, value in window:
+                    replayed_indices = replayed_parts.get(message_index + 1, ())
+                    if replayed_indices and (
+                        not isinstance(message, ModelResponse)
+                        or any(index >= len(message.parts) or not isinstance(message.parts[index], ToolCallPart)
+                               for index in replayed_indices)
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if value is None or value.part_index in replayed_indices:
+                        continue
+                    metadata = (
+                        None
+                        if value.tool_call_id is None
+                        else tool_metadata.get(value.tool_call_id)
+                    )
+                    origin_request = (
+                        responses.get(message_index + 1)
+                        if isinstance(message, ModelResponse)
+                        else None
+                    )
+                    tool_request = None if metadata is None else metadata[4]
+                    if value.item_kind == "tool_call" and origin_request is None and tool_request is not None:
+                        original_sequences = tuple(sequence for sequence, request in responses.items()
+                                                   if request == tool_request and sequence < message_index + 1)
+                        if len(original_sequences) > 1:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if original_sequences:
+                            original_messages = [original async for original in self._store_for(source.record).iter_message_range(
+                                agent_run_id=agent_run_id, start=original_sequences[0] - 1, end=original_sequences[0],
+                            )]
+                            if len(original_messages) != 1 or not isinstance(original_messages[0], ModelResponse):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            original_calls = [part for part in original_messages[0].parts
+                                              if isinstance(part, ToolCallPart) and part.tool_call_id == value.tool_call_id]
+                            if (len(original_calls) != 1 or original_calls[0].tool_name != value.tool_name
+                                    or original_calls[0].args_as_dict() != value.content):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            continue
+                    if origin_request is not None and tool_request is not None and origin_request != tool_request:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if origin_request is None:
+                        origin_request = tool_request
+                    origin_step = None if origin_request is None else request_steps.get(origin_request)
+                    if model_request_seq is not None and origin_request != model_request_seq:
+                        continue
+                    if step_index is not None and origin_step != step_index:
+                        continue
+                    status = None if metadata is None else metadata[3]
+                    if status == "STARTED" and source.record.status in {
+                        ExecutionStatus.FAILED,
+                        ExecutionStatus.CANCELLED,
+                    }:
+                        status = source.record.status.value
+                    if value.interrupted_tool_placeholder:
+                        status = "INTERRUPTED"
+                    selected.append(_HistoryOccurrence(
+                        ExecutionHistoryItem(
+                            execution_id=source.record.execution_id,
+                            message_seq=message_index + 1,
+                            item_kind=value.item_kind,
+                            content=value.content,
+                            tool_name=value.tool_name,
+                            tool_call_id=value.tool_call_id,
+                            content_included=True,
+                            part_index=value.part_index,
+                            agent_run_seq=source.agent_run_seq,
+                            model_request_seq=origin_request,
+                            step_index=origin_step,
+                            started_at=None if metadata is None else metadata[0],
+                            finished_at=None if metadata is None else metadata[1],
+                            duration_ns=None if metadata is None else metadata[2],
+                            status=status,
+                            skill_read=value.skill_read,
+                        ),
+                        source.record.execution_id,
+                        source.agent_run_seq,
+                        message_index,
+                        projected_offset,
+                        (*source.merge_prefix, message_index, projected_offset),
+                    ))
+                selected_calls = tuple(dict.fromkeys(
+                    occurrence.item.tool_call_id for occurrence in selected
+                    if occurrence.item.tool_call_id in tool_metadata
+                ))
+                operations: dict[str, ToolOperationRecord] = {}
+                if self._tool_operations is not None and selected_calls:
+                    for operation in await self._tool_operations.get_by_call_ids(
+                        agent_run_id, selected_calls, tenant_id=tenant_id,
+                    ):
+                        if (operation.execution_id != source.record.execution_id
+                                or operation.tool_call_id in operations):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        operations[operation.tool_call_id] = operation
+                for occurrence in selected:
+                    operation = operations.get(occurrence.item.tool_call_id)
+                    if operation is not None:
+                        status = occurrence.item.status
+                        if status != "INTERRUPTED":
+                            if operation.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                                status = "EFFECT_UNKNOWN"
+                            elif operation.status is ToolOperationStatus.CANCELLED:
+                                status = "CANCELLED"
+                        occurrence = replace(occurrence, item=replace(
+                            occurrence.item, tool_operation_id=operation.tool_operation_id, status=status,
+                        ))
+                    remaining -= 1
+                    yield occurrence
+        finally:
+            await candidate_items.aclose()
+            await messages.aclose()
         if from_cursor and not saw_message:
             raise AIError(ErrorCode.CURSOR_INVALID)
         if (
@@ -3102,6 +3117,11 @@ def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
             item.content,
             item.tool_name,
             item.tool_call_id,
+            skill_read=(
+                SkillReadReceipt.from_payload(part.metadata[SKILL_READ_METADATA_KEY])
+                if isinstance(part, ToolReturnPart) and isinstance(part.metadata, Mapping)
+                and SKILL_READ_METADATA_KEY in part.metadata else None
+            ),
             interrupted_tool_placeholder=(
                 isinstance(part, ToolReturnPart) and part.outcome == "interrupted"
                 and isinstance(part.metadata, Mapping)

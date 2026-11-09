@@ -133,7 +133,9 @@ def bind_state_scope(
         transactions
         if writable
         else {
-            store: _ReadOnlyStateTransaction(transaction)
+            store: (_ReadOnlyFactReader(transaction, transaction)
+                    if isinstance(transaction, FactReader)
+                    else _ReadOnlyStateTransaction(transaction))
             for store, transaction in transactions.items()
         }
     )
@@ -309,6 +311,7 @@ class StoredRecord:
     lease_fence: int
     lease_expires_at: datetime | None
     data: Mapping[str, JsonValue]
+    subject_digest: bytes | None = None
 
     def __post_init__(self) -> None:
         _require_digest(self.key_digest, "key_digest")
@@ -316,6 +319,8 @@ class StoredRecord:
             _require_digest(self.scope_digest, "scope_digest")
         if self.parent_digest is not None:
             _require_digest(self.parent_digest, "parent_digest")
+        if self.subject_digest is not None:
+            _require_digest(self.subject_digest, "subject_digest")
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
             raise ValueError("record kind must contain at most 32 characters")
         if self.kind in {".", ".."} or any(character in self.kind for character in "/\\"):
@@ -721,6 +726,40 @@ class StateTransaction(Protocol):
 
 
 @runtime_checkable
+class RecordSubjectReader(Protocol):
+    """Optional exact-subject reads within one record scope and kind.
+
+    Return matching records in ascending (sort_key, key_digest) order from the
+    transaction's current view, including its own writes. Subject duplicates
+    do not duplicate rows, but multiple records for one subject are retained.
+    Empty input returns an empty tuple without source reads. Parameter limits
+    may require several statements without strengthening isolation. Return
+    None only when this capability is unavailable, never for an empty match.
+    """
+
+    async def read_record_subjects(
+        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+    ) -> tuple[StoredRecord, ...] | None: ...
+
+
+@runtime_checkable
+class FactReader(Protocol):
+    """Optional exact-sequence reads in the current state transaction.
+
+    Return only found facts in this store and stream, once per requested
+    sequence, in ascending sequence order. Input order and duplicates do not
+    affect the result. Missing sequences are omitted; empty input returns an
+    empty tuple without source reads. Reuse the transaction's read view,
+    including its own writes. Parameter limits may require multiple statements;
+    this operation does not strengthen isolation or bound returned bytes.
+    """
+
+    async def get_facts(
+        self, stream_digest: bytes, sequences: Sequence[int],
+    ) -> tuple[StoredFact, ...]: ...
+
+
+@runtime_checkable
 class SqlStateTransaction(Protocol):
     """Execute prepared SQL inside the current writable storage callback.
 
@@ -747,6 +786,15 @@ class _ReadOnlyStateTransaction(StateTransaction):
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         return await self._transaction.get_records(keys)
+
+    async def read_record_subjects(
+        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+    ) -> tuple[StoredRecord, ...] | None:
+        if isinstance(self._transaction, RecordSubjectReader):
+            return await self._transaction.read_record_subjects(
+                scope_digest=scope_digest, kind=kind, subject_digests=subject_digests,
+            )
+        return None
 
     async def read_archive_frontiers(
         self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
@@ -972,6 +1020,17 @@ class _ReadOnlyStateTransaction(StateTransaction):
         return ()
 
 
+class _ReadOnlyFactReader(_ReadOnlyStateTransaction):
+    def __init__(self, transaction: StateTransaction, reader: FactReader) -> None:
+        super().__init__(transaction)
+        self._fact_reader = reader
+
+    async def get_facts(
+        self, stream_digest: bytes, sequences: Sequence[int],
+    ) -> tuple[StoredFact, ...]:
+        return await self._fact_reader.get_facts(stream_digest, sequences)
+
+
 StateCallback = Callable[[StateTransaction], Awaitable[ValueT]]
 StateGroupCallback = Callable[["StateGroupTransaction"], Awaitable[ValueT]]
 
@@ -1186,6 +1245,7 @@ def validate_record_identity(record: StoredRecord) -> None:
         ("key_digest", record.key_digest),
         ("scope_digest", record.scope_digest),
         ("parent_digest", record.parent_digest),
+        ("subject_digest", record.subject_digest),
     )
     for name, value in values:
         if value is not None and (not isinstance(value, bytes) or len(value) != 32):
@@ -1205,6 +1265,7 @@ def validate_record_replacement(current: StoredRecord, candidate: StoredRecord) 
         current.key_digest != candidate.key_digest
         or current.scope_digest != candidate.scope_digest
         or current.parent_digest != candidate.parent_digest
+        or current.subject_digest != candidate.subject_digest
         or current.kind != candidate.kind
         or current.sort_key != candidate.sort_key
     ):
@@ -1232,4 +1293,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
