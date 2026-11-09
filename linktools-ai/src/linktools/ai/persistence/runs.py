@@ -1555,7 +1555,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if offset.observation_task is None:
                     offset.observation_execution_id = None
                     offset.observation_producer_generation = None
-        self._publish_model_interaction_change(flight.agent_run_id)
+        # The first publication also makes the run available to metadata readers.
+        # Later event/transcript-only commits do not change their captured view.
+        if captured.interactions or not any((
+            captured.base_event_offset, captured.base_checkpoint_offset,
+            captured.base_interaction_offset, captured.base_message_index,
+        )):
+            self._publish_model_interaction_change(flight.agent_run_id)
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.debug(
@@ -1877,7 +1883,6 @@ class RuntimeAgentRunStore(AgentRunStore):
             # A transient route is observable only through its local staging
             # owner; there is no archive projection to commit or acknowledge.
             self.trace_persistence.dirty.discard(agent_run_id)
-            self._publish_model_interaction_change(agent_run_id)
             return
         offset = self.trace_persistence.offsets.get(agent_run_id)
         if (agent_run_id in self.trace_persistence.dirty and offset is not None

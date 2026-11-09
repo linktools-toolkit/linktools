@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from ..core import TaskStatus
 from ..errors import AIError, ErrorCode
 from ..task import TaskGraphView, TaskNode, TaskNodeView
+from ._task_summary import _TaskSummary
 
 
 def _is_sha256(value: object) -> bool:
@@ -36,28 +37,7 @@ def _aggregate_graph_status(
     nodes: tuple[TaskNodeView, ...],
     failure_policies: Mapping[str, str],
 ) -> TaskStatus:
-    statuses = {node.status for node in nodes}
-    if TaskStatus.RECOVERY_REQUIRED in statuses:
-        return TaskStatus.RECOVERY_REQUIRED
-    if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:
-        return TaskStatus.RUNNING
-    if TaskStatus.PENDING in statuses or TaskStatus.READY in statuses:
-        return TaskStatus.PENDING
-    if any(
-        node.status is TaskStatus.FAILED
-        and failure_policies[node.node_id] == "propagate"
-        for node in nodes
-    ):
-        return TaskStatus.FAILED
-    if any(
-        node.status is TaskStatus.BLOCKED
-        and failure_policies[node.node_id] == "propagate"
-        for node in nodes
-    ):
-        return TaskStatus.BLOCKED
-    if TaskStatus.CANCELLED in statuses:
-        return TaskStatus.CANCELLED
-    return TaskStatus.SUCCEEDED
+    return _TaskSummary.from_states(nodes, failure_policies).status()
 
 
 def _effective_graph_status(

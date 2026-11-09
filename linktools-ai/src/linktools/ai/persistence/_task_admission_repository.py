@@ -42,6 +42,7 @@ from .repositories import (
     replace_checked,
 )
 from .state import (
+    active_state_scope,
     RecordQuery,
     StateStore,
     StateTransaction,
@@ -54,9 +55,9 @@ from ._task_events import (
     _TaskEventState,
     _append_task_events,
     _append_task_state_events,
-    _guard_task_event_owner,
     _task_graph_event_drafts,
 )
+from ._task_summary import _TaskSummary
 from ._task_state import (
     _effective_graph_status,
     _is_sha256,
@@ -507,6 +508,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             for node in nodes
         )
         TaskGraph(graph_id, nodes)
+        summary = _TaskSummary.read(graph_record)
+        scope = active_state_scope()
+        if summary is not None and (scope is None or not scope.writable):
+            summary.validate(ordered_states, nodes)
         return (
             TaskGraphView(
                 graph_id,
@@ -956,6 +961,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     state=node_view.status.value,
                 )
             )
+        records[0] = _TaskSummary.build(tuple(node_views), graph.nodes).attach(records[0])
         await transaction.insert_records(tuple(records))
         await _append_task_state_events(
             transaction,
@@ -1142,21 +1148,26 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             and graph_record.state == view.status.value
         ):
             return view
-        graph_record = await _guard_task_event_owner(
-            transaction,
+        summary = _TaskSummary.read(graph_record)
+        guarded = await transaction.guard_record(
             self._graph_key(view.graph_id),
+            expected_storage_revision=graph_record.storage_revision,
         )
+        if guarded is None:
+            raise _SubmissionConflict()
+        graph_record = guarded
+        current, states = await self._current_graph_in_transaction(transaction, view.graph_id)
+        if summary is not None:
+            summary.validate(states, current.nodes)
+        summary = _TaskSummary.build(states, current.nodes)
         if (
             graph_view.status is not view.status
             or graph_record.state != view.status.value
         ):
+            replacement = projected_record(self, graph_record, replace(graph_view, status=view.status))
             await replace_checked(
                 transaction,
-                projected_record(
-                    self,
-                    graph_record,
-                    replace(graph_view, status=view.status),
-                ),
+                replacement if summary is None else summary.attach(replacement),
                 graph_record.storage_revision,
             )
         await _append_task_events(
