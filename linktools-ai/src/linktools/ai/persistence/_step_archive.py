@@ -3495,27 +3495,44 @@ class StateStepArchive(AgentRunStore):
             result: list[tuple[int, StepEvent]] = []
             start = 0
             while start < len(sequences):
-                end = start + 1
-                # Bound raw fact residency without reordering the timestamp page.
-                while (end < len(sequences) and end - start < 32
-                       and sequences[end] == sequences[end - 1] + 1):
-                    end += 1
-                facts = await transaction.list_facts(FactQuery(
-                    self._stream(agent_run_id, "event"),
-                    after_sequence=sequences[start] - 1, limit=end - start,
-                ))
-                if [fact.sequence for fact in facts] != sequences[start:end]:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                for index, fact in enumerate(facts, start):
-                    sequence, record = sequences[index], records[index]
+                window_end = start
+                while window_end < len(sequences):
+                    end = window_end + 1
+                    while (end < len(sequences) and end - window_end < 32
+                           and sequences[end] == sequences[end - 1] + 1):
+                        end += 1
+                    # Do not split an already contiguous read to fill a window.
+                    if end - start > 32:
+                        break
+                    window_end = end
+                window = sequences[start:window_end]
+                ordered = sorted(set(window))
+                selected: dict[int, StoredFact] = {}
+                offset = 0
+                # Read only selected contiguous facts, independently of timestamp order.
+                while offset < len(ordered):
+                    end = offset + 1
+                    while end < len(ordered) and ordered[end] == ordered[end - 1] + 1:
+                        end += 1
+                    facts = await transaction.list_facts(FactQuery(
+                        self._stream(agent_run_id, "event"),
+                        after_sequence=ordered[offset] - 1, limit=end - offset,
+                    ))
+                    if [fact.sequence for fact in facts] != ordered[offset:end]:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    selected.update((fact.sequence, fact) for fact in facts)
+                    del facts
+                    offset = end
+                for index, sequence in enumerate(window, start):
+                    record, fact = records[index], selected[sequence]
                     event = _decode_step(fact.data)
                     if (not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id
                             or record.sort_key != f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
                             or not matches(sequence, event)):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     result.append((sequence, event))
-                del facts, fact
-                start = end
+                del selected, fact
+                start = window_end
             return result
 
         return await self._store.read(read)

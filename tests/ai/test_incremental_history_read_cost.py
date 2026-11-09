@@ -3,6 +3,8 @@
 """Small history pages do not materialize an entire run's event facts."""
 
 from linktools.ai.persistence import Persistence
+import json
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,11 +13,12 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event as sql_event
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.core import ExecutionStatus, agent_conversation_id, agent_run_id
+from linktools.ai.core import ExecutionStatus, agent_conversation_id, agent_run_id, canonical_json_bytes
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.observe.journal import MESSAGE_SEQ_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import _sql
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._memory_transaction import _MemoryOverlay, _MemoryTransaction
 from linktools.ai.persistence._sql import _SqlTransaction
@@ -26,7 +29,7 @@ from .test_history_request_association import _history
 from .test_history_projection_conformance import _record
 
 
-async def _seed_trace(storage: Persistence, count: int):
+async def _seed_trace(storage: Persistence, count: int, *, reverse_timestamps: bool = False):
     await storage.initialize(namespace="history", tenant_id="tenant")
     await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1)
@@ -38,7 +41,8 @@ async def _seed_trace(storage: Persistence, count: int):
     timestamp = datetime(2026, 1, 2, tzinfo=timezone.utc)
     for index in range(count):
         await storage.run_store.append_event(StepEvent(
-            run_id, "TOOL_CALL_STARTED", index + 1, timestamp=timestamp,
+            run_id, "TOOL_CALL_STARTED", index + 1,
+            timestamp=timestamp + timedelta(seconds=count - index) if reverse_timestamps else timestamp,
             tool_call_id=f"call-{index}", tool_name="tool", event_index=index,
             idempotency_key=f"event-{index}",
         ), execution_id="execution")
@@ -251,35 +255,110 @@ async def test_sql_trace_query_count_is_independent_of_examined_events(tmp_path:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("page_size", (64, 129))
+@pytest.mark.parametrize("page_size", (32, 64, 129))
+@pytest.mark.parametrize("reverse_timestamps", (False, True))
 async def test_trace_pages_batch_fact_reads_without_overfetch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_size: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_size: int, reverse_timestamps: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'page.db'}")
     await provision_database(engine)
     storage = Persistence(PersistenceStorage.sql(engine))
     try:
-        archive, run_id = await _seed_trace(storage, page_size * 2)
+        archive, run_id = await _seed_trace(storage, page_size * 2, reverse_timestamps=reverse_timestamps)
         batches: list[int] = []
         original = _SqlTransaction.list_facts
+        original_fact = _sql._fact_from_row
+        alive = maximum_alive = 0
+        fact_selects = logical_json_bytes = 0
+
+        class TrackedFact(StoredFact):
+            pass
+
+        def released() -> None:
+            nonlocal alive
+            alive -= 1
+
+        def materialize(row):
+            nonlocal alive, maximum_alive, logical_json_bytes
+            value = original_fact(row)
+            logical_json_bytes += len(canonical_json_bytes(value.data))
+            tracked = TrackedFact(value.stream_digest, value.sequence, value.owner_key_digest,
+                                  value.kind, value.subject_digest, value.state, value.data)
+            alive += 1
+            maximum_alive = max(maximum_alive, alive)
+            weakref.finalize(tracked, released)
+            return tracked
 
         async def capture(self, query):
             rows = await original(self, query)
             batches.append(len(rows))
             return rows
 
+        def capture_sql(_connection, _cursor, statement, _parameters, _context, _many):
+            nonlocal fact_selects
+            if statement.lstrip().upper().startswith("SELECT") and "FROM AI_STATE_FACTS" in statement.upper():
+                fact_selects += 1
+
         monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
-        rows = await archive.list_trace_events(
-            agent_run_id=run_id, event_high_water=page_size * 2,
-            after_timestamp=None, after_sequence=0, limit=page_size,
-        )
-        assert [sequence for sequence, _ in rows] == list(range(1, page_size + 1))
+        monkeypatch.setattr(_sql, "_fact_from_row", materialize)
+        sql_event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
+        try:
+            rows = await archive.list_trace_events(
+                agent_run_id=run_id, event_high_water=page_size * 2,
+                after_timestamp=None, after_sequence=0, limit=page_size,
+            )
+        finally:
+            sql_event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
+        expected = (range(page_size * 2, page_size, -1) if reverse_timestamps else range(1, page_size + 1))
+        assert [sequence for sequence, _ in rows] == list(expected)
         assert sum(batches) == page_size, "normal pages must not read unselected event facts"
-        assert 1 < len(batches) < page_size // 4, "batch reads must avoid both per-event I/O and whole-page raw facts"
-        assert max(batches) <= 64, "raw fact batches must stay bounded as page size grows"
+        print("TRACE_SELECTED_FACTS " + json.dumps({"page_size": page_size, "reverse": reverse_timestamps,
+              "fact_selects": fact_selects, "fact_batches": len(batches), "fact_rows": sum(batches),
+              "logical_json_bytes": logical_json_bytes, "peak_raw_facts": maximum_alive}))
+        assert fact_selects == (page_size + 31) // 32, "selected consecutive facts must batch regardless of timestamp order"
+        assert len(batches) == fact_selects
+        assert maximum_alive <= 32, "raw facts from previous windows must not survive the next source read"
+        assert alive == 0
     finally:
         await storage.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ordered_sparse_trace_pages_keep_contiguous_fact_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "sparse-page.db"))
+    try:
+        archive, run_id = await _seed_trace(storage, 0)
+        timestamp = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        for sequence in range(1, 97):
+            traced = sequence not in {32, 65}
+            await storage.run_store.append_event(StepEvent(
+                run_id, "TOOL_CALL_STARTED" if traced else "AGENT_RUN_STARTED", sequence,
+                timestamp=timestamp, tool_call_id=f"call-{sequence}" if traced else None,
+                tool_name="tool" if traced else None,
+            ), execution_id="execution")
+        await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
+        batches: list[tuple[int, ...]] = []
+        original = _SqlTransaction.list_facts
+
+        async def capture(transaction, query):
+            facts = await original(transaction, query)
+            batches.append(tuple(fact.sequence for fact in facts))
+            return facts
+
+        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
+        rows = await archive.list_trace_events(
+            agent_run_id=run_id, event_high_water=96,
+            after_timestamp=None, after_sequence=0, limit=100,
+        )
+        expected = [sequence for sequence in range(1, 97) if sequence not in {32, 65}]
+        assert [sequence for sequence, _ in rows] == expected
+        assert [sequence for batch in batches for sequence in batch] == expected
+        assert len(batches) == 3
+    finally:
+        await storage.close()
 
 
 @pytest.mark.asyncio
