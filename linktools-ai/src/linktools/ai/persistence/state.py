@@ -612,6 +612,12 @@ class StateTransaction(Protocol):
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]: ...
     async def insert_record(self, record: StoredRecord) -> None: ...
     async def insert_records(self, records: Sequence[StoredRecord]) -> None: ...
+    async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        """Insert or confirm byte-exact immutable records without a preceding read.
+
+        Any failure poisons the enclosing mutation, even if the callback catches it.
+        """
+        ...
     async def guard_record(
         self, key: bytes, *, expected_storage_revision: int,
     ) -> StoredRecord | None:
@@ -914,6 +920,10 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def insert_records(self, records: Sequence[StoredRecord]) -> None:
         del records
         self._reject("insert_records")
+
+    async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        del records
+        self._reject("insert_immutable_records")
 
     async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool:
         del record, expected_storage_revision

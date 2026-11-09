@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
+from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from .state import (
     RecordLeaseTransition, FactQuery,
@@ -125,6 +126,27 @@ class _MemoryTransaction:
         for record in ordered:
             self.records[record.key_digest] = record
             self.guarded_record_keys.add(record.key_digest)
+
+    async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        values = tuple(records)
+        try:
+            if len({record.key_digest for record in values}) != len(values):
+                raise ValueError("insert_immutable_records contains duplicate keys")
+            for record in values:
+                validate_record_identity(record)
+                current = self.records.get(record.key_digest)
+                if current is not None and (
+                    replace(current, data={}) != replace(record, data={})
+                    or canonical_json_bytes(dict(current.data)) != canonical_json_bytes(dict(record.data))
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for record in values:
+                self.records[record.key_digest] = record
+                self.guarded_record_keys.add(record.key_digest)
+        except BaseException as error:
+            if self.mutation_error is None:
+                self.mutation_error = error
+            raise
 
     async def guard_record(
         self, key: bytes, *, expected_storage_revision: int,

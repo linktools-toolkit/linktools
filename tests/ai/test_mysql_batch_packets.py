@@ -42,6 +42,8 @@ async def _write(
     rows: list[dict[str, SqlValue]], operation: str,
 ) -> int | dict[str, int] | None:
     arguments = dict(table=table, rows=rows, index_elements=("key",))
+    if operation == "insert_immutable_many":
+        return await dialect.insert_immutable_many(session, **arguments, conflict_column="revision")
     if operation == "upsert_many":
         return await dialect.upsert_many(session, **arguments, set_columns=("body",))
     if operation == "upsert_increment_many":
@@ -77,6 +79,7 @@ class _PacketSession:
     def __init__(self, cursor: _PacketCursor) -> None:
         self.cursor = cursor
         self.selects = 0
+        self.rowcount = 0
 
     async def execute(
         self, statement: ClauseElement, parameters: list[dict[str, SqlValue]] | None = None,
@@ -94,6 +97,7 @@ class _PacketSession:
             await self.cursor.executemany(str(compiler), bound)
         else:
             await self.cursor.execute(str(compiler), bound[0])
+        self.rowcount = len(rows)
         return self
 
     def all(self) -> list[tuple[str, int]]:
@@ -101,7 +105,7 @@ class _PacketSession:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", _OPERATIONS)
+@pytest.mark.parametrize("operation", (*_OPERATIONS, "insert_immutable_many"))
 @pytest.mark.parametrize("body,count", (
     ("body", 64),
     ("x" * (80 * 1024), 64),

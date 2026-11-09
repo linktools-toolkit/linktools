@@ -624,6 +624,9 @@ class ContentArchive:
         prepared.clear_content_observation()
         self._bind(prepared)
         dependencies = self._publication_dependencies(prepared)
+        if dependencies.issubset(prepared.records):
+            await transaction.insert_immutable_records(tuple(prepared.records.values()))
+            return
         existing = await transaction.get_records(tuple(set(prepared.records) | dependencies))
         if not dependencies.issubset(set(prepared.records) | set(existing)):
             raise _integrity()

@@ -66,6 +66,8 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
+# Each immutable record contributes thirteen bound values.
+_IMMUTABLE_RECORD_BATCH_SIZE = 64
 # One store and one stream predicate leave 997 SQLite sequence binds.
 _FACT_READ_BATCH_SIZE = 997
 # Six CASE assignments and seven identity/CAS binds plus the IN key
@@ -1167,6 +1169,27 @@ class _SqlTransaction:
             )
         )
         self._log_batch("insert_records", len(values), 1)
+        for record in values:
+            self._guarded_record_revisions[record.key_digest] = record.storage_revision
+            self._record_cache[record.key_digest] = record
+
+    async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        values = tuple(sorted(records, key=lambda record: record.key_digest))
+        try:
+            if len({record.key_digest for record in values}) != len(values):
+                raise ValueError("insert_immutable_records contains duplicate keys")
+            for record in values:
+                validate_record_identity(record)
+            for offset in range(0, len(values), _IMMUTABLE_RECORD_BATCH_SIZE):
+                rows = [{**_record_values(record), "store_digest": self._store_hex}
+                        for record in values[offset:offset + _IMMUTABLE_RECORD_BATCH_SIZE]]
+                await self._context.run_statement(self._context.dialect.insert_immutable_many(
+                    self._session, table=self._table("ai_state_records"), rows=rows,
+                    index_elements=("store_digest", "key_digest"), conflict_column="storage_revision",
+                ))
+        except BaseException as error:
+            self._abort_mutation(error)
+            raise
         for record in values:
             self._guarded_record_revisions[record.key_digest] = record.storage_revision
             self._record_cache[record.key_digest] = record

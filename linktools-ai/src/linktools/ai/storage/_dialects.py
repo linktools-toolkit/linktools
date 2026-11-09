@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from sqlalchemy.dialects.sqlite import Insert as SQLiteInsert
     from sqlalchemy.engine import Connection, RowMapping
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+    from sqlalchemy.sql.base import ColumnCollection
     from sqlalchemy.sql.elements import ColumnElement
 
 
@@ -128,6 +129,14 @@ class SqlAlchemyDialect(Protocol):
         index_elements: "Sequence[str]",
     ) -> int | None:
         """Return the inserted count, or None when conflicts cannot be distinguished."""
+        ...
+
+    async def insert_immutable_many(
+        self, session: "AsyncSession", *, table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]", index_elements: "Sequence[str]",
+        conflict_column: str,
+    ) -> None:
+        """Insert exact immutable rows; a mismatch requires transaction rollback."""
         ...
 
     async def upsert(
@@ -296,6 +305,39 @@ class SQLiteDialect:
         )
         result = await session.execute(statement)
         return result.rowcount if result.rowcount >= 0 else None
+
+    def _immutable_match(
+        self, table: "Table", incoming: "ColumnCollection", columns: "Sequence[str]",
+    ) -> "ColumnElement[bool]":
+        from sqlalchemy import LargeBinary, String, and_, cast, func
+
+        comparisons = []
+        for name in columns:
+            current, candidate = table.c[name], incoming[name]
+            if isinstance(current.type, String):
+                if self.name == "postgresql":
+                    current, candidate = func.convert_to(current, "UTF8"), func.convert_to(candidate, "UTF8")
+                else:
+                    current, candidate = cast(current, LargeBinary), cast(candidate, LargeBinary)
+            comparisons.append(current.is_not_distinct_from(candidate))
+        return and_(*comparisons)
+
+    async def insert_immutable_many(
+        self, session: "AsyncSession", *, table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]", index_elements: "Sequence[str]",
+        conflict_column: str,
+    ) -> None:
+        if not rows:
+            return
+        statement = self._insert(table).values([dict(row) for row in rows])
+        statement = statement.on_conflict_do_update(
+            index_elements=list(index_elements),
+            set_={conflict_column: table.c[conflict_column]},
+            where=self._immutable_match(table, statement.excluded, tuple(rows[0])),
+        )
+        result = await session.execute(statement)
+        if result.rowcount != len(rows):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def upsert(
         self,
@@ -562,6 +604,34 @@ class MySQLDialect(SQLiteDialect):
         )
         # FOUND_ROWS makes an ignored duplicate indistinguishable from an insert.
         return None
+
+    async def insert_immutable_many(
+        self, session: "AsyncSession", *, table: "Table",
+        rows: "Sequence[Mapping[str, SqlValue]]", index_elements: "Sequence[str]",
+        conflict_column: str,
+    ) -> None:
+        if not rows:
+            return
+        from sqlalchemy import case, literal_column
+        from sqlalchemy.dialects.mysql import insert
+
+        statement = insert(table)
+        current = table.c[conflict_column]
+        matches = self._immutable_match(table, statement.inserted, tuple(rows[0]))
+        # SQLAlchemy's MySQL drivers enable FOUND_ROWS: insert/exact no-op = 1,
+        # changed duplicate = 2. A mismatch changes a bounded integer marker,
+        # even without STRICT sql_mode. The caller must poison and roll back
+        # the enclosing transaction when any row fails this exact comparison.
+        # Keep constants out of the UPDATE parameter suffix so MySQL drivers
+        # can batch the VALUES tuples within their escaped-packet limit.
+        negative, zero = literal_column("-1"), literal_column("0")
+        changed = case((current == negative, zero), else_=negative)
+        statement = statement.on_duplicate_key_update(**{
+            conflict_column: case((matches, current), else_=changed),
+        })
+        result = await session.execute(statement, [dict(row) for row in rows])
+        if result.rowcount != len(rows):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def upsert(
         self,
