@@ -26,6 +26,7 @@ from pydantic_ai_harness.step_persistence import (
 from linktools.core import environ
 
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
+from ._native_checkpoint import NativeCheckpoint
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, StateTransaction
 
@@ -302,8 +303,18 @@ class SqlStepStore:
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
     ) -> "tuple[dict[str, SqlValue], list[tuple[str, str]]]":
+        if isinstance(snapshot, NativeCheckpoint):
+            snapshot = NativeCheckpoint.encode(snapshot, output_retries_used=snapshot.output_retries_used)
         values = self._record_values(snapshot)
-        messages = json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages))
+        decoded = NativeCheckpoint.decode(snapshot)
+        checkpoint = None
+        if isinstance(decoded, NativeCheckpoint):
+            last = json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages[-1:]))[0]
+            checkpoint = {
+                "output_retries_used": decoded.output_retries_used,
+                "message_sha256": _digest(_message_body(last, sort_keys=True)),
+            }
+        messages = json.loads(ModelMessagesTypeAdapter.dump_json(decoded.messages))
         if self._media_store is not None:
             messages = await externalize_media(
                 messages, media_store=self._media_store, threshold_bytes=self._media_threshold_bytes,
@@ -312,9 +323,9 @@ class SqlStepStore:
             raise ValueError("snapshot messages must be a list")
         keyed = []
         for message in messages:
-            body = json.dumps(message, separators=(",", ":"))
+            body = _message_body(message)
             keyed.append((_digest(body), body))
-        values["messages"] = json.dumps({"stored_messages": len(keyed)})
+        values["messages"] = json.dumps({"stored_messages": len(keyed), "checkpoint": checkpoint})
         values["pruned"] = False
 
         return values, keyed
@@ -464,12 +475,29 @@ class SqlStepStore:
             if position != len(messages) or body is None or _digest(body) != sha256:
                 raise ValueError("snapshot message references are missing or corrupt")
             messages.append(json.loads(body))
-        if json.loads(data["messages"]) != {"stored_messages": len(messages)}:
+        descriptor = json.loads(data["messages"])
+        if (not isinstance(descriptor, dict) or set(descriptor) != {"stored_messages", "checkpoint"}
+                or type(descriptor["stored_messages"]) is not int
+                or descriptor["stored_messages"] != len(messages)):
             raise ValueError("snapshot message references are incomplete")
         if self._media_store is not None:
             messages = await restore_media(messages, media_store=self._media_store)
         data["messages"] = ModelMessagesTypeAdapter.validate_python(messages)
-        return _SNAPSHOT_ADAPTER.validate_python(data)
+        snapshot = _SNAPSHOT_ADAPTER.validate_python(data)
+        checkpoint = descriptor["checkpoint"]
+        if checkpoint is None:
+            return snapshot
+        if (not isinstance(checkpoint, dict)
+                or set(checkpoint) != {"output_retries_used", "message_sha256"}
+                or type(checkpoint["output_retries_used"]) is not int
+                or checkpoint["output_retries_used"] < 0
+                or not isinstance(checkpoint["message_sha256"], str)):
+            raise ValueError("snapshot checkpoint state is invalid")
+        restored = NativeCheckpoint.encode(snapshot, output_retries_used=checkpoint["output_retries_used"])
+        last = json.loads(ModelMessagesTypeAdapter.dump_json(restored.messages[-1:]))[0]
+        if _digest(_message_body(last, sort_keys=True)) != checkpoint["message_sha256"]:
+            raise ValueError("snapshot checkpoint state is corrupt or misbound")
+        return restored
 
     def _table(self, name: str) -> "Table":
         return self._metadata.tables[f"ai_step_{name}"]
@@ -500,6 +528,10 @@ class SqlStepStore:
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _message_body(value: object, *, sort_keys: bool = False) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=sort_keys, separators=(",", ":"))
 
 
 def _optional_digest(value: str | None) -> str | None:

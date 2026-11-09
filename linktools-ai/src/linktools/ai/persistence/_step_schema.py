@@ -97,7 +97,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         text("agent_name", "Upstream agent name."),
         Column("timestamp", String(64), nullable=False, comment="Original ISO 8601 snapshot time."),
         Column("state", sql_state(), nullable=False, comment="Upstream complete or interrupted state."),
-        text("messages", "Upstream stored_messages count for the ordered references.", nullable=False),
+        text("messages", "Ordered message count and bound native checkpoint state.", nullable=False),
         text("idempotency_key", "Upstream boundary replay key."),
         digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
         Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),

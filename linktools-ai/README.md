@@ -1714,6 +1714,15 @@ usage for the same execution. An upstream snapshot without the Runtime envelope
 has unknown retry usage, not zero. Reads and recovery do not rewrite the physical
 snapshot. Caller ownership controls resource lifetime, not the encoded wire view.
 
+The SQL adapter keeps checkpoint retry usage in the snapshot descriptor and
+deduplicates the underlying business messages independently. It reconstructs the
+same native envelope when reading, checking the original envelope-message digest
+to reject changed retry usage or snapshot bindings. Message JSON uses UTF-8
+without ASCII escaping. This changes only the SQL storage representation, not
+the native store's returned snapshots, conversation retention, or recovery budget.
+Provision new data with the current writer and reader; no older development-data
+migration is performed.
+
 The adapter uses Persistence's namespace and tenant and borrows the exact
 Execution SQL context, including a local SQLite writer owner when configured.
 Native checkpoint writes can therefore join the Runtime control transaction.

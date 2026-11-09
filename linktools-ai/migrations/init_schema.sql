@@ -270,7 +270,7 @@ CREATE TABLE ai_step_snapshots (
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 snapshot time.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
-	messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream stored_messages count for the ordered references.',
+    messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Ordered message count and bound native checkpoint state.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
 	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	pruned BOOL NOT NULL COMMENT 'Retired snapshot identity without retained message references.',
