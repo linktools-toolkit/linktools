@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """SQL payload reads preserve JSON numbers independently of driver decoding."""
 
-import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.schema import CreateTable
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.core import canonical_json_bytes
@@ -17,7 +18,7 @@ from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._sql import (
     SqlStateStore, _fact_from_row, _fact_values, _operation_from_row,
-    _operation_values, _record_from_row, _record_values, _select_rows,
+    _operation_values, _record_from_row, _record_values,
 )
 from linktools.ai.persistence.state import (
     FactQuery, OperationQuery, RecordQuery, StoredFact, StoredOperation, StoredRecord,
@@ -28,7 +29,8 @@ from .test_evaluation_numeric_transport import _transport_json
 
 DATA = {"numbers": [1.0, 1, True, -0.0, 0.0, 1.5, 1e20, 2**53 + 1,
                     float.fromhex("0x1.fffffffffffffp+1023")],
-        "nested": {"$float": "ordinary user data"}}
+        "nested": {"$float": "ordinary user data", "values": [0, 0.0, -0.0]},
+        "large_text": "数" * 25000}
 RECORD = StoredRecord(b"r" * 32, None, None, "numeric", "one", None, 0, None, 0, None, DATA)
 FACT = StoredFact(b"s" * 32, 1, RECORD.key_digest, "numeric", b"u" * 32, None, DATA)
 OPERATION = StoredOperation(b"o" * 32, b"s" * 32, 1, "pending", False, DATA)
@@ -41,28 +43,27 @@ OPERATION = StoredOperation(b"o" * 32, b"s" * 32, 1, "pending", False, DATA)
 ))
 def test_sql_payload_text_preserves_original_json_and_rejects_invalid_roots(value, encode, decode) -> None:
     row = encode(value)
-    # Existing stored JSON objects and their text representations both remain readable.
-    for payload in (row["payload_json"], json.dumps(row["payload_json"]),
-                    json.dumps(row["payload_json"]).encode()):
-        restored = decode({**row, "payload_json": payload})
-        assert canonical_json_bytes(dict(restored.data)) == canonical_json_bytes(DATA)
-    for invalid in ("{broken", "[]", "null", "1", '"text"'):
+    assert isinstance(row["payload_json"], str)
+    assert row["payload_json"].encode("utf-8") == canonical_json_bytes(DATA)
+    restored = decode(row)
+    assert canonical_json_bytes(dict(restored.data)) == canonical_json_bytes(DATA)
+    for invalid in ("{broken", "[]", "null", "1", '"text"', dict(DATA),
+                    row["payload_json"].encode("utf-8")):
         with pytest.raises(AIError) as raised:
             decode({**row, "payload_json": invalid})
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("dialect,cast_type", ((mysql.dialect(), "CHAR"),
-                                             (postgresql.dialect(), "TEXT"),
-                                             (sqlite.dialect(), "TEXT")))
+@pytest.mark.parametrize("dialect,storage_type", ((mysql.dialect(), "LONGTEXT"),
+                                                (postgresql.dialect(), "TEXT"),
+                                                (sqlite.dialect(), "TEXT")))
 @pytest.mark.parametrize("name", ("ai_state_records", "ai_state_facts", "ai_state_operations"))
-def test_sql_payload_projection_selects_text_without_changing_columns(dialect, cast_type: str, name: str) -> None:
+def test_sql_payload_schema_uses_lossless_large_text(dialect, storage_type: str, name: str) -> None:
     table = build_runtime_sql_metadata(frozenset({PersistenceDomain.EVALUATION})).tables[name]
-    statement = _select_rows(table)
-    assert tuple(statement.selected_columns.keys()) == tuple(table.c.keys())
-    compiled = statement.compile(dialect=dialect)
-    assert f"CAST({name}.payload_json AS {cast_type}) AS payload_json" in str(compiled)
-    assert not compiled.params
+    payload = table.c.payload_json
+    assert storage_type in str(payload.type.compile(dialect=dialect))
+    assert f"payload_json {storage_type}" in str(CreateTable(table).compile(dialect=dialect))
+    assert not payload.nullable
 
 
 @pytest.mark.asyncio
@@ -81,6 +82,12 @@ async def test_sql_payloads_keep_numeric_identity_across_read_queries_and_reopen
                     await tx.insert_fact(FACT)
                     await tx.insert_operation(OPERATION)
                 await store.mutate(write)
+            async with engine.connect() as connection:
+                for table_name in ("ai_state_records", "ai_state_facts", "ai_state_operations"):
+                    raw = (await connection.execute(text(f"SELECT payload_json FROM {table_name}"))).scalar_one()
+                    assert isinstance(raw, str)
+                    assert len(raw.encode("utf-8")) > 65535
+                    assert raw.encode("utf-8") == canonical_json_bytes(DATA)
             reads = (
                 lambda tx: tx.get_record(RECORD.key_digest),
                 lambda tx: tx.get_records((RECORD.key_digest,)),

@@ -41,7 +41,6 @@ def build_runtime_sql_metadata(
 ) -> "MetaData":
     """Build the five canonical Runtime primitive tables."""
     from sqlalchemy import (
-        JSON,
         TIMESTAMP,
         BigInteger,
         Boolean,
@@ -139,9 +138,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            JSON,
+            sql_sort_key(),
             nullable=False,
-            comment="Versioned canonical domain payload not needed by SQL identity, query, CAS, or lease predicates.",
+            comment="Canonical domain JSON text preserving numeric representations.",
         ),
         *_audit(),
         comment=_RECORD_COMMENT,
@@ -230,9 +229,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            JSON,
+            sql_sort_key(),
             nullable=False,
-            comment="Versioned canonical immutable fact payload.",
+            comment="Canonical immutable fact JSON text preserving numeric representations.",
         ),
         *_audit(),
         comment=_FACT_COMMENT,
@@ -314,9 +313,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            JSON,
+            sql_sort_key(),
             nullable=False,
-            comment="Versioned canonical operation request, result, error, resource identity, and semantic timestamps.",
+            comment="Canonical operation JSON text preserving numeric representations.",
         ),
         *_audit(),
         comment=_OPERATION_COMMENT,
