@@ -49,9 +49,9 @@ async def test_longer_refresh_period_reduces_idle_reads_and_keeps_terminal_proje
         engine = base.with_definitions(task)
         async with (
             TaskEngine.open(task, persistence=base.persistence) as default,
-            TaskEngine.open(task, persistence=base.persistence, model_refresh_interval_seconds=10) as tuned,
+            TaskEngine.open(task, persistence=base.persistence, model_refresh_interval_seconds=60) as tuned,
         ):
-            assert tuned.with_definitions().model_refresh_interval_seconds == 10
+            assert tuned.with_definitions().model_refresh_interval_seconds == 60
             run = await engine.start(TaskGraph("interval", (
                 TaskNode("node", task=task, input=AgentTaskInput("wait")),
             )), idempotency_key="interval")
@@ -72,6 +72,7 @@ async def test_longer_refresh_period_reduces_idle_reads_and_keeps_terminal_proje
 
             ready = {name: asyncio.Event() for name in counts}
             results = {name: [] for name in counts}
+            terminal_models = {name: asyncio.Event() for name in counts}
 
             async def observe(label, handle):
                 token = owner.set(label)
@@ -80,6 +81,8 @@ async def test_longer_refresh_period_reduces_idle_reads_and_keeps_terminal_proje
                         results[label].append(item.event)
                         if isinstance(item.event, TaskGraphProjection) and item.event.coverage is not None:
                             ready[label].set()
+                        if isinstance(item.event, TaskModelProjection) and item.event.item.status == "SUCCEEDED":
+                            terminal_models[label].set()
                 finally:
                     owner.reset(token)
 
@@ -95,7 +98,13 @@ async def test_longer_refresh_period_reduces_idle_reads_and_keeps_terminal_proje
                 assert counts["tuned"]["select"] < counts["default"]["select"]
                 assert counts["tuned"]["transaction"] < counts["default"]["transaction"]
                 release.set()
-                await asyncio.wait_for(asyncio.gather(*watchers), 5)
+                outcome = await run.wait(timeout_seconds=10)
+                assert outcome.result.status is TaskStatus.SUCCEEDED
+                # Terminal model metadata must not wait for the 60-second refresh.
+                await asyncio.wait_for(asyncio.gather(*(item.wait() for item in terminal_models.values())), 5)
+                # These engines do not own the graph: its event stream uses
+                # independent polling with a maximum 30-second idle backoff.
+                await asyncio.wait_for(asyncio.gather(*watchers), 35)
                 for rows in results.values():
                     assert isinstance(rows[-1], TaskGraphProjection)
                     assert rows[-1].phase == "final"
