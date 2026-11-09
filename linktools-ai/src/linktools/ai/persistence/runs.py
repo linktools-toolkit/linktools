@@ -210,31 +210,37 @@ class RuntimeAgentRunStore(AgentRunStore):
                 and archive.can_share_native_start(native))
 
     @classmethod
-    def project_native_start(cls, source: NativeStepEvent, *, event_index: int) -> StepEvent:
+    def project_native_event(cls, source: NativeStepEvent, *, event_index: int) -> StepEvent:
         return NativeEventReferences.project(source, event_index=event_index)
 
-    async def stage_native_start(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
+    async def stage_native_event(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
         archive = self._archives.get(PersistenceDomain.TRACE)
         if not self.can_share_native_start(run.run_id, self.step_store) or not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        await archive.stage_native_start(run, source, event)
+        await archive.stage_native_event(run, source, event)
 
     @asynccontextmanager
-    async def native_start_publication(self, run_id: str) -> AsyncIterator[None]:
+    async def native_event_publication(self, run_id: str) -> AsyncIterator[None]:
         archive = self._archives.get(PersistenceDomain.TRACE)
         if not isinstance(archive, StateStepArchive):
             yield
         else:
-            async with archive.native_start_publication(run_id):
+            async with archive.native_event_publication(run_id):
                 yield
 
     def has_pending_native_start(self, run_id: str) -> bool:
         archive = self._archives.get(PersistenceDomain.TRACE)
         return isinstance(archive, StateStepArchive) and archive.has_pending_native_start(run_id)
 
-    def step_start_receipt(self, run_id: str) -> StepWriteReceipt | None:
+    def step_event_receipt(self, run_id: str) -> StepWriteReceipt | None:
         archive = self._archives.get(PersistenceDomain.TRACE)
-        return archive.native_start_receipt(run_id) if isinstance(archive, StateStepArchive) else None
+        return archive.native_event_receipt(run_id) if isinstance(archive, StateStepArchive) else None
+
+    def release_step_event_receipt(self, run_id: str) -> None:
+        """Release settled lifecycle proof, without releasing business staging."""
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if isinstance(archive, StateStepArchive):
+            archive.release_native_event_receipt(run_id)
 
     def _canonical_trace_run(self, run: AgentRunRecord) -> AgentRunRecord:
         if (run.agent_run_id not in self._step_boundaries
@@ -247,10 +253,10 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return source
 
-    def _confirm_native_start_projection(self, events: Sequence[StepEvent]) -> None:
+    def _confirm_native_event_projection(self, events: Sequence[StepEvent]) -> None:
         archive = self._archives.get(PersistenceDomain.TRACE)
         if isinstance(archive, StateStepArchive):
-            receipts = archive.confirm_native_start_projection(events)
+            receipts = archive.confirm_native_event_projection(events)
             if not receipts:
                 return
             native = self.step_store
@@ -279,7 +285,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             if self.execution_persistence(source.run_id)[1] and isinstance(archive, StateStepArchive):
                 archive.confirm_native_run(source)
                 if receipt is not None:
-                    archive.confirm_native_start_source(receipt)
+                    archive.confirm_native_event_source(receipt)
                     if isinstance(native, SqlStepStore) and native.started_from_receipt(receipt) is not None:
                         self._staging.adopt_native_run_local(OfficialStepReader.project_run(source))
 
@@ -1262,7 +1268,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         require_owned: bool,
     ) -> None:
         if projection is not None:
-            self._confirm_native_start_projection(projection.events)
+            self._confirm_native_event_projection(projection.events)
         token = plan.token_for(agent_run_id)
         completion: asyncio.Future[None] | None = None
         async with self._history_lock.hold(agent_run_id):
@@ -1601,7 +1607,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         request_projection: ContextProjection | None = None,
     ) -> None:
         """FINALIZE: advance offsets and clear dirty state after durable success."""
-        self._confirm_native_start_projection(captured.events)
+        self._confirm_native_event_projection(captured.events)
         async with self._history_lock.hold(flight.agent_run_id):
             if self._durability_flights.get(flight.agent_run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1672,7 +1678,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         """PREPARE + DURABLE COMMIT without the run lock, then FINALIZE."""
         delegated = False
         try:
-            async with self.native_start_publication(captured.run.agent_run_id):
+            async with self.native_event_publication(captured.run.agent_run_id):
                 captured = replace(captured, run=self._canonical_trace_run(captured.run))
                 delegated = True
                 await self._commit_captured_execution_projection(captured, flight, execution_id=execution_id)

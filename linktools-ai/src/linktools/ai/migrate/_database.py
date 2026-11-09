@@ -57,13 +57,15 @@ async def provision_runtime_database(
     from sqlalchemy import MetaData
 
     metadata = MetaData()
-    build_runtime_sql_metadata(selected, metadata=metadata)
     if PersistenceDomain.CHECKPOINT in selected:
         build_step_sql_metadata(metadata=metadata)
     elif selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
-        native = build_step_sql_metadata()
-        for name in ("ai_step_runs", "ai_step_events"):
-            native.tables[name].to_metadata(metadata)
+        build_step_sql_metadata(metadata=metadata)
+        # Keep canonical objects: Table.to_metadata drops dialect DDL conditions.
+        for table in tuple(metadata.tables.values()):
+            if table.name not in {"ai_step_runs", "ai_step_events"}:
+                metadata.remove(table)
+    build_runtime_sql_metadata(selected, metadata=metadata)
     if object_store is None and any(
         runtime_domain_uses_object_store(domain) for domain in selected
     ):

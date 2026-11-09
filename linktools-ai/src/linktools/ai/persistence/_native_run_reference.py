@@ -188,7 +188,8 @@ class NativeRunReferences:
 
     def statement(self, *, keys: Sequence[bytes] | None = None, query: RecordQuery | None = None,
                   scan: tuple[RecordScanCursor | None, int] | None = None,
-                  expected_start: NativeStepEvent | None = None) -> "Select":
+                  expected_start: NativeStepEvent | None = None,
+                  expected_terminal: NativeStepEvent | None = None) -> "Select":
         from sqlalchemy import JSON, and_, bindparam, cast, select, type_coerce
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
@@ -206,30 +207,34 @@ class NativeRunReferences:
             runs.c.registration_id == reference["registration"].as_string(),
         )
         source_columns = tuple(column.label("native_" + column.name) for column in runs.c)
-        if expected_start is not None:
+        expected = expected_start if expected_start is not None else expected_terminal
+        if expected is not None:
             if self._native is None:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            # An inline small Run still has a managed start. Verify its exact
-            # source using this existing Run SELECT, never a second read.
+            # Inline Run views also require full pending lifecycle proof in
+            # this existing SELECT, never a second source read.
             run_join = and_(records.c.kind == "agent_run", runs.c.store_digest == self._store_digest,
-                            runs.c.run_digest == bindparam("source_run_digest", hashlib.sha256(expected_start.run_id.encode()).hexdigest()),
-                            runs.c.run_id == bindparam("source_run_id", expected_start.run_id))
+                            runs.c.run_digest == bindparam("source_run_digest", hashlib.sha256(expected.run_id.encode()).hexdigest()),
+                            runs.c.run_id == bindparam("source_run_id", expected.run_id))
         joined = records.outerjoin(runs, run_join)
-        if expected_start is not None:
-            events = self._events
+        for prefix, event in (("start", expected_start), ("terminal", expected_terminal)):
+            if event is None:
+                continue
+            events = self._events if prefix == "start" else self._events.alias("terminal_source")
             joined = joined.outerjoin(events, and_(events.c.store_digest == runs.c.store_digest,
                 events.c.run_digest == runs.c.run_digest, events.c.run_id == runs.c.run_id,
-                events.c.key_digest == bindparam("source_event_key", self._native.event_key_digest(expected_start))))
+                events.c.key_digest == bindparam("source_event_key" if prefix == "start" else "source_terminal_key",
+                                                self._native.event_key_digest(event))))
             names = tuple(field.name for field in fields(NativeStepEvent)) + (
-                "store_digest", "run_digest", "key_digest", "run_fields", "body_sha256", "fields_sha256",
+                "outcome", "store_digest", "run_digest", "key_digest", "run_fields", "body_sha256", "fields_sha256",
             )
-            source_columns += tuple(events.c[name].label("start_" + name) for name in names)
+            source_columns += tuple(events.c[name].label(prefix + "_" + name) for name in names)
         statement = select(records, *source_columns).select_from(joined)
         # Render typed invariant JOIN literals without consuming the record
         # reader's existing bind budget. Keys and query inputs remain bound.
         statement = visitors.replacement_traverse(statement, {}, lambda node: (
             bindparam(None, node.value, type_=node.type, literal_execute=True)
-            if isinstance(node, BindParameter) and node.key not in {"source_run_digest", "source_run_id", "source_event_key"}
+            if isinstance(node, BindParameter) and node.key not in {"source_run_digest", "source_run_id", "source_event_key", "source_terminal_key"}
             else None
         )).where(records.c.store_digest == self._state.store_digest.hex())
         if keys is not None:
@@ -254,10 +259,15 @@ class NativeRunReferences:
         self, transaction: StateTransaction, *, keys: Sequence[bytes] | None = None, query: RecordQuery | None = None,
         scan: tuple[RecordScanCursor | None, int] | None = None,
         expected_start: NativeStepEvent | None = None,
+        expected_terminal: NativeStepEvent | None = None,
         expected_run: RunRecord | None = None,
     ) -> tuple[StoredRecord, ...]:
-        if (expected_start is None) != (expected_run is None):
-            raise ValueError("source readback requires both registration and start")
+        expected = expected_start if expected_start is not None else expected_terminal
+        if (expected is None) != (expected_run is None):
+            raise ValueError("source readback requires registration and lifecycle source")
+        if expected is not None and any(event is not None and event.run_id != expected_run.run_id
+                                        for event in (expected_start, expected_terminal)):
+            raise ValueError("source readback lifecycle belongs to another registration")
         if keys is not None and not keys:
             return ()
         if not isinstance(transaction, SqlStateRecordReader):
@@ -265,7 +275,7 @@ class NativeRunReferences:
         projected = self._projections.setdefault(transaction, {})
         values: dict[bytes, StoredRecord] = {}
         missing = keys
-        if keys is not None and expected_start is None:
+        if keys is not None and expected is None:
             cached = transaction.cached_records(keys)
             unresolved: list[bytes] = []
             for key in keys:
@@ -285,21 +295,27 @@ class NativeRunReferences:
             if not missing:
                 return tuple(values[key] for key in dict.fromkeys(keys) if key in values)
         rows = await transaction.read_joined_records(
-            self._state.context, self.statement(keys=missing, query=query, scan=scan, expected_start=expected_start), keys=missing or (),
+            self._state.context, self.statement(keys=missing, query=query, scan=scan, expected_start=expected_start,
+                expected_terminal=expected_terminal), keys=missing or (),
         )
         ordered: list[StoredRecord] = []
         for record, row in rows:
-            if expected_start is not None:
+            if expected is not None:
                 try:
-                    source = {key.removeprefix("start_"): value for key, value in row.items()
-                              if key.startswith("start_")}
                     run_source = {column.name: row["native_" + column.name] for column in self._runs.c}
-                    actual_start = SqlStepStore.decode_started_row(source,
-                        expected_store_digest=self._store_digest, run=run_source)
+                    for prefix, event in (("start", expected_start), ("terminal", expected_terminal)):
+                        if event is None:
+                            continue
+                        source = {key.removeprefix(prefix + "_"): value for key, value in row.items()
+                                  if key.startswith(prefix + "_")}
+                        actual = SqlStepStore.decode_started_row(source,
+                            expected_store_digest=self._store_digest, run=run_source)
+                        if actual != event:
+                            raise ValueError("lifecycle source differs from its provisional body")
                     run_source["metadata"] = json.loads(run_source["metadata"])
                     actual_run = _RUN_ADAPTER.validate_python(run_source)
-                    if actual_start != expected_start or actual_run != expected_run:
-                        raise ValueError("terminal source differs from its provisional registration or start")
+                    if actual_run != expected_run:
+                        raise ValueError("lifecycle source differs from its provisional registration")
                 except (TypeError, ValueError, KeyError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             if is_native_run_reference(record.data):

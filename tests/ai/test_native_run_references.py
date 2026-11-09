@@ -40,7 +40,8 @@ async def _source(tmp_path: Path, *, confirmed: bool = True, restart: bool = Tru
     store = state.run_store
     source = RunRecord(
         run_id="run", conversation_id="conversation", parent_run_id="parent", agent_name="agent",
-        registration_id="registration",
+        # A long registration token makes the reference larger than the small inline run.
+        registration_id="registration" if large else "registration" * 128,
         metadata=({"capability_scope": "parent", "history_id": "6ae1ec90-9238-43ec-a423-30db52344212",
                    "agent_run_seq": "1", "linktools.transcript_start": "0", "linktools.transcript_run_id": "run"}
                   if default_metadata else
@@ -165,6 +166,7 @@ async def test_cold_history_reads_share_one_native_join_and_keep_raw_cache(tmp_p
             assert len(statements) == 1
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
+            await cold.preflight_close()
             await cold.close()
 
 
@@ -279,9 +281,12 @@ async def test_reference_promotion_rolls_back_with_original_projection_transacti
         engine = native.storage_context.engine
         event.listen(engine.sync_engine, "before_cursor_execute", fail)
         try:
-            with pytest.raises(RuntimeError, match="publication failed"):
+            with pytest.raises(AIError) as raised:
                 await archive.sync_projection(run, events=(StepEvent("run", "AGENT_RUN_INTERRUPTED", 1),),
                                               checkpoints=(), execution_id="execution")
+            assert raised.value.code is ErrorCode.INTERNAL_ERROR
+            assert isinstance(raised.value.__cause__, RuntimeError)
+            assert str(raised.value.__cause__) == "publication failed"
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", fail)
         assert await _raw_run(archive) == before

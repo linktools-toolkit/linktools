@@ -28,7 +28,7 @@ from ._harness import HarnessPlanStoreAdapter
 from ..capability.planning import HarnessPlanning
 from ._memory import MemoryStore
 from ._tool_boundary import require_tool_effects
-from ..capability import TraceCapability
+from ..capability import RunCallbackScope, TraceCapability
 from ._plan import RuntimePlanStore
 from ._run_hooks import AgentRunCapture
 from ..spec import CapabilityRef
@@ -233,6 +233,8 @@ async def compose_platform_capabilities(
                         run_id=agent_run_id, parent_run_id=parent_agent_run_id,
                         agent_name=agent_id, metadata=native_metadata,
                         share_started=run_store.can_share_native_start(agent_run_id, capability.store),
+                        lifecycle_participant_types=(AgentRunCapture, AtomicStepPersistence, TraceCapability, ExecutionCapability, RunCallbackScope),
+                        lifecycle_observer_types=(AtomicStepPersistence, TraceCapability),
                     )
                     persistence.native_registration = registration
                     capability = replace(capability, run_registration=registration)

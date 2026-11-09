@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Trace start positions backed by the immutable native event owner."""
+"""Trace lifecycle positions backed by the immutable native event owner."""
 
 import asyncio
 import json
@@ -20,6 +20,7 @@ from ._step_contracts import AgentRunRecord, StepEvent
 from ._official_step_reader import OfficialStepReader
 from ._step_schema import build_step_sql_metadata
 from ._step_store import PreparedStep, SqlStepStore, StepWriteReceipt
+from ..steps import NativeLifecycleEvent
 from .codec import _encode_step_envelope, decode_envelope, encode_envelope
 from .state import FactQuery, FactScanCursor, SqlStateFactReader, StateTransaction, StoredFact, record_key_digest, stream_digest
 
@@ -27,23 +28,29 @@ if TYPE_CHECKING:
     from sqlalchemy.sql import Select
 
 
-_TYPE = "native_start_reference"
+_TYPE = "native_event_reference"
 _RUN_ADAPTER = TypeAdapter(RunRecord)
 
 
 @dataclass(slots=True)
-class _PreparedStart:
+class _PreparedEvent:
     prepared: PreparedStep
     projection: StepEvent
     receipt: StepWriteReceipt | None = None
     trace_confirmed: bool = False
     native_confirmed: bool = False
-    source_confirmed: bool = False
-    publication_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass(slots=True)
+class _RunPublication:
+    pending: dict[str, _PreparedEvent] = field(default_factory=dict)
+    confirmed: StepWriteReceipt | None = None
+    native_keys: set[str] = field(default_factory=set)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class NativeEventReferences:
-    """Publish the pending start with its original ordered fact and join on reads.
+    """Publish pending lifecycle sources with their ordered facts and join on reads.
 
     Pending bodies live only until both first-source publishers are confirmed.
     The native store owns immutable-body proof; the sidecar owns only position.
@@ -53,7 +60,7 @@ class NativeEventReferences:
         self._state, self._namespace, self._tenant_id = state, namespace, tenant_id
         self._store_digest = SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
         self._native: SqlStepStore | None = None
-        self._pending: dict[str, _PreparedStart] = {}
+        self._runs_pending: dict[str, _RunPublication] = {}
         metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE}))
         build_step_sql_metadata(metadata=metadata)
         self._facts, self._events, self._runs = (metadata.tables[name] for name in (
@@ -72,65 +79,90 @@ class NativeEventReferences:
 
     @classmethod
     def project(cls, source: NativeStepEvent, *, event_index: int) -> StepEvent:
-        if (source.kind != "run_started" or source.idempotency_key is None
-                or source.tool_call_id is not None or source.tool_name is not None or source.error is not None
+        if (source.idempotency_key is None or source.tool_call_id is not None or source.tool_name is not None
                 or type(event_index) is not int or event_index < 0):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(source, NativeLifecycleEvent):
+            source.__post_init__()
+            event_type = source.event_type
+        elif source.kind == "run_started" and source.error is None:
+            event_type = "AGENT_RUN_STARTED"
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return StepEvent(
-            agent_run_id=source.run_id, event_type="AGENT_RUN_STARTED", step_index=source.step_index,
+            agent_run_id=source.run_id, event_type=event_type, step_index=source.step_index,
             timestamp=source.timestamp, agent_conversation_id=source.conversation_id,
             parent_agent_run_id=source.parent_run_id, agent_id=source.agent_name,
-            metadata={}, event_index=event_index,
-            idempotency_key=f"{event_index}:{source.step_index}:AGENT_RUN_STARTED:",
+            error=source.error, metadata={}, event_index=event_index,
+            idempotency_key=f"{event_index}:{source.step_index}:{event_type}:",
         )
 
     async def stage(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
         if self._native is None or run.run_id != source.run_id or self.project(source, event_index=event.event_index) != event:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        prepared = await self._native.prepare_step(run=run, events=(source,), managed_start=True)
-        previous = self._pending.get(run.run_id)
+        started = source.kind == "run_started"
+        prepared = await self._native.prepare_step(run=run if started else None, events=(source,), managed_start=started)
+        publication = self._runs_pending.setdefault(source.run_id, _RunPublication())
+        key = source.idempotency_key
+        previous = publication.pending.get(key)
         if previous is not None:
             if previous.prepared != prepared or previous.projection != event:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
-        self._pending[run.run_id] = _PreparedStart(prepared, event)
+        pending = _PreparedEvent(prepared, event)
+        receipt = publication.confirmed
+        if receipt is not None and source.idempotency_key in {
+            item.idempotency_key for item in self._native.events_from_receipt(receipt)
+        }:
+            self._adopt(pending, receipt)
+            pending.native_confirmed = key in publication.native_keys
+        publication.pending[key] = pending
 
     @asynccontextmanager
     async def publication(self, run_id: str) -> AsyncIterator[None]:
-        """Serialize the two first-source publishers through commit confirmation."""
-        pending = self._pending.get(run_id)
-        if pending is None:
+        """Serialize native and Trace publishers through commit confirmation."""
+        publication = self._runs_pending.get(run_id)
+        if publication is None:
             yield
         else:
-            async with pending.publication_lock:
+            async with publication.lock:
                 yield
 
-    def _adopt(self, pending: _PreparedStart, receipt: StepWriteReceipt) -> None:
-        source = self._native.started_from_receipt(receipt)
-        run = self._native.run_from_receipt(receipt)
+    def _adopt(self, pending: _PreparedEvent, receipt: StepWriteReceipt) -> None:
         expected = pending.prepared.events[0]
-        if (source is None or run is None or source.idempotency_key != expected.idempotency_key
+        source = next((item for item in self._native.events_from_receipt(receipt)
+                       if (item.run_id, item.idempotency_key) == (expected.run_id, expected.idempotency_key)), None)
+        run = self._native.run_from_receipt(receipt)
+        if (source is None or (pending.prepared.run is not None and run is None)
+                or (isinstance(expected, NativeLifecycleEvent) and source != expected)
                 or self.project(source, event_index=pending.projection.event_index) != pending.projection):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        pending.prepared = replace(pending.prepared, run=run, events=(source,))
+        pending.prepared = replace(pending.prepared, run=run if pending.prepared.run is not None else None, events=(source,))
         pending.receipt = receipt
 
     def resolve_run(self, run: AgentRunRecord) -> AgentRunRecord:
-        pending = self._pending.get(run.agent_run_id)
-        if pending is None or pending.receipt is None:
-            return run
-        source = self._native.run_from_receipt(pending.receipt)
-        if source is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return OfficialStepReader.project_run(source)
+        publication = self._runs_pending.get(run.agent_run_id)
+        receipts = () if publication is None else (publication.confirmed, *(item.receipt for item in publication.pending.values()))
+        for receipt in receipts:
+            if receipt is not None:
+                source = self._native.run_from_receipt(receipt)
+                if source is not None:
+                    return OfficialStepReader.project_run(source)
+        return run
+
+    def _for_event(self, event: StepEvent) -> _PreparedEvent | None:
+        publication = self._runs_pending.get(event.agent_run_id)
+        return None if publication is None else next((pending for pending in publication.pending.values()
+                                                      if pending.projection == event), None)
 
     async def publish(self, transaction: StateTransaction, events: Sequence[StepEvent]) -> StepWriteReceipt | None:
-        """Return source proof usable in this same transaction, not a global confirmation."""
+        """Return proof usable in this transaction, not a global confirmation."""
         receipt = None
         for event in events:
-            pending = self._pending.get(event.agent_run_id)
-            if pending is not None and event == pending.projection:
-                confirmed = pending.receipt if pending.source_confirmed else None
+            pending = self._for_event(event)
+            if pending is not None:
+                publication = self._runs_pending[event.agent_run_id]
+                confirmed = receipt or publication.confirmed
                 if confirmed is None:
                     pending.receipt = None
                 receipt = await self._native.write_prepared_step(transaction, pending.prepared, confirmed=confirmed)
@@ -138,13 +170,13 @@ class NativeEventReferences:
         return receipt
 
     def encode(self, event: StepEvent) -> dict[str, object] | None:
-        pending = self._pending.get(event.agent_run_id)
-        if pending is None or pending.projection != event:
+        pending = self._for_event(event)
+        if pending is None:
             return None
         if pending.receipt is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        source = self._native.started_from_receipt(pending.receipt)
-        if source != pending.prepared.events[0]:
+        source = pending.prepared.events[0]
+        if source not in self._native.events_from_receipt(pending.receipt):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return encode_envelope({"type": _TYPE, "payload": {
             "key": self._native.event_key_digest(source), "index": event.event_index,
@@ -153,51 +185,80 @@ class NativeEventReferences:
     def confirm(self, events: Sequence[StepEvent]) -> tuple[StepWriteReceipt, ...]:
         receipts = []
         for event in events:
-            pending = self._pending.get(event.agent_run_id)
-            if pending is not None and pending.projection == event:
+            pending = self._for_event(event)
+            if pending is not None:
                 if pending.receipt is None:
                     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 self._native.confirm_prepared_step(pending.receipt)
                 receipts.append(pending.receipt)
-                pending.trace_confirmed = pending.source_confirmed = True
+                pending.trace_confirmed = True
+                source = pending.prepared.events[0]
+                publication = self._runs_pending[source.run_id]
+                publication.confirmed = pending.receipt
                 if pending.native_confirmed:
-                    del self._pending[event.agent_run_id]
+                    del publication.pending[source.idempotency_key]
         return tuple(receipts)
 
     def confirm_native(self, receipt: StepWriteReceipt) -> None:
         if self._native is None:
             return
-        source = self._native.started_from_receipt(receipt)
-        pending = None if source is None else self._pending.get(source.run_id)
-        if pending is not None:
-            self._adopt(pending, receipt)
-            pending.native_confirmed = pending.source_confirmed = True
-            if pending.trace_confirmed:
-                del self._pending[source.run_id]
-
-    def pending_source(self, run_id: str) -> tuple[RunRecord, NativeStepEvent] | None:
-        """Exact registration and start to verify before acknowledging an unknown commit."""
-        pending = self._pending.get(run_id)
-        if pending is None or pending.receipt is None:
-            return None
-        run = self._native.run_from_receipt(pending.receipt)
-        event = self._native.started_from_receipt(pending.receipt)
-        if run is None or event is None:
+        sources = {source.idempotency_key: source for source in self._native.events_from_receipt(receipt)}
+        if not set(receipt.lifecycle_keys).issubset(sources):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return run, event
+        for key in receipt.lifecycle_keys:
+            source = sources[key]
+            publication = self._runs_pending.setdefault(source.run_id, _RunPublication())
+            publication.confirmed = receipt
+            key = source.idempotency_key
+            publication.native_keys.add(key)
+            pending = publication.pending.get(key)
+            if pending is not None:
+                self._adopt(pending, receipt)
+                pending.native_confirmed = True
+                if pending.trace_confirmed:
+                    del publication.pending[key]
+
+    def pending_source(self, run_id: str) -> tuple[RunRecord, NativeStepEvent | None, NativeStepEvent | None] | None:
+        """Exact pending lifecycle sources for the existing owner UNKNOWN readback."""
+        publication = self._runs_pending.get(run_id)
+        if publication is None:
+            return None
+        run = None
+        started = terminal = None
+        for pending in publication.pending.values():
+            if pending.receipt is not None:
+                run = self._native.run_from_receipt(pending.receipt)
+                source = pending.prepared.events[0]
+                if source.kind == "run_started":
+                    started = source
+                else:
+                    terminal = source
+        if run is None:
+            return None
+        return run, started, terminal
 
     def has_pending(self, run_id: str) -> bool:
-        return run_id in self._pending
+        publication = self._runs_pending.get(run_id)
+        return publication is not None and any(item.prepared.managed_start for item in publication.pending.values())
 
     def confirmed_receipt(self, run_id: str) -> StepWriteReceipt | None:
-        pending = self._pending.get(run_id)
-        return pending.receipt if pending is not None and pending.source_confirmed else None
+        publication = self._runs_pending.get(run_id)
+        return None if publication is None else publication.confirmed
+
+    def release_settled(self, run_id: str) -> None:
+        """Drop settled source bodies after a quiescent run boundary is confirmed."""
+        publication = self._runs_pending.get(run_id)
+        if (publication is not None and not publication.lock.locked()
+                and all(pending.trace_confirmed for pending in publication.pending.values())):
+            # At a confirmed quiescent boundary a failed native publisher cannot
+            # echo again. Keep only unresolved Trace publication/UNKNOWN proof.
+            del self._runs_pending[run_id]
 
     def clear(self, run_id: str | None = None) -> None:
         if run_id is None:
-            self._pending.clear()
+            self._runs_pending.clear()
         else:
-            self._pending.pop(run_id, None)
+            self._runs_pending.pop(run_id, None)
 
     def statement(self, *, query: FactQuery | None = None, sequences: Sequence[int] | None = None,
                   scan: tuple[FactScanCursor | None, int] | None = None,
@@ -212,6 +273,7 @@ class NativeEventReferences:
         reference = payload["value"]["payload"]
         columns = {field.name: events.c[field.name] for field in fields(NativeStepEvent)
                    if full_source or field.name != "metadata"}
+        columns["outcome"] = events.c.outcome
         if full_source:
             columns["metadata"] = cast(events.c.metadata, Text)
         inherited = events.c.run_fields if full_source else events.c.run_fields.bitwise_and(7)
@@ -305,13 +367,16 @@ class NativeEventReferences:
                 except (TypeError, ValueError, KeyError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 if (reference["key"] != row["native_key_digest"] or fact.kind != "step_event"
-                        or fact.state != "AGENT_RUN_STARTED" or fact.subject_digest is not None
+                        or fact.state != event.event_type or fact.subject_digest is not None
                         or fact.owner_key_digest != record_key_digest(self._namespace, self._tenant_id, "trace", "agent_run", source.run_id)
                         or fact.stream_digest != stream_digest(self._namespace, self._tenant_id, "trace", "event", source.run_id)):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                pending = self._pending.get(source.run_id)
+                publication = self._runs_pending.get(source.run_id)
+                pending = None if publication is None else publication.pending.get(source.idempotency_key)
                 if full_source and pending is not None:
-                    if pending.prepared.events[0] != source or pending.prepared.run != native_run:
+                    expected_run = (pending.prepared.run if pending.receipt is None
+                                    else self._native.run_from_receipt(pending.receipt))
+                    if pending.prepared.events[0] != source or expected_run != native_run:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 fact = replace(fact, data=_encode_step_envelope(event))
             values.append(fact)

@@ -324,7 +324,7 @@ async def test_narrow_start_fields_proof_does_not_claim_metadata_integrity(nativ
 
     projected = {field.name: getattr(full, field.name) for field in fields(full) if field.name != "metadata"}
     projected["timestamp"] = full.timestamp.isoformat()
-    projected.update({name: source[name] for name in ("store_digest", "run_digest", "key_digest", "fields_sha256")})
+    projected.update({name: source[name] for name in ("outcome", "store_digest", "run_digest", "key_digest", "fields_sha256")})
     assert "metadata" not in projected and "body_sha256" not in projected
     assert SqlStepStore.decode_started_fields(projected, expected_store_digest=store.store_digest) == replace(started, metadata={})
     for damage in ({"error": "changed"}, {"fields_sha256": None}, {"fields_sha256": "wrong"}, {"step_index": "0"}):

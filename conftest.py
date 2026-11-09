@@ -95,11 +95,39 @@ class _StorageCostReports:
         for field in ("calls", "encoded_bytes", "cpu_ns")
     } | {"managed_start_write_cpu_ns", "managed_start_metadata_utf8_bytes", "managed_start_selects_sqlite"}
     _START_FLAGS = {"owned_tracemalloc_inherited_session", "subclass_tracemalloc_inherited_session"}
+    _TERMINAL_CASES = {
+        **{
+            "test_terminal_outcome_and_full_source_survive_cold_replay[%s]" % outcome:
+            ("cold_terminal_replay", {"case": "cold_replay", "outcome": outcome}, {"source_row_upper_bound"})
+            for outcome in ("succeeded", "interrupted", "failed", "cancelled")
+        },
+        **{
+            "test_owned_runtime_terminal_is_native_with_only_trace_position[%s]" % outcome:
+            (outcome, {"case": "runtime", "outcome": outcome, "fixture_metadata_bytes": 65537}, {
+                "terminal_sidecar_logical_json_bytes", "terminal_former_inline_logical_json_bytes",
+                "terminal_native_proof_ascii_bytes",
+            }) for outcome in ("success", "failure", "cancel", "shortcircuit")
+        },
+        **{
+            "test_terminal_seal_unknown_readback_checks_source_in_existing_run_read[%s]" % damage:
+            ("terminal_seal_unknown", {"case": "seal_unknown", "damage": damage}, set())
+            for damage in ("none", "missing", "outcome", "metadata", "hash")
+        },
+        "test_native_terminal_unknown_rejects_changed_registration_in_one_select":
+        ("native_terminal_registration_unknown", {"case": "registration_unknown"}, set()),
+        **{
+            "test_terminal_publishers_reuse_one_source_without_second_write[%s-%s]" % (native_first, failed_echo):
+            ("terminal_trace_publication", {"case": "publication", "native_first": native_first,
+                                            "failed_echo": failed_echo}, set())
+            for native_first, failed_echo in ((False, False), (True, False), (False, True))
+        },
+    }
 
     def __init__(self) -> None:
         self.reports = {}  # type: typing.Dict[bool, typing.Dict[str, typing.Any]]
         self.replay = None  # type: typing.Optional[typing.Dict[str, typing.Any]]
         self.start_reports = {}  # type: typing.Dict[typing.Tuple[str, str], typing.Dict[str, typing.Any]]
+        self.terminal_reports = {}  # type: typing.Dict[str, typing.Dict[str, typing.Any]]
 
     @classmethod
     def _count(cls, value: object) -> bool:
@@ -179,6 +207,8 @@ class _StorageCostReports:
         outcome = report.outcome if report.outcome in {"passed", "failed", "skipped"} else "unknown"
         if self._record_start(report, outcome):
             return
+        if self._record_terminal(report, outcome):
+            return
         if report.nodeid == self._REPLAY_TEST:
             values = [(name, value) for name, value in report.user_properties
                       if isinstance(name, str) and name in self._REPLAY_COUNTERS]
@@ -200,8 +230,33 @@ class _StorageCostReports:
         result["test_outcome"] = outcome
         self.reports[matches] = result
 
+    def _record_terminal(self, report: pytest.TestReport, outcome: str) -> bool:
+        source = "tests/ai/test_native_terminal_projection.py::"
+        if not report.nodeid.startswith(source):
+            return False
+        case = self._TERMINAL_CASES.get(report.nodeid[len(source):])
+        if case is None:
+            return False
+        prefix, identity, extra = case
+        fields = {prefix + "_" + field for field in (
+            "select", "insert", "update", "delete", "sql_text_bytes", "bound_text_binary_bytes",
+        )} | extra
+        values = report.user_properties
+        names = [name for name, _ in values]
+        if (any(type(name) is not str or name not in fields for name in names)
+                or len(set(names)) != len(names) or not all(self._count(value) for _, value in values)):
+            result = {"status": "invalid"}
+        elif set(names) != fields:
+            result = {"status": "unavailable"}
+        else:
+            result = dict(values)
+        result.update(identity)
+        result["test_outcome"] = outcome
+        self.terminal_reports[report.nodeid] = result
+        return True
+
     def pytest_terminal_summary(self, terminalreporter: object) -> None:
-        if not self.reports and self.replay is None and not self.start_reports:
+        if not self.reports and self.replay is None and not self.start_reports and not self.terminal_reports:
             return
         terminalreporter.section("Synthetic native storage costs")
         sha = os.environ.get("GITHUB_SHA", "")
@@ -232,15 +287,27 @@ class _StorageCostReports:
             terminalreporter.write_line("native_registration_replay_cost " + json.dumps(self.replay, sort_keys=True))
         if self.start_reports:
             terminalreporter.write_line(
-                "START lifecycle baseline: owned vs unchanged subclass using the current algorithm, not a historical-version "
-                "benchmark. The added 128-byte proof may offset savings for a short start."
+                "Owned/subclass lifecycle baseline: current algorithm across the whole lifecycle, including terminal "
+                "sharing, not a historical-version benchmark. START's 128-byte proof may offset savings for a short start."
             )
             terminalreporter.write_line(
-                "START lifecycle timing: whole-scenario wall/CPU nanoseconds; SQL counters cover the runtime listener window. "
+                "Lifecycle timing: whole-scenario wall/CPU nanoseconds; SQL counters cover the runtime listener window. "
                 "Tracemalloc peak is session-wide when inherited_session=true, not an isolated allocation increment."
             )
             for key in sorted(self.start_reports):
                 terminalreporter.write_line(key[0] + " " + json.dumps(self.start_reports[key], sort_keys=True))
+        if self.terminal_reports:
+            terminalreporter.write_line(
+                "Terminal observations: fixed SQLite fixtures only. Runtime fixture metadata is 65537 input bytes; "
+                "logical sidecar/inline/proof sizes are not a historical-version benchmark. "
+                "Terminal cases do not record CPU, peak memory or measured response-byte costs."
+            )
+            terminalreporter.write_line(
+                "Runtime counters cover the full runtime listener window; publication counters cover only Trace publication. "
+                "source_row_upper_bound and terminal_native_proof_ascii_bytes are contract-derived constants, not measurements."
+            )
+            for key in sorted(self.terminal_reports):
+                terminalreporter.write_line("native_terminal_cost " + json.dumps(self.terminal_reports[key], sort_keys=True))
 
 
 class _ManifestGroups:

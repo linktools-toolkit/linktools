@@ -63,7 +63,8 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
             run, event = await registration.prepare_started(
                 conversation_id=ctx.conversation_id, step_index=ctx.run_step,
             )
-            await capture.recorder.record_native_start(run, event)
+            await capture.recorder.record_native_event(run, event)
+            registration.observe_trace_start()
         else:
             await capture.recorder.record_event("AGENT_RUN_STARTED", ctx.run_step)
 
@@ -82,12 +83,18 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
             if isinstance(result.output, DeferredToolRequests)
             else "complete",
         )
-        await capture.recorder.record_event(
-            "AGENT_RUN_INTERRUPTED"
-            if isinstance(result.output, DeferredToolRequests)
-            else "AGENT_RUN_SUCCEEDED",
-            ctx.run_step,
-        )
+        registration = capture.native_registration
+        shared = (await registration.prepare_terminal(
+            context=ctx, conversation_id=ctx.conversation_id, step_index=ctx.run_step, publisher="trace",
+            outcome="interrupted" if isinstance(result.output, DeferredToolRequests) else "succeeded",
+        ) if registration is not None and registration.share_started else None)
+        if shared is not None:
+            await capture.recorder.record_native_event(*shared)
+        else:
+            await capture.recorder.record_event(
+                "AGENT_RUN_INTERRUPTED" if isinstance(result.output, DeferredToolRequests) else "AGENT_RUN_SUCCEEDED",
+                ctx.run_step,
+            )
         return result
 
     async def on_run_error(
@@ -102,9 +109,16 @@ class TraceService(AbstractCapability[AgentContext[AppT]]):
         await capture.context.save_checkpoint(
             ctx, messages=capture.live_messages or ctx.messages, state="interrupted"
         )
-        await capture.recorder.record_event(
-            "AGENT_RUN_FAILED", ctx.run_step, error=repr(error)
-        )
+        registration = capture.native_registration
+        shared = (await registration.prepare_terminal(
+            context=ctx, conversation_id=ctx.conversation_id, step_index=ctx.run_step, publisher="trace",
+            outcome="cancelled" if (isinstance(error, asyncio.CancelledError)
+                or isinstance(error, AIError) and error.code is ErrorCode.EXECUTION_CANCELLED) else "failed", error=error,
+        ) if registration is not None and registration.share_started else None)
+        if shared is not None:
+            await capture.recorder.record_native_event(*shared)
+        else:
+            await capture.recorder.record_event("AGENT_RUN_FAILED", ctx.run_step, error=repr(error))
         raise error
 
     def _tool_request_metadata(self, tool_call_id: str) -> dict[str, str]:

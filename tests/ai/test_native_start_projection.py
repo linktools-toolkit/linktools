@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepEvent as NativeEvent, StepPersistence
 from sqlalchemy import delete, event, update
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -45,6 +45,10 @@ class _Traffic(_SqlTraffic):
         self.sql.append(statement)
         super().capture(connection, cursor, statement, parameters, context, many)
 
+    @property
+    def selects(self) -> list[str]:
+        return [statement for statement in self.sql if statement.lstrip().upper().startswith("SELECT")]
+
     def report(self, record_property, prefix: str) -> None:
         for verb in ("SELECT", "INSERT", "UPDATE", "DELETE"):
             record_property(f"{prefix}_{verb.lower()}", self.statements[verb])
@@ -55,7 +59,9 @@ class _Traffic(_SqlTraffic):
 
 
 @asynccontextmanager
-async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: str = "owned", metadata_bytes: int = 0, trace_sync: bool = False) -> AsyncIterator[tuple]:
+async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: str = "owned", metadata_bytes: int = 0, trace_sync: bool = False,
+                         extra_capabilities: tuple[AbstractCapability, ...] = (),
+                         yield_while_attached: bool = False, observe_without_wait: bool = False) -> AsyncIterator[tuple]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'native-start.db'}")
     await provision_database(engine)
     class CustomSqlStore(SqlStepStore):
@@ -79,7 +85,17 @@ async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: s
                 return ModelResponse(parts=[TextPart("short circuit")])
 
         features.capability(ShortCircuit(), id="short-circuit", scope="runtime")
-    features.agent("default", model="default", allow_tools=())
+    for capability in extra_capabilities:
+        features.capability(capability, scope="runtime")
+    if outcome == "deferred":
+        from pydantic_ai.exceptions import ApprovalRequired
+        from linktools.ai.capability import AgentContext
+
+        async def approval(_context: AgentContext[None]) -> str:
+            raise ApprovalRequired()
+
+        features.tool(approval, effect_policy="replay_safe")
+    features.agent("default", model="default", allow_tools=("approval",) if outcome == "deferred" else ())
     entered = asyncio.Event()
 
     async def model(_messages, _info):
@@ -88,6 +104,8 @@ async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: s
             raise RuntimeError("early model failure")
         if outcome == "cancel":
             await asyncio.Event().wait()
+        if outcome == "deferred":
+            return ModelResponse(parts=[ToolCallPart("approval", {}, tool_call_id="approval-1")])
         return ModelResponse(parts=[TextPart("done")])
 
     traffic = _Traffic()
@@ -101,11 +119,31 @@ async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: s
                     if outcome == "cancel":
                         await asyncio.wait_for(entered.wait(), 5)
                         await execution.cancel()
-                    result = await execution.wait(timeout_seconds=5)
-                    if outcome in {"success", "shortcircuit"}:
-                        assert result.result.status is ExecutionStatus.SUCCEEDED
+                    if observe_without_wait:
+                        from ._runtime_test_helpers import _wait_for_committed
+                        record = await _wait_for_committed(
+                            lambda: state.execution.executions.get(execution.execution_id, tenant_id="default"),
+                            lambda value: value is not None and value.status in {
+                                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+                                ExecutionStatus.WAITING_DEFERRED,
+                            },
+                        )
+                        async def worker_finished() -> None:
+                            while runtime._execution_service.runtime_backend().worker_installed(execution.execution_id):
+                                await asyncio.sleep(0.01)
+                        await asyncio.wait_for(worker_finished(), 5)
+                        status = record.status
                     else:
-                        assert result.result.status is not ExecutionStatus.SUCCEEDED
+                        status = (await execution.wait(timeout_seconds=5)).result.status
+                    if outcome in {"success", "shortcircuit"}:
+                        assert status is ExecutionStatus.SUCCEEDED
+                    else:
+                        assert status is not ExecutionStatus.SUCCEEDED
+                    if yield_while_attached:
+                        runs = await native.list_runs()
+                        assert len(runs) == 1
+                        yield state, native, runs[0], traffic
+                        return
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
             runs = await native.list_runs()
@@ -189,7 +227,7 @@ async def test_runtime_start_remains_first_and_single_after_terminal_flush(
             assert next(index for index, item in enumerate(events) if item.event_type == "MODEL_REQUEST_STARTED") > 0
         raw = await _raw_events(archive, run.run_id)
         assert [item.sequence for item in raw] == list(range(1, len(events) + 1))
-        assert raw[0].data["value"]["type"] == "native_start_reference"
+        assert raw[0].data["value"]["type"] == "native_event_reference"
         assert raw[0].data["value"]["payload"] == {
             "key": native.event_key_digest(starts[0]), "index": 0,
         }
@@ -224,9 +262,9 @@ async def test_cold_start_readers_join_source_in_the_existing_select(tmp_path: P
             traffic.report(record_property, name)
             assert traffic.statements["SELECT"] == 1
             assert not any(traffic.statements[verb] for verb in ("INSERT", "UPDATE", "DELETE"))
-            assert "JOIN ai_step_events" in traffic.sql[0]
-            assert "ai_step_events.metadata" not in traffic.sql[0]
-            assert "ai_step_runs.metadata" not in traffic.sql[0]
+            assert "JOIN ai_step_events" in traffic.selects[0]
+            assert "ai_step_events.metadata" not in traffic.selects[0]
+            assert "ai_step_runs.metadata" not in traffic.selects[0]
             return result
 
         try:
@@ -238,8 +276,9 @@ async def test_cold_start_readers_join_source_in_the_existing_select(tmp_path: P
             selected = await measured("selected", lambda: archive.state_store.read(
                 lambda tx: archive._read_selected_history_facts(tx, run.run_id, (1,))))
             assert _decode_step_envelope(selected[1].data) == expected[0]
-            assert (await _raw_events(archive, run.run_id))[0].data["value"]["type"] == "native_start_reference"
+            assert (await _raw_events(archive, run.run_id))[0].data["value"]["type"] == "native_event_reference"
         finally:
+            await cold.preflight_close()
             await cold.close()
 
 
@@ -275,6 +314,7 @@ async def test_cold_start_reference_fails_closed(tmp_path: Path, corruption: str
                         await read()
                     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         finally:
+            await cold.preflight_close()
             await cold.close()
 
 
@@ -282,7 +322,8 @@ async def test_cold_start_reference_fails_closed(tmp_path: Path, corruption: str
 async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(tmp_path: Path, record_property) -> None:
     async with _runtime_start(tmp_path) as (state, native, run, _):
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
-        expected = (await archive.list_events(agent_run_id=run.run_id))[0]
+        expected_events = await archive.list_events(agent_run_id=run.run_id)
+        expected = expected_events[0]
         objects = InMemoryObjectStore()
         resources = SnapshotResources(namespace="native-start", tenant_id="default",
             durable_domains=frozenset({PersistenceDomain.TRACE}),
@@ -305,15 +346,16 @@ async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(t
         facts = [decode_fact(value) for value in manifest["domains"]["trace"]["facts"]]
         exported = next(fact for fact in facts if fact.kind == "step_event" and fact.state == "AGENT_RUN_STARTED")
         assert _decode_step_envelope(exported.data) == expected
+        assert [_decode_step_envelope(fact.data) for fact in facts if fact.kind == "step_event"] == expected_events
         restored_root = tmp_path / "restored-start"
         await Persistence.restore_snapshot(ref, object_store=target, root=restored_root,
             limits=SnapshotLimits(max_entries=10000, max_bytes=10000000))
         async with Persistence.open("native-start", storage=PersistenceStorage.from_root(restored_root)) as restored:
             restored_archive = restored.run_store.read_store(PersistenceDomain.TRACE)
             restored_events = await restored_archive.list_events(agent_run_id=run.run_id)
-            assert restored_events[0] == expected
+            assert restored_events == expected_events
             assert (await restored_archive.list_event_range(agent_run_id=run.run_id, start=0, end=1)) == [expected]
-        assert (await _raw_events(archive, run.run_id))[0].data["value"]["type"] == "native_start_reference"
+        assert (await _raw_events(archive, run.run_id))[0].data["value"]["type"] == "native_event_reference"
 
 
 @pytest.mark.asyncio
@@ -325,12 +367,12 @@ async def test_native_and_trace_publication_order_does_not_reinsert_source(tmp_p
             conversation_id=run.conversation_id, parent_run_id=run.parent_run_id,
             agent_name=run.agent_name, metadata=dict(run.metadata), idempotency_key="0:0:run_started:")
         projected = NativeEventReferences.project(source, event_index=0)
-        await archive.stage_native_start(run, source, projected)
+        await archive.stage_native_event(run, source, projected)
         if native_first:
             prepared = await native.prepare_step(run=run, events=(source,), managed_start=True)
             receipt = await archive.state_store.mutate(lambda tx: native.write_prepared_step(tx, prepared))
             native.confirm_prepared_step(receipt)
-            archive.confirm_native_start_source(receipt)
+            archive.confirm_native_event_source(receipt)
         traffic = _Traffic()
         engine = native.storage_context.engine
         event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
@@ -343,7 +385,7 @@ async def test_native_and_trace_publication_order_does_not_reinsert_source(tmp_p
             raw_run = await archive.state_store.read(lambda tx: tx.get_record(archive._agent_run_key(run.run_id)))
             assert raw_run.data["value"]["type"] == "native_agent_run_reference"
             assert native.confirmed_run(run.run_id) is None
-        receipts = archive.confirm_native_start_projection((projected,))
+        receipts = archive.confirm_native_event_projection((projected,))
         inserts = [sql for sql in traffic.sql if sql.startswith("INSERT INTO ai_step_events ")]
         traffic.report(record_property, "native_first" if native_first else "trace_first")
         assert len(inserts) == (0 if native_first else 1)
@@ -356,7 +398,7 @@ async def test_native_and_trace_publication_order_does_not_reinsert_source(tmp_p
                     lambda tx: native.write_prepared_step(tx, prepared, confirmed=receipts[0]))
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", replay.capture)
-            archive.confirm_native_start_source(receipt)
+            archive.confirm_native_event_source(receipt)
             replay.report(record_property, "native_after_trace")
             assert not any(replay.statements[verb] for verb in ("SELECT", "INSERT", "UPDATE", "DELETE"))
         assert native.started_from_receipt(receipts[0]) == source
@@ -372,7 +414,7 @@ async def test_nonshared_runtime_keeps_independent_inline_start(tmp_path: Path, 
         raw = await _raw_events(archive, run.run_id)
         starts = [fact for fact in raw if fact.state == "AGENT_RUN_STARTED"]
         assert len(starts) == 1
-        assert starts[0].data["value"]["type"] != "native_start_reference"
+        assert starts[0].data["value"]["type"] != "native_event_reference"
         assert _decode_step_envelope(starts[0].data).event_type == "AGENT_RUN_STARTED"
         assert len([item for item in await native.list_events(run_id=run.run_id) if item.kind == "run_started"]) == 1
 
@@ -427,7 +469,7 @@ async def test_unstaged_archive_start_stays_inline(tmp_path: Path) -> None:
         await archive.sync_projection(projected_run, events=(projected,), checkpoints=(), execution_id="execution")
         raw = await _raw_events(archive, run.run_id)
         assert _decode_step_envelope(raw[0].data) == projected
-        assert raw[0].data["value"]["type"] != "native_start_reference"
+        assert raw[0].data["value"]["type"] != "native_event_reference"
 
 
 @pytest.mark.asyncio
@@ -502,6 +544,11 @@ async def test_concurrent_first_publishers_keep_receipt_proof_after_cache_evicti
         assert traffic.statements["SELECT"] == 0
         assert len([sql for sql in traffic.sql if sql.startswith("INSERT INTO ai_step_events ")]) == 1
         assert await native.list_events(run_id=run.run_id) == [source]
+        retained = references.confirmed_receipt(run.run_id)
+        assert retained is not None
+        assert native.started_from_receipt(retained) == source
+        assert not references.has_pending(run.run_id)
+        references.release_settled(run.run_id)
         assert references.confirmed_receipt(run.run_id) is None
 
 
@@ -520,7 +567,7 @@ async def test_native_source_write_failure_prevents_provider_dispatch(tmp_path: 
     def reject(_connection, _cursor, statement, _parameters, _context, _many):
         if statement.startswith("INSERT INTO ai_step_events "):
             rejected.append(statement)
-            raise RuntimeError("native source unavailable")
+            raise AIError(ErrorCode.STORAGE_CONFLICT, "native source unavailable")
 
     features = RuntimeFeatures("rejected-source")
     features.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
@@ -547,7 +594,7 @@ async def test_native_source_write_failure_prevents_provider_dispatch(tmp_path: 
             archive = state.run_store.read_store(PersistenceDomain.TRACE)
             for run in await archive.list_agent_runs():
                 raw = await _raw_events(archive, run.agent_run_id)
-                assert all(fact.data["value"]["type"] != "native_start_reference" for fact in raw)
+                assert all(fact.data["value"]["type"] != "native_event_reference" for fact in raw)
     finally:
         await native.close()
         await engine.dispose()
@@ -624,10 +671,11 @@ async def test_large_metadata_is_not_returned_by_cold_trace_select(tmp_path: Pat
                 traffic.report(record_property, f"metadata_{size}")
                 record_property(f"metadata_{size}_returned_sql_text_binary_bytes", returned_bytes)
                 assert traffic.statements["SELECT"] == 1
-                assert "ai_step_events.metadata" not in traffic.sql[0]
-                assert "ai_step_runs.metadata" not in traffic.sql[0]
+                assert "ai_step_events.metadata" not in traffic.selects[0]
+                assert "ai_step_runs.metadata" not in traffic.selects[0]
                 assert all("native_metadata" not in row for _, row in rows)
             finally:
+                await cold.preflight_close()
                 await cold.close()
     # Independently generated IDs and timestamp text can vary slightly; the
     # returned fixed-field row must not scale with the 64 KiB source metadata.
@@ -702,7 +750,7 @@ async def test_runtime_recovers_trace_start_commit_ack_loss_with_joined_readback
 
     def mark_start(connection, _cursor, statement, parameters, _context, _many):
         if (not lost and statement.startswith("INSERT INTO ai_state_facts ")
-                and "native_start_reference" in str(parameters)):
+                and "native_event_reference" in str(parameters)):
             connection.info[marker] = True
 
     async def lose_ack(transaction, error_type, error, traceback):
@@ -729,8 +777,8 @@ async def test_runtime_recovers_trace_start_commit_ack_loss_with_joined_readback
             event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
         traffic.report(record_property, f"ack_readback_{len(checked_ranges)}")
         assert traffic.statements["SELECT"] == 1
-        assert "JOIN ai_step_events" in traffic.sql[0]
-        assert "ai_step_events.metadata" in traffic.sql[0]
+        assert "JOIN ai_step_events" in traffic.selects[0]
+        assert "ai_step_events.metadata" in traffic.selects[0]
         checked_ranges.append(result)
         return result
 
@@ -779,8 +827,8 @@ async def test_admitted_candidate_capture_uses_canonical_run_after_native_tail_i
         native.confirm_prepared_step(original_receipt)
         candidate = replace(original, metadata=dict(candidate_trace.metadata))
         candidate_source = replace(source, metadata=dict(candidate.metadata))
-        projected = store.project_native_start(candidate_source, event_index=0)
-        await store.stage_native_start(candidate, candidate_source, projected)
+        projected = store.project_native_event(candidate_source, event_index=0)
+        await store.stage_native_event(candidate, candidate_source, projected)
         await store.append_event(projected)
         capture = await store.capture_execution_projection(original.run_id)
         assert capture is not None
@@ -832,8 +880,10 @@ async def _shared_candidate_source(tmp_path: Path, *, large: bool = True) -> Asy
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="native-run-facts", tenant_id="tenant")
     native = await state.create_step_store()
+    # The small case deliberately makes a native reference larger than the inline run.
     original = RunRecord(run_id="run", conversation_id="conversation", parent_run_id="parent",
-        agent_name="agent", registration_id="registration", metadata={"shared": "original" * (1024 if large else 1)})
+        agent_name="agent", registration_id="registration" if large else "registration" * 128,
+        metadata={"shared": "original" * (1024 if large else 1)})
     candidate = replace(OfficialStepReader.project_run(original), metadata={"shared": "candidate" * (1024 if large else 1)})
     try:
         await state.execution.executions.create_execution(replace(_execution(), revision=1,
@@ -877,8 +927,8 @@ async def test_two_admitted_buffers_reproject_canonical_metadata_after_reader_in
         native.confirm_prepared_step(receipt)
         candidate = replace(original, metadata=dict(candidate_trace.metadata))
         candidate_source = replace(source, metadata=dict(candidate.metadata))
-        projected = store.project_native_start(candidate_source, event_index=0)
-        await store.stage_native_start(candidate, candidate_source, projected)
+        projected = store.project_native_event(candidate_source, event_index=0)
+        await store.stage_native_event(candidate, candidate_source, projected)
         await store.append_event(projected)
         await owner.defer("run", execution_id="execution", producer_generation=1)
         buffer = owner._buffers["run"]
@@ -929,7 +979,7 @@ async def test_terminal_unknown_verification_checks_pending_source_in_original_r
             conversation_id=original.conversation_id, parent_run_id=original.parent_run_id,
             agent_name=original.agent_name, metadata=dict(original.metadata), idempotency_key="0:0:run_started:")
         projected = NativeEventReferences.project(source, event_index=0)
-        await archive.stage_native_start(original, source, projected)
+        await archive.stage_native_event(original, source, projected)
         canonical = OfficialStepReader.project_run(original)
         await archive.sync_projection(canonical, events=(projected,), checkpoints=(), execution_id="execution")
         # Deliberately leave the receipt provisional, as at terminal ACK loss.
@@ -983,14 +1033,15 @@ async def test_terminal_unknown_verification_checks_pending_source_in_original_r
                 event.remove(engine.sync_engine, "before_cursor_execute", checked.capture)
             checked.report(record_property, "terminal_with_pending_source")
             assert accepted is (damage == "none")
-            assert "JOIN ai_step_events" in checked.sql[0]
+            assert "JOIN ai_step_events" in checked.selects[0]
             assert checked.statements["SELECT"] <= baseline.statements["SELECT"]
             if damage == "none":
                 assert checked.statements["SELECT"] == baseline.statements["SELECT"]
         finally:
+            await cold.preflight_close()
             await cold.close()
         if damage == "none":
-            archive.confirm_native_start_projection((projected,))
+            archive.confirm_native_event_projection((projected,))
 
 
 @pytest.mark.parametrize("dialect_name", ("sqlite", "postgresql", "mysql"))
@@ -1051,7 +1102,7 @@ async def test_start_sharing_matches_inline_workload_sql_budget(
                 traffic.report(record_property, backend)
                 results[backend] = traffic
                 if backend == "owned":
-                    assert start.data["value"]["type"] == "native_start_reference"
+                    assert start.data["value"]["type"] == "native_event_reference"
                     sidecar_bytes = len(canonical_json_bytes(dict(start.data)))
                     former_inline = len(canonical_json_bytes(_encode_step_envelope(projected[0])))
                     record_property("shared_start_sidecar_logical_json_bytes", sidecar_bytes)
@@ -1059,7 +1110,7 @@ async def test_start_sharing_matches_inline_workload_sql_budget(
                     record_property("shared_start_former_inline_logical_json_bytes", former_inline)
                     record_property("shared_start_signed_logical_byte_delta", sidecar_bytes + 128 - former_inline)
                 else:
-                    assert start.data["value"]["type"] != "native_start_reference"
+                    assert start.data["value"]["type"] != "native_event_reference"
         finally:
             elapsed_wall = time.perf_counter_ns() - started_wall
             elapsed_cpu = time.process_time_ns() - started_cpu

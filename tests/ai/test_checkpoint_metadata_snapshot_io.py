@@ -14,6 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._native_run_reference import NativeRunReferences
 from linktools.ai.persistence._step_archive import PreparedAgentRunCheckpointBatch, StateStepArchive
 from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
@@ -137,6 +138,12 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
         statements = []
         get_records = _SqlTransaction.get_records
         projection_key = archive.transcript_repository.projection_key("run")
+        read_physical = NativeRunReferences.read_physical
+
+        async def without_native_projection_prefetch(references, transaction, keys):
+            if archive._agent_run_key("run") in keys:
+                keys = tuple(key for key in keys if key != projection_key)
+            return await read_physical(references, transaction, keys)
 
         async def without_projection_prefetch(transaction, keys):
             if archive._agent_run_key("run") in keys:
@@ -165,6 +172,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             with monkeypatch.context() as patch:
                 if baseline:
                     patch.setattr(_SqlTransaction, "get_records", without_projection_prefetch)
+                    patch.setattr(NativeRunReferences, "read_physical", without_native_projection_prefetch)
                 event.listen(engine, "before_cursor_execute", capture)
                 try:
                     await commit()

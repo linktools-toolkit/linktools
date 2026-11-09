@@ -118,13 +118,14 @@ class _CustomFactReader(_LegacyTransaction):
 
 
 def _custom_transactions(monkeypatch, backend, wrapper):
-    module = _memory if backend == "memory" else _sql
-    original = module.bind_state_scope
+    store_type = _memory.InMemoryStateStore if backend == "memory" else _sql.SqlStateStore
+    original = store_type.read
 
-    def bind(group, transactions, **kwargs):
-        return original(group, {store: wrapper(tx) for store, tx in transactions.items()}, **kwargs)
+    async def read(store, callback):
+        # Decorate the consumer view, not the physical transaction's active identity.
+        return await original(store, lambda transaction: callback(wrapper(transaction)))
 
-    monkeypatch.setattr(module, "bind_state_scope", bind)
+    monkeypatch.setattr(store_type, "read", read)
 
 
 @pytest.mark.asyncio

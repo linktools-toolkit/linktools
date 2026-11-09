@@ -1191,17 +1191,17 @@ class StateStepArchive(AgentRunStore):
     def can_share_native_start(self, native: object) -> bool:
         return self._native_events is not None and self._native_events.accepts(native)
 
-    async def stage_native_start(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
+    async def stage_native_event(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
         if self._native_events is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         await self._native_events.stage(run, source, event)
 
-    def confirm_native_start_source(self, receipt: StepWriteReceipt) -> None:
+    def confirm_native_event_source(self, receipt: StepWriteReceipt) -> None:
         if self._native_events is not None:
             self._native_events.confirm_native(receipt)
 
     @asynccontextmanager
-    async def native_start_publication(self, run_id: str) -> AsyncIterator[None]:
+    async def native_event_publication(self, run_id: str) -> AsyncIterator[None]:
         if self._native_events is None:
             yield
         else:
@@ -1211,10 +1211,14 @@ class StateStepArchive(AgentRunStore):
     def has_pending_native_start(self, run_id: str) -> bool:
         return self._native_events is not None and self._native_events.has_pending(run_id)
 
-    def native_start_receipt(self, run_id: str) -> StepWriteReceipt | None:
+    def native_event_receipt(self, run_id: str) -> StepWriteReceipt | None:
         return None if self._native_events is None else self._native_events.confirmed_receipt(run_id)
 
-    def confirm_native_start_projection(self, events: Sequence[StepEvent]) -> tuple[StepWriteReceipt, ...]:
+    def release_native_event_receipt(self, run_id: str) -> None:
+        if self._native_events is not None:
+            self._native_events.release_settled(run_id)
+
+    def confirm_native_event_projection(self, events: Sequence[StepEvent]) -> tuple[StepWriteReceipt, ...]:
         return () if self._native_events is None else self._native_events.confirm(events)
 
     async def read_event_facts(self, transaction: StateTransaction, query: FactQuery,
@@ -1784,7 +1788,8 @@ class StateStepArchive(AgentRunStore):
             observed_run = await self.get_agent_run(agent_run_id=projection.run.agent_run_id)
         else:
             records = await self._store.read(lambda transaction: self._native_runs.read(transaction,
-                keys=(self._agent_run_key(projection.run.agent_run_id),), expected_run=source[0], expected_start=source[1]))
+                keys=(self._agent_run_key(projection.run.agent_run_id),), expected_run=source[0],
+                expected_start=source[1], expected_terminal=source[2]))
             observed_run = None if not records else _decode_step(records[0].data)
         if observed_run != expected_run:
             return False

@@ -31,12 +31,13 @@ SOFTWARE.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
 import anyio
@@ -59,6 +60,9 @@ from pydantic_ai_harness.step_persistence import (
     StepEvent,
     is_provider_valid,
 )
+
+from ..errors import AIError, ErrorCode
+from ..steps import LifecycleOutcome, NativeLifecycleEvent
 
 
 @runtime_checkable
@@ -143,8 +147,14 @@ class StepRunRegistration:
     agent_name: str | None
     metadata: dict[str, str]
     share_started: bool = False
+    lifecycle_participant_types: tuple[type[AbstractCapability[Any]], ...] = ()
+    lifecycle_observer_types: tuple[type[AbstractCapability[Any]], ...] = ()
     _record: RunRecord | None = field(default=None, init=False, repr=False)
     _started: StepEvent | None = field(default=None, init=False, repr=False)
+    _terminal: NativeLifecycleEvent | None = field(default=None, init=False, repr=False)
+    _trace_started: bool = field(default=False, init=False, repr=False)
+    _terminal_publishers: set[str] = field(default_factory=set, init=False, repr=False)
+    _terminal_error_id: int | None = field(default=None, init=False, repr=False)
     _prepare_token: Callable[[], Awaitable[tuple[str, datetime]]] | None = field(default=None, init=False, repr=False)
 
     def bind_registration(self, prepare_token: Callable[[], Awaitable[tuple[str, datetime]]]) -> None:
@@ -172,6 +182,64 @@ class StepRunRegistration:
         prepared = self.prepared_started()
         assert prepared is not None
         return prepared
+
+    def observe_trace_start(self) -> None:
+        """Admit paired lifecycle capture after Trace stages the shared start."""
+        if self._started is None:
+            raise ValueError("Trace lifecycle requires its shared start")
+        self._trace_started = True
+
+    async def prepare_terminal(self, *, context: RunContext[Any], conversation_id: str | None, step_index: int,
+                         outcome: LifecycleOutcome, publisher: Literal["native", "trace"],
+                         error: BaseException | None = None) -> tuple[RunRecord, NativeLifecycleEvent] | None:
+        """Share the terminal hook's source and clock, regardless of hook order."""
+        if (not self.share_started or not self._trace_started or self._record is None
+                or self._started is None or context.in_durable_context):
+            return None
+        root = context.root_capability
+        if root is None:
+            return None
+        paired = True
+        observers = dict.fromkeys(self.lifecycle_observer_types, 0)
+
+        def inspect(capability: AbstractCapability[Any]) -> None:
+            nonlocal paired
+            cls = type(capability)
+            if cls in observers:
+                observers[cls] += 1
+            # This traversal observes the final invocation tree at the hook,
+            # including per-run replacement and dynamically resolved wrappers.
+            if (cls not in self.lifecycle_participant_types
+                    and (cls.wrap_run is not AbstractCapability.wrap_run
+                         or cls.after_run is not AbstractCapability.after_run
+                         or cls.on_run_error is not AbstractCapability.on_run_error)):
+                paired = False
+
+        root.apply(inspect)
+        if not paired or len(observers) != 2 or any(count != 1 for count in observers.values()):
+            return None
+        run = self.prepare(conversation_id=conversation_id)
+        kind = "run_completed" if outcome in {"succeeded", "interrupted"} else "run_failed"
+        if publisher in self._terminal_publishers:
+            return None
+        self._terminal_publishers.add(publisher)
+        event = self._terminal
+        if event is None:
+            timestamp = datetime.now(UTC)
+            event = NativeLifecycleEvent(
+                run_id=run.run_id, kind=kind, step_index=step_index, outcome=outcome, timestamp=timestamp,
+                conversation_id=run.conversation_id, parent_run_id=run.parent_run_id,
+                agent_name=run.agent_name, metadata=dict(run.metadata), error=None if error is None else repr(error),
+                idempotency_key=NativeLifecycleEvent.source_key(),
+            )
+            self._terminal = event
+            self._terminal_error_id = None if error is None else id(error)
+        elif (event.step_index, event.outcome, self._terminal_error_id) != (
+                step_index, outcome, None if error is None else id(error)):
+            # An intervening hook can transform or recover the outcome. Its
+            # observation remains independent instead of overwriting this source.
+            return None
+        return deepcopy((run, event))
 
     def prepared_started(self) -> tuple[RunRecord, StepEvent] | None:
         """Return a prepared source, including before the native before_run hook."""
@@ -400,7 +468,13 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
             snapshot = self._atomic_prepare_snapshot(
                 ctx, list(messages), step, "interrupted" if interrupted else "complete",
             )
-        event = self._atomic_prepare_event(ctx, kind="run_completed")
+        shared = (await self.run_registration.prepare_terminal(
+            context=ctx, conversation_id=ctx.conversation_id, step_index=ctx.run_step, publisher="native",
+            outcome="interrupted" if interrupted else "succeeded",
+        ) if self.run_registration is not None and self.run_registration.share_started else None)
+        if shared is not None:
+            self._atomic_event_sequence = max(1, self._atomic_event_sequence) + 1
+        event = shared[1] if shared is not None else self._atomic_prepare_event(ctx, kind="run_completed")
         await self._atomic_commit(events=(event,), snapshot=snapshot)
         if snapshot is not None:
             await self._atomic_confirm_snapshot(ctx, snapshot)
@@ -423,9 +497,14 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
                     snapshot = self._atomic_prepare_snapshot(
                         ctx, captured, step_index, _snapshot_state(captured)
                     )
-            event = self._atomic_prepare_event(
-                ctx, kind="run_failed", error=repr(error)
-            )
+            shared = (await self.run_registration.prepare_terminal(
+                context=ctx, conversation_id=ctx.conversation_id, step_index=ctx.run_step, publisher="native",
+                outcome="cancelled" if (isinstance(error, asyncio.CancelledError)
+                    or isinstance(error, AIError) and error.code is ErrorCode.EXECUTION_CANCELLED) else "failed", error=error,
+            ) if self.run_registration is not None and self.run_registration.share_started else None)
+            if shared is not None:
+                self._atomic_event_sequence = max(1, self._atomic_event_sequence) + 1
+            event = shared[1] if shared is not None else self._atomic_prepare_event(ctx, kind="run_failed", error=repr(error))
             await self._atomic_commit(events=(event,), snapshot=snapshot)
             if snapshot is not None:
                 await self._atomic_confirm_snapshot(ctx, snapshot)

@@ -16,7 +16,7 @@ from sqlalchemy import event
 
 from linktools.ai.capability import TraceCapability
 from linktools.ai.capability.steps import StepRunRegistration
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence.runs import OfficialStepReader
@@ -63,12 +63,14 @@ async def test_runtime_native_producer_and_cold_trace_share_exact_registration(
     features = RuntimeFeatures("native-producer")
     features.capability(StepPersistence(store=native, capture_frontier=True,
         metadata={} if not metadata_size else {"custom": "x" * metadata_size}), scope="runtime")
-    features.capability(TraceCapability(), scope="runtime")
+    features.capability(TraceCapability(commit=CommitPolicy.sync()), scope="runtime")
     features.agent("default", model="default", allow_tools=())
 
     async def provider(messages, info):
         source, = await native.list_runs()
-        projected = await state.run_store.get_agent_run(agent_run_id=source.run_id)
+        # Synchronous Trace publishes the shared registration before provider dispatch.
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
+        projected = await archive.get_agent_run(agent_run_id=source.run_id)
         assert projected == OfficialStepReader.project_run(source)
         assert projected.started_at.isoformat() == source.started_at.isoformat()
         assert set(source.metadata) - set(projected.metadata) == {
@@ -97,6 +99,7 @@ async def test_runtime_native_producer_and_cold_trace_share_exact_registration(
                     assert reference["removed"] == []
                     assert reference["started_at"] is None
             finally:
+                await cold.preflight_close()
                 await cold.close()
     finally:
         await native.close()

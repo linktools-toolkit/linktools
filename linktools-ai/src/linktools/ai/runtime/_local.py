@@ -101,6 +101,7 @@ from ..observe.service import (
 from ..model.messages import encode_model_messages
 from ..execution import ExecutionInputContext
 from ._memory import MemoryStore, RuntimeMemoryStore
+from ..steps import NativeLifecycleEvent
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import (
     RuntimeToolOperationBridge,
@@ -4838,6 +4839,9 @@ class LocalExecutionBackend:
                                 execution_id,
                             )
                         raise _secondary_execution_error(commit_error, error) from error
+                if (isinstance(self._run_store, RuntimeAgentRunStore)
+                        and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
+                    self._run_store.release_step_event_receipt(agent_run_id)
                 metric_status = current.status.value
                 metric_error_code = current.error_code
                 if current.status is ExecutionStatus.RECOVERY_REQUIRED:
@@ -4894,6 +4898,8 @@ class LocalExecutionBackend:
                         deferred, agent_run_id=agent_run_id, producer_generation=producer_generation,
                     )
                     await self._publish_persisted_terminal_event(deferred)
+                if isinstance(self._run_store, RuntimeAgentRunStore):
+                    self._run_store.release_step_event_receipt(agent_run_id)
                 metric_status = deferred.status.value
                 metric_error_code = deferred.error_code
                 return
@@ -5530,11 +5536,11 @@ class LocalExecutionBackend:
                 if source is None or await native.get_run(run_id=run.run_id) != source:
                     return False
             if events:
-                started = native.started_from_receipt(receipt)
-                actual_events = (await native.list_events(run_id=events[0].run_id) if started is None else
+                proven = native.events_from_receipt(receipt)
+                actual_events = (await native.list_events(run_id=events[0].run_id) if not proven else
                                  await native.list_events(run_id=events[0].run_id, started_receipt=receipt))
-                expected_events = tuple(started if started is not None and event.idempotency_key == started.idempotency_key
-                                        else event for event in events)
+                expected_events = tuple(next((source for source in proven if source.idempotency_key == event.idempotency_key), event)
+                                        for event in events)
                 if any(event not in actual_events for event in expected_events):
                     return False
             if snapshot is not None:
@@ -5544,7 +5550,7 @@ class LocalExecutionBackend:
             return True
 
         async def commit_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
-            async with self._run_store.native_start_publication(agent_run_id):
+            async with self._run_store.native_event_publication(agent_run_id):
                 return await publish_boundary(run=run, events=events, snapshot=snapshot)
 
         async def publish_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
@@ -5574,7 +5580,8 @@ class LocalExecutionBackend:
                         transaction, observed, next_record=next_record,
                         expected_producer_generation=generation, expected_producer_claim_id=claim_id,
                     )
-                    source_receipt = self._run_store.step_start_receipt(run.run_id) if managed else None
+                    source_receipt = (self._run_store.step_event_receipt(agent_run_id)
+                                      if managed or any(isinstance(event, NativeLifecycleEvent) for event in events) else None)
                     written = (await native.write_prepared_step(transaction, prepared, confirmed=source_receipt)
                                if source_receipt is not None else await native.write_prepared_step(transaction, prepared))
                     return receipt
