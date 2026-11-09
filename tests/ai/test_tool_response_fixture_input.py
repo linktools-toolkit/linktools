@@ -60,7 +60,7 @@ def _execution_without_fixture() -> ExecutionRecord:
     with sqlite3.connect(":memory:") as connection:
         connection.executescript(sql.decode("utf-8"))
         row = connection.execute("SELECT payload_json FROM ai_state_records WHERE kind = 'execution'").fetchone()
-    payload = json.loads(row[0])
+    payload = json.loads(json.loads(row[0]))
     fields = payload["value"]["payload"]["fields"]
     assert fields["tool_response_ref"] is None
     assert fields["restart_checkpoints"] is True and fields["durable_trace"] is True

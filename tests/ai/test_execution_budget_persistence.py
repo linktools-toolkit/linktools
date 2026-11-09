@@ -111,7 +111,7 @@ def test_explicit_shared_budget_scope_keeps_its_value_and_validation(
         row = connection.execute(
             "SELECT payload_json FROM ai_state_records WHERE kind = 'execution'",
         ).fetchone()
-    value = json.loads(row[0])
+    value = json.loads(json.loads(row[0]))
     value["value"]["payload"]["fields"]["budget_scope_id"] = scope
     if scope is None or isinstance(scope, str) and scope:
         assert _decode_enveloped_domain(value, ExecutionRecord).budget_scope_id == scope
