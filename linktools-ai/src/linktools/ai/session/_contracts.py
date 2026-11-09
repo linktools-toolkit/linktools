@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol, cast
 
 from ..core import (
     CorrelationData,
@@ -35,6 +35,15 @@ from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..model import CanonicalUserInput, StoredUserInput, UserPromptInput, normalize_input_files, validate_user_input
 from ..workspace import validate_workspace_path
+
+
+SessionContext = Literal["all", "current_turn"]
+
+
+def normalize_session_context(value: str) -> SessionContext:
+    if value not in ("all", "current_turn"):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return cast(SessionContext, value)
 
 
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
@@ -280,9 +289,11 @@ class ResumeSessionRequest:
     files: tuple[str, ...] = ()
     budget: RunBudget | None = None
     tool_effects: ToolEffects = "live"
+    session_context: SessionContext = "all"
 
     def __post_init__(self) -> None:
         normalize_tool_effects(self.tool_effects)
+        normalize_session_context(self.session_context)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
@@ -480,6 +491,8 @@ class SessionRepository(Protocol):
 
 
 __all__ = [
+    "SessionContext",
+    "normalize_session_context",
     "SessionRepository",
     "ConversationCursor",
     "SessionRecord",

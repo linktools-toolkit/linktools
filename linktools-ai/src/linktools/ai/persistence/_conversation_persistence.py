@@ -182,6 +182,7 @@ class ConversationPersistence:
         checkpoint_sequence: int | None,
         projection_digest: str | None,
         tenant_id: str,
+        include_content: bool = True,
     ) -> LoadedModelContext:
         archive = self.archive
         if isinstance(archive, StateStepArchive):
@@ -192,8 +193,11 @@ class ConversationPersistence:
                 checkpoint_sequence=checkpoint_sequence,
                 projection_digest=projection_digest,
                 tenant_id=tenant_id,
+                include_content=include_content,
             )
         if isinstance(archive, InMemoryStepArchive):
+            if not include_content:
+                return LoadedModelContext(())
             values = await archive.load_model_context(agent_run_id=agent_run_id)
             return LoadedModelContext(
                 tuple(

@@ -3012,6 +3012,7 @@ class StateStepArchive(AgentRunStore):
     async def load_committed_session_model_context(
         self, *, agent_run_id: str,
         checkpoint_sequence: int, projection_digest: str, tenant_id: str,
+        include_content: bool = True,
     ) -> LoadedModelContext:
         require_no_run_history_lock("StateStepArchive.load_committed_session_model_context")
         self._ensure_open()
@@ -3029,6 +3030,8 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
         if stored.projection_digest != projection_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not include_content:
+            return LoadedModelContext(())
         key = None
         if self._context_cache is not None:
             key = await self._session_context_cache_key(

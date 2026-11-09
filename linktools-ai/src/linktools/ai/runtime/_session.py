@@ -131,6 +131,7 @@ class _SessionExecutionAdapter:
             mode=request.mode, planning=request.planning, thinking=request.thinking,
             correlation=request.correlation, files=request.files, budget=request.budget,
             tool_effects=request.tool_effects,
+            session_context=request.session_context,
         )
         return await self._execution.start_for_session(
             agent_id, binding_digest, session_id, execution_request,

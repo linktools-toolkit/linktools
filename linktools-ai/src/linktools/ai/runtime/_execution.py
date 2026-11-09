@@ -673,7 +673,7 @@ class DefaultExecutionService(TaskExecutionService):
     ) -> ExecutionRequest:
         stored = execution.stored_user_input
         if stored is None:
-            return replace(request, tool_response_ref=execution.tool_response_ref, tool_effects=execution.tool_effects)
+            return replace(request, tool_response_ref=execution.tool_response_ref, tool_effects=execution.tool_effects, session_context=execution.session_context)
         if self._input_materializer is not None:
             prompt = await self._input_materializer.restore(stored)
         elif stored.codec == "text":
@@ -684,7 +684,7 @@ class DefaultExecutionService(TaskExecutionService):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             prompt = decode_user_content_payload(payload)
         return replace(request, user_prompt=prompt, files=(), tool_response_ref=execution.tool_response_ref,
-                       tool_effects=execution.tool_effects)
+                       tool_effects=execution.tool_effects, session_context=execution.session_context)
 
     async def _binding(
         self,
@@ -724,6 +724,7 @@ class DefaultExecutionService(TaskExecutionService):
             or execution.budget_scope_id != expected_scope
             or execution.tool_response_ref != request.tool_response_ref
             or execution.tool_effects != request.tool_effects
+            or execution.session_context != request.session_context
             or execution.binding_digest != binding.binding_digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
@@ -1254,6 +1255,8 @@ class DefaultExecutionService(TaskExecutionService):
         await self._authorization.authorize(
             request.principal, AuthorizationAction.EXECUTION_RUN, resource
         )
+        if request.session_context != "all" and session_id is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         self._validate_tool_response_mode(request.tool_response_ref, session_id=session_id, fixture=fixture)
         if budget_scope_id is not None:
             await self.authorize_budget_scope(
@@ -1528,6 +1531,7 @@ class DefaultExecutionService(TaskExecutionService):
             context_imported=request.input_context is not None,
             tool_response_ref=request.tool_response_ref,
             tool_effects=request.tool_effects,
+            session_context=request.session_context,
             correlation=request.correlation,
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
@@ -2489,6 +2493,7 @@ class DefaultExecutionService(TaskExecutionService):
             input_context=input_context,
             tool_response_ref=previous.tool_response_ref,
             tool_effects=previous.tool_effects,
+            session_context=previous.session_context,
         )
         return await self._start(
             binding_digest,
@@ -2535,6 +2540,7 @@ class DefaultExecutionService(TaskExecutionService):
             budget=request.budget,
             tool_response_ref=previous.tool_response_ref,
             tool_effects=previous.tool_effects,
+            session_context=previous.session_context,
         )
         return await self._start(
             binding_digest,
@@ -3002,6 +3008,7 @@ def _request_digest(
             **({"input_context_digest": request.input_context.digest} if request.input_context is not None else {}),
             **({"tool_response_ref": request.tool_response_ref.to_payload()} if request.tool_response_ref is not None else {}),
             **({"tool_effects": request.tool_effects} if request.tool_effects != "live" else {}),
+            **({"session_context": request.session_context} if request.session_context != "all" else {}),
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),

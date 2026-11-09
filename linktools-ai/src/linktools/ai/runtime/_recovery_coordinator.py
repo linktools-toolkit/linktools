@@ -994,6 +994,7 @@ class _RecoveryCoordinator:
             correlation=execution.correlation,
             tool_response_ref=execution.tool_response_ref,
             tool_effects=execution.tool_effects,
+            session_context=execution.session_context,
             resolved_binding=resolved_binding,
         )
         if not self._port._prepare_recovery_relaunch(execution.execution_id):

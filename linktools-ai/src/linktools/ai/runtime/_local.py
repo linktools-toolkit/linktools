@@ -2443,6 +2443,7 @@ class LocalExecutionBackend:
             correlation=current.correlation,
             tool_response_ref=current.tool_response_ref,
             tool_effects=current.tool_effects,
+            session_context=current.session_context,
             resolved_binding=decision.binding,
         )
         if not self._prepare_recovery_relaunch(current.execution_id):

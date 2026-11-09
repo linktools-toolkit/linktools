@@ -3,6 +3,8 @@
 """Session lifecycle and conversation membership contracts."""
 
 from ._contracts import (
+    SessionContext,
+    normalize_session_context,
     SessionRepository,
     ConversationCursor,
     SessionRecord,
@@ -37,6 +39,8 @@ from ._service import (
 )
 
 __all__ = [
+    "SessionContext",
+    "normalize_session_context",
     "SessionManager",
     "SessionExecutionState",
     "SessionExecutionReader",

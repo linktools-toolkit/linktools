@@ -14,6 +14,7 @@ from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionL
     ExecutionMode, ExecutionStatus, IdempotencyStatus, JsonValue, OperationStatus,
     ResourceKind, StopReason, ThinkingValue, UsageMetrics, canonical_sha256,
     normalize_correlation, normalize_execution_mode, normalize_thinking, normalize_tool_effects, ToolEffects)
+from ..session import SessionContext, normalize_session_context
 from ..errors import ErrorDiagnostics
 from ..storage import StoredPayload
 from ..spec import CapabilityRef
@@ -81,6 +82,7 @@ class ExecutionRecord:
     budget_scope_id: str | None = None
     tool_response_ref: AssetVersionRef | None = None
     tool_effects: ToolEffects = "live"
+    session_context: SessionContext = "all"
     restart_checkpoints: bool = False
     durable_trace: bool = False
     # Whether this execution retains conversation and fork context.
@@ -90,6 +92,7 @@ class ExecutionRecord:
 
     def __post_init__(self) -> None:
         normalize_tool_effects(self.tool_effects)
+        normalize_session_context(self.session_context)
         if (isinstance(self.producer_generation, bool)
                 or not isinstance(self.producer_generation, int)
                 or self.producer_generation < 0):
@@ -147,6 +150,7 @@ class ExecutionRecord:
                 or self.context_imported
                 or self.tool_response_ref is not None
                 or self.tool_effects != "live"
+                or self.session_context != "all"
                 or self.conversation_agent_run_id is not None
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None

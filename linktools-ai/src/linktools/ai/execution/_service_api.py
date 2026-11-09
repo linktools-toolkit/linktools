@@ -61,6 +61,7 @@ from ..core import (
     validate_page_limit,
     validate_resource_id,
 )
+from ..session import SessionContext, normalize_session_context
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..model import ModelClientRequest
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent, TaskGraphInfo
@@ -113,11 +114,13 @@ class ExecutionRequest:
     budget: RunBudget | None = None
     tool_response_ref: AssetVersionRef | None = None
     tool_effects: ToolEffects = "live"
+    session_context: SessionContext = "all"
     # Ephemeral admission state; never included in durable request projections.
     resolved_binding: AgentBinding | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         normalize_tool_effects(self.tool_effects)
+        normalize_session_context(self.session_context)
         if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.budget is not None and not isinstance(self.budget, RunBudget):

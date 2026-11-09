@@ -19,7 +19,7 @@ def _replay_values(
         requires_task_invocation_capture=False,
         budget_scope_id=None,
         tool_response_ref=None,
-        tool_effects="live",
+        tool_effects="live", session_context="all",
         binding_digest="a" * 64,
         planning=False,
         thinking=False,
@@ -33,7 +33,7 @@ def _replay_values(
         correlation=request_correlation,
         budget=None,
         tool_response_ref=None,
-        tool_effects="live",
+        tool_effects="live", session_context="all",
     )
     return execution, binding, request
 
@@ -63,7 +63,7 @@ def test_execution_replay_uses_binding_digest() -> None:
         requires_task_invocation_capture=False,
         budget_scope_id=None,
         tool_response_ref=None,
-        tool_effects="live",
+        tool_effects="live", session_context="all",
         binding_digest=durable.binding_digest,
         planning=False,
         thinking=False,
@@ -74,7 +74,7 @@ def test_execution_replay_uses_binding_digest() -> None:
         binding_contract=replayed,
     )
     request = SimpleNamespace(
-        planning=False, thinking=False, budget=None, tool_response_ref=None, tool_effects="live",
+        planning=False, thinking=False, budget=None, tool_response_ref=None, tool_effects="live", session_context="all",
     )
 
     service._validate_replayed_execution(execution, binding, request)
