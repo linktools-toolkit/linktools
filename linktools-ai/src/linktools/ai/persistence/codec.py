@@ -14,6 +14,7 @@ import math
 import types
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass
+from ..steps import NativeStepSource
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -302,6 +303,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("execution_event", ExecutionEventRecord),
     ("execution_history_seal", ExecutionHistorySealRecord),
     ("execution_record", ExecutionRecord),
+    ("native_step_source", NativeStepSource),
     ("execution_run_seal_head", ExecutionRunSealHead),
     ("model_client_body_ref", ModelClientBodyRef),
     ("model_client_request_ref", ModelClientRequestRef),

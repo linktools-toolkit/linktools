@@ -14,6 +14,7 @@ from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
+from ..steps import NativeStepSource
 from pydantic import ValidationError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -303,6 +304,7 @@ class LocalExecutionBackend:
         archive_objects: ObjectStore | None = None,
         archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
         restore_binding: "Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None" = None,
+        native_step_source: Callable[[AgentBinding], Awaitable[NativeStepSource | None]] | None = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
         execution_cwd: "str | None",
@@ -354,6 +356,7 @@ class LocalExecutionBackend:
         self._executor = executor
         self._catalog = catalog
         self._restore_binding = restore_binding
+        self._native_step_source = native_step_source
         self._workspace = workspace
         self._limits = limits
         self._execution_cwd = execution_cwd
@@ -443,6 +446,10 @@ class LocalExecutionBackend:
             )
         if binding.binding_digest != execution.binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.native_step_source is not None:
+            source = (None if self._native_step_source is None else await self._native_step_source(binding))
+            if source != execution.native_step_source:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return binding
 
     async def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:

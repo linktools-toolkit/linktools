@@ -75,6 +75,7 @@ from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, Agen
 from ._native_checkpoint import NativeCheckpoint
 from ._native_event_reference import NativeEventReferences
 from ._step_store import SqlStepStore, StepWriteReceipt
+from ..steps import NativeStepSource
 from ._sql import SqlStateStore
 from .state import StateGroupTransaction, StateTransaction
 
@@ -137,6 +138,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._staging = staging
         self.conversation_persistence = ConversationPersistence(conversation_archive)
         self._execution_repository = execution_repository
+        self._native_step_source: NativeStepSource | None = None
         self._pending_producer_guard: Callable[[str, int, bool], bool] | None = None
         self._tenant_id = tenant_id
         self._archives = {
@@ -178,12 +180,27 @@ class RuntimeAgentRunStore(AgentRunStore):
     def bind_step_store(self, store: StepStore) -> None:
         """Use the same official StepStore as the run's StepPersistence capability."""
         self.checkpoint_persistence.bind_step_store(store)
+        self._native_step_source = None
+        if type(store) is SqlStepStore and self._execution_repository is not None:
+            state = self._execution_repository.state_store
+            if isinstance(state, SqlStateStore) and state.context.engine is store.storage_context.engine:
+                self._native_step_source = store.backup_source
         if isinstance(store, SqlStepStore):
             for archive in self._archives.values():
                 if (isinstance(archive, StateStepArchive)
                         and isinstance(archive.state_store, SqlStateStore)
                         and archive.state_store.context.engine is store.storage_context.engine):
                     archive.bind_native_run_store(store)
+
+    @property
+    def native_step_source(self) -> NativeStepSource | None:
+        """Admitted built-in checkpoint owner, without querying native tables."""
+        return self._native_step_source
+
+    def validate_native_step_source(self, source: NativeStepSource | None) -> None:
+        """Prevent a restored execution from using a different native owner."""
+        if source is not None and source != self.native_step_source:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
     @property
     def step_store(self) -> StepStore:

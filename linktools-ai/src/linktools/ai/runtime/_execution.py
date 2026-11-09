@@ -34,6 +34,7 @@ from ..execution import (ExecutionManager, ExecutionDriver, CancelEffectOutcome,
 )
 
 from ..model import validate_model_inputs
+from ..steps import NativeStepSource
 
 from ..agent import (
     AgentBinding,
@@ -382,6 +383,7 @@ class DefaultExecutionService(TaskExecutionService):
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         restore_binding: Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None = None,
+        native_step_source: Callable[[AgentBinding], Awaitable[NativeStepSource | None]] | None = None,
         runtime_bridge: _ExecutionRuntimeBridge,
         live_broker: _LiveExecutionStreamBroker,
         operation_ids: "Callable[[], str] | None" = None,
@@ -418,6 +420,7 @@ class DefaultExecutionService(TaskExecutionService):
         self._catalog = catalog
         self._compiler = compiler
         self._restore_binding = restore_binding
+        self._native_step_source = native_step_source
         self._runtime_bridge = runtime_bridge
         self._live_broker = live_broker
         self._history_reader = history_reader
@@ -1502,6 +1505,9 @@ class DefaultExecutionService(TaskExecutionService):
                         resolved_instructions,
                     )
 
+        native_source = None
+        if (policy.restart_checkpoints or parent is not None and parent.restart_checkpoints) and self._native_step_source is not None:
+            native_source = await self._native_step_source(binding)
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
@@ -1538,6 +1544,7 @@ class DefaultExecutionService(TaskExecutionService):
             stored_user_input=context.stored_user_input,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id or (None if request.budget is None else "execution:" + execution_id),
+            native_step_source=native_source,
             restart_checkpoints=(policy.restart_checkpoints
                                  or parent is not None and parent.restart_checkpoints),
             durable_trace=(policy.durable_trace or requires_task_invocation_capture

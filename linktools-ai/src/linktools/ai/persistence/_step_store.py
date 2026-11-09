@@ -5,7 +5,7 @@
 import hashlib
 import json
 from collections import OrderedDict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy, deepcopy
@@ -40,10 +40,11 @@ from ._payload import encode_payload_bytes
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, encode_model_messages
 from ..storage import StoredPayload
 from ._native_checkpoint import NativeCheckpoint
+from ._step_backup import NativeStepBackup
 from ._step_maintenance import StepContentCleanupResult, purge_step_content
 from ._step_schema import build_step_sql_metadata
-from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction
-from ..steps import NativeLifecycleEvent
+from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction, SqlStateRowReader
+from ..steps import NativeLifecycleEvent, NativeStepSource
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
@@ -709,6 +710,159 @@ class SqlStepStore:
         """The borrowed physical context used to verify same-group composition."""
         return self._context
 
+    @property
+    def backup_supported(self) -> bool:
+        """Whether this owner has no unexported external effect ledger."""
+        return self._tool_effect_store is None
+
+    @property
+    def backup_source(self) -> NativeStepSource | None:
+        """Actual bound message group, never inferred from table presence."""
+        if not self.backup_supported or self._message_archive is None:
+            return None
+        return NativeStepSource(group_id=self._message_archive.scope_id, store_digest=self._store_digest)
+
+    @classmethod
+    def validate_backup(cls, backup: NativeStepBackup) -> None:
+        """Validate raw row identities and descriptors without opening SQL."""
+        metadata = build_step_sql_metadata()
+        runs = {}
+        for name in ("runs", "events", "snapshots"):
+            table = metadata.tables[f"ai_step_{name}"]
+            columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at"}
+            seen = set()
+            for row in getattr(backup, name):
+                if set(row) != columns or row["store_digest"] != backup.store_digest:
+                    raise ValueError("native backup row fields or scope are invalid")
+                run_id = row["run_id"]
+                if not isinstance(run_id, str) or row["run_digest"] != _digest(run_id):
+                    raise ValueError("native backup run identity is corrupt")
+                key = row["run_digest"] if name == "runs" else row["key_digest"]
+                NativeMessageRoot("validation", key)
+                if key in seen:
+                    raise ValueError("native backup contains duplicate owner identities")
+                seen.add(key)
+                if name == "runs":
+                    record = _RUN_ADAPTER.validate_python(cls._record_data(row))
+                    if (row["conversation_digest"] != _optional_digest(record.conversation_id)
+                            or row["parent_digest"] != _optional_digest(record.parent_run_id)):
+                        raise ValueError("native backup lineage identity is corrupt")
+                    runs[run_id] = row
+                    continue
+                replay = row["idempotency_key"]
+                if replay is not None and (not isinstance(replay, str) or key !=
+                        _replay_digest(backup.store_digest, row["run_digest"], replay)):
+                    raise ValueError("native backup replay identity is corrupt")
+                if name == "snapshots":
+                    if type(row["pruned"]) is not bool:
+                        raise ValueError("native backup tombstone flag is invalid")
+                    data = dict(row, messages=[])
+                    _SNAPSHOT_ADAPTER.validate_python(data)
+                    if row["pruned"]:
+                        if row["messages"] != "{}" or row["sequence_root"] is not None:
+                            raise ValueError("native backup tombstone retains message content")
+                    else:
+                        cls.snapshot_message_sequence(row)
+                        NativeCheckpoint.validate_descriptor(json.loads(row["messages"])["checkpoint"])
+                    continue
+                mask = row["run_fields"]
+                if type(mask) is not int or not 0 <= mask < (1 << len(_EVENT_RUN_FIELDS)):
+                    raise ValueError("native backup event run reference is invalid")
+                data = dict(row)
+                run = runs.get(run_id)
+                for bit, field in enumerate(_EVENT_RUN_FIELDS):
+                    if mask & (1 << bit):
+                        if run is None or data[field] is not None or run[field] is None:
+                            raise ValueError("native backup event run reference is missing or corrupt")
+                        data[field] = json.loads(run[field]) if field == "metadata" else run[field]
+                event = cls.decode_event(data)
+                if (isinstance(event, NativeLifecycleEvent) or row["body_sha256"] is not None
+                        or row["fields_sha256"] is not None):
+                    cls.decode_started_row(row, expected_store_digest=backup.store_digest, run=run)
+
+    async def capture_backup(
+        self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
+    ) -> NativeStepBackup:
+        """Capture and strictly verify every owner row in the caller's read transaction.
+
+        The caller begins a consistent read and captures the shared message
+        closure in that same transaction. No connection or transaction is opened
+        here, and no corrupt snapshot is skipped.
+        """
+        from sqlalchemy import select
+
+        if not self.backup_supported:
+            raise ValueError("native backup cannot include an external effect ledger")
+        batches = []
+        for name in ("runs", "events", "snapshots"):
+            table = self._table(name)
+            columns = tuple(column for column in table.columns
+                            if column.name not in {"id", "updated_at", "created_at"})
+            rows = []
+            cursor = 0
+            while True:
+                page = await reader.read_sql_rows(self._context, select(table.c.id, *columns).where(
+                    table.c.store_digest == self._store_digest, table.c.id > cursor,
+                ).order_by(table.c.id).limit(_BATCH_SIZE))
+                for row in page:
+                    value = {column.name: row[column.name] for column in columns}
+                    if accept is not None:
+                        accept(value)
+                    rows.append(value)
+                if len(page) < _BATCH_SIZE:
+                    break
+                cursor = page[-1]["id"]
+            batches.append(tuple(rows))
+        backup = NativeStepBackup(self._store_digest, *batches)
+        self.validate_backup(backup)
+        await self.validate_backup_messages(reader, backup)
+        return backup
+
+    async def validate_backup_messages(self, reader: SqlStateRowReader, backup: NativeStepBackup) -> None:
+        """Verify descriptors against messages in the caller's consistent read."""
+        async def read(statement: "Select") -> Sequence[Mapping[str, object]]:
+            return await reader.read_sql_rows(self._context, statement)
+        await self._validate_backup_messages(read, backup)
+
+    async def _validate_backup_messages(
+        self, read: Callable[["Select"], Awaitable[Sequence[Mapping[str, object]]]], backup: NativeStepBackup,
+    ) -> None:
+        if not self.backup_supported or backup.store_digest != self._store_digest:
+            raise ValueError("native backup belongs to another owner or has external effects")
+        self.validate_backup(backup)
+        snapshots = tuple(row for row in backup.snapshots if not row["pruned"])
+        for offset in range(0, len(snapshots), _BATCH_SIZE):
+            selected = snapshots[offset:offset + _BATCH_SIZE]
+            sequences = tuple(self.snapshot_message_sequence(row) for row in selected)
+            query = self._message_content.range_query(sequences)
+            rows = () if query is None else await read(query.statement)
+            readbacks = await self._message_content.read_hydrated_ranges(
+                sequences, rows, read_object=None if self._message_archive is None
+                else self._message_archive.read_payload_object,
+            )
+            for row, readback in zip(selected, readbacks, strict=True):
+                await self._snapshot_from_data(dict(row), readback.payloads)
+
+    async def restore_backup(self, session: "AsyncSession", backup: NativeStepBackup) -> None:
+        """Restore into an empty owner after message closure import, without replaying writers."""
+        from sqlalchemy import select
+
+        async def read(statement: "Select") -> Sequence[Mapping[str, object]]:
+            return (await session.execute(statement)).mappings().all()
+        await self._validate_backup_messages(read, backup)
+        for name in ("runs", "events", "snapshots"):
+            table = self._table(name)
+            if (await session.execute(select(table.c.id).where(
+                    table.c.store_digest == self._store_digest).limit(1))).first() is not None:
+                raise ValueError("native backup restore requires an empty owner")
+        for name in ("runs", "events", "snapshots"):
+            table = self._table(name)
+            # Individual inserts preserve ordering even on dialects that do not
+            # guarantee the generated ID order of executemany operations.
+            for row in getattr(backup, name):
+                await session.execute(table.insert().values(**dict(row)))
+        self.invalidate_context(self._context)
+
     @classmethod
     def for_state_store(cls, store: StateStore, *, namespace: str, tenant_id: str) -> "SqlStepStore | None":
         """Borrow a SQL owner's native message partition without opening a connection."""
@@ -1264,29 +1418,30 @@ class SqlStepStore:
     async def _snapshot_from_data(
         self, data: dict[str, object], payloads: tuple[bytes, ...],
     ) -> ContinuableSnapshot:
-        sequence = self.snapshot_message_sequence(data)
+        return self.decode_backup_snapshot(data, payloads)
+
+    @classmethod
+    def decode_backup_snapshot(
+        cls, data: Mapping[str, object], payloads: tuple[bytes, ...],
+    ) -> ContinuableSnapshot:
+        """Verify an unpruned snapshot's complete header, messages, and retry binding.
+
+        Payloads are canonical message bytes in occurrence order, already
+        authenticated against the shared native message closure by the caller.
+        This operation does not open a store or modify the supplied row.
+        """
+        sequence = cls.snapshot_message_sequence(data)
         descriptor = json.loads(data["messages"])
         _raw, messages = decode_model_message_payloads(payloads)
         if len(messages) != sequence.count:
             raise ValueError("snapshot message references are incomplete")
+        data = dict(data)
         data.pop("sequence_root")
         # Validate native control fields without sending canonical host/model
         # values back through the SDK's narrower message union.
         data["messages"] = []
         snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(data), messages=list(messages))
-        checkpoint = descriptor["checkpoint"]
-        if checkpoint is None:
-            return snapshot
-        if (not isinstance(checkpoint, dict)
-                or set(checkpoint) != {"output_retries_used", "message_sha256"}
-                or type(checkpoint["output_retries_used"]) is not int
-                or checkpoint["output_retries_used"] < 0
-                or not isinstance(checkpoint["message_sha256"], str)):
-            raise ValueError("snapshot checkpoint state is invalid")
-        restored = NativeCheckpoint.encode(snapshot, output_retries_used=checkpoint["output_retries_used"])
-        if hashlib.sha256(encode_model_messages(restored.messages[-1:])).hexdigest() != checkpoint["message_sha256"]:
-            raise ValueError("snapshot checkpoint state is corrupt or misbound")
-        return restored
+        return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"])
 
     def _table(self, name: str) -> "Table":
         return self._metadata.tables[f"ai_step_{name}"]

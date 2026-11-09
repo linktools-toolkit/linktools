@@ -452,6 +452,39 @@ class NativeMessageClosure(_SequenceClosure):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+    def message_identities(self, store_digest: str, slices: Sequence[NativeMessageSlice]) -> tuple[str, ...]:
+        """Read validated message identities in chronological occurrence order."""
+        self.mark(store_digest, slices)
+
+        def tree(identity: str, start: int, end: int) -> Iterator[str]:
+            node = self._node(store_digest, identity)
+            if start == 0:
+                yield node.content_id
+            offset = 1
+            for child in (node.left, node.right):
+                if child is None:
+                    continue
+                count = self._node(store_digest, child).tree_count
+                lo, hi = max(0, start - offset), min(count, end - offset)
+                if hi > lo:
+                    yield from tree(child, lo, hi)
+                offset += count
+
+        result = []
+        for span in slices:
+            lo, hi = span.count - span.end, span.count - span.start
+            identity, offset = span.first, 0
+            reversed_messages = []
+            while identity is not None and offset < hi:
+                node = self._node(store_digest, identity)
+                start, end = max(0, lo - offset), min(node.tree_count, hi - offset)
+                if end > start:
+                    reversed_messages.extend(tree(identity, start, end))
+                offset += node.tree_count
+                identity = node.next_forest
+            result.extend(reversed(reversed_messages))
+        return tuple(result)
+
     def mark_snapshot(self, row: Mapping[str, object]) -> None:
         """Mark a native snapshot's declared full sequence, including tombstones."""
         try:

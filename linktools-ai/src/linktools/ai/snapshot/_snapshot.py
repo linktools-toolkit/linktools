@@ -1078,7 +1078,9 @@ def _storage_snapshot_usage(
             if not isinstance(values, list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             entries += len(values)
-    for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages"))):
+    for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages")),
+                         ("native_checkpoints", ("runs", "events", "snapshots")),
+                         ("native_projections", ("records", "facts"))):
         groups = manifest.get(name, [])
         if not isinstance(groups, list):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

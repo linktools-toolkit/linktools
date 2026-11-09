@@ -150,14 +150,21 @@ class NativeRunReferences:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return payload
 
-    def matches(self, data: Mapping[str, object], run: AgentRunRecord) -> bool:
-        reference = self.decode_reference(data)
+    @classmethod
+    def matches(cls, data: Mapping[str, object], run: AgentRunRecord) -> bool:
+        reference = cls.decode_reference(data)
         return (reference["run"] == run.agent_run_id
                 and reference["projection_sha256"] == canonical_sha256(_encode_step_envelope(run)))
 
     def project(self, data: Mapping[str, object], source: RunRecord, *, store_digest: str) -> AgentRunRecord:
-        reference = self.decode_reference(data)
-        if (store_digest != self._store_digest or reference["run"] != source.run_id
+        return self.project_source(data, source, store_digest=store_digest, expected_store_digest=self._store_digest)
+
+    @classmethod
+    def project_source(cls, data: Mapping[str, object], source: RunRecord, *,
+                       store_digest: str, expected_store_digest: str) -> AgentRunRecord:
+        """Verify a detached native registration with the online projection contract."""
+        reference = cls.decode_reference(data)
+        if (store_digest != expected_store_digest or reference["run"] != source.run_id
                 or reference["run_digest"] != hashlib.sha256(source.run_id.encode()).hexdigest()
                 or reference["registration"] != source.registration_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -167,7 +174,7 @@ class NativeRunReferences:
         run.metadata.update(reference["metadata"])
         if reference["started_at"] is not None:
             run.started_at = datetime.fromisoformat(reference["started_at"])
-        if not self.matches(data, run):
+        if not cls.matches(data, run):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return run
 

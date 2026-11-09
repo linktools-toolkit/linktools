@@ -97,6 +97,37 @@ class NativeEventReferences:
             idempotency_key=f"{event_index}:{source.step_index}:{event_type}:",
         )
 
+    @classmethod
+    def decode_reference(cls, data: Mapping[str, object]) -> Mapping[str, object]:
+        """Validate the physical event locator without querying its owner."""
+        value = decode_envelope(data).value
+        reference = value.get("payload")
+        if (set(value) != {"type", "payload"} or value["type"] != _TYPE
+                or not isinstance(reference, Mapping) or set(reference) != {"key", "index"}
+                or type(reference["index"]) is not int or reference["index"] < 0
+                or not isinstance(reference["key"], str) or len(reference["key"]) != 64
+                or any(character not in "0123456789abcdef" for character in reference["key"])):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return reference
+
+    @classmethod
+    def project_source(cls, fact: StoredFact, row: Mapping[str, object], *,
+                       run: Mapping[str, object] | None, namespace: str, tenant_id: str) -> StoredFact:
+        """Verify complete detached source bytes and their physical Trace position."""
+        reference = cls.decode_reference(fact.data)
+        try:
+            source = SqlStepStore.decode_started_row(row,
+                expected_store_digest=SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id), run=run)
+            event = cls.project(source, event_index=reference["index"])
+        except (TypeError, ValueError, KeyError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if (reference["key"] != row.get("key_digest") or fact.kind != "step_event"
+                or fact.state != event.event_type or fact.subject_digest is not None
+                or fact.owner_key_digest != record_key_digest(namespace, tenant_id, "trace", "agent_run", source.run_id)
+                or fact.stream_digest != stream_digest(namespace, tenant_id, "trace", "event", source.run_id)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return replace(fact, data=_encode_step_envelope(event))
+
     async def stage(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
         if self._native is None or run.run_id != source.run_id or self.project(source, event_index=event.event_index) != event:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -346,10 +377,8 @@ class NativeEventReferences:
                 query=query, sequences=sequences, scan=scan, full_source=full_source)):
             value = fact.data.get("value")
             if isinstance(value, Mapping) and value.get("type") == _TYPE:
-                payload = decode_envelope(fact.data).value
-                reference = payload.get("payload")
-                if (set(payload) != {"type", "payload"} or not isinstance(reference, Mapping)
-                        or set(reference) != {"key", "index"} or row["invalid_native_reference"]):
+                reference = self.decode_reference(fact.data)
+                if row["invalid_native_reference"]:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
                     source_data = {key.removeprefix("native_"): entry for key, entry in row.items()

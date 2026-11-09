@@ -1431,6 +1431,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if (
                 stored_value.revision != commit.expected_revision
                 or stored_value.event_seq != commit.expected_event_seq
+                or stored_value.native_step_source != commit.execution.native_step_source
                 or stored_value.restart_checkpoints != commit.execution.restart_checkpoints
                 or stored_value.durable_trace != commit.execution.durable_trace
                 or stored_value.producer_generation != commit.execution.producer_generation
@@ -1660,7 +1661,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                      "parent_execution_id", "parent_invocation_id", "root_execution_id", "previous_execution_id",
                      "fork_base_execution_id", "lineage_kind", "created_at", "mode", "planning", "thinking",
                      "memory_scope", "repository_instructions", "context_imported", "correlation",
-                     "requires_task_invocation_capture", "budget_scope_id", "restart_checkpoints", "durable_trace", "tool_effects", "session_context",
+                     "requires_task_invocation_capture", "budget_scope_id", "native_step_source", "restart_checkpoints", "durable_trace", "tool_effects", "session_context",
                      "conversation"):
             if getattr(reservation.execution, name) != getattr(commit.execution, name):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
