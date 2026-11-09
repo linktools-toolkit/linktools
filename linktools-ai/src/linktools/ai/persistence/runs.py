@@ -1694,6 +1694,8 @@ class RuntimeAgentRunStore(AgentRunStore):
                 local_message_count=local_count,
                 local_messages=captured.local_messages,
                 prepared=interaction_archive,
+                replay=any(value.model_request_seq <= captured.base_interaction_offset
+                           for value in captured.interactions),
                 baseline=self.trace_persistence.offsets.get(
                     captured.run.agent_run_id, _ProjectionOffset(),
                 ).request_projection,
