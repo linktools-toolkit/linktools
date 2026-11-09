@@ -3,12 +3,16 @@
 """Vendor-neutral Skill definition and function-call capability."""
 
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, WrapModelRequestHandler
-from pydantic_ai.messages import ToolReturn, ModelRequest, ModelResponse, InstructionPart
-from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
+from pydantic_ai.messages import ToolReturn, ModelMessage, ModelRequest, ModelResponse, InstructionPart
+from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
+from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -203,31 +207,37 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
     def get_ordering(self) -> CapabilityOrdering | None:
         return CapabilityOrdering(position="innermost") if self._preload_skills else None
 
-    async def wrap_model_request(
-        self, ctx: PydanticRunContext[AgentContext[object]], *,
-        request_context: ModelRequestContext, handler: WrapModelRequestHandler,
-    ) -> ModelResponse:
-        if self._preload_skills:
-            parts = request_context.model_request_parameters.instruction_parts
-            receipts = []
-            for definition in self._preload_skills.values():
-                name = f"preload-skill-{hashlib.sha256(definition.id.encode()).hexdigest()}"
-                if not any(part.name == name and part.content == definition.model_content for part in parts):
-                    raise AIError(ErrorCode.BINDING_CONFLICT,
-                                  safe_details={"reason": "preload_skill_instructions_removed", "id": definition.id})
-                receipts.append(self._root_receipt(definition).to_payload())
-            # This is the actual current request, not a synthetic tool call.
-            # Provider capture and the native transcript retain this metadata.
-            current = request_context.messages[-1] if request_context.messages else None
-            if not isinstance(current, ModelRequest):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            metadata = dict(current.metadata or {})
-            previous = metadata.get(PRELOAD_SKILL_READS_METADATA_KEY)
-            if previous is not None and previous != receipts:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            metadata[PRELOAD_SKILL_READS_METADATA_KEY] = receipts
-            current.metadata = metadata
-        return await handler(request_context)
+    def get_wrapper_model(self, model: Model) -> Model | None:
+        if not self._preload_skills:
+            return None
+        return _PreloadSkillModel(model, self._prepare_model_request)
+
+    def _prepare_model_request(
+        self, messages: Sequence[ModelMessage], parameters: ModelRequestParameters,
+    ) -> None:
+        current = messages[-1] if messages else None
+        if isinstance(current, ModelResponse) and current.state == "suspended":
+            current = messages[-2] if len(messages) > 1 else None
+        if not isinstance(current, ModelRequest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        parts = parameters.instruction_parts
+        # Native continuation can restore a joined, unnamed prefix. Unset
+        # parts use the request's rendering; an empty list removes it.
+        instructions = current.instructions if parts is None else InstructionPart.join(parts)
+        receipts = []
+        for definition in self._preload_skills.values():
+            expected = InstructionPart.join([InstructionPart(content=definition.model_content)]) or ""
+            if expected not in (instructions or ""):
+                raise AIError(ErrorCode.BINDING_CONFLICT,
+                              safe_details={"reason": "preload_skill_instructions_removed", "id": definition.id})
+            receipts.append(self._root_receipt(definition).to_payload())
+        # Record only the request that is about to be sent, after all hooks.
+        metadata = dict(current.metadata or {})
+        previous = metadata.get(PRELOAD_SKILL_READS_METADATA_KEY)
+        if previous is not None and previous != receipts:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metadata[PRELOAD_SKILL_READS_METADATA_KEY] = receipts
+        current.metadata = metadata
 
     @classmethod
     def _root_receipt(cls, definition: SkillDefinition) -> SkillReadReceipt:
@@ -379,6 +389,36 @@ def _usage_hint(view: SkillSourceView) -> str:
         "Resources are relative to the virtual skill location. Use `load_skill(skill_id, path)` to read them. "
         "Virtual paths are not operating-system paths and must not be passed directly to filesystem or shell tools."
     )
+
+
+class _PreloadSkillModel(WrapperModel):
+    """Validate delivery after request hooks, including each retry's preparation."""
+
+    def __init__(
+        self, wrapped: Model,
+        prepare: Callable[[Sequence[ModelMessage], ModelRequestParameters], None],
+    ) -> None:
+        super().__init__(wrapped)
+        self._prepare = prepare
+
+    async def request(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        self._prepare(messages, model_request_parameters)
+        return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+    @asynccontextmanager
+    async def request_stream(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: PydanticRunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        self._prepare(messages, model_request_parameters)
+        async with self.wrapped.request_stream(
+            messages, model_settings, model_request_parameters, run_context,
+        ) as response:
+            yield response
 
 
 __all__ = ["SkillCapability", "SkillDefinition"]
