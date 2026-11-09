@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Required rules are fixed execution inputs; actual Skill reads retain provenance."""
+"""Preloaded rules are fixed execution inputs; actual Skill reads retain provenance."""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -35,8 +35,8 @@ class _InlineLoader:
         return (SkillDefinition(SkillSpec("inline", "INLINE_RULE")),)
 
 
-def _features(store, model, *, required=("guide",), filtered=False, retained=True):
-    features = RuntimeFeatures("required-skills", workspace_factory=None,
+def _features(store, model, *, preload=("guide",), allowed=("*",), filtered=False, retained=True):
+    features = RuntimeFeatures("preload-skills", workspace_factory=None,
                                filter=(lambda agent, item: item.kind != "skill") if filtered else None)
     assets = features.capability(AssetCapability(store))
     assets.loader("inline", _InlineLoader())
@@ -45,25 +45,27 @@ def _features(store, model, *, required=("guide",), filtered=False, retained=Tru
         features.capability(TraceCapability())
         features.capability(native_checkpoint())
     features.model("default", _Models(_UsageFunctionModel(model)))
-    features.agent("default", allow_tools=(), allow_subagents=(), required_skills=required)
+    features.agent("default", allow_tools=(), allow_subagents=(), allow_skills=allowed, preload_skills=preload)
     return features
 
 
-def test_required_skill_declaration_roundtrips_and_does_not_widen_allowlist():
-    assert "required_skills" not in AgentSpecCodec().to_contract_payload(AgentSpec("unchanged"))
-    spec = AgentSpec("agent", allow_skills=("guide",), required_skills=("guide",))
+def test_preload_skill_declaration_roundtrips_with_independent_scope():
+    assert "preload_skills" not in AgentSpecCodec().to_contract_payload(AgentSpec("unchanged"))
+    spec = AgentSpec("agent", allow_skills=(), preload_skills=("guide",))
     assert AgentSpecCodec().decode(AgentSpecCodec().encode(spec)) == spec
+    assert AgentSpecCodec().to_contract_payload(spec)["preload_skills"] == ["guide"]
+    assert AgentSpecAdapter().from_mapping({"preload_skills": ["guide"]}, logical_id="agent").preload_skills == ("guide",)
     parsed = AgentSpecAdapter().decode_markdown(
-        b"---\nrequired-skills: [guide]\nallow-skills: [guide]\n---\n", logical_id="agent")
-    assert parsed.required_skills == ("guide",)
-    for required, allowed in ((("*",), ("*",)), (("guide",), ())):
+        b"---\npreload-skills: [guide]\nallow-skills: [guide]\n---\n", logical_id="agent")
+    assert parsed.preload_skills == ("guide",)
+    for preload, allowed in ((("*",), ("*",)), (("*",), ())):
         with pytest.raises(AIError) as error:
-            AgentSpec("agent", required_skills=required, allow_skills=allowed)
+            AgentSpec("agent", preload_skills=preload, allow_skills=allowed)
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 @pytest.mark.asyncio
-async def test_required_root_is_preloaded_while_resources_and_other_skills_stay_live(tmp_path: Path):
+async def test_preload_root_is_preloaded_while_resources_and_other_skills_stay_live(tmp_path: Path):
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -83,6 +85,7 @@ async def test_required_root_is_preloaded_while_resources_and_other_skills_stay_
         returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
         if stage == 0:
             assert "ORIGINAL_RULE" in str((messages, info))
+            assert "ORIGINAL_OPTIONAL" not in str((messages, info))
             await store.put(root, _declaration("guide", "CHANGED_RULE"))
             await store.put(resource, b"current resource")
             await store.put(AssetKey("skill", "optional/SKILL.md"), _declaration("optional", "CHANGED_OPTIONAL"))
@@ -104,11 +107,11 @@ async def test_required_root_is_preloaded_while_resources_and_other_skills_stay_
         stage += 1
         return ModelResponse(parts=[ToolCallPart("load_skill", args, call_id)])
 
-    features = _features(store, model)
+    features = _features(store, model, allowed=("optional", "inline"))
     path = tmp_path / "runtime.db"
-    async with Persistence.open("required-live", storage=PersistenceStorage.sqlite(path)) as persistence:
+    async with Persistence.open("preload-live", storage=PersistenceStorage.sqlite(path)) as persistence:
         async with Runtime.attach(persistence=persistence, features=features.borrow()) as runtime:
-            execution = await runtime.agents.get().start("Use the required guide", idempotency_key="run")
+            execution = await runtime.agents.get().start("Use the preload guide", idempotency_key="run")
             result = (await execution.wait(timeout_seconds=20)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             principal = runtime.default_principal
@@ -129,26 +132,26 @@ async def test_required_root_is_preloaded_while_resources_and_other_skills_stay_
                     assert receipt.identity_verified is (call_id != "unknown")
                     if call_id == "root":
                         assert receipt.asset == original_ref
-                        assert receipt.path == "SKILL.md" and receipt.source_id == "required-skills"
+                        assert receipt.path == "SKILL.md" and receipt.source_id == "preload-skills"
             requests = await runtime.history.read_model_interactions(execution_id, principal=principal,
                 identities=((1, 1),), include_content=True)
             assert len(requests) == 1
-            receipts = requests[0].request["required_skill_reads"]
+            receipts = requests[0].request["preload_skill_reads"]
             assert SkillReadReceipt.from_payload(receipts[0]).asset == original_ref
             assert "ORIGINAL_RULE" in str(requests[0].request["instructions"])
     await store.close()
-    async with Persistence.open("required-live", storage=PersistenceStorage.sqlite(path), read_only=True) as persistence:
+    async with Persistence.open("preload-live", storage=PersistenceStorage.sqlite(path), read_only=True) as persistence:
         async with History.open(persistence=persistence) as history:
             for call_id, _args in calls:
                 page = await history.history(execution_id, principal=principal, tool_call_id=call_id, include_content=True)
                 assert page.items == pages[call_id]
             requests = await history.read_model_interactions(execution_id, principal=principal, identities=((1, 1),), include_content=True)
-            assert SkillReadReceipt.from_payload(requests[0].request["required_skill_reads"][0]).asset == original_ref
+            assert SkillReadReceipt.from_payload(requests[0].request["preload_skill_reads"][0]).asset == original_ref
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ("missing", "filtered", "directory", "unverifiable", "integrity"))
-async def test_required_input_admission_fails_before_model_without_fixed_access(tmp_path: Path, failure: str):
+async def test_preload_input_admission_fails_before_model_without_fixed_access(tmp_path: Path, failure: str):
     if failure == "directory":
         package = tmp_path / "assets" / "skills" / "guide"
         package.mkdir(parents=True)
@@ -167,10 +170,10 @@ async def test_required_input_admission_fails_before_model_without_fixed_access(
             await store.put(AssetKey("skill", "guide/SKILL.md"), _declaration("guide", "RULE"))
 
     async def model(messages, info):
-        raise AssertionError("required-input failure must precede the model")
+        raise AssertionError("preload-input failure must precede the model")
 
-    features = _features(store, model, required=("inline",) if failure == "unverifiable" else ("guide",), filtered=failure == "filtered", retained=failure != "missing")
-    async with Persistence.open("required-denied", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
+    features = _features(store, model, preload=("inline",) if failure == "unverifiable" else ("guide",), allowed=(), filtered=failure == "filtered", retained=failure != "missing")
+    async with Persistence.open("preload-denied", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
         async with Runtime.attach(persistence=persistence, features=features) as runtime:
             execution = await runtime.agents.get().start("go", idempotency_key="run")
             result = (await execution.wait(timeout_seconds=20)).result
@@ -182,17 +185,17 @@ async def test_required_input_admission_fails_before_model_without_fixed_access(
 
 
 @pytest.mark.asyncio
-async def test_imported_empty_required_input_cannot_rebind_current_rules(tmp_path: Path):
+async def test_imported_empty_preload_input_cannot_rebind_current_rules(tmp_path: Path):
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     await store.put(AssetKey("skill", "guide/SKILL.md"), _declaration("guide", "RULE"))
 
     async def model(messages, info):
-        raise AssertionError("unbound required rules must not reach the model")
+        raise AssertionError("unbound preload rules must not reach the model")
 
     features = _features(store, model)
-    async with Persistence.open("required-import", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
+    async with Persistence.open("preload-import", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
         async with Runtime.attach(persistence=persistence, features=features) as runtime:
             with pytest.raises(AIError) as error:
                 await runtime.agents.get().start("go", idempotency_key="run",
@@ -231,7 +234,7 @@ async def test_retention_checks_actual_layer_and_snapshot_survives_source_change
 
 
 @pytest.mark.asyncio
-async def test_required_rules_recover_from_sql_history_after_source_changes(tmp_path: Path):
+async def test_preload_rules_recover_from_sql_history_after_source_changes(tmp_path: Path):
     from sqlalchemy.ext.asyncio import create_async_engine
     from linktools.ai.asset import SqlAssetBackend
     from linktools.ai.migrate import provision_asset_database
@@ -244,13 +247,13 @@ async def test_required_rules_recover_from_sql_history_after_source_changes(tmp_
 
     @asynccontextmanager
     async def open_runtime(model, *, initial=False):
-        backend = SqlAssetBackend(engine, namespace="required-recovery")
+        backend = SqlAssetBackend(engine, namespace="preload-recovery")
         store = AssetStore(StorageOverlay(backend, writer=backend))
         await store.initialize()
         if initial:
             await store.put(key, _declaration("guide", "ORIGINAL_RULE"))
-        features = _features(store, model)
-        async with Persistence.open("required-recovery", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
+        features = _features(store, model, allowed=())
+        async with Persistence.open("preload-recovery", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
             async with Runtime.attach(persistence=persistence, features=features.borrow(), auto_recover=False) as runtime:
                 yield runtime, store
         await store.close()
@@ -296,13 +299,13 @@ async def test_required_rules_recover_from_sql_history_after_source_changes(tmp_
             page = await runtime.history.history(execution.execution_id, principal=runtime.default_principal,
                 tool_call_id="after", include_content=True)
             loaded, = (item for item in page.items if item.item_kind == "tool_result")
-            assert loaded.skill_read.asset == SkillReadReceipt.from_payload(old_requests[0].request["required_skill_reads"][0]).asset
+            assert loaded.skill_read.asset == SkillReadReceipt.from_payload(old_requests[0].request["preload_skill_reads"][0]).asset
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_execution_authorization_precedes_required_retained_read_and_model(tmp_path: Path):
+async def test_execution_authorization_precedes_preload_retained_read_and_model(tmp_path: Path):
     class RecordingStore(AssetStore):
         reads = 0
         async def require_retained_versions(self, refs):
@@ -322,9 +325,9 @@ async def test_execution_authorization_precedes_required_retained_read_and_model
     async def model(messages, info):
         raise AssertionError("denied execution must not reach model")
 
-    async with Persistence.open("required-auth", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
+    async with Persistence.open("preload-auth", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
         async with Runtime.attach(persistence=persistence, features=_features(store, model), authorization=Authorization()) as runtime:
-            # Discovery may parse declarations during configuration. Required
+            # Discovery may parse declarations during configuration. Preload
             # retained-version reads are a separate, authorized admission step.
             assert store.reads == 0
             with pytest.raises(AIError) as error:
@@ -334,7 +337,7 @@ async def test_execution_authorization_precedes_required_retained_read_and_model
 
 
 @pytest.mark.asyncio
-async def test_required_descriptor_cannot_disguise_another_asset(tmp_path: Path):
+async def test_preload_descriptor_cannot_disguise_another_asset(tmp_path: Path):
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -343,14 +346,14 @@ async def test_required_descriptor_cannot_disguise_another_asset(tmp_path: Path)
         ref, = await store.resolve_versions((key,))
         with pytest.raises(AIError) as error:
             SkillInput(CapabilityRef("skill", "guide", 1),
-                       SkillSourceRef("required-skills", "guide", declaration=SkillResource("SKILL.md", ref)))
+                       SkillSourceRef("preload-skills", "guide", declaration=SkillResource("SKILL.md", ref)))
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     await store.close()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attack", ("old-version", "other-skill"))
-async def test_imported_required_input_cannot_select_unadmitted_history(tmp_path: Path, attack: str):
+async def test_imported_preload_input_cannot_select_unadmitted_history(tmp_path: Path, attack: str):
     reads = []
     class RecordingStore(AssetStore):
         async def require_retained_versions(self, refs):
@@ -365,7 +368,7 @@ async def test_imported_required_input_cannot_select_unadmitted_history(tmp_path
     old, = await store.resolve_versions((key,))
     await store.put(key, _declaration("guide", "CURRENT_RULE"))
     fake = SkillInput(CapabilityRef("skill", "guide", 1),
-                      SkillSourceRef("required-skills", "guide", declaration=SkillResource("SKILL.md", old))).to_payload()
+                      SkillSourceRef("preload-skills", "guide", declaration=SkillResource("SKILL.md", old))).to_payload()
     unadmitted = old
     if attack == "other-skill":
         foreign = AssetKey("skill", "private/SKILL.md")
@@ -376,11 +379,62 @@ async def test_imported_required_input_cannot_select_unadmitted_history(tmp_path
     async def model(messages, info):
         raise AssertionError("unadmitted imported version must not reach the model")
 
-    async with Persistence.open("required-import-fake", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
+    async with Persistence.open("preload-import-fake", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
         async with Runtime.attach(persistence=persistence, features=_features(store, model)) as runtime:
             with pytest.raises(AIError) as error:
                 await runtime.agents.get().start("go", idempotency_key="run",
-                    input_context=ExecutionInputContext.from_messages((), required_skills=(fake,)))
+                    input_context=ExecutionInputContext.from_messages((), preload_skills=(fake,)))
             assert error.value.code is (ErrorCode.BINDING_CONFLICT if attack == "old-version" else ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     assert unadmitted not in reads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denied_path", (None, "private.txt"))
+async def test_preload_scope_includes_its_live_resources_but_no_unlisted_skill(tmp_path: Path, denied_path: str | None):
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    resource = AssetKey("skill", "guide/resource.txt")
+    await store.put(AssetKey("skill", "guide/SKILL.md"), _declaration("guide", "PRELOADED_RULE"))
+    await store.put(resource, b"original resource")
+    await store.put(AssetKey("skill", "other/SKILL.md"), _declaration("other", "PRIVATE_RULE"))
+    await store.put(AssetKey("skill", "other/private.txt"), b"PRIVATE_RESOURCE")
+    stage = 0
+
+    async def model(messages, info):
+        nonlocal stage
+        assert "PRELOADED_RULE" in str(info)
+        assert "PRIVATE_RULE" not in str(info)
+        returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+        if stage == 0:
+            result = ModelResponse(parts=[ToolCallPart("list_skills", {}, "list")])
+        elif stage == 1:
+            assert [item["id"] for item in returns[-1].content] == ["guide"]
+            result = ModelResponse(parts=[ToolCallPart("load_skill", {"skill_id": "guide"}, "root")])
+        elif stage == 2:
+            assert returns[-1].content["instructions"].endswith("PRELOADED_RULE")
+            assert returns[-1].content["resources"] == ["resource.txt"]
+            await store.put(resource, b"current resource")
+            result = ModelResponse(parts=[ToolCallPart("load_skill", {"skill_id": "guide", "path": "resource.txt"}, "resource")])
+        elif stage == 3:
+            assert returns[-1].content["content"] == "current resource"
+            args = {"skill_id": "other"}
+            if denied_path is not None:
+                args["path"] = denied_path
+            result = ModelResponse(parts=[ToolCallPart("load_skill", args, "denied")])
+        else:
+            assert returns[-1].tool_call_id == "denied" and returns[-1].outcome == "retried"
+            assert "PRIVATE_RULE" not in str(returns[-1].content)
+            assert "PRIVATE_RESOURCE" not in str(returns[-1].content)
+            return ModelResponse(parts=[TextPart("done")])
+        stage += 1
+        return result
+
+    async with Persistence.open("preload-scope", storage=PersistenceStorage.sqlite(tmp_path / "runtime.db")) as persistence:
+        async with Runtime.attach(persistence=persistence, features=_features(store, model, allowed=())) as runtime:
+            agent = runtime.agents.get()
+            assert [item.id for item in agent.compiled.skill_definitions] == ["guide"]
+            execution = await agent.start("Read the guide", idempotency_key="scope")
+            result = (await execution.wait(timeout_seconds=20)).result
+            assert result.status is ExecutionStatus.SUCCEEDED, result

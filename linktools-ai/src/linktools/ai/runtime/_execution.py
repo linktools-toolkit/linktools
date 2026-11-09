@@ -252,7 +252,7 @@ _TerminalMetricDelivery = Callable[[], Awaitable[None]]
 class _ExecutionRuntimePort(ExecutionBackend, Protocol):
     def preflight_handoff(self) -> None: ...
 
-    async def validate_required_skill_inputs(
+    async def validate_preload_skill_inputs(
         self, binding: AgentBinding, inputs: tuple[Mapping[str, JsonValue], ...],
     ) -> None: ...
 
@@ -1434,7 +1434,7 @@ class DefaultExecutionService(TaskExecutionService):
             port = self._runtime_bridge.port
             if port is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            await port.validate_required_skill_inputs(binding, request.input_context.required_skills)
+            await port.validate_preload_skill_inputs(binding, request.input_context.preload_skills)
             input_context = RuntimePayloadRef(
                 StoredPayload.inline_json(request.input_context.to_payload()), PersistenceDomain.EXECUTION,
             )

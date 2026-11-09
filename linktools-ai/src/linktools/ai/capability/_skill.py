@@ -21,7 +21,7 @@ from ._skill_source import (
     SkillLocation,
     SkillReadReceipt,
     SKILL_READ_METADATA_KEY,
-    REQUIRED_SKILL_READS_METADATA_KEY,
+    PRELOAD_SKILL_READS_METADATA_KEY,
     SkillSourceView,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -87,7 +87,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         resource_paths: Mapping[str, "str | None"] | None = None,
         discover: Callable[[], Awaitable[Sequence[SkillDefinition]]] | None = None,
         mounted_resources: Mapping[str, SkillSourceRef] | None = None,
-        required_skills: Sequence[SkillDefinition] = (),
+        preload_skills: Sequence[SkillDefinition] = (),
     ) -> None:
         self.id = "linktools.ai.skills"
         if not isinstance(sources, SkillSourceRegistry):
@@ -98,10 +98,10 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         ids = tuple(item.id for item in ordered)
         if len(ids) != len(set(ids)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        required = tuple(required_skills)
-        if any(not isinstance(item, SkillDefinition) for item in required) or len({item.id for item in required}) != len(required):
+        preload = tuple(preload_skills)
+        if any(not isinstance(item, SkillDefinition) for item in preload) or len({item.id for item in preload}) != len(preload):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._required_skills = {item.id: item for item in required}
+        self._preload_skills = {item.id: item for item in preload}
         self._skills = ordered
         self._sources = sources
         self._resource_paths = None if resource_paths is None else dict(resource_paths)
@@ -183,7 +183,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         return None
 
     def get_instructions(self) -> str | Sequence[str | InstructionPart] | None:
-        if not self._skills and not self._required_skills and self._discover is None:
+        if not self._skills and not self._preload_skills and self._discover is None:
             return None
         lines = [
             "The following skills are available for this agent run.",
@@ -195,26 +195,26 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             f"- {item.id}: {_skill_description(item.spec)}" for item in self._skills
         )
         directory = "\n".join(lines)
-        if not self._required_skills:
+        if not self._preload_skills:
             return directory
-        return (directory, *(InstructionPart(content=definition.model_content, name=f"required-skill-{hashlib.sha256(definition.id.encode()).hexdigest()}")
-                             for definition in self._required_skills.values()))
+        return (directory, *(InstructionPart(content=definition.model_content, name=f"preload-skill-{hashlib.sha256(definition.id.encode()).hexdigest()}")
+                             for definition in self._preload_skills.values()))
 
     def get_ordering(self) -> CapabilityOrdering | None:
-        return CapabilityOrdering(position="innermost") if self._required_skills else None
+        return CapabilityOrdering(position="innermost") if self._preload_skills else None
 
     async def wrap_model_request(
         self, ctx: PydanticRunContext[AgentContext[object]], *,
         request_context: ModelRequestContext, handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        if self._required_skills:
+        if self._preload_skills:
             parts = request_context.model_request_parameters.instruction_parts
             receipts = []
-            for definition in self._required_skills.values():
-                name = f"required-skill-{hashlib.sha256(definition.id.encode()).hexdigest()}"
+            for definition in self._preload_skills.values():
+                name = f"preload-skill-{hashlib.sha256(definition.id.encode()).hexdigest()}"
                 if not any(part.name == name and part.content == definition.model_content for part in parts):
                     raise AIError(ErrorCode.BINDING_CONFLICT,
-                                  safe_details={"reason": "required_skill_instructions_removed", "id": definition.id})
+                                  safe_details={"reason": "preload_skill_instructions_removed", "id": definition.id})
                 receipts.append(self._root_receipt(definition).to_payload())
             # This is the actual current request, not a synthetic tool call.
             # Provider capture and the native transcript retain this metadata.
@@ -222,10 +222,10 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             if not isinstance(current, ModelRequest):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             metadata = dict(current.metadata or {})
-            previous = metadata.get(REQUIRED_SKILL_READS_METADATA_KEY)
+            previous = metadata.get(PRELOAD_SKILL_READS_METADATA_KEY)
             if previous is not None and previous != receipts:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            metadata[REQUIRED_SKILL_READS_METADATA_KEY] = receipts
+            metadata[PRELOAD_SKILL_READS_METADATA_KEY] = receipts
             current.metadata = metadata
         return await handler(request_context)
 
@@ -251,7 +251,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
 
     async def list_skills(self) -> "list[dict[str, str]]":
         values = {item.id: item for item in await self._current_skills()}
-        values.update(self._required_skills)
+        values.update(self._preload_skills)
         return [{"id": item.id, "description": _skill_description(item.spec)}
                 for item in sorted(values.values(), key=lambda item: item.id)]
 
@@ -266,7 +266,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
     async def _read_skill(
         self, skill_id: str, path: str | None,
     ) -> tuple[dict[str, str | list[str]], SkillReadReceipt]:
-        definition = self._required_skills.get(skill_id) if path is None else None
+        definition = self._preload_skills.get(skill_id) if path is None else None
         if definition is None:
             definition = next((item for item in await self._current_skills() if item.id == skill_id), None)
         if definition is None:
@@ -324,7 +324,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
                 raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN) from error
             if actual != definition.model_content:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if definition.id in self._required_skills:
+        if definition.id in self._preload_skills:
             current = next((item for item in await self._current_skills() if item.id == definition.id), None)
             if current is None or current.source_ref is None:
                 result["resource_status"] = "unavailable"

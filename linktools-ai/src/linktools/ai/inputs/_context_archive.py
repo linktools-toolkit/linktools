@@ -90,7 +90,7 @@ class ExecutionContextArchive:
             instruction_index = len(values)
             values.append(("json", canonical_json_bytes(instructions)))
         skill_indices = []
-        for skill in semantic["required_skills"]:
+        for skill in semantic["preload_skills"]:
             skill_indices.append(len(values))
             values.append(("json", canonical_json_bytes(skill)))
         identities = await archive.prepare_content(values, prepared)
@@ -105,7 +105,7 @@ class ExecutionContextArchive:
             "replace_history_system_prompt": context.replace_history_system_prompt,
             "unavailable_reason": context.unavailable_reason,
             "repository_instructions": None if instruction_index is None else reference(instruction_index),
-            "required_skills": [reference(index) for index in skill_indices],
+            "preload_skills": [reference(index) for index in skill_indices],
         }
         for name, fields in components.items():
             manifest[name] = None if fields is None else {key: reference(index) for key, index in fields}
@@ -142,7 +142,7 @@ class ExecutionContextArchive:
                 instruction_index = len(references)
                 references.append(value["repository_instructions"])
             skill_indices = []
-            skills = value["required_skills"]
+            skills = value["preload_skills"]
             if not isinstance(skills, list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for skill in skills:
@@ -162,7 +162,7 @@ class ExecutionContextArchive:
                 repository_instructions=None if instruction_index is None else bodies[instruction_index],
                 replace_history_system_prompt=value["replace_history_system_prompt"],
                 unavailable_reason=value["unavailable_reason"],
-                required_skills=tuple(bodies[index] for index in skill_indices))
+                preload_skills=tuple(bodies[index] for index in skill_indices))
             if result.digest != value["semantic_digest"]:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return result

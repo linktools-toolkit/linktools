@@ -177,25 +177,29 @@ async def test_original_input_reopens_while_session_metadata_remains_live(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
-async def test_required_skill_descriptors_round_trip_in_the_original_context_owner(tmp_path: Path, backend: str) -> None:
-    descriptor = {"skill": {"kind": "skill", "id": "required", "revision": 1},
+async def test_preload_skill_descriptors_round_trip_in_the_original_context_owner(tmp_path: Path, backend: str) -> None:
+    descriptor = {"skill": {"kind": "skill", "id": "preload", "revision": 1},
                   "declaration": {"ref": _reference().ref.to_payload(), "path": "SKILL.md"}}
-    context = ExecutionInputContext.from_messages((), required_skills=(descriptor,))
+    context = ExecutionInputContext.from_messages((), preload_skills=(descriptor,))
     descriptor["skill"]["id"] = "changed"
-    assert context.required_skills[0]["skill"]["id"] == "required"
-    assert ExecutionInputContext.from_payload(context.to_payload()) == context
+    assert context.preload_skills[0]["skill"]["id"] == "preload"
+    payload = context.to_payload()
+    assert payload["preload_skills"] == [dict(context.preload_skills[0])]
+    assert context.digest != ExecutionInputContext.from_messages(()).digest
+    assert ExecutionInputContext.from_payload(payload) == context
     storage = (PersistenceStorage.in_memory() if backend == "memory" else
                PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True) if backend == "local_sqlite" else
                PersistenceStorage.sqlite(tmp_path / "state.db"))
-    async with Persistence.open("required-input", storage=storage) as persistence:
+    async with Persistence.open("preload-input", storage=storage) as persistence:
         archive = ExecutionContextArchive(
             persistence.execution.executions.state_store,
             persistence.archive_object_store(PersistenceDomain.EXECUTION),
             namespace=persistence.namespace, tenant_id=persistence.tenant_id,
         )
         prepared = await archive.prepare(context)
+        assert len(prepared.reference.payload.decode()["preload_skills"]) == 1
         await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
         loaded = await archive.load(prepared.reference)
         assert loaded == context and loaded.digest == context.digest
-        loaded.required_skills[0]["skill"]["id"] = "detached"
-        assert loaded.required_skills[0]["skill"]["id"] == "required"
+        loaded.preload_skills[0]["skill"]["id"] = "detached"
+        assert loaded.preload_skills[0]["skill"]["id"] == "preload"

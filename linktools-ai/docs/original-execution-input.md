@@ -11,7 +11,7 @@ loaders:
   parameters. Ordinary file bodies are not added to this view.
 - `input_context` is the existing `ExecutionInputContext`. Its original
   history, session metadata, memory capture, repository instructions, and
-  required Skill descriptors remain associated with that execution. Calling
+  preloaded Skill descriptors remain associated with that execution. Calling
   `model_messages()` returns detached messages rather than mutable stored
   history.
 

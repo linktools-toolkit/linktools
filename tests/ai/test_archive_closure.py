@@ -65,7 +65,7 @@ async def test_archive_closure_preserves_partial_visible_content_and_shared_dag(
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("field", ("session_metadata", "required_skills"))
+@pytest.mark.parametrize("field", ("session_metadata", "preload_skills"))
 async def test_archive_closure_keys_content_roots_by_logical_tenant_scope(field: str) -> None:
     owner = InMemoryStateStore()
     await owner.initialize()
@@ -79,7 +79,7 @@ async def test_archive_closure_keys_content_roots_by_logical_tenant_scope(field:
     direct = {"archive_scope": scope, "content_scope": canonical_sha256(["archive", "first"]), "content_id": identities[0]}
     manifest = {"kind": "execution-context", "version": 1, "history": root.to_json(),
                 "session_metadata": {"value": direct} if field == "session_metadata" else {},
-                "required_skills": [direct] if field == "required_skills" else [],
+                "preload_skills": [direct] if field == "preload_skills" else [],
                 "memory": None, "repository_instructions": None,
                 "semantic_digest": "digest", "replace_history_system_prompt": False, "unavailable_reason": None}
     wire = {"$dataclass": "execution_record", "fields": {"input_context": encode_domain(
@@ -94,7 +94,7 @@ async def test_archive_closure_keys_content_roots_by_logical_tenant_scope(field:
     repaired = decode_domain(rewritten["fields"]["input_context"], RuntimePayloadRef)
     restored_manifest = repaired.payload.decode()
     restored_reference = (restored_manifest["session_metadata"]["value"] if field == "session_metadata"
-                          else restored_manifest["required_skills"][0])
+                          else restored_manifest["preload_skills"][0])
     assert restored_reference["archive_scope"] == "restored"
     assert tuple(iter_archive_roots(rewritten))[0].scope_id == "restored"
     block = ArchivedContextBlock(root, hashlib.sha256(b"semantic").hexdigest(), 8)

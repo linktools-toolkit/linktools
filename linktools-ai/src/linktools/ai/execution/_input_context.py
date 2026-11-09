@@ -20,7 +20,7 @@ class ExecutionInputContext:
     repository_instructions: Mapping[str, JsonValue] | None = None
     replace_history_system_prompt: bool = False
     unavailable_reason: str | None = None
-    required_skills: tuple[Mapping[str, JsonValue], ...] = ()
+    preload_skills: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
         decode_model_messages(self.history)
@@ -32,12 +32,12 @@ class ExecutionInputContext:
             raise ValueError("context unavailability reason is invalid")
         if not isinstance(self.replace_history_system_prompt, bool):
             raise ValueError("context history replacement flag is invalid")
-        if (not isinstance(self.required_skills, Sequence)
-                or isinstance(self.required_skills, (str, bytes))
-                or any(not isinstance(value, Mapping) for value in self.required_skills)):
-            raise TypeError("context required skills must be mappings")
-        object.__setattr__(self, "required_skills", tuple(
-            ImmutableJsonMapping(value) for value in self.required_skills
+        if (not isinstance(self.preload_skills, Sequence)
+                or isinstance(self.preload_skills, (str, bytes))
+                or any(not isinstance(value, Mapping) for value in self.preload_skills)):
+            raise TypeError("context preload skills must be mappings")
+        object.__setattr__(self, "preload_skills", tuple(
+            ImmutableJsonMapping(value) for value in self.preload_skills
         ))
 
     @classmethod
@@ -58,7 +58,7 @@ class ExecutionInputContext:
                 "repository_instructions": None if self.repository_instructions is None else dict(self.repository_instructions),
                 "replace_history_system_prompt": self.replace_history_system_prompt,
                 "unavailable_reason": self.unavailable_reason,
-                "required_skills": [dict(value) for value in self.required_skills]}
+                "preload_skills": [dict(value) for value in self.preload_skills]}
 
     @classmethod
     def from_payload(cls, value: Mapping[str, JsonValue]) -> "ExecutionInputContext":
@@ -67,7 +67,7 @@ class ExecutionInputContext:
         try:
             return cls(canonical_json_bytes(value["history"]), value["session_metadata"], value["memory"],
                        value["repository_instructions"], value["replace_history_system_prompt"], value["unavailable_reason"],
-                       value.get("required_skills", ()))
+                       value.get("preload_skills", ()))
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 

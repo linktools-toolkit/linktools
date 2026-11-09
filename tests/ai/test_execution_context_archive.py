@@ -23,7 +23,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("invalid_skills", ({}, "", [None]))
 @pytest.mark.parametrize("reader", ("load", "closure", "rekey"))
-async def test_context_archive_rejects_malformed_required_skills(tmp_path, invalid_skills, reader):
+async def test_context_archive_rejects_malformed_preload_skills(tmp_path, invalid_skills, reader):
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="context-root", tenant_id="tenant")
     try:
@@ -36,10 +36,10 @@ async def test_context_archive_rejects_malformed_required_skills(tmp_path, inval
         prepared = await service.prepare(context)
         await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
         manifest = prepared.reference.payload.decode()
-        assert manifest["required_skills"] == []
+        assert manifest["preload_skills"] == []
         assert await service.load(prepared.reference) == context
         malformed = replace(prepared.reference, payload=StoredPayload.inline_json({
-            **manifest, "required_skills": invalid_skills,
+            **manifest, "preload_skills": invalid_skills,
         }))
         wire = {"$dataclass": "execution_record", "fields": {"input_context": encode_domain(malformed)}}
         with pytest.raises(AIError) as failure:

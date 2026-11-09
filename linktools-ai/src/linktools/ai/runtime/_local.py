@@ -4086,10 +4086,10 @@ class LocalExecutionBackend:
             if current.status is ToolOperationStatus.CLAIMED:
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
 
-    async def validate_required_skill_inputs(
+    async def validate_preload_skill_inputs(
         self, binding: AgentBinding, inputs: tuple[Mapping[str, JsonValue], ...],
     ) -> None:
-        await self._executor.validate_required_skill_inputs(binding, inputs)
+        await self._executor.validate_preload_skill_inputs(binding, inputs)
 
     async def load_input_context(self, reference: RuntimePayloadRef | None) -> ExecutionInputContext | None:
         if reference is None:
@@ -4466,7 +4466,7 @@ class LocalExecutionBackend:
                     else:
                         reason = "memory_store_has_no_consistent_capture"
                 try:
-                    required_skills = await self._executor.capture_required_skills(binding)
+                    preload_skills = await self._executor.capture_preload_skills(binding)
                 except AIError as error:
                     failed = await self._commit_failure(current, error, producer_generation=producer_generation)
                     metric_status = failed.status.value
@@ -4476,7 +4476,7 @@ class LocalExecutionBackend:
                     memory=memory_capture,
                     repository_instructions=None if initial_repository_instructions is None else initial_repository_instructions.to_payload(),
                     replace_history_system_prompt=session_history_start, unavailable_reason=reason,
-                    required_skills=required_skills)
+                    preload_skills=preload_skills)
                 proposed_context = accepted_context
                 if prepared_admission is not None:
                     if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:

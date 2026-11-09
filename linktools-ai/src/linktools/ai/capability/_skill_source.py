@@ -92,7 +92,7 @@ class SkillSourceRef:
 
 @dataclass(frozen=True, slots=True)
 class SkillInput:
-    """An admitted required Skill root; its bytes remain with the Asset owner."""
+    """An admitted preloaded Skill root; its bytes remain with the Asset owner."""
 
     skill: CapabilityRef
     source: SkillSourceRef
@@ -102,14 +102,14 @@ class SkillInput:
                 or not isinstance(self.source, SkillSourceRef) or self.source.declaration is None
                 or self.source.resources):
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                          safe_details={"reason": "required_skill_identity_unavailable"})
+                          safe_details={"reason": "preload_skill_identity_unavailable"})
 
         declaration = self.source.declaration
         if (self.source.root != self.skill.id or declaration.path not in SKILL_DECLARATION_FILES
                 or declaration.asset.key.kind != "skill"
                 or declaration.asset.key.id != f"{self.source.root}/{declaration.path}"):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                          safe_details={"reason": "required_skill_source_mismatch"})
+                          safe_details={"reason": "preload_skill_source_mismatch"})
 
     def to_payload(self) -> dict[str, JsonValue]:
         return {"version": 1, "skill": self.skill.to_payload(), "source": self.source.to_payload()}
@@ -129,7 +129,7 @@ class SkillInput:
         source = sources.resolve(self.source.source_id)
         if not isinstance(source, AssetSkillSource) or not isinstance(source.asset_reader, RetainedAssetReader):
             raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                          safe_details={"reason": "required_skill_history_unavailable"})
+                          safe_details={"reason": "preload_skill_history_unavailable"})
         declaration = self.source.declaration
         assert declaration is not None
         data, = await source.asset_reader.require_retained_versions((declaration.asset,))
@@ -137,7 +137,7 @@ class SkillInput:
 
 
 SKILL_READ_METADATA_KEY = "linktools.skill_read"
-REQUIRED_SKILL_READS_METADATA_KEY = "linktools.required_skill_reads"
+PRELOAD_SKILL_READS_METADATA_KEY = "linktools.preload_skill_reads"
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,7 +372,7 @@ __all__ = [
     "SkillInput",
     "SkillReadReceipt",
     "SKILL_READ_METADATA_KEY",
-    "REQUIRED_SKILL_READS_METADATA_KEY",
+    "PRELOAD_SKILL_READS_METADATA_KEY",
     "SkillSourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",

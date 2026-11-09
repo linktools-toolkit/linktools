@@ -174,7 +174,7 @@ class AgentCompiler:
             capability_filter=self._capability_filter,
         )
         selected_tools, selected_mcp, tool_policy, mcp_policy = self._select_tools(spec, candidates)
-        selected_skills = self._select_exact_kind("skill", spec.allow_skills, candidates)
+        selected_skills = self._select_skills(spec, candidates)
         selected_capabilities = self._select_exact_kind("capability", spec.allow_capabilities, candidates)
         selected_subagents = self._select_subagents(
             spec, tuple(item.id for item in candidates if item.kind == "agent"),
@@ -327,9 +327,7 @@ class AgentCompiler:
             selected_tools, selected_mcp, tool_policy, mcp_policy = self._select_tools(
                 binding_contract.agent_spec, candidates,
             )
-            selected_skills = self._select_exact_kind(
-                "skill", binding_contract.agent_spec.allow_skills, candidates,
-            )
+            selected_skills = self._select_skills(binding_contract.agent_spec, candidates)
             compiled_agent = self._build_compiled_agent(
                 binding_contract.agent_spec,
                 model=model,
@@ -430,6 +428,13 @@ class AgentCompiler:
             tuple(sorted(set(tool_policy))),
             tuple(sorted(set(mcp_policy))),
         )
+
+    @classmethod
+    def _select_skills(
+        cls, spec: AgentSpec, candidates: Sequence[CapabilityContribution[object]],
+    ) -> tuple[CapabilityContribution[object], ...]:
+        """Preloaded roots and resources join the on-demand Skill scope."""
+        return cls._select_exact_kind("skill", (*spec.allow_skills, *spec.preload_skills), candidates)
 
     @classmethod
     def _select_exact_kind(
