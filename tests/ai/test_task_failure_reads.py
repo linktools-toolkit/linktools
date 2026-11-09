@@ -13,9 +13,8 @@ from sqlalchemy.engine import Engine
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.state import RecordReplacement
 from linktools.ai.task import (
-    TaskGraph, TaskGraphAdmission, TaskGraphLimits, TaskGraphRequest, TaskNode, TaskNodeView,
+    TaskGraph, TaskGraphAdmission, TaskGraphLimits, TaskGraphRequest, TaskNode,
 )
 from .test_task_io_measurements import _measure
 
@@ -152,17 +151,24 @@ async def test_failure_bounds_large_terminal_policy_reads(tmp_path: Path) -> Non
         lease = await repository.claim("graph", "target", tenant_id="tenant", owner="worker", lease_seconds=30)
 
         async def terminal_fixture(transaction):
-            records = await transaction.get_records(tuple(repository._state_key("graph", node_id) for node_id in prior_ids))
-            replacements = []
-            for record in records.values():
-                node = await repository._decode(record, TaskNodeView)
-                replacements.append(RecordReplacement(
-                    repository._task_node_record(record, replace(node, status=TaskStatus.FAILED, error_code="FAILED", error_digest="a" * 64)),
-                    record.storage_revision,
-                ))
-            await transaction.replace_records(tuple(replacements))
+            before = await repository._event_state_in_transaction(transaction, "graph")
+            graph_record = await transaction.get_record(repository._graph_key("graph"))
+            next_nodes = tuple(
+                replace(node, status=TaskStatus.FAILED, fence=1, error_code="FAILED", error_digest="a" * 64)
+                if node.node_id in prior_ids else node
+                for node in before.node_states
+            )
+            # Large-fixture setup uses the owner's atomic transition so its
+            # graph projection and event stream remain consistent with nodes.
+            await repository._apply_graph_transition(
+                transaction, before, graph_record, next_nodes, TaskStatus.RUNNING,
+            )
 
         await repository.state_store.mutate(terminal_fixture)
+        prepared = await repository.graph_state("graph", tenant_id="tenant")
+        assert prepared.status is TaskStatus.RUNNING
+        assert sum(node.status is TaskStatus.FAILED for node in prepared.node_states) == len(prior_ids)
+        assert next(node for node in prepared.node_states if node.node_id == "target").status is TaskStatus.RUNNING
         reads = []
 
         def before_sql(connection, cursor, statement, parameters, context, many):

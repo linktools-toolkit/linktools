@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence.state import RecordQuery, RecordReplacement
+from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.task import (
     LocalTaskGraphLauncher, TaskGraph, TaskGraphAdmission, TaskGraphLimits,
     TaskGraphRequest, TaskNode, TaskNodeView,
@@ -33,7 +33,7 @@ def _launcher(repository) -> LocalTaskGraphLauncher:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation,expected_reads", [("renew", 1), ("complete", 2), ("bind", 1), ("handoff", 1)])
+@pytest.mark.parametrize("operation,expected_reads", [("renew", 1), ("complete", 1), ("bind", 1), ("handoff", 1)])
 @pytest.mark.parametrize("width", [2, 200])
 async def test_task_prefetch_definition_read_budget(
     tmp_path: Path, operation: str, expected_reads: int, width: int,
@@ -70,6 +70,21 @@ async def test_task_prefetch_definition_read_budget(
         finally:
             event.remove(Engine, "before_cursor_execute", before_sql)
         assert len(reads) == expected_reads
+        current = await repository.graph_state("graph", tenant_id="tenant")
+        assert len(current.node_states) == width
+        target = next(node for node in current.node_states if node.node_id == "first")
+        expected_status = {
+            "renew": TaskStatus.RUNNING,
+            "bind": TaskStatus.RUNNING,
+            "handoff": TaskStatus.WAITING,
+            "complete": TaskStatus.SUCCEEDED,
+        }[operation]
+        assert target.status is expected_status
+        assert target.fence == lease.fence
+        assert all(node.status is TaskStatus.READY for node in current.node_states if node.node_id != "first")
+        if operation == "complete":
+            results = await repository.get_results("graph", ("first",), tenant_id="tenant")
+            assert results["first"].result_digest == target.result_digest == "a" * 64
 
 
 @pytest.mark.asyncio
@@ -126,19 +141,22 @@ async def test_high_fan_in_dependency_reads_bound_parameters(tmp_path: Path) -> 
         repository = state.task.tasks
 
         async def terminal_fixture(transaction):
-            records = await transaction.get_records(tuple(
-                repository._state_key("graph", key) for key in dependencies
-            ))
-            replacements = []
-            for record in records.values():
-                node = await repository._decode(record, TaskNodeView)
-                replacements.append(RecordReplacement(
-                    repository._task_node_record(record, replace(node, status=TaskStatus.CANCELLED)),
-                    record.storage_revision,
-                ))
-            await transaction.replace_records(tuple(replacements))
+            before = await repository._event_state_in_transaction(transaction, "graph")
+            graph_record = await transaction.get_record(repository._graph_key("graph"))
+            next_nodes = tuple(
+                replace(node, status=TaskStatus.CANCELLED)
+                if node.node_id in dependencies else node
+                for node in before.node_states
+            )
+            await repository._apply_graph_transition(
+                transaction, before, graph_record, next_nodes, TaskStatus.PENDING,
+            )
 
         await repository.state_store.mutate(terminal_fixture)
+        prepared = await repository.graph_state("graph", tenant_id="tenant")
+        assert prepared.status is TaskStatus.PENDING
+        assert sum(node.status is TaskStatus.CANCELLED for node in prepared.node_states) == len(dependencies)
+        assert next(node for node in prepared.node_states if node.node_id == "target").status is TaskStatus.PENDING
         reads = []
 
         def before_sql(connection, cursor, statement, parameters, context, many):
