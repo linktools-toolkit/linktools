@@ -259,7 +259,7 @@ async def test_native_factory_uses_execution_route_in_split_plan(tmp_path: Path)
             await native.close()
     with sqlite3.connect(execution) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_step_messages", "ai_step_message_refs"} <= tables
+        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_step_messages", "ai_step_sequences"} <= tables
         assert connection.execute("SELECT run_id FROM ai_step_runs").fetchall() == [("routed",)]
     with sqlite3.connect(conversation) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}

@@ -213,18 +213,6 @@ CREATE TABLE ai_step_events (
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Append-only upstream agent execution boundary events.' COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_step_message_refs (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	snapshot_id BIGINT NOT NULL COMMENT 'Physical snapshot row identifier.',
-	position BIGINT NOT NULL COMMENT 'Zero-based position in the upstream message history.',
-	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	UNIQUE KEY uk_snapshot_id_position (snapshot_id, position),
-	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Ordered message references belonging to upstream snapshots.' COLLATE utf8mb4_bin;
-
 CREATE TABLE ai_step_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
@@ -259,6 +247,22 @@ CREATE TABLE ai_step_runs (
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;
 
+CREATE TABLE ai_step_sequences (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the immutable sequence node.',
+	message_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
+	tree_count BIGINT NOT NULL COMMENT 'Number of ordered message occurrences in this tree.',
+	left_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable left subtree root.',
+	right_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable right subtree root.',
+	next_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Next immutable tree in the sequence forest.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	UNIQUE KEY uk_store_digest_sha256 (store_digest, sha256),
+	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Shared immutable message sequence nodes for native snapshots.' COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
@@ -270,7 +274,8 @@ CREATE TABLE ai_step_snapshots (
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 snapshot time.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
-    messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Ordered message count and bound native checkpoint state.',
+	messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Ordered message count and bound native checkpoint state.',
+	sequence_root CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable message sequence root retained by this snapshot.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
 	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	pruned BOOL NOT NULL COMMENT 'Retired snapshot identity without retained message references.',

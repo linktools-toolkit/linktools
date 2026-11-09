@@ -1721,7 +1721,19 @@ to reject changed retry usage or snapshot bindings. Message JSON uses UTF-8
 without ASCII escaping. This changes only the SQL storage representation, not
 the native store's returned snapshots, conversation retention, or recovery budget.
 Provision new data with the current writer and reader; no older development-data
-migration is performed.
+migration is performed. Snapshots retain a content-addressed sequence root rather
+than a complete set of message-reference rows. The immutable balanced forest
+shares existing prefixes across snapshots and runs while preserving repeated
+messages, shortened histories, and branches. Stored sequence nodes and message
+bodies remain until explicitly coordinated cleanup; pruning only releases roots
+and keeps snapshot replay identities.
+
+Snapshot publication adds no existence reads. A nonempty latest snapshot uses
+one header read and one bounded sequence/body query. MySQL 5.7 uses a finite
+union of tree frontiers; SQLite and PostgreSQL use a bounded recursive query.
+This reduces retained prefix references, not the cost of returning a full history:
+every save still encodes its supplied messages, and full recovery still returns
+the requested message bodies with their integrity metadata.
 
 The adapter uses Persistence's namespace and tenant and borrows the exact
 Execution SQL context, including a local SQLite writer owner when configured.

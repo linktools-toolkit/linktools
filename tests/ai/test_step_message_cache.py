@@ -26,8 +26,9 @@ class _SqlTraffic:
         self.bound_bytes = 0
 
     def capture(self, connection, cursor, statement, parameters, context, many) -> None:
-        words = statement.split()
-        self.statements[words[0]] += 1
+        verb = statement.split()[0].upper()
+        # Recursive sequence reads start WITH but still consume one SELECT.
+        self.statements["SELECT" if verb == "WITH" else verb] += 1
         self.bound_bytes += self._bytes(parameters)
         if statement.startswith("INSERT INTO ai_step_messages "):
             self.statements["message_insert"] += 1
@@ -36,8 +37,8 @@ class _SqlTraffic:
             self.message_bytes += sum(len(value.encode()) for value in parameters[2::3])
         elif statement.startswith("INSERT INTO ai_step_snapshots "):
             self.statements["snapshot_insert"] += 1
-        elif statement.startswith("INSERT INTO ai_step_message_refs "):
-            self.statements["reference_insert"] += 1
+        elif statement.startswith("INSERT INTO ai_step_sequences "):
+            self.statements["sequence_insert"] += 1
 
     @classmethod
     def _bytes(cls, value: object) -> int:
@@ -73,9 +74,10 @@ async def test_repeated_snapshots_skip_only_confirmed_message_body_submissions(
         await store.save_snapshot(second)
         assert traffic.message_rows == submitted
         assert traffic.statements["snapshot_insert"] == 2
-        assert traffic.statements["reference_insert"] == 2
         # Retention reads belong to the existing pruning contract, not the cache.
         assert traffic.statements["SELECT"] == 2
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
         assert await store.latest_snapshot(run_id="run") == second
         await store.save_snapshot(first)
         assert traffic.message_rows == submitted
@@ -99,7 +101,7 @@ async def test_failed_publication_does_not_cache_uncommitted_messages(tmp_path: 
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
 
     def fail(connection, cursor, statement, parameters, context, many) -> None:
-        if statement.startswith("INSERT INTO ai_step_message_refs "):
+        if statement.startswith("INSERT INTO ai_step_sequences "):
             raise RuntimeError("publication failed")
 
     try:

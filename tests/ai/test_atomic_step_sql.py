@@ -78,7 +78,7 @@ async def test_compound_failure_rolls_back_every_record_and_body_receipt(atomic_
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
 
     def fail(connection, cursor, statement, parameters, context, many):
-        if statement.startswith("INSERT INTO ai_step_message_refs "):
+        if statement.startswith("INSERT INTO ai_step_sequences "):
             raise RuntimeError("reference failed")
 
     event.listen(engine.sync_engine, "before_cursor_execute", fail)
@@ -86,8 +86,9 @@ async def test_compound_failure_rolls_back_every_record_and_body_receipt(atomic_
         await store.commit_step(run=run, events=events, snapshot=snapshot)
     event.remove(engine.sync_engine, "before_cursor_execute", fail)
     assert not store._confirmed_messages
+    assert not store._confirmed_sequences
     async with engine.connect() as connection:
-        for table in ("runs", "events", "snapshots", "message_refs", "messages"):
+        for table in ("runs", "events", "snapshots", "sequences", "messages"):
             assert await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}")) == 0
     await store.commit_step(run=run, events=events, snapshot=snapshot)
     assert traffic.message_rows == 2
@@ -120,6 +121,7 @@ async def test_compound_lost_commit_ack_requires_readback_without_cache_promotio
             await store.commit_step(run=run, events=events, snapshot=snapshot)
         assert raised.value.code == ErrorCode.STORAGE_COMMIT_UNKNOWN
     assert not store._confirmed_messages
+    assert not store._confirmed_sequences
     cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
     try:
         assert await cold.get_run(run_id="run") == run
@@ -129,6 +131,7 @@ async def test_compound_lost_commit_ack_requires_readback_without_cache_promotio
         await cold.close()
     await store.commit_step(events=events, snapshot=snapshot)
     assert not store._confirmed_messages
+    assert not store._confirmed_sequences
     await store.commit_step(snapshot=replace(snapshot, idempotency_key="next"))
     assert traffic.message_rows == 2
     await store.commit_step(snapshot=replace(snapshot, idempotency_key="warm"))
@@ -145,6 +148,7 @@ async def test_duplicate_run_rejects_compound_group_without_publishing_tail(atom
     assert await store.list_events(run_id="run") == []
     assert await store.latest_snapshot(run_id="run") is None
     assert not store._confirmed_messages
+    assert not store._confirmed_sequences
 
 
 @pytest.mark.asyncio
@@ -168,7 +172,7 @@ async def test_parallel_compound_calls_preserve_native_keys_and_each_event_order
         assert [item.kind for item in found if item.idempotency_key.startswith(f"{index}:")] == [item.kind for item in events]
     async with engine.connect() as connection:
         assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
-        assert await connection.scalar(text("SELECT count(*) FROM ai_step_message_refs")) == 5
+        assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
 
 
 @pytest.mark.asyncio
@@ -209,6 +213,7 @@ async def test_inflight_compound_group_is_invisible_to_cold_reader_and_cache(
         await inserted.wait()
         assert not writer.done()
         assert not store._confirmed_messages
+        assert not store._confirmed_sequences
         assert await cold.get_run(run_id="run") is None
         assert await cold.list_events(run_id="run") == []
         assert await cold.latest_snapshot(run_id="run") is None
@@ -250,7 +255,7 @@ async def test_native_boundary_joins_control_transaction_without_reads_or_early_
         receipt = await state.mutate(commit)
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert len(commits) == 1
-        assert not any(statement.startswith("SELECT") for statement in statements)
+        assert not any(statement.lstrip().upper().startswith(("SELECT", "WITH")) for statement in statements)
         assert not native._confirmed_messages
         native.confirm_prepared_step(receipt)
         assert native._confirmed_messages
@@ -411,15 +416,31 @@ async def test_pruned_headers_keep_replay_identity_without_body_retention_roots(
         await native.save_snapshot(last)
         await native.close()
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE sha256 NOT IN (SELECT sha256 FROM ai_step_message_refs)"))
+            # Pruning drops roots only. Offline collection follows every live root
+            # before deleting unreachable immutable sequence nodes and bodies.
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 4
+            await connection.execute(text("""
+                WITH RECURSIVE edges(parent, child) AS (
+                    SELECT sha256, left_sha256 FROM ai_step_sequences
+                    UNION ALL SELECT sha256, right_sha256 FROM ai_step_sequences
+                    UNION ALL SELECT sha256, next_sha256 FROM ai_step_sequences
+                ), live(sha256) AS (
+                    SELECT sequence_root FROM ai_step_snapshots WHERE pruned = 0
+                    UNION SELECT edges.child FROM edges JOIN live ON edges.parent = live.sha256
+                    WHERE edges.child IS NOT NULL
+                )
+                DELETE FROM ai_step_sequences WHERE sha256 NOT IN (SELECT sha256 FROM live WHERE sha256 IS NOT NULL)
+            """))
+            await connection.execute(text("DELETE FROM ai_step_messages WHERE sha256 NOT IN (SELECT message_sha256 FROM ai_step_sequences)"))
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 1 AND messages = '{}'")) == 2
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 1 AND messages = '{}' AND sequence_root IS NULL")) == 2
         cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
         await cold.save_snapshot(replace(first, messages=[ModelRequest(parts=[UserPromptPart("different replay")])]))
         assert await cold.list_snapshots(run_id="run", include_interrupted=True) == [last]
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_message_refs")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
         await cold.close()
     finally:
         await native.close()

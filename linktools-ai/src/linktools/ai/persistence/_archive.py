@@ -125,6 +125,28 @@ class ImmutableSequenceNode:
         if (self.tree_count == 1) != (self.left is None):
             raise _integrity()
 
+    @classmethod
+    def forest_weights(cls, count: int) -> tuple[int, ...]:
+        """Return the bounded tree sizes of a canonical occurrence sequence."""
+        count = _count(count)
+        values: list[int] = []
+        while count:
+            size = (1 << ((count + 1).bit_length() - 1)) - 1
+            values.append(size)
+            count -= size
+        return tuple(reversed(values))
+
+    @classmethod
+    def extend(
+        cls, content_id: str, first: "ImmutableSequenceNode | None",
+        second: "ImmutableSequenceNode | None",
+    ) -> "ImmutableSequenceNode":
+        """Append one occurrence using the captured immutable forest frontier."""
+        if first is not None and second is not None and first.tree_count == second.tree_count:
+            return cls(content_id, 1 + first.tree_count + second.tree_count,
+                       first.identity, second.identity, second.next_forest)
+        return cls(content_id, next_forest=None if first is None else first.identity)
+
     def to_json(self) -> dict[str, JsonValue]:
         return {"content": self.content_id, "count": self.tree_count,
                 "left": self.left, "right": self.right, "next": self.next_forest}
@@ -231,14 +253,6 @@ class _RangeNode:
     forest_position: int | None
     expand: bool = True
 
-
-def _forest_weights(count: int) -> tuple[int, ...]:
-    values: list[int] = []
-    while count:
-        size = (1 << ((count + 1).bit_length() - 1)) - 1
-        values.append(size)
-        count -= size
-    return tuple(reversed(values))
 
 
 class ContentArchive:
@@ -428,7 +442,7 @@ class ContentArchive:
         tail = root.slices[-1] if root.slices else None
         if tail is None or tail.start != 0 or tail.end != tail.count:
             raise _integrity()
-        weights = _forest_weights(tail.count)
+        weights = ImmutableSequenceNode.forest_weights(tail.count)
         if len(records) != min(2, len(weights)):
             raise _integrity()
         identity = tail.first
@@ -531,11 +545,7 @@ class ContentArchive:
                 if first.next_forest is not None:
                     await self._nodes((first.next_forest,), prepared, cache)
                     second = cache[first.next_forest]
-            if first is not None and second is not None and first.tree_count == second.tree_count:
-                node = ImmutableSequenceNode(content_id, 1 + first.tree_count + second.tree_count,
-                                             first_id, first.next_forest, second.next_forest)
-            else:
-                node = ImmutableSequenceNode(content_id, next_forest=first_id)
+            node = ImmutableSequenceNode.extend(content_id, first, second)
             identity = node.identity
             prepared.nodes[identity] = cache[identity] = node
             record = self._record("archive_sequence", identity, node.to_json())
@@ -669,7 +679,7 @@ class ContentArchive:
                 tail = root.slices[-1]
                 if tail.start == 0 and tail.end == tail.count:
                     frontier_first.add(tail.first)
-        weights = [_forest_weights(span.count) for span in spans]
+        weights = [ImmutableSequenceNode.forest_weights(span.count) for span in spans]
         ranges = [(span.count - span.end, span.count - span.start) for span in spans]
         matches: list[list[str | None]] = [[None] * (span.end - span.start) for span in spans]
         queue = deque(_RangeNode(index, span.first, 0, weights[index][0], 0)

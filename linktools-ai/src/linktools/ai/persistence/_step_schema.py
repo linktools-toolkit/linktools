@@ -98,6 +98,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
         Column("timestamp", String(64), nullable=False, comment="Original ISO 8601 snapshot time."),
         Column("state", sql_state(), nullable=False, comment="Upstream complete or interrupted state."),
         text("messages", "Ordered message count and bound native checkpoint state.", nullable=False),
+        digest("sequence_root", "Immutable message sequence root retained by this snapshot.", nullable=True),
         text("idempotency_key", "Upstream boundary replay key."),
         digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
         Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),
@@ -113,13 +114,17 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
     )
     sql_unique(messages, "store_digest", "sha256")
 
-    refs = table(
-        "ai_step_message_refs", "Ordered message references belonging to upstream snapshots.",
-        Column("snapshot_id", BigInteger, nullable=False, comment="Physical snapshot row identifier."),
-        Column("position", BigInteger, nullable=False, comment="Zero-based position in the upstream message history."),
-        digest("sha256", "SHA-256 of the referenced upstream message JSON."),
+    sequences = table(
+        "ai_step_sequences", "Shared immutable message sequence nodes for native snapshots.",
+        digest("store_digest", "Physical namespace and tenant partition."),
+        digest("sha256", "SHA-256 of the immutable sequence node."),
+        digest("message_sha256", "SHA-256 of the referenced upstream message JSON."),
+        Column("tree_count", BigInteger, nullable=False, comment="Number of ordered message occurrences in this tree."),
+        digest("left_sha256", "Immutable left subtree root.", nullable=True),
+        digest("right_sha256", "Immutable right subtree root.", nullable=True),
+        digest("next_sha256", "Next immutable tree in the sequence forest.", nullable=True),
     )
-    sql_unique(refs, "snapshot_id", "position")
+    sql_unique(sequences, "store_digest", "sha256")
     return metadata
 
 

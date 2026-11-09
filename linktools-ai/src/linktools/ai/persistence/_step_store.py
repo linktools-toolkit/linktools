@@ -25,8 +25,11 @@ from pydantic_ai_harness.step_persistence import (
 
 from linktools.core import environ
 
+from ..errors import AIError
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
+from ._archive import ImmutableSequenceNode
 from ._native_checkpoint import NativeCheckpoint
+from ._step_sequence import build_step_sequence, step_sequence_contents
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, StateTransaction
 
@@ -34,6 +37,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Table
     from sqlalchemy.engine import RowMapping
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+    from sqlalchemy.sql import Select
     from sqlalchemy.sql.elements import ColumnElement
 
     from ..storage import SqlValue
@@ -55,6 +59,7 @@ class PreparedStep:
     snapshot: ContinuableSnapshot | None
     snapshot_values: "dict[str, SqlValue] | None"
     messages: tuple[tuple[str, str], ...]
+    sequences: tuple[tuple[str, ImmutableSequenceNode], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +67,7 @@ class StepWriteReceipt:
     """Provisional body identities, confirmed only by the outer transaction."""
 
     message_digests: tuple[str, ...]
+    sequence_digests: tuple[str, ...]
 
 
 class SqlStepStore:
@@ -70,8 +76,8 @@ class SqlStepStore:
     The engine is borrowed. Provision production tables through the migration
     boundary; ``initialize(local=True)`` may create a local SQLite schema.
     Tool-effect methods delegate to the caller's existing durable effect owner.
-    Stored messages remain after snapshot pruning, as in the upstream Postgres
-    backend, because independent concurrent saves may reuse their bodies.
+    Stored bodies and sequence nodes remain after snapshot pruning because
+    independent concurrent saves may reuse their immutable content.
     Confirmed message digests are cached only after commit. Direct deletion or
     replacement of message bodies requires quiescing and closing all adapters
     before maintenance. ``max_cached_messages=0`` disables this optimization.
@@ -110,6 +116,7 @@ class SqlStepStore:
         self._initialized = False
         self._max_cached_messages = max_cached_messages
         self._confirmed_messages: OrderedDict[str, None] = OrderedDict()
+        self._confirmed_sequences: OrderedDict[str, None] = OrderedDict()
 
     async def initialize(self, *, local: bool = False) -> None:
         """Configure the borrowed backend, optionally creating local SQLite tables."""
@@ -131,6 +138,7 @@ class SqlStepStore:
     async def close(self) -> None:
         """Release this adapter's context without closing a borrowed engine."""
         self._confirmed_messages.clear()
+        self._confirmed_sequences.clear()
         if self._owns_context:
             await self._context.close()
 
@@ -242,8 +250,8 @@ class SqlStepStore:
         """Capture native records and perform encoding/media work before SQL."""
         await self.initialize()
         run, events, snapshot = deepcopy((run, tuple(events), snapshot))
-        values, messages = (None, ()) if snapshot is None else await self._prepare_snapshot(snapshot)
-        return PreparedStep(run, events, snapshot, values, tuple(messages))
+        values, messages, sequences = (None, (), ()) if snapshot is None else await self._prepare_snapshot(snapshot)
+        return PreparedStep(run, events, snapshot, values, tuple(messages), sequences)
 
     async def write_prepared_step(
         self, transaction: StateTransaction, prepared: PreparedStep,
@@ -261,16 +269,16 @@ class SqlStepStore:
         if prepared.run is not None:
             await self._write_run(session, prepared.run, replay=True)
         await self._write_events(session, prepared.events)
-        confirmed = ()
         if prepared.snapshot is not None and prepared.snapshot_values is not None:
-            confirmed = await self._write_snapshot(
-                session, prepared.snapshot_values, prepared.messages,
+            return await self._write_snapshot(
+                session, prepared.snapshot_values, prepared.messages, prepared.sequences,
             )
-        return StepWriteReceipt(confirmed)
+        return StepWriteReceipt((), ())
 
     def confirm_prepared_step(self, receipt: StepWriteReceipt) -> None:
         """Advance body knowledge after the enclosing commit is confirmed."""
-        self._confirm_messages(receipt.message_digests)
+        self._confirm_records(self._confirmed_messages, receipt.message_digests)
+        self._confirm_records(self._confirmed_sequences, receipt.sequence_digests)
 
     async def commit_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
@@ -294,15 +302,15 @@ class SqlStepStore:
         await self.initialize()
         prepared = await self._prepare_snapshot(snapshot)
 
-        async def write(session: "AsyncSession") -> tuple[str, ...]:
+        async def write(session: "AsyncSession") -> StepWriteReceipt:
             return await self._write_snapshot(session, *prepared)
 
-        confirmed = await self._context.run_mutation(write, domain="steps.snapshot")
-        self._confirm_messages(confirmed)
+        receipt = await self._context.run_mutation(write, domain="steps.snapshot")
+        self.confirm_prepared_step(receipt)
 
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
-    ) -> "tuple[dict[str, SqlValue], list[tuple[str, str]]]":
+    ) -> "tuple[dict[str, SqlValue], list[tuple[str, str]], tuple[tuple[str, ImmutableSequenceNode], ...]]":
         if isinstance(snapshot, NativeCheckpoint):
             snapshot = NativeCheckpoint.encode(snapshot, output_retries_used=snapshot.output_retries_used)
         values = self._record_values(snapshot)
@@ -327,12 +335,14 @@ class SqlStepStore:
             keyed.append((_digest(body), body))
         values["messages"] = json.dumps({"stored_messages": len(keyed), "checkpoint": checkpoint})
         values["pruned"] = False
+        values["sequence_root"], sequences = build_step_sequence(tuple(key for key, _ in keyed))
 
-        return values, keyed
+        return values, keyed, sequences
 
     async def _write_snapshot(
         self, session: "AsyncSession", values: "dict[str, SqlValue]", keyed: Sequence[tuple[str, str]],
-    ) -> tuple[str, ...]:
+        sequences: Sequence[tuple[str, ImmutableSequenceNode]],
+    ) -> StepWriteReceipt:
         values = values | self._run_values(values["run_id"])
         values["key_digest"] = _replay_digest(self._store_digest, values["run_digest"], values["idempotency_key"])
         if values["idempotency_key"] is None:
@@ -344,7 +354,7 @@ class SqlStepStore:
                 index_elements=("key_digest",),
             )
             if not result.inserted:
-                return ()
+                return StepWriteReceipt((), ())
             snapshot_id = result.row_id
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
@@ -358,20 +368,28 @@ class SqlStepStore:
                 rows=message_rows[offset:offset + _BATCH_SIZE],
                 index_elements=("store_digest", "sha256"),
             )
-        ref_rows = [{"snapshot_id": snapshot_id,
-                     "position": position, "sha256": key} for position, (key, _) in enumerate(keyed)]
-        for offset in range(0, len(ref_rows), _BATCH_SIZE):
-            await session.execute(self._table("message_refs").insert(), ref_rows[offset:offset + _BATCH_SIZE])
+        sequence_rows = [
+            {"store_digest": self._store_digest, "sha256": identity,
+             "message_sha256": node.content_id, "tree_count": node.tree_count,
+             "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
+            for identity, node in sorted(sequences) if identity not in self._confirmed_sequences
+        ]
+        for offset in range(0, len(sequence_rows), _BATCH_SIZE):
+            await self._context.dialect.insert_ignore_conflict_many(
+                session, table=self._table("sequences"),
+                rows=sequence_rows[offset:offset + _BATCH_SIZE],
+                index_elements=("store_digest", "sha256"),
+            )
         await self._prune_snapshots(session, values["run_id"])
-        return tuple(dict(keyed))
+        return StepWriteReceipt(tuple(dict(keyed)), tuple(identity for identity, _ in sequences))
 
-    def _confirm_messages(self, confirmed: Sequence[str]) -> None:
+    def _confirm_records(self, cache: "OrderedDict[str, None]", confirmed: Sequence[str]) -> None:
         if self._max_cached_messages:
             for key in confirmed:
-                self._confirmed_messages[key] = None
-                self._confirmed_messages.move_to_end(key)
-                if len(self._confirmed_messages) > self._max_cached_messages:
-                    self._confirmed_messages.popitem(last=False)
+                cache[key] = None
+                cache.move_to_end(key)
+                if len(cache) > self._max_cached_messages:
+                    cache.popitem(last=False)
 
     async def latest_snapshot(
         self, *, run_id: str, include_interrupted: bool = False,
@@ -427,23 +445,19 @@ class SqlStepStore:
         if complete:
             retained.add(complete[-1])
         removed = [row.id for row in rows if row.id not in retained]
-        refs = self._table("message_refs")
         for offset in range(0, len(removed), _BATCH_SIZE):
             ids = removed[offset:offset + _BATCH_SIZE]
-            await session.execute(refs.delete().where(refs.c.snapshot_id.in_(ids)))
             await session.execute(table.update().where(
                 table.c.store_digest == self._store_digest, table.c.id.in_(ids),
-            ).values(pruned=True, messages="{}"))
+            ).values(pruned=True, messages="{}", sequence_root=None))
 
     async def _load_snapshots(
         self, run_id: str, *, include_interrupted: bool, latest: bool,
-    ) -> list[tuple[dict[str, object], list[tuple[int, str, str | None]]]]:
-        from sqlalchemy import and_, select
+    ) -> list[tuple[dict[str, object], list[Mapping[str, object]]]]:
+        from sqlalchemy import select
 
         await self.initialize()
         table = self._table("snapshots")
-        refs = self._table("message_refs")
-        messages = self._table("messages")
         query = select(table).where(*self._run_predicates(table, run_id), table.c.pruned.is_(False))
         if not include_interrupted:
             query = query.where(table.c.state == "complete")
@@ -453,33 +467,109 @@ class SqlStepStore:
         async with self._context.sessions() as session, session.begin():
             await self._context.run_statement(self._context.dialect.begin_consistent_read(session))
             rows = (await self._context.run_statement(session.execute(query))).mappings().all()
-            histories: dict[int, list[tuple[int, str, str | None]]] = {}
+            histories: dict[int, list[Mapping[str, object]]] = {}
             for offset in range(0, len(rows), _BATCH_SIZE):
-                ids = [row["id"] for row in rows[offset:offset + _BATCH_SIZE]]
-                found = (await self._context.run_statement(session.execute(select(
-                    refs.c.snapshot_id, refs.c.position, refs.c.sha256, messages.c.message,
-                ).select_from(refs.outerjoin(messages, and_(
-                    messages.c.store_digest == self._store_digest,
-                    messages.c.sha256 == refs.c.sha256,
-                ))).where(refs.c.snapshot_id.in_(ids))
-                    .order_by(refs.c.snapshot_id, refs.c.position)))).all()
-                for ref in found:
-                    histories.setdefault(ref.snapshot_id, []).append((ref.position, ref.sha256, ref.message))
+                selected = rows[offset:offset + _BATCH_SIZE]
+                query = self._sequence_query(selected)
+                if query is None:
+                    continue
+                found = (await self._context.run_statement(session.execute(query))).mappings().all()
+                for item in found:
+                    histories.setdefault(item["snapshot_id"], []).append(item)
         return [(self._record_data(row), histories.get(row["id"], [])) for row in rows]
 
+    def _sequence_query(self, snapshots: "Sequence[RowMapping]") -> "Select | None":
+        """Expand bounded immutable trees and their bodies in one SQL statement."""
+        from sqlalchemy import BigInteger, and_, case, cast, literal, select, union_all
+
+        starts = []
+        max_depth = 0
+        for snapshot in snapshots:
+            try:
+                descriptor = json.loads(snapshot["messages"])
+            except (TypeError, ValueError):
+                continue
+            count = descriptor.get("stored_messages") if isinstance(descriptor, dict) else None
+            root = snapshot["sequence_root"]
+            if type(count) is not int or not 0 <= count <= (1 << 63) - 1 or (root is None) != (count == 0):
+                continue
+            if root is None:
+                continue
+            max_depth = max(max_depth, *(index + size.bit_length() - 1
+                for index, size in enumerate(ImmutableSequenceNode.forest_weights(count))))
+            starts.append(select(
+                literal(snapshot["id"], BigInteger).label("snapshot_id"),
+                literal(root, self._table("sequences").c.sha256.type).label("sha256"),
+                literal(count, BigInteger).label("remaining"),
+                literal(0, BigInteger).label("depth"),
+                literal(True).label("forest"),
+            ))
+        if not starts:
+            return None
+        seeds = (starts[0] if len(starts) == 1 else union_all(*starts)).subquery("snapshot_roots")
+        nodes = self._table("sequences")
+        edges = union_all(*(select(literal(index).label("edge")) for index in range(3))).subquery("sequence_edges")
+
+        def extend(frontier):
+            child = case((edges.c.edge == 0, nodes.c.left_sha256),
+                         (edges.c.edge == 1, nodes.c.right_sha256), else_=nodes.c.next_sha256)
+            size = case((edges.c.edge == 2, frontier.c.remaining - nodes.c.tree_count),
+                        else_=cast((nodes.c.tree_count - 1) / 2, BigInteger))
+            return select(
+                frontier.c.snapshot_id, child.label("sha256"), size.label("remaining"),
+                (frontier.c.depth + 1).label("depth"), (edges.c.edge == 2).label("forest"),
+            ).select_from(frontier.join(nodes, and_(
+                nodes.c.store_digest == self._store_digest, nodes.c.sha256 == frontier.c.sha256,
+            )).join(edges, literal(True))).where(
+                child.is_not(None), frontier.c.depth < max_depth,
+                nodes.c.tree_count > 0, nodes.c.tree_count <= frontier.c.remaining,
+                (edges.c.edge < 2) | frontier.c.forest, size > 0,
+            )
+
+        if self._context.engine.dialect.name == "mysql":
+            # MySQL 5.7 has no recursive CTEs. Every derived frontier is bounded
+            # by the exact tree height; DISTINCT prevents derived-table merging.
+            levels = [seeds]
+            for depth in range(max_depth):
+                levels.append(extend(levels[-1]).distinct().subquery(f"sequence_level_{depth + 1}"))
+            closure = (select(levels[0]) if len(levels) == 1 else
+                       union_all(*(select(level) for level in levels))).subquery("snapshot_sequences")
+        else:
+            closure = select(seeds).cte("snapshot_sequences", recursive=True)
+            closure = closure.union_all(extend(closure))
+        messages = self._table("messages")
+        return select(
+            closure.c.snapshot_id, nodes.c.sha256, nodes.c.message_sha256,
+            nodes.c.tree_count, nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256,
+            messages.c.message,
+        ).select_from(closure.join(nodes, and_(
+            nodes.c.store_digest == self._store_digest, nodes.c.sha256 == closure.c.sha256,
+        )).outerjoin(messages, and_(
+            messages.c.store_digest == self._store_digest, messages.c.sha256 == nodes.c.message_sha256,
+        )))
+
     async def _snapshot_from_data(
-        self, data: dict[str, object], references: list[tuple[int, str, str | None]],
+        self, data: dict[str, object], references: list[Mapping[str, object]],
     ) -> ContinuableSnapshot:
-        messages = []
-        for position, sha256, body in references:
-            if position != len(messages) or body is None or _digest(body) != sha256:
-                raise ValueError("snapshot message references are missing or corrupt")
-            messages.append(json.loads(body))
         descriptor = json.loads(data["messages"])
         if (not isinstance(descriptor, dict) or set(descriptor) != {"stored_messages", "checkpoint"}
-                or type(descriptor["stored_messages"]) is not int
-                or descriptor["stored_messages"] != len(messages)):
+                or type(descriptor["stored_messages"]) is not int or descriptor["stored_messages"] < 0):
             raise ValueError("snapshot message references are incomplete")
+        nodes: dict[str, ImmutableSequenceNode] = {}
+        bodies: dict[str, object] = {}
+        for row in references:
+            try:
+                node = ImmutableSequenceNode(row["message_sha256"], row["tree_count"],
+                                             row["left_sha256"], row["right_sha256"], row["next_sha256"])
+            except AIError as error:
+                raise ValueError("snapshot sequence is missing or corrupt") from error
+            body = row["message"]
+            if node.identity != row["sha256"] or body is None or _digest(body) != node.content_id:
+                raise ValueError("snapshot message references are missing or corrupt")
+            nodes[node.identity] = node
+            bodies[node.content_id] = json.loads(body)
+        contents = step_sequence_contents(data.pop("sequence_root"), descriptor["stored_messages"], nodes)
+        messages = [bodies[identity] for identity in contents]
         if self._media_store is not None:
             messages = await restore_media(messages, media_store=self._media_store)
         data["messages"] = ModelMessagesTypeAdapter.validate_python(messages)

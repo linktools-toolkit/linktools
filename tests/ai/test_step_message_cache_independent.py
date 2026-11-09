@@ -125,10 +125,11 @@ async def test_history_larger_than_cache_keeps_all_references(tmp_path: Path) ->
             await store.save_snapshot(current)
             # The private check observes the required resident memory bound, not an eviction order.
             assert len(store._confirmed_messages) <= 3
+            assert len(store._confirmed_sequences) <= 3
             assert await store.latest_snapshot(run_id="run") == current
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 17
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_message_refs")) == 17
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 17
     finally:
         await store.close()
         await engine.dispose()
