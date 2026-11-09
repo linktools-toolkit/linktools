@@ -58,6 +58,7 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
+    active_state_scope,
     sortable_identity,
     stream_digest,
 )
@@ -375,6 +376,7 @@ class TaskRepositoryImpl(RepositoryBase):
         super().__init__(
             store, namespace=namespace, tenant_id=tenant_id, domain=PersistenceDomain.TASK
         )
+        self._scheduler_definitions: tuple[str, tuple[TaskNode, ...]] | None = None
 
     def _graph_key(self, graph_id: str) -> bytes:
         return self._key("task_graph", graph_id)
@@ -743,26 +745,14 @@ class TaskRepositoryImpl(RepositoryBase):
         self,
         transaction: StateTransaction,
         graph_id: str,
+        cached_definitions: tuple[TaskNode, ...] | None = None,
     ) -> tuple[tuple[TaskNode, ...], tuple[TaskNodeView, ...]]:
-        definition_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._definition_parent(graph_id),
-                kind="task_node_definition",
-            )
-        )
         state_records = await transaction.list_records(
             RecordQuery(
                 parent_digest=self._state_parent(graph_id),
                 kind="task_node_state",
             )
         )
-        definitions: dict[str, TaskNode] = {}
-        for record in definition_records:
-            value = await self._decode(record, TaskNode)
-            self._validate_definition_record(record, graph_id, value.node_id)
-            if value.node_id in definitions:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            definitions[value.node_id] = value
         states: dict[str, TaskNodeView] = {}
         for record in state_records:
             value = await self._decode(record, TaskNodeView)
@@ -770,6 +760,23 @@ class TaskRepositoryImpl(RepositoryBase):
             if value.node_id in states:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             states[value.node_id] = value
+        definitions = {
+            node.node_id: node for node in cached_definitions or ()
+        }
+        if cached_definitions is None or set(definitions) != set(states):
+            definition_records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=self._definition_parent(graph_id),
+                    kind="task_node_definition",
+                )
+            )
+            definitions = {}
+            for record in definition_records:
+                value = await self._decode(record, TaskNode)
+                self._validate_definition_record(record, graph_id, value.node_id)
+                if value.node_id in definitions:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                definitions[value.node_id] = value
         if set(definitions) != set(states):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         ordered = tuple(sorted(definitions))
@@ -833,6 +840,7 @@ class TaskRepositoryImpl(RepositoryBase):
         self,
         transaction: StateTransaction,
         graph_id: str,
+        cached_definitions: tuple[TaskNode, ...] | None = None,
     ) -> _TaskEventState | None:
         graph_record = await transaction.get_record(self._graph_key(graph_id))
         if graph_record is None:
@@ -841,7 +849,7 @@ class TaskRepositoryImpl(RepositoryBase):
         header = await self._decode(graph_record, TaskGraphView)
         _require_canonical_graph_status(header.status)
         definitions, states = await self._nodes_with_definitions_in_transaction(
-            transaction, graph_id
+            transaction, graph_id, cached_definitions
         )
         graph = TaskGraph(graph_id, definitions)
         if tuple(state.node_id for state in states) != tuple(
@@ -2091,8 +2099,16 @@ class TaskRepositoryImpl(RepositoryBase):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
+        # Nested mutations can roll back after this call returns. Only committed
+        # top-level reads may reuse or publish definitions across transactions.
+        top_level = active_state_scope() is None
+        cached = self._scheduler_definitions if top_level else None
+        definitions = cached[1] if cached is not None and cached[0] == graph_id else None
+
         async def mutate(transaction: StateTransaction) -> TaskGraphState:
-            before = await self._event_state_in_transaction(transaction, graph_id)
+            before = await self._event_state_in_transaction(
+                transaction, graph_id, definitions,
+            )
             if before is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             graph_record = await transaction.get_record(self._graph_key(graph_id))
@@ -2120,7 +2136,7 @@ class TaskRepositoryImpl(RepositoryBase):
             )
 
         try:
-            return await self._mutate_with_event_retry(mutate)
+            state = await self._mutate_with_event_retry(mutate)
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
@@ -2135,8 +2151,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 )
                 if state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return state
-            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+            elif error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise AIError(
                     ErrorCode.STORAGE_RECOVERY_REQUIRED,
                     safe_details={
@@ -2144,7 +2159,16 @@ class TaskRepositoryImpl(RepositoryBase):
                         "graph_id": graph_id,
                     },
                 ) from error
-            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            else:
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        if top_level:
+            # Definitions are immutable within this repository's source lifetime;
+            # expansion adds nodes and triggers a full definition read next time.
+            if state.status in _TERMINAL_TASK_STATUSES or state.status is TaskStatus.RECOVERY_REQUIRED:
+                self._scheduler_definitions = None
+            else:
+                self._scheduler_definitions = (graph_id, state.nodes)
+        return state
 
     async def cancel_node(
         self,

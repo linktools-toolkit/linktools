@@ -1,4 +1,4 @@
-# Scheduler reads after local completion
+# Scheduler reads
 
 The local launcher distinguishes work that finished before a scheduler read
 from work that finishes while that read is in progress. A successful local
@@ -13,13 +13,13 @@ retry. Cancelled tasks, failed tasks and quiescence retain their existing paths.
 Work that finishes during the read still triggers the existing refresh before
 the launcher decides whether to wait or start dependents.
 
-Each scheduler read remains a fresh, complete definition/state read with the
-same integrity checks, dependency reconciliation and transactional semantics.
-Terminal closing reads, cancellation effects, cleanup failure propagation and
-execution-hold settlement are unchanged. There is no cross-read cache, new
-workset protocol, persistent queue or deferred authoritative write.
+Each scheduler read returns a complete graph state. Mutable node state and
+leases remain freshly read, with the same dependency reconciliation and
+transactional semantics. Terminal closing reads, cancellation effects, cleanup
+failure propagation and execution-hold settlement are unchanged. There is no
+new workset protocol, persistent queue or deferred authoritative write.
 
-## Measured boundary
+## Completed local work
 
 `tests/ai/test_task_scheduler_completed_work.py` isolates a local task that has
 already completed successfully before the next scheduler read. Another live
@@ -53,3 +53,50 @@ sample recording 133; not all other operations are unchanged. The scope included
 attachment, TaskEngine opening, start/wait, all results and closing, excluding
 Persistence provisioning. It does not establish real MySQL performance or a
 latency improvement.
+
+
+## Reusing immutable node definitions
+
+A Task repository retains validated definitions for at most its most recently
+scheduled active graph. Admission creates immutable definitions; expansion adds
+new nodes without changing existing definitions. The scheduler reads the graph
+header, all current node-state payloads and lease columns, and the latest event
+on every pass. It reuses definitions only for the same graph and the same full
+node ID set. A cold read, another graph, or any membership change reads and
+validates all definitions alongside that pass's already-read states. A miss does
+not repeat the state scan.
+
+Nested transactions neither use nor publish retained definitions: their outer
+transaction can still roll back. Only successful top-level mutation or complete
+commit readback publishes a definition tuple. Failure and cancellation do not
+publish provisional values. Terminal and recovery-required scheduler results
+release the retained tuple. A late older read can replace a newer tuple, but the
+next fresh membership check reloads definitions if needed. This may cause a
+cache miss, not stale mutable state.
+
+The tuple belongs to one repository and source lifetime. Supported Task APIs do
+not delete and re-admit a graph ID with new definitions. Snapshot restore opens
+a fresh source and repository; it does not replace a live repository's source.
+Returned node inputs and nested contract values remain detached through their
+existing immutable value interfaces. Retention is bounded to one graph, not a
+fixed byte limit: a large active graph can retain large definition payloads until
+replaced, observed inactive, or its repository is released.
+
+Public `graph_state`, other full graph reads, and cold recovery still read and
+validate complete stored definitions. Each consumed stored payload still
+receives its full integrity checks. Direct database or low-level StateStore
+modification of an already validated definition is outside the Task writer
+contract; a warm scheduler need not detect that modification until a full read.
+Missing or corrupt mutable state is not hidden by definition reuse. No SQL status
+projection or graph revision is treated as a replacement for authoritative
+state or lease payloads.
+
+`tests/ai/test_task_scheduler_definitions.py` protects these boundaries across
+memory, local SQLite and SQL SQLite. Its controlled SQLite budgets include all
+current state payloads, not just saved definition reads. At widths 2 and 200, an
+unchanged warm pass reads respectively 3 and 201 records instead of 5 and 401,
+and executes 4 SELECTs instead of 5, in one transaction without writes. Cold,
+nested and membership-miss passes retain the full definition-read cost; changing
+graphs deliberately evicts the previous graph. These are record and SQL budgets,
+not network traffic or whole-chain latency guarantees. The scheduler still does
+O(N) state reading and graph validation.
