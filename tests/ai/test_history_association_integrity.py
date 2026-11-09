@@ -12,6 +12,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence._step_contracts import StepEvent
+from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence.state import FactQuery, RecordQuery
 
 from .test_incremental_history_read_cost import _seed_trace
@@ -198,7 +199,9 @@ async def test_filtered_trace_rejects_missing_locator_under_complete_coverage(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(tmp_path: Path, backend: str) -> None:
+async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(
+    tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     storage = Persistence(
         PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "order.db"),
     )
@@ -219,14 +222,37 @@ async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(tmp_path: Pa
                 expected.append((index + 1, event))
         await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
         expected.sort(key=lambda item: (item[1].timestamp, item[0]))
+        batches: list[tuple[int, ...]] = []
+        original = _SqlTransaction.list_facts
+
+        async def capture(transaction, query):
+            facts = await original(transaction, query)
+            batches.append(tuple(fact.sequence for fact in facts))
+            return facts
+
+        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
         for page_size in (1, 33, 65):
             result = []
             after_timestamp, after_sequence = None, 0
             while True:
+                batches.clear()
                 page = await archive.list_trace_events(
                     agent_run_id=run_id, event_high_water=73,
                     after_timestamp=after_timestamp, after_sequence=after_sequence, limit=page_size,
                 )
+                if backend == "sqlite":
+                    selected = [sequence for sequence, _ in page]
+                    assert sorted(sequence for batch in batches for sequence in batch) == sorted(selected)
+                    ordered_batches = 0
+                    offset = 0
+                    while offset < len(selected):
+                        end = offset + 1
+                        while (end < len(selected) and end - offset < 32
+                               and selected[end] == selected[end - 1] + 1):
+                            end += 1
+                        ordered_batches += 1
+                        offset = end
+                    assert len(batches) <= ordered_batches
                 if not page:
                     break
                 result.extend(page)
@@ -239,16 +265,48 @@ async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_trace_duplicate_sequence_locators_keep_individual_validation(
+    tmp_path: Path, backend: str,
+) -> None:
+    storage = Persistence(
+        PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "duplicates.db"),
+    )
+    try:
+        archive, run_id = await _seed_trace(storage, 1)
+        key = archive._history_association_key(run_id, "trace", "1")
+
+        async def duplicate(transaction) -> None:
+            record = await transaction.get_record(key)
+            assert record is not None
+            await transaction.insert_record(replace(
+                record, key_digest=b"\xff" * 32,
+                sort_key=record.sort_key + "x",
+            ))
+
+        await archive.state_store.mutate(duplicate)
+        arguments = dict(agent_run_id=run_id, event_high_water=1,
+                         after_timestamp=None, after_sequence=0, limit=10)
+        with pytest.raises(AIError) as raised:
+            await archive.list_trace_events(**arguments)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("corruption", ("missing", "payload"))
+@pytest.mark.parametrize("reverse_timestamps", (False, True))
 async def test_trace_pages_reject_corrupt_facts_across_batches(
-    tmp_path: Path, backend: str, corruption: str,
+    tmp_path: Path, backend: str, corruption: str, reverse_timestamps: bool,
 ) -> None:
     storage = Persistence(
         PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "corrupt.db"),
     )
     try:
-        archive, run_id = await _seed_trace(storage, 66)
+        archive, run_id = await _seed_trace(storage, 66, reverse_timestamps=reverse_timestamps)
         stream = archive._stream(run_id, "event")
+        corrupt_sequence = 34 if reverse_timestamps else 33
 
         async def corrupt(transaction) -> None:
             facts = await transaction.list_facts(FactQuery(stream))
@@ -257,8 +315,8 @@ async def test_trace_pages_reject_corrupt_facts_across_batches(
             await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
             await transaction.delete_fact_streams(archive._agent_run_key(run_id))
             await transaction.insert_facts(tuple(
-                replace(fact, data={"invalid": True}) if fact.sequence == 33 else fact
-                for fact in facts if corruption != "missing" or fact.sequence != 33
+                replace(fact, data={"invalid": True}) if fact.sequence == corrupt_sequence else fact
+                for fact in facts if corruption != "missing" or fact.sequence != corrupt_sequence
             ))
 
         await archive.state_store.mutate(corrupt)
