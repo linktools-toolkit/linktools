@@ -17,6 +17,7 @@ from ..core import (
     validate_persistence_namespace,
 )
 if TYPE_CHECKING:
+    from ..execution import ExecutionInputContext
     from ._tool_identity import ToolCallIdentity
     from ._persistence import TraceCapability
 
@@ -25,6 +26,14 @@ AppT = TypeVar("AppT")
 
 @dataclass(frozen=True, slots=True)
 class AgentContext(Generic[AppT]):
+    """Invocation services and detached views of the original admitted input.
+
+    ``input_context`` and ``original_input`` come from the execution's existing
+    context and user-input owners. They do not track live session updates and
+    are not authorization grants. ``None`` means no captured view was supplied,
+    as with a caller-created context outside Runtime.
+    """
+
     app: AppT
     principal: Principal
     namespace: str
@@ -40,6 +49,8 @@ class AgentContext(Generic[AppT]):
     agent_run_seq: int | None = None
     tool_call: "ToolCallIdentity | None" = None
     trace: "TraceCapability[AppT] | None" = field(default=None, repr=False, compare=False)
+    input_context: "ExecutionInputContext | None" = field(default=None, repr=False)
+    original_input: Mapping[str, JsonValue] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.deadline_at is not None and (
@@ -76,6 +87,12 @@ class AgentContext(Generic[AppT]):
             "correlation",
             normalize_correlation(self.correlation),
         )
+        if self.original_input is not None and not isinstance(self.original_input, ImmutableJsonMapping):
+            object.__setattr__(
+                self,
+                "original_input",
+                ImmutableJsonMapping(self.original_input, allow_empty_keys=True),
+            )
 
 
 __all__ = ["AgentContext"]

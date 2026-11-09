@@ -46,6 +46,7 @@ from ..inputs import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
     stored_input_attachment_views,
+    stored_user_input_view,
 )
 from ._plan import RuntimePlanStore
 from ._execution_payload import _materialize_execution_json, _materialize_execution_payloads
@@ -4654,6 +4655,8 @@ class LocalExecutionBackend:
                 parent_execution_id=current.parent_execution_id,
                 agent_id=binding.compiled_agent.spec.id,
                 agent_run_seq=current.agent_run_seq,
+                input_context=accepted_context,
+                original_input=stored_user_input_view(current.stored_user_input),
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store
