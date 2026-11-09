@@ -1242,6 +1242,16 @@ class LocalTaskGraphLauncher:
         observed_fingerprint: str | None = None
         try:
             while not run.closed:
+                # The next read already follows these completions. Completions
+                # during that read still require the refresh below.
+                completed = tuple(
+                    (node_id, value)
+                    for node_id, value in inflight.items()
+                    if value.quiesce_task is None
+                    and value.task.done()
+                    and not value.task.cancelled()
+                    and value.task.exception() is None
+                )
                 try:
                     state = await self._repository.scheduler_state(
                         request.graph_id,
@@ -1258,6 +1268,14 @@ class LocalTaskGraphLauncher:
                     state.nodes,
                 )
                 states = state.node_states
+                if completed:
+                    persisted_ids = {node.node_id for node in states}
+                    for node_id, value in completed:
+                        if inflight.get(node_id) is not value or value.quiesce_task is not None:
+                            continue
+                        if node_id not in persisted_ids:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        inflight.pop(node_id)
                 now = datetime.now(timezone.utc)
                 fingerprint = _scheduler_observation_fingerprint(view, states, now)
                 if fingerprint != observed_fingerprint:
