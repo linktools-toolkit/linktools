@@ -9,8 +9,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic_ai import ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability, AgentNode, CapabilityOrdering, NodeResult
-from pydantic_ai.messages import ModelMessage, ModelRequest
+from pydantic_ai.messages import AgentStreamEvent, ModelMessage, ModelRequest, OutputToolResultEvent, RetryFeedbackPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import DeferredToolRequests
@@ -31,6 +32,7 @@ class AgentRunCapture(AbstractCapability[None]):
     agent_id: str
     agent_run_id: str
     parent_agent_run_id: str | None = None
+    initial_output_retries_used: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
     id: str | None = field(
         default="linktools.ai.run-capture",
@@ -71,7 +73,10 @@ class AgentRunCapture(AbstractCapability[None]):
         return self._live_messages
 
     def __post_init__(self) -> None:
-        self.context = RunContextCapture(self.recorder, self.agent_run_id, self.agent_id, self.parent_agent_run_id)
+        self.context = RunContextCapture(
+            self.recorder, self.agent_run_id, self.agent_id, self.parent_agent_run_id,
+            output_retries_used=self.initial_output_retries_used,
+        )
         if not isinstance(self.recorder, AgentRunRecorder):
             raise TypeError("recorder must be AgentRunRecorder")
         if not self.agent_run_id or self.recorder.agent_run_id != self.agent_run_id:
@@ -103,6 +108,7 @@ class AgentRunCapture(AbstractCapability[None]):
         ctx: PydanticRunContext[None],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
+        self.context.output_retries_used = self.initial_output_retries_used + ctx.retry
         if self.producer_guard is not None:
             await self.producer_guard()
         await self.before_run(ctx)
@@ -117,6 +123,12 @@ class AgentRunCapture(AbstractCapability[None]):
                 self.recorder.append_transcript_message(ctx.messages[-1])
         return request_context
 
+    async def on_event(self, ctx: PydanticRunContext[None], *, event: AgentStreamEvent) -> None:
+        if isinstance(event, OutputToolResultEvent) and event.part.outcome == "retried":
+            # The SDK emits settled output retries before a co-emitted approval
+            # can end the run. Run/node lifecycle contexts do not refresh retry.
+            self.context.output_retries_used += 1
+
     async def after_node_run(
         self,
         ctx: PydanticRunContext[None],
@@ -126,6 +138,10 @@ class AgentRunCapture(AbstractCapability[None]):
     ) -> NodeResult[None]:
         self._live_messages = ctx.messages
         self._last_observed_step_index = ctx.run_step
+        if isinstance(result, ModelRequestNode):
+            for part in result.request.parts:
+                if isinstance(part, RetryFeedbackPart) and part.retry.attempt is not None:
+                    self.context.output_retries_used = self.initial_output_retries_used + part.retry.attempt
         return result
 
     async def after_run(

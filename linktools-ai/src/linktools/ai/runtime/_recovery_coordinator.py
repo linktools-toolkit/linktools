@@ -84,6 +84,7 @@ class _DeferredResume:
     results: DeferredToolResults
     producer_generation: int
     binding: AgentBinding = field(repr=False, compare=False)
+    output_retries_used: int
     repository_instruction_approvals: Mapping[str, _RepositoryInstructionApproval] = field(default_factory=dict)
 
 
@@ -228,11 +229,11 @@ class _RecoveryCoordinatorPort(Protocol):
 
     async def read_deferred_payload(self, payload: StoredPayload) -> JsonValue: ...
 
-    async def load_interrupted_messages(
+    async def load_interrupted_checkpoint(
         self,
         agent_run_id: str,
         *, execution: ExecutionRecord,
-    ) -> tuple[ModelMessage, ...]: ...
+    ) -> AgentRunCheckpoint: ...
 
     async def claim_deferred_resume(
         self,
@@ -1212,9 +1213,11 @@ class _RecoveryCoordinator:
         if resolved is None:
             return None
         deferred_results, repository_approvals = resolved
-        history = await self._port.load_interrupted_messages(
+        checkpoint = await self._port.load_interrupted_checkpoint(
             continuation.source_agent_run_id, execution=current,
         )
+        if checkpoint.output_retries_used is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         binding = await self._port.validate_recovery_inputs(current, binding=binding)
         try:
             resumed_execution = await self._port.claim_deferred_resume(
@@ -1230,8 +1233,10 @@ class _RecoveryCoordinator:
                 return None
             raise
         return _DeferredResume(
-            resumed_execution, history, deferred_results, current.revision + 1,
-            binding, repository_approvals,
+            resumed_execution, tuple(checkpoint.messages if checkpoint.context_messages is None
+                                     else checkpoint.context_messages),
+            deferred_results, current.revision + 1,
+            binding, checkpoint.output_retries_used, repository_approvals,
         )
 
     async def _load_deferred_results(
@@ -1336,6 +1341,7 @@ class _RecoveryCoordinator:
     async def restore_resumed_deferred(
         self, execution: ExecutionRecord, *,
         history: tuple[ModelMessage, ...], producer_generation: int, binding: AgentBinding,
+        output_retries_used: int,
     ) -> _DeferredResume:
         if (execution.recovery_state is not ExecutionRecoveryState.ACTIVE
                 or execution.recovery is None or execution.recovery.pending_tools is None):
@@ -1345,7 +1351,7 @@ class _RecoveryCoordinator:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         results, approvals = resolved
         return _DeferredResume(
-            execution, history, results, producer_generation, binding, approvals,
+            execution, history, results, producer_generation, binding, output_retries_used, approvals,
         )
 
     def _deferred_attempt_advanced(

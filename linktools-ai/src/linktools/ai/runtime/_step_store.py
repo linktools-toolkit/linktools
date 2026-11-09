@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Run-bound native storage view with Runtime's single tool-effect owner."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Protocol
 
@@ -17,6 +17,7 @@ from pydantic_ai_harness.step_persistence import (
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ..model.messages import native_checkpoint_messages
 from ..capability.steps import AtomicStepStore
+from ..persistence.runs import NativeCheckpoint
 
 if TYPE_CHECKING:
     from ..persistence.runs import RuntimeAgentRunStore
@@ -37,12 +38,14 @@ class RuntimeStepStore:
     def __init__(self, store: StepStore, tool_operations: ToolOperationBridge, *,
                  working_set: "RuntimeAgentRunStore | None" = None,
                  commit_boundary: StepBoundaryCommitter | None = None,
-                 native_boundary: bool = False) -> None:
+                 native_boundary: bool = False,
+                 output_retries_used: Callable[[], int] | None = None) -> None:
         self._store = store
         self._tool_operations = tool_operations
         self._working_set = working_set
         self._commit_boundary = commit_boundary
         self._native_boundary = native_boundary
+        self._output_retries_used = output_retries_used
         if native_boundary and isinstance(tool_operations, RuntimeToolOperationBridge):
             tool_operations.bind_native_step_store(store)
 
@@ -58,9 +61,7 @@ class RuntimeStepStore:
         if writer is None:
             writer = (self._store.commit_step if isinstance(self._store, AtomicStepStore)
                       else self._commit_split_step)
-        stored_snapshot = None if snapshot is None else replace(
-            snapshot, messages=native_checkpoint_messages(snapshot.messages),
-        )
+        stored_snapshot = None if snapshot is None else self._encode_snapshot(snapshot)
         try:
             await writer(run=run, events=events, snapshot=stored_snapshot)
         except BaseException:
@@ -74,7 +75,7 @@ class RuntimeStepStore:
             if run is not None:
                 self._working_set.confirm_step_run(run)
             if snapshot is not None:
-                self._working_set.confirm_step_snapshot(snapshot)
+                self._working_set.confirm_step_snapshot(stored_snapshot)
 
     async def _commit_split_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
@@ -122,15 +123,22 @@ class RuntimeStepStore:
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         return await self._store.list_events(run_id=run_id)
 
+    def _encode_snapshot(self, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
+        snapshot = replace(snapshot, messages=native_checkpoint_messages(snapshot.messages))
+        if self._output_retries_used is None:
+            return snapshot
+        return NativeCheckpoint.encode(snapshot, output_retries_used=self._output_retries_used())
+
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        stored_snapshot = self._encode_snapshot(snapshot)
         try:
-            await self._store.save_snapshot(replace(snapshot, messages=native_checkpoint_messages(snapshot.messages)))
+            await self._store.save_snapshot(stored_snapshot)
         except BaseException:
             if self._working_set is not None:
                 self._working_set.invalidate_step_run(snapshot.run_id)
             raise
         if self._working_set is not None:
-            self._working_set.confirm_step_snapshot(snapshot)
+            self._working_set.confirm_step_snapshot(stored_snapshot)
 
     async def latest_snapshot(
         self, *, run_id: str, include_interrupted: bool = False,
@@ -138,9 +146,10 @@ class RuntimeStepStore:
         snapshot = await self._store.latest_snapshot(
             run_id=run_id, include_interrupted=include_interrupted,
         )
-        return None if snapshot is None else replace(
-            snapshot, messages=native_checkpoint_messages(snapshot.messages, restore=True),
-        )
+        if snapshot is None:
+            return None
+        restored = NativeCheckpoint.decode(snapshot)
+        return replace(snapshot, messages=native_checkpoint_messages(restored.messages, restore=True))
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         if not self._native_boundary:

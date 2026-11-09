@@ -204,6 +204,7 @@ class _AgentRunScope:
     agent_run_id: str
     agent_run_seq: int
     history_producer_generation: int | None = None
+    output_retries_used: int = 0
     initial_attachments: tuple[Mapping[str, JsonValue], ...] = ()
     history_id: str | None = None
     memory_store: MemoryStore | None = None
@@ -992,6 +993,8 @@ async def _materialize_agent(
     tuple[AbstractCapability[AgentContext[object]], ...],
 ]:
     compiled_agent = scope.binding.compiled_agent
+    if scope.output_retries_used > compiled_agent.spec.output_retries:
+        raise AIError(ErrorCode.MODEL_RESPONSE_INVALID, retryable=False)
     repository_boundary = scope.repository_instruction_boundary
     workspace_names: list[str] = []
     workspace_descriptors: dict[str, ManagedToolDescriptor] = {}
@@ -1228,6 +1231,7 @@ async def _materialize_agent(
     platform = await compose_platform_capabilities(
         runtime_capabilities=bound_runtime_capabilities,
         capability_revisions=_runtime_feature_policy(compiled_agent.runtime_contributions).capability_revisions,
+        initial_output_retries_used=scope.output_retries_used,
         transcript_start=(scope.run_store.checkpoint_transcript_start(
             scope.agent_run_id, initial_history_count=initial_history_count,
         ) if isinstance(scope.run_store, RuntimeAgentRunStore) else initial_history_count),
@@ -1286,7 +1290,7 @@ async def _materialize_agent(
         deps_type=AgentContext,
         retries={
             "tools": compiled_agent.spec.tool_retries,
-            "output": compiled_agent.spec.output_retries,
+            "output": compiled_agent.spec.output_retries - scope.output_retries_used,
         },
         toolsets=tuple(raw_toolsets),
     )

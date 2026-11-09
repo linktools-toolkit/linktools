@@ -2160,6 +2160,7 @@ class StateStepArchive(AgentRunStore):
                         archive_base + len(incoming),
                         checkpoint.context_messages is not None,
                         checkpoint.pending_request_index,
+                        checkpoint.output_retries_used,
                     ),
                     chunks,
                     projection,
@@ -3083,6 +3084,7 @@ class StateStepArchive(AgentRunStore):
             and stored.has_context_projection
             == (checkpoint.context_messages is not None)
             and stored.pending_request_index == checkpoint.pending_request_index
+            and stored.output_retries_used == checkpoint.output_retries_used
             and (self._runtime_domain is PersistenceDomain.CONVERSATION
                  or stored.transcript_message_count == len(checkpoint.messages))
             and context.model_messages() == tuple(expected_messages)
@@ -3141,6 +3143,7 @@ class StateStepArchive(AgentRunStore):
             state=latest.state,
             context_messages=context_messages,
             pending_request_index=latest.pending_request_index,
+            output_retries_used=latest.output_retries_used,
         )
         return latest if include_interrupted or latest.state == "complete" else None
 
@@ -3664,6 +3667,7 @@ def _conversation_relocated_checkpoint_matches(
         or observed.state != source.state
         or observed.idempotency_key != source.idempotency_key
         or observed.pending_request_index != source.pending_request_index
+        or observed.output_retries_used != source.output_retries_used
         or observed.context_messages != source.context_messages
     ):
         return False

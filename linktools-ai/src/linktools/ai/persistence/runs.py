@@ -71,6 +71,7 @@ from ._step_archive import (
     _sync_projection,
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
+from ._native_checkpoint import NativeCheckpoint
 from .state import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
@@ -2412,4 +2413,4 @@ from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._step_contracts import AgentRunHistoryCapture, CheckpointState, StepEventType, TOOL_ERROR_CODE_METADATA_KEY
 from ._views import SESSION_HISTORY_VIEW_V1, project_execution_transcript_message, project_session_history_message
 
-__all__ = ['AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'OfficialStepReader', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']
+__all__ = ['NativeCheckpoint', 'AgentRunCheckpoint', 'AgentRunHistoryCapture', 'AgentRunRecord', 'AgentRunStore', 'ArchiveFrontierReader', 'ArchiveNodeRead', 'ArchiveNodeSlot', 'ArchiveRoot', 'CheckpointPersistence', 'CheckpointState', 'ContentArchive', 'ConversationPersistence', 'ExecutionProjectionBatch', 'ExecutionTerminalSealPlan', 'InMemoryStepArchive', 'LockOrderError', 'ModelInteractionStateStepArchive', 'OfficialStepReader', 'PreparedAgentRunCheckpoint', 'PreparedAgentRunCheckpointBatch', 'PreparedArchive', 'PreparedExecutionProjection', 'RuntimeAgentRunStore', 'SESSION_HISTORY_VIEW_V1', 'StagedContextProjection', 'StagedContextSpan', 'StagedModelInteraction', 'StagedStreamAttemptRecord', 'StagedTranscript', 'StagingAgentRunStore', 'StateStepArchive', 'StepEvent', 'StepEventType', 'TOOL_ERROR_CODE_METADATA_KEY', 'TracePersistence', 'build_context_projection', 'build_inline_context_projection', 'model_identity', 'project_execution_transcript_message', 'project_public_messages', 'project_session_history_message', 'request_envelope']

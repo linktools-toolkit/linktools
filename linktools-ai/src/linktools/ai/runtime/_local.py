@@ -2629,11 +2629,11 @@ class LocalExecutionBackend:
             tenant_id=tenant_id,
         )
 
-    async def load_interrupted_messages(
+    async def load_interrupted_checkpoint(
         self,
         agent_run_id: str,
         *, execution: ExecutionRecord,
-    ) -> tuple[ModelMessage, ...]:
+    ) -> AgentRunCheckpoint:
         domain = (PersistenceDomain.CHECKPOINT if execution.restart_checkpoints else
                   PersistenceDomain.TRACE if execution.durable_trace else PersistenceDomain.CONVERSATION)
         archive = self._run_stores[domain]
@@ -2644,11 +2644,7 @@ class LocalExecutionBackend:
             )
         if checkpoint is None or checkpoint.state != "interrupted":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(
-            checkpoint.messages
-            if checkpoint.context_messages is None
-            else checkpoint.context_messages
-        )
+        return checkpoint
 
     async def claim_deferred_resume(
         self,
@@ -4308,6 +4304,7 @@ class LocalExecutionBackend:
             )
             deferred_tool_results = None if resume is None else resume.results
             resumed_deferred_attempt = deferred_tool_results is not None
+            output_retries_used = 0 if resume is None else resume.output_retries_used
             exact_recovery_context = checkpoint.recovery.source_agent_run_id is not None
             recovery_history_agent_run_id = checkpoint.recovery.source_agent_run_id
             if recovery_history_agent_run_id is not None:
@@ -4386,6 +4383,9 @@ class LocalExecutionBackend:
                 if source_replay_history is not None:
                     history = source_replay_history
                 elif recovery_history_agent_run_id is not None:
+                    output_retries_used = recovery_history_checkpoint.output_retries_used
+                    if output_retries_used is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     context_messages = recovery_history_checkpoint.context_messages
                     if context_messages is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4407,6 +4407,7 @@ class LocalExecutionBackend:
                 resume = await self._recovery_coordinator.restore_resumed_deferred(
                     current, history=tuple(history),
                     producer_generation=producer_generation, binding=binding,
+                    output_retries_used=output_retries_used,
                 )
                 deferred_tool_results = resume.results
                 resumed_deferred_attempt = True
@@ -4694,6 +4695,7 @@ class LocalExecutionBackend:
                             current.stored_user_input
                         ),
                         history=history,
+                        output_retries_used=output_retries_used,
                         initial_context=loaded_context,
                         agent_conversation_id=agent_conversation_id,
                         run_store=self._run_store,

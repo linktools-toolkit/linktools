@@ -138,7 +138,8 @@ async def test_deferred_resume_claim_requires_turn_admission() -> None:
         status=ApprovalStatus.DENIED, decision_message="denied", resolution_metadata={},
     ))
     port.read_deferred_payload = AsyncMock(return_value={})
-    port.load_interrupted_messages = AsyncMock(return_value=())
+    from linktools.ai.persistence.runs import AgentRunCheckpoint
+    port.load_interrupted_checkpoint = AsyncMock(return_value=AgentRunCheckpoint("run", 1, [], output_retries_used=0))
 
     async def claim(*args, **kwargs):
         assert admission.active
