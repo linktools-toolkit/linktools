@@ -78,7 +78,7 @@ _RECORD_SUBJECT_READ_BATCH_SIZE = 996
 _GROUP_RECORD_BIND_BUDGET = 999
 _ARCHIVE_READ_BIND_BUDGET = 999
 # Fixed predicates and JSON-path bindings across all eight edge branches.
-_ARCHIVE_READ_FIXED_BINDS = 96
+_ARCHIVE_READ_FIXED_BINDS = 106
 
 
 class _SqlGroupTransaction:
@@ -1092,9 +1092,10 @@ class _SqlTransaction:
     def _payload_field(self, column: "ColumnElement", field: str) -> "ColumnElement":
         from sqlalchemy import JSON, cast, type_coerce
 
-        # Parse only archive string links in SQL; authoritative payloads stay text.
-        payload = (cast(column, JSON) if self._context.dialect.name == "postgresql"
-                   else type_coerce(column, JSON))
+        # The JSON scalar retains canonical text; parse only archive string links.
+        encoded = type_coerce(column, JSON)[()].as_string()
+        payload = (cast(encoded, JSON) if self._context.dialect.name == "postgresql"
+                   else type_coerce(encoded, JSON))
         return payload[field].as_string()
 
     def _archive_read_statement(

@@ -309,11 +309,13 @@ class SQLiteDialect:
     def _immutable_match(
         self, table: "Table", incoming: "ColumnCollection", columns: "Sequence[str]",
     ) -> "ColumnElement[bool]":
-        from sqlalchemy import LargeBinary, String, and_, cast, func
+        from sqlalchemy import JSON, LargeBinary, String, Text, and_, cast, func
 
         comparisons = []
         for name in columns:
             current, candidate = table.c[name], incoming[name]
+            if isinstance(current.type, JSON):
+                current, candidate = cast(current, Text), cast(candidate, Text)
             if isinstance(current.type, String):
                 if self.name == "postgresql":
                     current, candidate = func.convert_to(current, "UTF8"), func.convert_to(candidate, "UTF8")

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """SQL payload reads preserve JSON numbers independently of driver decoding."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -54,11 +55,11 @@ def test_sql_payload_text_preserves_original_json_and_rejects_invalid_roots(valu
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("dialect,storage_type", ((mysql.dialect(), "LONGTEXT"),
-                                                (postgresql.dialect(), "TEXT"),
-                                                (sqlite.dialect(), "TEXT")))
+@pytest.mark.parametrize("dialect,storage_type", ((mysql.dialect(), "JSON"),
+                                                (postgresql.dialect(), "JSON"),
+                                                (sqlite.dialect(), "JSON")))
 @pytest.mark.parametrize("name", ("ai_state_records", "ai_state_facts", "ai_state_operations"))
-def test_sql_payload_schema_uses_lossless_large_text(dialect, storage_type: str, name: str) -> None:
+def test_sql_payload_schema_uses_json_string_without_numeric_normalization(dialect, storage_type: str, name: str) -> None:
     table = build_runtime_sql_metadata(frozenset({PersistenceDomain.EVALUATION})).tables[name]
     payload = table.c.payload_json
     assert storage_type in str(payload.type.compile(dialect=dialect))
@@ -87,7 +88,7 @@ async def test_sql_payloads_keep_numeric_identity_across_read_queries_and_reopen
                     raw = (await connection.execute(text(f"SELECT payload_json FROM {table_name}"))).scalar_one()
                     assert isinstance(raw, str)
                     assert len(raw.encode("utf-8")) > 65535
-                    assert raw.encode("utf-8") == canonical_json_bytes(DATA)
+                    assert json.loads(raw).encode("utf-8") == canonical_json_bytes(DATA)
             reads = (
                 lambda tx: tx.get_record(RECORD.key_digest),
                 lambda tx: tx.get_records((RECORD.key_digest,)),
