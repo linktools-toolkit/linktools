@@ -437,7 +437,7 @@ def test_step_development_ddl_and_complete_metadata_match_canonical_schema() -> 
         statement = re.search(rf"CREATE TABLE {re.escape(name)} \(.*?;", compact)
         assert statement is not None
         actual_columns = re.sub(
-            r", KEY ix_(?:updated|created)_at \((?:updated|created)_at\)",
+            r", (?:UNIQUE )?(?:KEY|INDEX) \w+ \((?:[^()]|\([^()]*\))+\)",
             "",
             statement.group(),
         ).rsplit(")", 1)[0]

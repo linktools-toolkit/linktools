@@ -13,7 +13,7 @@ from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateIndex
 
 
-def test_mysql_ddl_declares_required_audit_indexes_and_matches_all_metadata_indexes() -> None:
+def test_mysql_ddl_declares_all_indexes_in_each_create_table_and_matches_metadata() -> None:
     metadata = build_sql_schema_metadata()
     migration = (
         Path(__file__).resolve().parents[2]
@@ -27,24 +27,18 @@ def test_mysql_ddl_declares_required_audit_indexes_and_matches_all_metadata_inde
         if not statement:
             continue
         create_table = re.fullmatch(r"CREATE TABLE (\w+) \((.*)\)\s*ENGINE=.*", statement)
-        if create_table:
-            name, body = create_table.groups()
-            assert name not in table_indexes
-            indexes = [
-                f"{unique}INDEX {index_name} ({columns})"
-                for unique, index_name, columns in re.findall(
-                    rf"(?:^|,)\s*{index_pattern}", body,
-                )
-            ]
-            assert "INDEX ix_updated_at (updated_at)" in indexes, name
-            assert "INDEX ix_created_at (created_at)" in indexes, name
-            table_indexes[name] = indexes
-        else:
-            alter_index = re.fullmatch(rf"ALTER TABLE (\w+) ADD {index_pattern}", statement)
-            assert alter_index is not None, statement
-            name, unique, index_name, columns = alter_index.groups()
-            assert name in table_indexes, name
-            table_indexes[name].append(f"{unique or ''}INDEX {index_name} ({columns})")
+        assert create_table is not None, statement
+        name, body = create_table.groups()
+        assert name not in table_indexes
+        indexes = [
+            f"{unique}INDEX {index_name} ({columns})"
+            for unique, index_name, columns in re.findall(
+                rf"(?:^|,)\s*{index_pattern}", body,
+            )
+        ]
+        assert "INDEX ix_updated_at (updated_at)" in indexes, name
+        assert "INDEX ix_created_at (created_at)" in indexes, name
+        table_indexes[name] = indexes
 
     assert set(table_indexes) == set(metadata.tables)
     dialect = mysql.dialect()

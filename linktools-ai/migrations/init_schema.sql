@@ -205,12 +205,10 @@ CREATE TABLE ai_step_events (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
+	KEY ix_store_digest_run_digest (store_digest, run_digest),
+	UNIQUE KEY uk_key_digest (key_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Append-only upstream agent execution boundary events.' COLLATE utf8mb4_bin;
-
-ALTER TABLE ai_step_events ADD INDEX ix_store_digest_run_digest (store_digest, run_digest);
-
-ALTER TABLE ai_step_events ADD UNIQUE INDEX uk_key_digest (key_digest);
 
 CREATE TABLE ai_step_message_refs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -220,10 +218,9 @@ CREATE TABLE ai_step_message_refs (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
+	UNIQUE KEY uk_snapshot_id_position (snapshot_id, position),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Ordered message references belonging to upstream snapshots.' COLLATE utf8mb4_bin;
-
-ALTER TABLE ai_step_message_refs ADD UNIQUE INDEX uk_snapshot_id_position (snapshot_id, position);
 
 CREATE TABLE ai_step_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -233,10 +230,9 @@ CREATE TABLE ai_step_messages (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
+	UNIQUE KEY uk_store_digest_sha256 (store_digest, sha256),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Deduplicated upstream ModelMessage JSON bodies.' COLLATE utf8mb4_bin;
-
-ALTER TABLE ai_step_messages ADD UNIQUE INDEX uk_store_digest_sha256 (store_digest, sha256);
 
 CREATE TABLE ai_step_runs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -254,14 +250,11 @@ CREATE TABLE ai_step_runs (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
+	KEY ix_store_digest_conversation_digest (store_digest, conversation_digest),
+	KEY ix_store_digest_parent_digest (store_digest, parent_digest),
+	UNIQUE KEY uk_store_digest_run_digest (store_digest, run_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;
-
-ALTER TABLE ai_step_runs ADD INDEX ix_store_digest_conversation_digest (store_digest, conversation_digest);
-
-ALTER TABLE ai_step_runs ADD INDEX ix_store_digest_parent_digest (store_digest, parent_digest);
-
-ALTER TABLE ai_step_runs ADD UNIQUE INDEX uk_store_digest_run_digest (store_digest, run_digest);
 
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -281,9 +274,7 @@ CREATE TABLE ai_step_snapshots (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
+	KEY ix_store_digest_run_digest (store_digest, run_digest),
+	UNIQUE KEY uk_key_digest (key_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream complete or interrupted message-history snapshots.' COLLATE utf8mb4_bin;
-
-ALTER TABLE ai_step_snapshots ADD INDEX ix_store_digest_run_digest (store_digest, run_digest);
-
-ALTER TABLE ai_step_snapshots ADD UNIQUE INDEX uk_key_digest (key_digest);
