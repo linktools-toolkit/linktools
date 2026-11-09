@@ -11,7 +11,7 @@ from ._stream_attempt import ModelStreamAttempt
 from ._factory import create_model
 from ._fallback import FallbackBinding
 from ._input import model_input_content, validate_model_input, validate_model_inputs
-from ._referenced_content import ReferencedContent
+from ._referenced_content import ReferencedContent, ReferencedInputOrigin
 from ._referenced_input import ReferencedInputModel
 from ._response import project_model_attempts, project_model_response_attempts
 
@@ -20,7 +20,7 @@ from ._user_input import (StoredUserInput, CanonicalUserInput, MaterializedUserC
 __all__ = [
     "model_input_content",
     "project_model_attempts", "project_model_response_attempts",
-    "ReferencedContent", "ReferencedInputModel", "ModelInputValidator", "model_request_error",
+    "ReferencedContent", "ReferencedInputOrigin", "ReferencedInputModel", "ModelInputValidator", "model_request_error",
     "StoredUserInput",
     "CanonicalUserInput",
     "MaterializedUserContent",

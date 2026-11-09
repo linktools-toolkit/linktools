@@ -266,6 +266,86 @@ intentional long-lived outputs still require their existing storage policy. Old
 history is not rewritten or purged, and moving an input into an output directory
 does not make it an independently authorized operational artifact.
 
+### Batch authorization and original producers
+
+`ReferencedInputsCapability` accepts either the existing scalar `authorized_load`
+callback or an optional `authorized_load_many` callback, or both. A batch-only
+registration also supports `load(context, reference)` through a one-item batch.
+Ordinary Python tools may call the same `load_many` operation explicitly. They
+must still use the original admitted collection and the host authorization owner;
+constructing a descriptor from model arguments does not admit it.
+
+```python
+from linktools.ai.capability import ReferencedInputResult, ReferencedInputsCapability
+from linktools.ai.core import PromptLimits
+
+async def read_admitted_batch(context, references):
+    # One bounded metadata/authorization query for this same-source/producer batch.
+    # This application operation checks the requesting context, original admission,
+    # source MIME/ref membership and current revocation before reading any bodies.
+    admitted = await host.authorize_original_inputs(context, references)
+    values = []
+    for item in admitted:
+        data = await host.read_exact_version(item.reference.ref)
+        values.append(ReferencedInputResult(item.reference, data))
+    return values
+
+inputs = ReferencedInputsCapability(
+    authorized_load_many=read_admitted_batch,
+    limits=PromptLimits(max_binary_input_parts=32, max_binary_input_bytes=64 * 1024 * 1024),
+)
+```
+
+The host returns one `ReferencedInputResult` per requested occurrence, including
+duplicates, in the original order. Each result carries the descriptor from trusted
+metadata. The SDK compares the complete descriptor (source, MIME, Asset ref,
+representation, reconstruction parameters, identifier and origin), verifies the
+bytes' size and digest, and rejects a partial or reordered result. Batch-callback input
+values are detached snapshots: changing them cannot redefine the expected batch.
+`validate_batch` exposes the same descriptor snapshot and optional budget check.
+It does not authorize or read anything. An empty batch returns an empty tuple.
+
+Runtime and materialized native contributions share `load_selected`, which groups
+provider reads by exact source id/revision and original producer,
+then restores the original occurrence order in the outbound copy. A configured
+batch callback is invoked once for each such group per provider operation. There
+is no grant cache across requests, counting, compaction, retries or executions.
+Without a batch callback, the SDK keeps scalar reads and does not claim that the
+host performed batch metadata authorization. Optional `limits` use the existing
+`PromptLimits` contract and constrain explicit reads. Runtime additionally checks
+its configured full-request input budget before provider hydration. Per-source
+batch limits are checked over all its occurrences before producer grouping, so
+splitting one source into several producers cannot bypass that budget.
+
+New Runtime tool references carry `ReferencedInputOrigin`, projected from the
+actual invocation: namespace, original principal, execution, Agent run id and
+sequence, model request sequence, tool call id and name. Managed business,
+Workspace and MCP projections bind this before their durable result receipt;
+native capability tools bind it before SDK message/checkpoint projection. Native
+`ToolReturn.content` remains additional user content but retains the same producer
+facts. Parallel tool calls do not share mutable producer state. If Trace did not
+capture a model request sequence, it remains `None`; neither run step nor retry
+count substitutes for it. No managed operation id is fabricated.
+
+Origin survives the descriptor, tool-result, message and native-checkpoint codecs.
+Forwarding an already-bound reference preserves its original producer. The loader
+receives the **consumer's** actual `AgentContext`, plus each reference's original
+producer. Runtime never impersonates the producer by replacing the consumer's
+principal or execution id. The host must verify original admission and current
+permission, including authorized historical access and revocation, against its
+trusted source. An origin supplied by an application is still only a claim until
+that check succeeds. Unknown-source references fail before loader IO; a tool-result
+reference with unknown producer fails closed instead of being treated as current
+initial input. Current-version data can be reopened by the same version; no old
+history is rewritten to invent missing provenance.
+
+This byte reader does not automatically provide a local path to an MCP server.
+The existing run resource owner still governs MCP resources. If an application
+materializes bytes for an MCP call, it must use that owner's success, failure and
+cancellation cleanup boundary and pass only a real permitted path. A descriptor,
+URL, credential or fabricated path is not a substitute. This API adds no generic
+MCP file handoff, new storage owner or persistent file permission.
+
 ## Discovery and edits
 
 `list_files(path=".", include_glob="*")` lists direct children; `**` explicitly

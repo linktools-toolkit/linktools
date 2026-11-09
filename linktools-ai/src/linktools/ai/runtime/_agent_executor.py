@@ -128,7 +128,7 @@ from ._memory import MemoryStore
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._harness import (
-    ReinjectRuntimeSystemPrompt, SummaryProviderModel,
+    BindReferencedInputOrigins, ReinjectRuntimeSystemPrompt, SummaryProviderModel,
     FallbackProviderModel,
 )
 from ..capability.steps import StepBoundaryCapabilities
@@ -972,7 +972,8 @@ async def _materialize_agent(
             scope.deferred_capability_refs.pop(call.tool_call_id, None)
 
     capabilities: list[AbstractCapability[AgentContext[object]]] = [
-        PydanticToolControlCapability(before_validate=observe_tool_validation), RunCallbackScope(callbacks)
+        PydanticToolControlCapability(before_validate=observe_tool_validation), RunCallbackScope(callbacks),
+        BindReferencedInputOrigins(),
     ]
     for candidate in compiled_agent.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):

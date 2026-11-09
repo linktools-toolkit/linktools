@@ -193,6 +193,7 @@ def _user_content(part: UserPromptPart, payload: Mapping[str, JsonValue]) -> Jso
                            "source": {"kind": item.source.kind, "id": item.source.id,
                                       "revision": item.source.revision},
                            "mime_type": item.media_type,
+                           **({"origin": item.origin.to_payload()} if item.origin is not None else {}),
                            **({"identifier": item.identifier} if item.identifier is not None else {}),
                            **({"representation": item.representation} if item.representation != "binary" else {}),
                            **({"source_parameters": dict(item.source_parameters)} if item.source_parameters else {})})

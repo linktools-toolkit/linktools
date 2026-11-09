@@ -7,7 +7,7 @@ from ._persistence import TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._tool_results import ToolResultsCapability
 from ._run_callbacks import RunCallbacks, RunCallbackScope, bind_run_callbacks
-from ._referenced_inputs import ReferencedInputsCapability
+from ._referenced_inputs import ReferencedInputResult, ReferencedInputsCapability
 from ._asset import AssetCapability
 from ._tool_identity import ToolCallIdentity
 from ._context import AgentContext
@@ -67,7 +67,7 @@ from ._session import SessionCapability
 from ._execution import ExecutionCapability
 
 __all__ = [
-    "ReferencedInputsCapability",
+    "ReferencedInputResult", "ReferencedInputsCapability",
     "SessionCapability",
     "MemoryCapability",
     "ExecutionCapability",

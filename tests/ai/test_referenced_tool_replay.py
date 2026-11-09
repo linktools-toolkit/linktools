@@ -93,7 +93,9 @@ async def test_business_tool_reference_is_consumed_once_after_live_or_durable_re
     async def authorized_load(context: AgentContext[None], content: ReferencedContent) -> bytes:
         calls["load"] += 1
         principals.append(context.principal)
-        assert content == _content()
+        assert content.ref == _content().ref and content.source == _SOURCE
+        assert content.origin.execution_id == context.execution_id
+        assert content.origin.tool_call_id == "load" and content.origin.model_request_seq == 1
         return _BODY
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

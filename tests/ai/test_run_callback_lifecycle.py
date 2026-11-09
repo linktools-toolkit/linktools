@@ -88,7 +88,9 @@ async def test_two_concurrent_runs_use_their_initialized_instance_through_close(
         def __init__(self, run=None):
             self.run, self.ready = run, False
             async def load(context, content):
-                assert self.ready and self.run == context.execution_id and content == _REF
+                assert self.ready and self.run == context.execution_id and content.ref == _REF.ref
+                assert content.origin.execution_id == self.run
+                assert content.origin.tool_call_id == "same-call"
                 events.append(("source.load", self.run, id(self)))
                 return _BODY
             super().__init__(load)

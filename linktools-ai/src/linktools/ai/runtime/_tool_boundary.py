@@ -41,6 +41,7 @@ from ..workspace import SupportsFileTools, ToolPermissionPolicy
 from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
 from ..model.messages import bind_tool_return_attachments
+from ._harness import bind_tool_reference_origins
 from ._tool import ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
@@ -380,7 +381,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 result = await ToolResultsCapability.process_results(
                     processors, ctx.deps, tool.tool_def, args, result,
                 )
-            return result
+            return bind_tool_reference_origins(ctx, result)
 
         if decision is None:
             if self._budget is not None:
@@ -452,6 +453,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     raise
                 if not replay_safe:
                     await unknown_after_leaf(error)
+                error.result = bind_tool_reference_origins(ctx, error.result)
                 cancelled = await bridge.complete(decision, error.result)
                 if cancelled:
                     raise asyncio.CancelledError

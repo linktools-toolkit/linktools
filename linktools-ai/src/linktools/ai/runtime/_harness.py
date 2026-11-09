@@ -10,12 +10,14 @@ from dataclasses import replace
 from typing import Any, cast, TYPE_CHECKING
 
 from linktools.core import environ
-from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, StructuredContent, SystemPromptPart, TextContent, ToolReturnPart, UserPromptPart
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
+from pydantic_ai.capabilities.abstract import ValidatedToolArgs, WrapToolExecuteHandler
+from pydantic_ai.exceptions import SkipToolExecution
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, StructuredContent, SystemPromptPart, TextContent, ToolCallPart, ToolReturn, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai_harness.planning import (
     PlanItem as HarnessPlanItem,
 )
@@ -23,12 +25,12 @@ from pydantic_ai_harness.planning import (
     TaskStatus,
 )
 
-from ..capability import AgentContext, ReferencedInputsCapability, ToolCallRetry
+from ..capability import AgentContext, ReferencedInputsCapability, ToolCallIdentity, ToolCallRetry
 from ..errors import AIError, ErrorCode
-from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, ReferencedInputModel, model_input_content
+from ..model import ModelBinding, ModelClientRequestRecorder, ReferencedContent, ReferencedInputModel, ReferencedInputOrigin, model_input_content
 from ..spec import CapabilityRef
 from ._plan import PlanItem, RuntimePlanStore
-from ..model.messages import RetiredReferencedContent
+from ..model.messages import RetiredReferencedContent, bind_referenced_input_origin
 from ..model.messages import project_provider_messages, without_history_system_prompts
 
 if TYPE_CHECKING:
@@ -36,6 +38,45 @@ if TYPE_CHECKING:
 
 _logger = environ.get_logger("ai.runtime.harness")
 
+
+
+def bind_tool_reference_origins(ctx: RunContext[AgentContext[object]], value: object) -> object:
+    """Bind newly produced references to this invocation, without shared state."""
+    native = value.return_value if isinstance(value, ToolReturn) else value
+    items = list(native) if isinstance(native, list) else [native]
+    if (isinstance(value, ToolReturn) and isinstance(value.content, Sequence)
+            and not isinstance(value.content, str)):
+        items.extend(value.content)
+    if not any(isinstance(item, ReferencedContent) and item.origin is None for item in items):
+        return value
+    identity = ToolCallIdentity.from_context(ctx)
+    origin = ReferencedInputOrigin(
+        namespace=identity.namespace, principal=identity.principal,
+        execution_id=identity.execution_id, agent_run_id=identity.agent_run_id,
+        agent_run_seq=identity.agent_run_seq, model_request_seq=identity.model_request_seq,
+        tool_call_id=identity.tool_call_id, tool_name=identity.tool_name,
+    )
+    return bind_referenced_input_origin(value, origin)
+
+
+class BindReferencedInputOrigins(AbstractCapability[AgentContext[object]]):
+    """Retain native tool producer facts before SDK message/checkpoint projection."""
+
+    id = "linktools.ai.referenced-input-origins"
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="outermost")
+
+    async def wrap_tool_execute(
+        self, ctx: RunContext[AgentContext[object]], *, call: ToolCallPart,
+        tool_def: ToolDefinition, args: ValidatedToolArgs, handler: WrapToolExecuteHandler,
+    ) -> Any:
+        try:
+            result = await handler(args)
+        except SkipToolExecution as error:
+            error.result = bind_tool_reference_origins(ctx, error.result)
+            raise
+        return bind_tool_reference_origins(ctx, result)
 
 
 class SummaryProviderModel(ReferencedInputModel):
@@ -52,17 +93,31 @@ class SummaryProviderModel(ReferencedInputModel):
         self._reference_sources = sources
         self._reference_context = context
 
-        async def load(content: ReferencedContent) -> bytes:
+        async def load_many(contents: tuple[ReferencedContent, ...]) -> tuple[bytes, ...]:
             available = sources() if callable(sources) else sources
             if not available or context is None:
                 raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
                               safe_details={"reason": "referenced_inputs_unavailable"})
-            if content.source not in available:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                              safe_details={"reason": "referenced_input_source_mismatch"})
-            return await available[content.source].load(context, content)
+            return await ReferencedInputsCapability.load_selected(context, contents, available)
 
-        super().__init__(model, load=load, binding=binding, preserve_errors=preserve_errors)
+        async def load(content: ReferencedContent) -> bytes:
+            return (await load_many((content,)))[0]
+
+        super().__init__(model, load=load, load_many=load_many, binding=binding,
+                         preserve_errors=preserve_errors)
+
+    async def load_references(self, messages: Sequence[ModelMessage]) -> tuple[bytes, ...]:
+        for message in messages:
+            if not isinstance(message, ModelRequest):
+                continue
+            for part in message.parts:
+                if isinstance(part, ToolReturnPart) and any(
+                    isinstance(item, ReferencedContent) and item.origin is None
+                    for item in model_input_content(part)
+                ):
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED, retryable=False,
+                                  safe_details={"reason": "referenced_input_origin_unknown"})
+        return await super().load_references(messages)
 
     def validate_inputs(self, value: object) -> None:
         if isinstance(value, Sequence) and self.content_omission_reason(value) is not None:
@@ -317,6 +372,7 @@ def _plan_item_id(index: int) -> str:
 
 
 __all__ = [
+    "BindReferencedInputOrigins", "bind_tool_reference_origins",
     "ReinjectRuntimeSystemPrompt",
     "SummaryProviderModel",
     "FallbackProviderModel",

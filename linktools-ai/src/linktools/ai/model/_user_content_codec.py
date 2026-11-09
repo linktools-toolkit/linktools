@@ -23,7 +23,7 @@ from pydantic_ai.messages import (
 
 from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
-from . import ReferencedContent
+from . import ReferencedContent, ReferencedInputOrigin
 from ._wire_fields import decode_fields
 from ._json_snapshot import stable_json_snapshot
 
@@ -56,6 +56,7 @@ def encode_user_content_item(item: UserContent) -> JsonValue:
                     "source": {"kind": item.source.kind, "id": item.source.id,
                                "revision": item.source.revision},
                     "media_type": item.media_type,
+                    **({"origin": item.origin.to_payload()} if item.origin is not None else {}),
                     **({"identifier": item.identifier} if item.identifier is not None else {}),
                     **({"representation": item.representation} if item.representation != "binary" else {}),
                     **({"source_parameters": dict(item.source_parameters)} if item.source_parameters else {})}
@@ -140,12 +141,13 @@ def decode_user_content_item(value: object) -> UserContent:
         from ..spec import CapabilityRef
         source = value.get("source")
         required = {"kind", "ref", "media_type", "source"}
-        if (not required.issubset(value) or set(value) - required - {"representation", "source_parameters", "identifier"}
+        if (not required.issubset(value) or set(value) - required - {"representation", "source_parameters", "identifier", "origin"}
             or not isinstance(value.get("source_parameters", {}), Mapping)
             or not isinstance(source, Mapping) or set(source) != {"kind", "id", "revision"}):
             raise ValueError("referenced content is invalid")
         return ReferencedContent(AssetVersionRef.from_payload(value["ref"]),
                                  media_type=value["media_type"],
+                                 origin=ReferencedInputOrigin.from_payload(value["origin"]) if "origin" in value else None,
                                  representation=value.get("representation", "binary"),
                                  source_parameters=value.get("source_parameters", {}),
                                  identifier=_optional_string(value.get("identifier")),

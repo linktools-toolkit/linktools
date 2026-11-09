@@ -219,6 +219,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
     principal = service_principal("default", "admitted-owner")
     state = tmp_path / "state"
     provider_counts, loads, pipeline, after_hooks, calls = [], [], [], [], []
+    producer_names = []
     body = _PNG if media_type == "image/png" else _TEXT.encode()
     filename = "page.png" if media_type == "image/png" else "page.txt"
     reference = ReferencedContent(
@@ -278,6 +279,10 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         assert context.principal == principal
         assert content.ref == reference.ref and content.source == reference.source
         assert content.representation == reference.representation
+        assert content.origin.execution_id == context.execution_id
+        assert content.origin.principal == principal
+        assert content.origin.agent_run_seq == 1 and content.origin.model_request_seq == 1
+        assert content.origin.tool_call_id == "render" and content.origin.tool_name == producer_names[0]
         assert bool(content.identifier) is (kind == "read_file" and media_type == "image/png")
         loads.append(content)
         return body
@@ -300,6 +305,7 @@ async def test_one_result_pipeline_precedes_persistence_for_every_managed_tool(
         provider_counts.append(len(bodies))
         if len(provider_counts) == 1:
             name = next(tool.name for tool in info.function_tools if tool.name != "finish")
+            producer_names.append(name)
             yield {0: DeltaToolCall(name=name, json_args=json.dumps(arguments), tool_call_id="render")}
         elif len(provider_counts) == 2:
             assert len(bodies) == 1
