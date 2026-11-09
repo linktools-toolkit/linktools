@@ -3383,6 +3383,7 @@ class StateStepArchive(AgentRunStore):
             ) -> None:
                 if indexed is None:
                     indexed = await transaction.get_records(index_keys)
+                locators: list[tuple[bytes, StoredRecord, int]] = []
                 for key in index_keys:
                     record = indexed.get(key)
                     if record is None:
@@ -3392,19 +3393,20 @@ class StateStepArchive(AgentRunStore):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if sequence > event_high_water:
                         continue
-                    event = selected.get(sequence)
-                    if event is None:
-                        facts = await transaction.list_facts(FactQuery(
-                            self._stream(agent_run_id, "event"), after_sequence=sequence - 1, limit=1,
-                        ))
-                        if len(facts) != 1 or facts[0].sequence != sequence:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        event = _decode_step(facts[0].data)
+                    locators.append((key, record, sequence))
+                missing = sorted({sequence for _, _, sequence in locators if sequence not in selected})
+                for offset in range(0, len(missing), 32):
+                    facts = await self._read_selected_history_facts(transaction, agent_run_id, missing[offset:offset + 32])
+                    for sequence, fact in facts.items():
+                        event = _decode_step(fact.data)
                         if not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        selected[sequence] = event
+                    del facts, fact
+                for key, record, sequence in locators:
+                    event = selected[sequence]
                     if self._history_association_records(agent_run_id, ((sequence, event),)).get(key) != record:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    selected[sequence] = event
 
             await resolve(keys, records)
             requests = tuple(dict.fromkeys(
@@ -3420,6 +3422,26 @@ class StateStepArchive(AgentRunStore):
             return [selected[sequence] for sequence in sorted(selected)]
 
         return await self._store.read(read)
+
+    async def _read_selected_history_facts(
+        self, transaction: StateTransaction, agent_run_id: str, ordered: Sequence[int],
+    ) -> dict[int, StoredFact]:
+        """Read a sorted window of selected identities without including gaps."""
+        selected: dict[int, StoredFact] = {}
+        offset = 0
+        while offset < len(ordered):
+            end = offset + 1
+            while end < len(ordered) and ordered[end] == ordered[end - 1] + 1:
+                end += 1
+            facts = await transaction.list_facts(FactQuery(
+                self._stream(agent_run_id, "event"),
+                after_sequence=ordered[offset] - 1, limit=end - offset,
+            ))
+            if [fact.sequence for fact in facts] != list(ordered[offset:end]):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            selected.update((fact.sequence, fact) for fact in facts)
+            offset = end
+        return selected
 
     async def list_trace_events(
         self, *, agent_run_id: str, event_high_water: int,
@@ -3507,22 +3529,7 @@ class StateStepArchive(AgentRunStore):
                     window_end = end
                 window = sequences[start:window_end]
                 ordered = sorted(set(window))
-                selected: dict[int, StoredFact] = {}
-                offset = 0
-                # Read only selected contiguous facts, independently of timestamp order.
-                while offset < len(ordered):
-                    end = offset + 1
-                    while end < len(ordered) and ordered[end] == ordered[end - 1] + 1:
-                        end += 1
-                    facts = await transaction.list_facts(FactQuery(
-                        self._stream(agent_run_id, "event"),
-                        after_sequence=ordered[offset] - 1, limit=end - offset,
-                    ))
-                    if [fact.sequence for fact in facts] != ordered[offset:end]:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    selected.update((fact.sequence, fact) for fact in facts)
-                    del facts
-                    offset = end
+                selected = await self._read_selected_history_facts(transaction, agent_run_id, ordered)
                 for index, sequence in enumerate(window, start):
                     record, fact = records[index], selected[sequence]
                     event = _decode_step(fact.data)

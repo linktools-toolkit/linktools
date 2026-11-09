@@ -391,3 +391,47 @@ async def test_run_release_scans_owned_cleanup_data_once_per_batch(monkeypatch: 
             await storage.close()
     assert costs[1] <= costs[0] * 2.25
     assert costs[2] <= costs[1] * 2.25
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selected_count,sparse", ((32, False), (65, False), (65, True)))
+async def test_history_associations_batch_only_selected_source_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_count: int, sparse: bool,
+) -> None:
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "association-page.db"))
+    try:
+        archive, run_id = await _seed_trace(storage, selected_count * 2)
+        selected = tuple(range(1, selected_count * 2, 2)) if sparse else tuple(range(1, selected_count + 1))
+        batches: list[tuple[int, ...]] = []
+        original = _SqlTransaction.list_facts
+        fact_selects = 0
+
+        async def capture(transaction, query):
+            facts = await original(transaction, query)
+            batches.append(tuple(fact.sequence for fact in facts))
+            return facts
+
+        def capture_sql(_connection, _cursor, statement, _parameters, _context, _many):
+            nonlocal fact_selects
+            if statement.lstrip().upper().startswith("SELECT") and "FROM AI_STATE_FACTS" in statement.upper():
+                fact_selects += 1
+
+        monkeypatch.setattr(_SqlTransaction, "list_facts", capture)
+        engine = archive.state_store.storage_group.context.engine.sync_engine
+        sql_event.listen(engine, "before_cursor_execute", capture_sql)
+        try:
+            values = await archive.read_history_associations(
+                agent_run_id=run_id, message_seqs=(),
+                tool_call_ids=tuple(f"call-{sequence - 1}" for sequence in reversed(selected)),
+                event_high_water=selected[-1],
+            )
+        finally:
+            sql_event.remove(engine, "before_cursor_execute", capture_sql)
+        assert [value.tool_call_id for value in values] == [f"call-{sequence - 1}" for sequence in selected]
+        assert tuple(sequence for batch in batches for sequence in batch) == selected
+        assert all(len(batch) <= 32 for batch in batches)
+        assert fact_selects <= (selected_count if sparse else (selected_count + 31) // 32)
+        print("HISTORY_SELECTED_FACTS " + json.dumps({"selected_count": selected_count, "sparse": sparse,
+              "fact_selects": fact_selects, "fact_rows": sum(map(len, batches))}))
+    finally:
+        await storage.close()
