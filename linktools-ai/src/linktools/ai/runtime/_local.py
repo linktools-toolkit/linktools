@@ -4462,7 +4462,8 @@ class LocalExecutionBackend:
                 accepted_context = ExecutionInputContext.from_messages(history, session_metadata=session_metadata,
                     memory=memory_capture,
                     repository_instructions=None if initial_repository_instructions is None else initial_repository_instructions.to_payload(),
-                    replace_history_system_prompt=session_history_start, unavailable_reason=reason)
+                    replace_history_system_prompt=session_history_start, unavailable_reason=reason,
+                    required_skills=await self._executor.capture_required_skills(binding))
                 proposed_context = accepted_context
                 if prepared_admission is not None:
                     if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
