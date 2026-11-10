@@ -11,7 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from pydantic_ai import Agent, messages as sdk_messages
+from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import FallbackExceptionGroup, ModelAPIError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -33,12 +33,6 @@ from linktools.ai.spec import AgentUsageLimits
 
 from .test_runtime_fallback_failures import _Binding
 from .test_model_request_lifecycle import _LifecycleRecorder
-
-
-pytestmark = pytest.mark.skipif(
-    not hasattr(sdk_messages, "ModelRequestAttempt"),
-    reason="installed SDK does not expose fallback attempt observations",
-)
 
 
 class _Response(CompletedStreamedResponse):
