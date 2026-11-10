@@ -2794,10 +2794,13 @@ class StateStepArchive(AgentRunStore):
         execution_id: str | None = None,
         execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
+        archive: PreparedArchive | None = None,
     ) -> None:
         require_no_run_history_lock(
             "StateStepArchive.sync_projection_in_transaction"
         )
+        if archive is not None:
+            await self._history.publish_archive(archive)
         await self._sync_projection_in_transaction(
             transaction,
             run,
@@ -2810,6 +2813,8 @@ class StateStepArchive(AgentRunStore):
             execution_guard=execution_guard,
             inserted_terminal=inserted_terminal,
         )
+        if archive is not None:
+            await self._history.publish_native_archive(transaction, archive, owner_written=True)
 
     async def _ensure_run_with_head_in_transaction(
         self,
