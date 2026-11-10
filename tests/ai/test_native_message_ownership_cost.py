@@ -9,6 +9,7 @@ model latency. CPU and allocation observations are diagnostics, not timing gates
 """
 
 import json
+import re
 import time
 import tracemalloc
 from collections import Counter
@@ -20,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
-from sqlalchemy import event, text
+from sqlalchemy import event, select, text
 
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.inputs import ExecutionContextArchive
@@ -30,14 +31,21 @@ from linktools.ai.persistence import _transcript_staging
 from linktools.ai.persistence._archive import ContentRecord, PreparedArchive
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.persistence._step_message_content import NativeMessageContent
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.state import RecordQuery
 
 from .test_step_projection import _execution
 
 
+def _binary_size(value: bytes | bytearray | memoryview) -> int:
+    return value.nbytes if isinstance(value, memoryview) else len(value)
+
+
 class _Traffic:
     def __init__(self) -> None:
         self.statements: Counter[str] = Counter()
+        self.reads: list[tuple[str, tuple[object, ...]]] = []
+        self.writes: list[tuple[str, str]] = []
         self.rows = 0
         self.native_insert_statements = 0
         self.returned_body_bytes = 0
@@ -52,6 +60,12 @@ class _Traffic:
         operation = statement.lstrip().split(None, 1)[0].upper()
         # Recursive sequence joins start WITH, not SELECT.
         self.statements['SELECT' if operation == 'WITH' else operation] += 1
+        if operation in ('SELECT', 'WITH'):
+            self.reads.append((statement, tuple(parameters)))
+        if operation in ('INSERT', 'UPDATE', 'DELETE'):
+            target = re.match(r"(?:INSERT INTO|UPDATE|DELETE FROM) (\w+)", statement.lstrip())
+            assert target is not None
+            self.writes.append((operation, target.group(1)))
         if operation == 'INSERT' and any(statement.lstrip().startswith('INSERT INTO ' + table)
                 for table in ('ai_step_messages', 'ai_step_sequences')):
             self.native_insert_statements += 1
@@ -62,11 +76,80 @@ class _Traffic:
             # numeric binds. Do not turn bytes back into a JSON/string estimate.
             batches = parameters if many else (parameters,)
             self.native_bind_bytes += sum(
-                len(value.encode("utf-8")) if isinstance(value, str) else len(value)
+                len(value.encode("utf-8")) if isinstance(value, str) else _binary_size(value)
                 for batch in batches
                 for value in (batch.values() if isinstance(batch, dict) else batch)
-                if isinstance(value, (str, bytes))
+                if isinstance(value, (str, bytes, bytearray, memoryview))
             )
+
+    def assert_snapshot_metadata(
+        self, start: int, *, store_digest: str, node_ids: int, message_ids: int,
+    ) -> None:
+        lookups: Counter[str] = Counter()
+        identities: Counter[str] = Counter()
+        collectors = 0
+        for statement, parameters in self.reads[start:]:
+            projection = " ".join(statement.split("FROM", 1)[0].split())
+            for table in ("ai_step_sequences", "ai_step_messages"):
+                if projection == f"SELECT {table}.sha256, {table}.id":
+                    assert f"{table}.store_digest =" in statement and f"{table}.sha256 IN" in statement
+                    assert parameters[0] == store_digest and 0 < len(parameters) - 1 <= 128
+                    lookups[table] += 1
+                    identities[table] += len(parameters) - 1
+                    break
+            else:
+                columns = projection.removeprefix("SELECT ").split(", ")
+                assert all(column.startswith("ai_native_content_edges.") for column in columns)
+                assert {column.split(".")[-1] for column in columns} <= {
+                    "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
+                }
+                assert "LIMIT" in statement and 0 < parameters[-2] <= 32
+                collectors += 1
+        assert collectors == 1
+        for table, bound in (("ai_step_sequences", node_ids), ("ai_step_messages", message_ids)):
+            assert 0 < identities[table] <= bound
+            assert lookups[table] == (bound + 127) // 128
+
+    def assert_owner_metadata(
+        self, start: int, *, store_digest: str, record_store: str, root: str,
+        collecting: bool, replacing: bool = False,
+    ) -> None:
+        kinds: Counter[str] = Counter()
+        for statement, parameters in self.reads[start:]:
+            projection = " ".join(statement.split("FROM", 1)[0].split())
+            if projection.startswith("SELECT ai_state_records.id,"):
+                assert "ai_state_records.store_digest =" in statement and "ai_state_records.key_digest =" in statement
+                assert parameters[0] == record_store and len(parameters) == 2
+                kinds['owner'] += 1
+            elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
+                assert "ai_step_sequences.sha256 IN" in statement
+                assert parameters == (store_digest, root)
+                kinds['root'] += 1
+            elif projection.startswith("SELECT ai_native_content_edges.id,"):
+                columns = projection.removeprefix("SELECT ").split(", ")
+                assert all(column.startswith("ai_native_content_edges.") for column in columns)
+                assert {column.split(".")[-1] for column in columns} <= {
+                    "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
+                }
+                assert "LIMIT" in statement and 0 < parameters[-2] <= 32
+                kinds['collector'] += 1
+            else:
+                assert projection == ("SELECT ai_step_sequences.id, ai_step_sequences.store_digest, "
+                                      "ai_step_sequences.sha256, ai_step_sequences.gc_revision")
+                assert "WHERE ai_step_sequences.id =" in statement and len(parameters) == 1
+                kinds['retired_target'] += 1
+        expected = Counter(owner=1, root=1)
+        if collecting:
+            expected['collector'] = 2 if replacing else 1
+        if replacing:
+            expected['retired_target'] = 1
+        assert kinds == expected
+
+    def assert_writes(self, start: int, limits: dict[tuple[str, str], int]) -> int:
+        counts = Counter(self.writes[start:])
+        assert counts.keys() <= limits.keys()
+        assert all(count <= limits[kind] for kind, count in counts.items())
+        return sum(limits.values())
 
     def observe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         encode = _transcript_staging.encode_model_messages
@@ -99,8 +182,8 @@ class _Traffic:
             # than estimating returned traffic from a standalone table scan.
             self.rows += len(rows)
             self.returned_body_bytes += sum(
-                len(row['message'])
-                for row in rows if isinstance(row['message'], bytes)
+                _binary_size(row['message'])
+                for row in rows if isinstance(row['message'], (bytes, bytearray, memoryview))
             )
             return await hydrate(owner, roots, rows, **kwargs)
 
@@ -124,9 +207,10 @@ class _Traffic:
 
 async def _native_counts(engine) -> tuple[int, int, int]:
     async with engine.connect() as connection:
-        bodies = (await connection.execute(text('SELECT * FROM ai_step_messages'))).mappings().all()
+        table = build_step_sql_metadata().tables['ai_step_messages']
+        bodies = (await connection.execute(select(table.c.message))).scalars().all()
         nodes = await connection.scalar(text('SELECT count(*) FROM ai_step_sequences'))
-    return len(bodies), nodes, sum(len(body) for body in bodies if body is not None)
+    return len(bodies), nodes, sum(_binary_size(body) for body in bodies if body is not None)
 
 
 @pytest.mark.asyncio
@@ -170,7 +254,7 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     started = time.process_time_ns()
     try:
         await native.save_snapshot(snapshot)
-        assert traffic.statements['SELECT'] == 0
+        traffic.assert_snapshot_metadata(0, store_digest=native.store_digest, node_ids=size, message_ids=size)
         roots = []
         for archive in traces:
             repository = archive.transcript_repository
@@ -346,7 +430,8 @@ async def test_cold_native_media_object_is_read_by_snapshot_and_execution_contex
 
         await store.mutate(publish)
         async with store.storage_group.context.engine.connect() as connection:
-            bodies = (await connection.execute(text('SELECT * FROM ai_step_messages'))).mappings().all()
+            table = build_step_sql_metadata().tables['ai_step_messages']
+            bodies = (await connection.execute(select(table))).mappings().all()
         assert len(bodies) == 1
         content = ContentRecord.from_native_row(bodies[0])
         assert content.payload.encoding == 'json-attachments'
@@ -419,6 +504,8 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     frozen = frozen_owner.snapshot(())
     baselines = [None, None]
     phase_encodings: Counter[str] = Counter()
+    phase_reads: Counter[str] = Counter()
+    budgeted_writes = 0
     maximum_tail_rows = 0
     try:
         for turn in range(1, turns + 1):
@@ -441,9 +528,20 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             snapshot = ContinuableSnapshot(run_id='growing', step_index=turn,
                                             idempotency_key=str(turn), messages=list(messages))
             before, reads = writer_traffic.encodings, writer_traffic.statements['SELECT']
+            write_start, body_rows = len(writer_traffic.writes), writer_traffic.rows
             await native.save_snapshot(snapshot)
             phase_encodings['mutable_snapshot_freeze'] += writer_traffic.encodings - before
-            assert writer_traffic.statements['SELECT'] == reads
+            writer_traffic.assert_snapshot_metadata(
+                reads, store_digest=native.store_digest, node_ids=4, message_ids=1,
+            )
+            phase_reads['snapshot'] += writer_traffic.statements['SELECT'] - reads
+            budgeted_writes += writer_traffic.assert_writes(write_start, {
+                ('INSERT', 'ai_step_snapshots'): 1, ('INSERT', 'ai_step_messages'): 1,
+                ('INSERT', 'ai_step_sequences'): 1, ('UPDATE', 'ai_step_messages'): 1,
+                ('UPDATE', 'ai_step_sequences'): 2, ('INSERT', 'ai_native_content_edges'): 3,
+                ('DELETE', 'ai_native_content_edges'): 1,
+            })
+            assert writer_traffic.rows == body_rows
             roots = []
             for index, archive in enumerate(archives):
                 repository = archive.transcript_repository
@@ -460,8 +558,24 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                     await repository.store_projection(transaction, 'growing', projection)
                     await repository.publish_native_archive(transaction, prepared, owner_written=True)
 
+                write_start = len(writer_traffic.writes)
                 await archive.state_store.mutate(publish)
-                assert writer_traffic.statements['SELECT'] == reads + 1
+                writer_traffic.assert_owner_metadata(
+                    reads, store_digest=native.store_digest, record_store=archive.state_store.store_digest.hex(),
+                    root=projection.items[0].root.slices[0].first, collecting=True, replacing=turn > 1,
+                )
+                phase_reads['archive'] += writer_traffic.statements['SELECT'] - reads
+                limits = {
+                    ('INSERT' if turn == 1 else 'UPDATE', 'ai_state_records'): 1,
+                    ('UPDATE', 'ai_step_sequences'): 1, ('INSERT', 'ai_native_content_edges'): 2,
+                    ('DELETE', 'ai_native_content_edges'): 1 if turn == 1 else 2,
+                }
+                if turn > 1:
+                    # Old snapshots still retain this candidate: the collector
+                    # checks its revision/edges but cannot reclaim its body.
+                    limits['DELETE', 'ai_step_sequences'] = 1
+                budgeted_writes += writer_traffic.assert_writes(write_start, limits)
+                assert writer_traffic.rows == body_rows
                 baselines[index] = projection
                 roots.append(projection.items[0].root)
             assert roots[0] == roots[1]
@@ -483,8 +597,18 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                                          root_execution_id=execution_id, input_context=accepted.reference),
                 )
 
+            write_start = len(writer_traffic.writes)
             await store.mutate(admit)
-            assert writer_traffic.statements['SELECT'] == reads + 1
+            writer_traffic.assert_owner_metadata(
+                reads, store_digest=native.store_digest, record_store=store.store_digest.hex(),
+                root=roots[0].slices[0].first, collecting=False,
+            )
+            phase_reads['context'] += writer_traffic.statements['SELECT'] - reads
+            budgeted_writes += writer_traffic.assert_writes(write_start, {
+                ('INSERT', 'ai_state_records'): 1, ('UPDATE', 'ai_step_sequences'): 1,
+                ('INSERT', 'ai_native_content_edges'): 2, ('DELETE', 'ai_native_content_edges'): 1,
+            })
+            assert writer_traffic.rows == body_rows
 
             # Each committed tail is read through a separate physical connection
             # with the native proof cache disabled. Earlier bodies must not be
@@ -508,10 +632,11 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         # separately from the zero-encode frozen projection/context reuse path.
         assert phase_encodings['mutable_snapshot_freeze'] <= turns * (turns + 1) // 2
         assert phase_encodings['frozen_projection'] == phase_encodings['confirmed_context'] == 0
-        assert writer_traffic.statements['SELECT'] == 3 * turns
+        assert phase_reads == {'snapshot': 3 * turns, 'archive': 2 * (3 + 5 * (turns - 1)), 'context': 2 * turns}
+        assert writer_traffic.statements['SELECT'] == sum(phase_reads.values())
         assert reader_traffic.statements['SELECT'] == turns
         assert 0 < writer_traffic.preparations <= 2 * turns
-        assert sum(writer_traffic.statements[op] for op in ('INSERT', 'UPDATE', 'DELETE')) <= 12 * turns
+        assert sum(writer_traffic.statements[op] for op in ('INSERT', 'UPDATE', 'DELETE')) <= budgeted_writes
         writer_traffic.report(record_property, 'incremental_lifecycle', time.process_time_ns() - started,
                               sampled_peak, sampled=True)
         record_property('incremental_encoding_phases', json.dumps(dict(phase_encodings), sort_keys=True))
@@ -556,3 +681,11 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             tracemalloc.stop()
         await cold.close()
         await state.close()
+
+
+def test_native_byte_accounting_uses_buffer_size() -> None:
+    for body in (b"12345678", bytearray(b"12345678"), memoryview(b"12345678").cast("I")):
+        assert _binary_size(body) == 8
+        traffic = _Traffic()
+        traffic.sql(None, None, "INSERT INTO ai_step_messages (message) VALUES (?)", (body,), None, False)
+        assert traffic.native_bind_bytes == 8

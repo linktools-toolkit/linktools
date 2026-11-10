@@ -136,12 +136,12 @@ class _StorageCostReports:
         "incremental_turns": {"incremental_lifecycle"},
     }
     _MESSAGE_COUNTERS = {
-        "materialized_rows", "returned_body_utf8_bytes", "encoded_messages", "prepared_payloads",
+        "materialized_rows", "returned_body_bytes", "encoded_messages", "prepared_payloads",
         "encoded_bytes", "snapshot_digest_input_bytes", "context_history_digest_input_bytes",
-        "native_bind_json_bytes", "process_cpu_ns",
+        "native_bound_text_and_body_bytes", "process_cpu_ns",
     }
     _MESSAGE_EXTRAS = {
-        "shared_batch": {"stored_message_utf8_bytes"},
+        "shared_batch": {"stored_message_bytes"},
         "incremental_turns": {
             "incremental_stored_message_bytes", "unconfirmed_context_encoded_messages",
             "incremental_turns_completed", "incremental_max_cold_tail_rows", "incremental_sample_turn",
@@ -413,8 +413,11 @@ class _StorageCostReports:
         if self.message_reports:
             terminalreporter.write_line(
                 "Message costs: shared_batch is one N-message publication; incremental_turns is N growing commits. "
-                "CPU is process_time_ns; traced peak is the observation session peak. "
-                "Native bind JSON bytes and returned body UTF-8 bytes exclude protocol framing. "
+                "CPU is process_time_ns; traced_peak_bytes is the observation session peak; "
+                "sampled_peak_bytes covers only incremental_sample_turn. "
+                "Native bound bytes count UTF-8 text and binary parameters for message/sequence DML, "
+                "excluding numeric binds and protocol framing. Returned/stored message bytes count binary bodies, "
+                "not attachment objects or database-file size. "
                 "Mutable input freezing and full-history digest bytes are reported separately from reuse; "
                 "no whole-lifecycle linear CPU claim or historical-version baseline."
             )

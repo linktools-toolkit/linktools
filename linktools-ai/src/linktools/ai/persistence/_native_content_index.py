@@ -4,7 +4,7 @@
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from ..errors import AIError, ErrorCode
 from ._step_schema import build_step_sql_metadata
@@ -25,6 +25,44 @@ _RECOVER = "linktools.native_recovery"
 _PUBLISHED = "linktools.native_published"
 _CLAIMED = "linktools.native_claimed"
 _WORK = "linktools.native_gc_work"
+_PUBLICATION_HANDOFF = "linktools.native_publication_handoff"
+
+
+class PublicationTargetsUnavailable(ValueError):
+    """A receipt cannot supply IDs in the requested publication scope."""
+
+
+class _PublicationTargets(Protocol):
+    def __call__(
+        self, session: "AsyncSession", *, store_digest: str, roots: Sequence[str],
+    ) -> tuple[int, ...]: ...
+
+
+def register_publication_targets(
+    session: "AsyncSession", store: str, roots: Sequence[str], resolve: _PublicationTargets,
+) -> None:
+    """Hand one receipt's live evidence to its pending durable owner."""
+    resolve(session, store_digest=store, roots=roots)
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    current = session.info.get(_PUBLICATION_HANDOFF)
+    if current is None or current[0] is not transaction:
+        current = (transaction, {})
+        session.info[_PUBLICATION_HANDOFF] = current
+    current[1][store, tuple(sorted(set(roots)))] = resolve
+
+
+async def _owner_targets(session: "AsyncSession", store: str, roots: Sequence[str]) -> tuple[int, ...]:
+    current = session.info.get(_PUBLICATION_HANDOFF)
+    if current is not None:
+        resolve = current[1].pop((store, tuple(sorted(set(roots)))), None)
+        if resolve is not None:
+            try:
+                return resolve(session, store_digest=store, roots=roots)
+            except PublicationTargetsUnavailable:
+                # A completed savepoint or prior transaction is not evidence
+                # for the owner's current write. Resolve its actual rows again.
+                pass
+    return tuple((await resolve_targets(session, "sequence", store, roots)).values())
 
 
 class NativeContentUnavailable(Exception):
@@ -65,6 +103,8 @@ async def run_native_mutation(
             return result
         except NativeContentUnavailable as error:
             raise NativeContentUnavailable(tuple(session.info.get(_RECOVER, ()))) from error
+        finally:
+            session.info.pop(_PUBLICATION_HANDOFF, None)
 
     recovered: set[Callable[[], Awaitable[None]]] = set()
     while True:
@@ -255,6 +295,7 @@ async def note_publication(
 
 
 async def finish_publications(context: "SqlStorageContext", session: "AsyncSession") -> None:
+    session.info.pop(_PUBLICATION_HANDOFF, None)
     claimed = session.info.get(_CLAIMED, set())
     for target in session.info.get(_PUBLISHED, ()):
         if ("sequence", target) not in claimed:
@@ -288,8 +329,7 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
         for root in roots:
             if group_id is None or root.group_id != group_id:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            resolved = await resolve_targets(session, "sequence", root.store_digest, tuple(span.first for span in root.slices))
-            targets.extend(resolved.values())
+            targets.extend(await _owner_targets(session, root.store_digest, tuple(span.first for span in root.slices)))
         await replace_owner_edges(context, session, kind, sources, targets)
 
 
@@ -345,6 +385,6 @@ async def collect_native_content(
 
 
 
-__all__ = ["NativeContentUnavailable", "stage_owner", "register_recovery", "run_native_mutation",
+__all__ = ["NativeContentUnavailable", "PublicationTargetsUnavailable", "stage_owner", "register_recovery", "register_publication_targets", "run_native_mutation",
            "maintain_native_content", "replace_edges", "replace_owner_edges", "resolve_targets", "index_nodes", "note_publication", "finish_publications",
            "flush_owners", "collect_native_content", "enqueue"]

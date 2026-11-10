@@ -474,3 +474,76 @@ async def test_multiple_stale_candidates_each_rebuild_once_before_atomic_publica
         assert await state.read(lambda tx: tx.get_record(record.key_digest)) == record
         assert await _count(engine, "ai_step_messages") == before + 2
         assert all(await native.read_message_roots(roots))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ("same", "savepoint_commit", "savepoint_rollback", "outer_rollback", "other_root"))
+async def test_state_owner_consumes_only_live_matching_publication_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    from sqlalchemy import event
+    from linktools.ai.persistence._archive import PreparedArchive
+    from linktools.ai.persistence._step_message_content import NativeMessageContent
+
+    async with _shared(tmp_path / "owner-handoff.db") as (engine, state, native, old_root):
+        prepared = PreparedArchive()
+        root = await native.prepare_archived_messages(_snapshot("new", 1, "new").messages, prepared)
+        retained = old_root if boundary == "other_root" else root
+        record = _record(encode_domain(ArchivedContextBlock(retained, "c" * 64, 2)))
+        publish = NativeMessageContent.publish_retained
+        first = True
+        queries = []
+
+        class RollbackSavepoint(Exception):
+            pass
+
+        async def publish_at_boundary(content, transaction, candidate, **kwargs):
+            nonlocal first
+            if not first or not boundary.startswith("savepoint_"):
+                return await publish(content, transaction, candidate, **kwargs)
+            first = False
+
+            async def nested(session):
+                try:
+                    async with session.begin_nested():
+                        receipt = await publish(content, transaction, candidate, **kwargs)
+                        if boundary == "savepoint_rollback":
+                            raise RollbackSavepoint()
+                except RollbackSavepoint:
+                    pass
+                return receipt
+
+            return await transaction.run_sql(native.storage_context, nested)
+
+        def capture(_connection, _cursor, statement, parameters, _context, _many):
+            if statement.startswith("SELECT ai_step_sequences.sha256, ai_step_sequences.id"):
+                queries.append((statement, parameters))
+
+        monkeypatch.setattr(NativeMessageContent, "publish_retained", publish_at_boundary)
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            async def write(transaction, *, abort=False):
+                await transaction.insert_record(record)
+                await native.publish_archived_messages(transaction, prepared)
+                if abort:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            if boundary == "outer_rollback":
+                with pytest.raises(AIError) as failed:
+                    await state.mutate(lambda transaction: write(transaction, abort=True))
+                assert failed.value.code is ErrorCode.STORAGE_CONFLICT
+                assert await state.read(lambda transaction: transaction.get_record(record.key_digest)) is None
+            await state.mutate(write)
+            assert await state.read(lambda transaction: transaction.get_record(record.key_digest)) == record
+            assert len(queries) == (1 if boundary == "same" else 3 if boundary == "savepoint_rollback" else 2)
+            assert all(parameters[0] == native.store_digest and len(parameters) == 2 for _, parameters in queries)
+            assert (await native.read_message_roots((retained,)))[0]
+            if boundary == "other_root":
+                assert await _count(engine, "ai_step_messages") == 1
+            await native.save_snapshot(_snapshot("run", 2, "current"))
+            assert (await native.read_message_roots((retained,)))[0]
+            assert await _count(engine, "ai_step_messages") == 2
+            assert await state.mutate(lambda transaction: transaction.delete_record(record.key_digest))
+            assert await _count(engine, "ai_step_messages") == 1
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)

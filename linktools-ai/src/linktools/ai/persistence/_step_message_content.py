@@ -115,11 +115,13 @@ class NativeMessageReceipt:
         self, session: "AsyncSession", *, store_digest: str, roots: Sequence[str],
     ) -> tuple[int, ...]:
         """Reuse physical IDs only inside this exact live publication transaction."""
+        from ._native_content_index import PublicationTargetsUnavailable
+
         if (self.prepared is None or self._transaction is None
                 or (session.get_nested_transaction() or session.get_transaction()) is not self._transaction or not self._transaction.is_active
                 or store_digest != self._store_digest
                 or tuple(sorted(set(roots))) != tuple(root for root, _ in self._root_targets)):
-            raise ValueError("native publication targets require their active transaction, store, and roots")
+            raise PublicationTargetsUnavailable("native publication targets require their active transaction, store, and roots")
         return tuple(target for _, target in self._root_targets)
 
     @property
@@ -410,7 +412,7 @@ class NativeMessageContent:
         owner_written: bool, confirmed_content: CommittedNativeMessages | None,
     ) -> NativeMessageReceipt:
         from sqlalchemy.ext.asyncio import AsyncConnection
-        from ._native_content_index import index_nodes, note_publication, register_recovery
+        from ._native_content_index import index_nodes, note_publication, register_publication_targets, register_recovery
 
         recovery = self._recoveries.get(prepared)
         if recovery is not None:
@@ -453,6 +455,10 @@ class NativeMessageContent:
             receipt = NativeMessageReceipt(
                 prepared, session.get_nested_transaction() or session.get_transaction(),
                 self._store_digest, tuple(sorted(targets.items())),
+            )
+            register_publication_targets(
+                session, self._store_digest, tuple(span.first for span in prepared.root.slices),
+                receipt.publication_targets,
             )
         self._receipts.add(receipt)
         return receipt

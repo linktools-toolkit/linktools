@@ -54,9 +54,11 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
         session = await owner.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
+        cleanups = []
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
-            commits.append(kwargs.get('domain'))
+            domain = kwargs.get("domain")
+            (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
         execution = await session.start('question', idempotency_key='request')
@@ -65,7 +67,7 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
         try:
             same = await remote.start('question', idempotency_key='request')
             assert same.execution_id == execution.execution_id
-            assert len(calls) == 1 and commits == []
+            assert len(calls) == 1 and commits == cleanups == []
             view = await reader.executions.inspect(execution.execution_id, principal=reader.default_principal)
             assert view.status is ExecutionStatus.STARTED
             with pytest.raises(AIError) as not_ready:
@@ -82,9 +84,12 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
         assert (await same.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert len(commits) == 1
+        assert len(cleanups) <= 1
+        total = (len(commits), len(cleanups))
         again = await remote.start('question', idempotency_key='request')
         assert again.execution_id == execution.execution_id and len(calls) == 1
         assert (await again.wait()).result.output == {'text': 'answer'}
+        assert (len(commits), len(cleanups)) == total
 
 
 @pytest.mark.asyncio
