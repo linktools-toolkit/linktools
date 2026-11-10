@@ -27,7 +27,7 @@ from linktools.ai.snapshot import _snapshot as runtime_snapshot_module
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence import snapshots as runtime_storage_snapshot_module
-from linktools.ai.persistence import codec as runtime_storage_codec
+from linktools.ai.persistence import captures as capture_contracts
 from linktools.ai.persistence.codec import (
     _encode_persisted_domain,
     encode_envelope,
@@ -152,55 +152,55 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     ("format_version", "corruption", "expected_code"),
     (
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION + 1,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION + 1,
             "valid",
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
         ),
         (True, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (2.0, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "missing_array",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "wrong_kind",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "unexpected_field",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_task",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_schema",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "duplicate_task",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "duplicate_expander",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_expander",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
     ),
 )
-def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
+def test_snapshot_task_capture_state_rejects_invalid_manifests(
     format_version: object,
     corruption: str,
     expected_code: ErrorCode,
@@ -256,21 +256,13 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
         del manifest["expanders"]
     elif corruption == "unexpected_field":
         manifest["roots"] = {}
-    payload = canonical_json_bytes(manifest)
-    reference = ObjectRef(
-        "runtime",
-        "v1/task-graph-binding-capture/capture",
-        "a" * 64,
-        len(payload),
-    )
+    key = capture_contracts.task_graph_binding_capture_key("runtime", "tenant", "graph", "a" * 64)
+    record = capture_contracts.capture_record("runtime", "tenant", key, manifest)
 
     with pytest.raises(AIError) as raised:
-        tuple(
-            runtime_storage_codec.iter_runtime_object_dependencies(
-                reference,
-                payload,
-                default_domain=PersistenceDomain.TASK,
-            )
+        validate_snapshot_domain(
+            namespace="runtime", tenant_id="tenant", domain=PersistenceDomain.TASK,
+            records=(record,), aliases=(), facts=(), operations=(), sequences={},
         )
 
     assert raised.value.code is expected_code

@@ -13,10 +13,12 @@ from ..agent import AgentBinding, AgentBindingContract, AgentCompiler, CompiledA
 from ..session import SessionContext, normalize_session_context
 from ..capability import MemoryCapability
 from ._capabilities import runtime_feature_leaves
-from ..core import (OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
+from ..core import (BudgetUsage, OperationLedgerInput, ExecutionMode, RunBudget, Principal, ThinkingValue, ToolEffects, normalize_execution_mode,
                     normalize_thinking, overlay_correlation, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
-from ..execution import Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest
+from ..execution import (Execution, ExecutionInputContext, ExecutionRequest, ResumeSessionRequest,
+    ExecutionView, ExecutionResult, CancelExecutionRequest, CancelExecutionResult, ExecutionHistoryService,
+    ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, UsageReadCutoff)
 from ..execution.handle import ExecutionBinding, ExecutionTreeWatcher
 from ..model import CanonicalUserInput, normalize_input_files
 if TYPE_CHECKING:
@@ -34,15 +36,15 @@ class AgentExecutionPort(Generic[AppT]):
     persistence: Persistence
     compiled: CompiledAgent | None
     _binding_contract: AgentBindingContract | None
-    compiler: AgentCompiler
-    service: DefaultExecutionService
-    sessions: SessionService
-    operations: ExecutionBinding
+    _compiler: AgentCompiler
+    _service: DefaultExecutionService
+    _sessions: SessionService
+    _operations: ExecutionBinding
     watch_tree: ExecutionTreeWatcher
     resolve_binding: Callable[[AgentBinding], Awaitable[AgentBinding]]
     default_principal: Principal
     correlation: Mapping[str, object]
-    captures: InputCaptures | None
+    _captures: InputCaptures | None
     memory_scope: str | None = None
     captured: bool = False
     agent_id: str | None = None
@@ -64,24 +66,24 @@ class AgentExecutionPort(Generic[AppT]):
             if self.compiled is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                               safe_details={"reason": "agent_definition_unresolved"})
-            contract = self.compiler.bind(self.compiled).binding_contract
+            contract = self._compiler.bind(self.compiled).binding_contract
             object.__setattr__(self, "_binding_contract", contract)
         return contract
 
     async def resolve_definition(self) -> AgentBinding:
         """Read the current declaration for inspection, without changing this port."""
-        self.operations.ensure_open()
+        self._operations.ensure_open()
         if self.captured:
             return (
                 await self.restore_binding(self.binding_contract)
                 if self.restore_binding is not None
-                else self.compiler.restore(self.binding_contract,
+                else self._compiler.restore(self.binding_contract,
                                            model=None if self.compiled is None else self.compiled.model)
             )
         if self.resolve_current is None:
             if self.compiled is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return self.compiler.bind(self.compiled)
+            return self._compiler.bind(self.compiled)
         agent_id = self.agent_id if self.compiled is None else self.compiled.spec.id
         if agent_id is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -91,42 +93,42 @@ class AgentExecutionPort(Generic[AppT]):
         """Require this producer's exact persistence owner before checking the producer is open."""
         if self.persistence is not persistence:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        self.operations.ensure_open()
+        self._operations.ensure_open()
 
     async def record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
         """Record the Task handoff when this producer has input capture enabled."""
-        if self.captures is not None:
-            await self.captures.record_invocation(execution_id, invocation)
+        if self._captures is not None:
+            await self._captures.record_invocation(execution_id, invocation)
 
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
-        self.operations.ensure_open()
-        if self.captures is None:
+        self._operations.ensure_open()
+        if self._captures is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await self.captures.canonicalize_files(files)
+        return await self._captures.canonicalize_files(files)
 
     async def materialize_input(self, prompt: CanonicalUserInput, files: Sequence[str] = ()) -> CanonicalUserInput:
-        self.operations.ensure_open()
-        if self.captures is None:
+        self._operations.ensure_open()
+        if self._captures is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await self.captures.materialize_input(prompt, files)
+        return await self._captures.materialize_input(prompt, files)
 
     async def resolve_contract(self, contract: AgentBindingContract) -> AgentBindingContract:
-        self.operations.ensure_open()
+        self._operations.ensure_open()
         if self.restore_binding is not None:
             return (await self.restore_binding(contract)).binding_contract
-        restored = self.compiler.restore(
+        restored = self._compiler.restore(
             contract, model=None if self.compiled is None else self.compiled.model,
         )
         return (await self.resolve_binding(restored)).binding_contract
 
     def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
-        return self.service.runtime_backend().owns_execution(execution_id, tenant_id=tenant_id)
+        return self._service.runtime_backend().owns_execution(execution_id, tenant_id=tenant_id)
 
     async def recover_bound_execution(
         self, execution: ExecutionRecord, *, recovery_operation: OperationLedgerInput,
     ) -> ExecutionRecord:
         """Resume the producer after its task owner validates and authorizes the binding."""
-        self.operations.ensure_open()
+        self._operations.ensure_open()
         spec = self.binding_contract.agent_spec
         if (
             not execution.requires_task_invocation_capture
@@ -138,20 +140,88 @@ class AgentExecutionPort(Generic[AppT]):
             or recovery_operation.resource_id != execution.execution_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await self.service.runtime_backend().recover_execution(
+        return await self._service.runtime_backend().recover_execution(
             execution.execution_id, tenant_id=recovery_operation.tenant_id,
             expected_revision=execution.revision, recovery_operation=recovery_operation,
         )
 
-    async def get(self, execution_id: str, principal: Principal) -> Execution[AppT]:
-        self.operations.ensure_open()
-        return Execution(self.operations, execution_id, principal, self.watch_tree)
+    async def get(
+        self, execution_id: str, principal: Principal, *,
+        cancel: Callable[[str | None, bool], Awaitable[CancelExecutionResult]] | None = None,
+    ) -> Execution[AppT]:
+        """Bind a handle; a Task owner may supply graph-aware cancellation."""
+        self._operations.ensure_open()
+        return Execution(self._operations, execution_id, principal, self.watch_tree, None, cancel)
 
-    async def acquire_hold(self, execution_id: str, principal: Principal, hold_id: str) -> None:
-        await self.service.acquire_dependency_hold(execution_id, tenant_id=principal.tenant_id, hold_id=hold_id)
+    async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
+        return await self._service.inspect(execution_id, principal=principal)
 
-    async def release_hold(self, execution_id: str, principal: Principal, hold_id: str) -> None:
-        await self.service.release_dependency_hold(execution_id, tenant_id=principal.tenant_id, hold_id=hold_id)
+    async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
+        return await self._service.result(execution_id, principal=principal)
+
+    async def result_payload_size(self, execution_id: str, *, principal: Principal) -> int:
+        return await self._service.result_payload_size(execution_id, principal=principal)
+
+    async def wait(
+        self, execution_id: str, *, principal: Principal, timeout_seconds: float | None = None,
+    ) -> ExecutionResult:
+        return await self._service.wait(execution_id, principal=principal, timeout_seconds=timeout_seconds)
+
+    async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:
+        return await self._service.list_children(execution_id, principal=principal)
+
+    async def budget_usage(self, execution_id: str, *, principal: Principal) -> BudgetUsage | None:
+        return await self._service.budget_usage(execution_id, principal=principal)
+
+    async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
+        return await self._service.cancel(execution_id, request)
+
+    async def acquire_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> bool:
+        return await self._service.acquire_dependency_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
+
+    async def release_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
+        await self._service.release_dependency_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
+
+    async def request_terminal_handoff(
+        self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
+    ) -> None:
+        await self._service.request_terminal_handoff(
+            execution_id, tenant_id=tenant_id, terminal_commit=terminal_commit,
+        )
+
+    def _history_reader(self) -> ExecutionHistoryService:
+        history = self._operations.history
+        if history is None:
+            raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
+        return history
+
+    async def capture_model_interaction_cutoffs(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionReadBoundary:
+        return await self._history_reader().capture_model_interaction_cutoffs(execution_id, principal=principal)
+
+    async def read_model_interaction_updates(
+        self, execution_id: str, *, principal: Principal,
+        after_cutoffs: tuple[UsageReadCutoff, ...] = (), limit: int = 200,
+    ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+        return await self._history_reader().read_model_interaction_updates(
+            execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
+        )
+
+    async def read_model_interaction_metadata(
+        self, execution_id: str, *, principal: Principal, agent_run_seq: int,
+        after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
+    ) -> tuple[ModelInteractionItem, ...]:
+        return await self._history_reader().read_model_interaction_metadata(
+            execution_id, principal=principal, agent_run_seq=agent_run_seq,
+            after_model_request_seq=after_model_request_seq, through_model_request_seq=through_model_request_seq,
+            limit=limit,
+        )
+
+    async def subscribe_model_interactions(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionSubscription | None:
+        return await self._history_reader().subscribe_model_interactions(execution_id, principal=principal)
 
     async def start(
         self,
@@ -174,7 +244,7 @@ class AgentExecutionPort(Generic[AppT]):
         tool_effects: ToolEffects = "live",
         session_context: SessionContext = "all",
     ) -> "Execution[AppT]":
-        self.operations.ensure_open()
+        self._operations.ensure_open()
         normalize_session_context(session_context)
         if session_context != "all" and session_id is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "session_context_requires_session"})
@@ -196,12 +266,12 @@ class AgentExecutionPort(Generic[AppT]):
             if not captured:
                 if compiled_agent is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                binding = self.compiler.bind(compiled_agent, output=output)
+                binding = self._compiler.bind(compiled_agent, output=output)
             else:
                 binding = (
                     await self.restore_binding(self.binding_contract)
                     if self.restore_binding is not None
-                    else self.compiler.restore(self.binding_contract,
+                    else self._compiler.restore(self.binding_contract,
                                                model=None if compiled_agent is None else compiled_agent.model)
                 )
                 if output is not None:
@@ -242,7 +312,7 @@ class AgentExecutionPort(Generic[AppT]):
         if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if session_id is None:
-            handle = await self.service.start(
+            handle = await self._service.start(
                 binding.binding_digest,
                 request,
                 dependency_hold_id=dependency_hold_id,
@@ -266,7 +336,7 @@ class AgentExecutionPort(Generic[AppT]):
                 tool_effects=request.tool_effects,
                 session_context=request.session_context,
             )
-            handle = await self.sessions.resume(
+            handle = await self._sessions.resume(
                 compiled_agent.spec.id,
                 binding.binding_digest,
                 session_id,
@@ -287,7 +357,7 @@ class AgentExecutionPort(Generic[AppT]):
             resolved_planning,
             resolved_thinking,
         )
-        return Execution(self.operations,
+        return Execution(self._operations,
             handle.execution_id,
             resolved_principal,
             self.watch_tree,

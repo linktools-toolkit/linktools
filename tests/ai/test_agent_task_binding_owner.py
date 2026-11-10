@@ -45,9 +45,6 @@ async def test_agent_task_binding_preserves_snapshot_and_distinct_port_surfaces(
             gets.append((execution_id, actor))
             return execution
 
-        async def acquire_hold(self, *args: object, **kwargs: object) -> None:
-            raise AssertionError("Task hold must retain its service dispatch")
-
     persistence = object()
     service = SimpleNamespace(
         acquire_dependency_hold=AsyncMock(return_value=True),
@@ -57,9 +54,9 @@ async def test_agent_task_binding_preserves_snapshot_and_distinct_port_surfaces(
     captures = SimpleNamespace(record_invocation=AsyncMock())
     port = Port(
         persistence=persistence, compiled=SimpleNamespace(spec=binding.agent_spec),
-        _binding_contract=None, compiler=None, service=service, sessions=None,
-        operations=operations, watch_tree=None, resolve_binding=None,
-        default_principal=principal, correlation={}, captures=captures,
+        _binding_contract=None, _compiler=None, _service=service, _sessions=None,
+        _operations=operations, watch_tree=None, resolve_binding=None,
+        default_principal=principal, correlation={}, _captures=captures,
     )
     task = Task.from_agent("agent-task", SimpleNamespace(execution_port=port))
     admissions = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
@@ -116,9 +113,9 @@ async def test_invocation_capture_preserves_optional_owner_and_failure(capture: 
     error = asyncio.CancelledError() if capture == "cancelled" else AIError(ErrorCode.STORAGE_UNAVAILABLE)
     captures = None if capture == "disabled" else SimpleNamespace(record_invocation=AsyncMock(side_effect=error))
     port = AgentExecutionPort(
-        persistence=None, compiled=None, _binding_contract=None, compiler=None,
-        service=None, sessions=None, operations=None, watch_tree=None, resolve_binding=None,
-        default_principal=principal, correlation={}, captures=captures,
+        persistence=None, compiled=None, _binding_contract=None, _compiler=None,
+        _service=None, _sessions=None, _operations=None, watch_tree=None, resolve_binding=None,
+        default_principal=principal, correlation={}, _captures=captures,
     )
     if capture == "disabled":
         assert await port.record_invocation("execution", invocation) is None
@@ -140,11 +137,11 @@ def test_producer_binding_checks_identity_before_open_state(same_owner: bool, cl
     failure = AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     ensure_open = Mock(side_effect=failure if closed else None)
     port = AgentExecutionPort(
-        persistence=owner, compiled=None, _binding_contract=None, compiler=None,
-        service=object(), sessions=None,
-        operations=SimpleNamespace(service=object(), ensure_open=ensure_open),
+        persistence=owner, compiled=None, _binding_contract=None, _compiler=None,
+        _service=object(), _sessions=None,
+        _operations=SimpleNamespace(service=object(), ensure_open=ensure_open),
         watch_tree=None, resolve_binding=None, default_principal=None,
-        correlation={}, captures=None,
+        correlation={}, _captures=None,
     )
     candidate = owner if same_owner else Owner()
     if not same_owner or closed:
@@ -157,3 +154,61 @@ def test_producer_binding_checks_identity_before_open_state(same_owner: bool, cl
     else:
         assert port.validate_persistence(candidate) is None
     assert ensure_open.call_count == int(same_owner)
+
+
+@pytest.mark.asyncio
+async def test_agent_port_reads_controls_and_handoff_retain_the_producer() -> None:
+    from linktools.ai.execution import CancelExecutionRequest
+    from linktools.ai.task.engine._reads import TaskExecutionReads
+
+    actor = Principal("caller", "tenant", "service")
+    view = SimpleNamespace(binding_kind="agent", root_execution_id="root")
+    service = SimpleNamespace(
+        inspect=AsyncMock(return_value=view), result=AsyncMock(return_value="result"),
+        cancel=AsyncMock(return_value="cancelled"), acquire_dependency_hold=AsyncMock(return_value=True),
+        release_dependency_hold=AsyncMock(), request_terminal_handoff=AsyncMock(),
+    )
+    port = AgentExecutionPort(
+        persistence=None, compiled=None, _binding_contract=None, _compiler=None,
+        _service=service, _sessions=None, _operations=SimpleNamespace(service=object()),
+        watch_tree=None, resolve_binding=None, default_principal=actor, correlation={}, _captures=None,
+    )
+    tasks = SimpleNamespace(inspect=AsyncMock(return_value=view))
+    reads = TaskExecutionReads(tasks, {"execution": port})
+    assert await reads.result("execution", principal=actor) == "result"
+    service.result.assert_awaited_once_with("execution", principal=actor)
+    request = CancelExecutionRequest(actor, "cancel")
+    assert await port.cancel("execution", request) == "cancelled"
+    service.cancel.assert_awaited_once_with("execution", request)
+    assert await reads.acquire_dependency_hold("execution", tenant_id="tenant", hold_id="hold") is True
+    await reads.release_dependency_hold("execution", tenant_id="tenant", hold_id="hold")
+    await reads.request_terminal_handoff("execution", tenant_id="tenant", terminal_commit=True)
+    service.acquire_dependency_hold.assert_awaited_once_with("execution", tenant_id="tenant", hold_id="hold")
+    service.release_dependency_hold.assert_awaited_once_with("execution", tenant_id="tenant", hold_id="hold")
+    service.request_terminal_handoff.assert_awaited_once_with("execution", tenant_id="tenant", terminal_commit=True)
+
+
+@pytest.mark.asyncio
+async def test_task_history_uses_producer_observation_operations() -> None:
+    from linktools.ai.execution import ModelInteractionReadBoundary
+    from linktools.ai.task.engine._history import TaskHistory
+
+    actor = Principal("caller", "tenant", "service")
+    boundary = ModelInteractionReadBoundary((), (), False, False)
+    reader = SimpleNamespace(
+        capture_model_interaction_cutoffs=AsyncMock(return_value=boundary),
+        read_model_interaction_updates=AsyncMock(return_value=(boundary, ())),
+        subscribe_model_interactions=AsyncMock(return_value=None),
+    )
+    port = AgentExecutionPort(
+        persistence=None, compiled=None, _binding_contract=None, _compiler=None,
+        _service=object(), _sessions=None, _operations=SimpleNamespace(history=reader),
+        watch_tree=None, resolve_binding=None, default_principal=actor, correlation={}, _captures=None,
+    )
+    execution = SimpleNamespace(inspect=AsyncMock(return_value=SimpleNamespace(binding_kind="agent", root_execution_id="root")))
+    history = TaskHistory(execution, {"root": port})
+    assert await history.capture_model_interaction_cutoffs("child", principal=actor) is boundary
+    assert await history.read_model_interaction_updates("child", principal=actor) == (boundary, ())
+    assert await history.subscribe_model_interactions("child", principal=actor) is None
+    reader.capture_model_interaction_cutoffs.assert_awaited_once_with("child", principal=actor)
+    reader.read_model_interaction_updates.assert_awaited_once_with("child", principal=actor, after_cutoffs=(), limit=200)

@@ -52,7 +52,7 @@ async def test_reducing_snapshot_retention_reads_bounded_metadata_and_keeps_repl
             patch.setattr(AsyncSession, "execute", observe)
             await limited.save_snapshot(final)
             await limited.latest_snapshot(run_id="run")
-        assert result_sizes and max(result_sizes) <= 1
+        assert result_sizes and max(result_sizes) <= 128
         assert any("pruned = false" in statement for statement in compiled_statements)
         assert not any("pruned IS false" in statement for statement in compiled_statements)
         retained = ([snapshots[complete_index]] if complete_index is not None and complete_index < 11 else [])

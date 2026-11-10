@@ -23,7 +23,6 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
     MySQLDialect,
-    PayloadPolicy,
     PostgreSQLDialect,
     SqlErrorKind,
     SQLiteDialect,
@@ -363,7 +362,6 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
         backend = SqlAssetBackend(
             engine,
             namespace="history",
-            payload_policy=PayloadPolicy(inline_limit_bytes=1),
         )
         assert backend.root.scheme == "sql"
         await provision_asset_database(engine)
@@ -503,7 +501,6 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
         backend = SqlAssetBackend(
             engine,
             namespace="batch",
-            payload_policy=PayloadPolicy(inline_limit_bytes=1),
         )
         await provision_asset_database(engine)
         await backend.initialize()

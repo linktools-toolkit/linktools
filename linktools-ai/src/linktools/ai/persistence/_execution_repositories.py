@@ -17,6 +17,8 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
+from ..execution import ExecutionTimelineRecord
+from .codec import decode_execution_timeline
 from ._archive import ContentArchive, PreparedArchive
 from ._budget import BudgetRepositoryImpl
 from .contracts import (
@@ -196,6 +198,37 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             tenant_id=tenant_id,
             domain=PersistenceDomain.EXECUTION,
         )
+
+    async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
+        if current.state in {ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value,
+                             ExecutionStatus.CANCELLED.value, "execution_handoff"}:
+            previous = decode_execution_timeline(current.data)
+            if (previous.completed_at is not None and (not isinstance(value, ExecutionRecord)
+                    or not previous.terminal_matches(value))):
+                raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+        return await super()._projected_content(current, value)
+
+    async def get_timeline_many(
+        self, execution_ids: Sequence[str], *, tenant_id: str,
+    ) -> Mapping[str, ExecutionTimelineRecord]:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if isinstance(execution_ids, (str, bytes)):
+            raise TypeError("execution_ids must be a sequence of strings")
+        ordered = tuple(dict.fromkeys(execution_ids))
+        if any(not isinstance(value, str) or not value for value in ordered):
+            raise ValueError("execution_ids must contain non-empty strings")
+        keys = {value: self._key("execution", value) for value in ordered}
+        records = await self._store.read_records(tuple(keys.values())) if keys else {}
+        values: dict[str, ExecutionTimelineRecord] = {}
+        for execution_id, key in keys.items():
+            record = records.get(key)
+            if record is None:
+                continue
+            value = decode_execution_timeline(record.data)
+            if record.kind != "execution" or record.key_digest != key or value.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values[execution_id] = value
+        return values
 
     async def get_recovery(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         execution = await self.get(execution_id, tenant_id=tenant_id)
@@ -1503,7 +1536,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 revision=stored_value.revision + len(pending_events) + 1,
                 event_seq=stored_value.event_seq + len(pending_events) + 1,
                 result=commit.result,
-            )
+            ).finalize_terminal(commit.result)
             replacements = [
                 RecordReplacement(
                     await self._projected_content(stored, next_execution),
@@ -1694,7 +1727,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         # Pending turns opt out of the post-terminal dependency admission window.
         final = replace(commit.execution, result=commit.result, event_seq=len(events), retention_closed=True,
-                        revision=commit.expected_revision + len(audit_events) + 1)
+                        revision=commit.expected_revision + len(audit_events) + 1).finalize_terminal(commit.result)
         identity = self._idempotency._identity_key(
             reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
         )

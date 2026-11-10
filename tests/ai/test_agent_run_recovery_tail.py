@@ -152,7 +152,6 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
     from linktools.ai.history._projection import StepExecutionHistoryReader
     from linktools.ai.runtime._tool import RuntimeToolOperationBridge
     from linktools.ai.persistence._runtime_commands import StateCommands
-    from linktools.ai.storage import PayloadPolicy
 
     namespace = "replayed-model"
     run_id = make_agent_run_id(
@@ -178,7 +177,7 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
                 state.checkpoint.tools, state.object_store(PersistenceDomain.CHECKPOINT),
                 namespace=namespace, tenant_id="tenant", execution_id="execution",
                 agent_run_id=run_id, binding_digest=execution.binding_digest,
-                owner=owner, background_tasks=set(), payload_policy=PayloadPolicy(),
+                owner=owner, background_tasks=set(),
                 terminal_commands=commands, producer_generation=producer_generation,
             )
 

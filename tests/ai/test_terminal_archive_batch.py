@@ -4,12 +4,11 @@
 """Terminal archive sharing preserves owner facts and immutable caller plans."""
 
 import hashlib
-import json
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 import pytest
 from sqlalchemy import event, select
@@ -433,7 +432,8 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
     run = AgentRunRecord("run")
     timestamp = run.started_at
     messages = (
-        ModelRequest(parts=[UserPromptPart("retained request " * 2000, timestamp=timestamp)]),
+        ModelRequest(parts=[UserPromptPart(["retained request " * 2000,
+                                            BinaryContent(b"request image", media_type="image/png")], timestamp=timestamp)]),
         ModelResponse(parts=[TextPart("response")], timestamp=timestamp),
         ModelRequest(parts=[UserPromptPart("next request", timestamp=timestamp)]),
     )
@@ -453,10 +453,9 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
             local_message_count=2, local_messages=messages[:2], prepared=prepared,
         )
         request_object = next(
-            content.payload.ref for native in prepared.native_messages.values()
-            for _identity, body in native.messages
-            for content in (ContentRecord.from_json(json.loads(body)),)
-            if content.codec == "model-message" and content.raw_size > 16 * 1024
+            reference for native in prepared.native_messages.values()
+            for _identity, content in native.messages
+            for reference in content.object_refs()
         )
         assert request_object is not None
         await archive.sync_projection(

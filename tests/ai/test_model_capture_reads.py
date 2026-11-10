@@ -896,7 +896,7 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
         await state.close()
 
 
-async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
+async def test_model_reads_preserve_custom_archive_overrides() -> None:
     from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 
     state = Persistence(PersistenceStorage.in_memory())
@@ -914,6 +914,9 @@ async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
                 return await super().list_model_interactions(**kwargs)
             async def read_model_interactions_with_run(self, **kwargs):
                 raise AssertionError("custom archive must retain its independent operations")
+            async def resolve_model_interactions(self, interactions, **kwargs):
+                calls.append("resolve")
+                return await super().resolve_model_interactions(interactions, **kwargs)
         custom = CustomArchive(
             archive.state_store, object_store=None, namespace=_NAMESPACE,
             tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
@@ -921,5 +924,16 @@ async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
         page = await _metadata(_service(state, reader=_reader(state, store=custom)))
         assert [item.model_request_seq for item in page] == [1]
         assert calls == ["run", "interactions"]
+        service = _service(state, reader=_reader(state, store=custom))
+        calls.clear()
+        page = await service.model_interactions("execution", principal=_PRINCIPAL, include_content=True)
+        assert len(page.items) == 1 and page.items[0].content_included
+        assert "interactions" in calls and "resolve" in calls
+        calls.clear()
+        items = await service.read_model_interactions(
+            "execution", principal=_PRINCIPAL, identities=((1, 1),), include_content=True,
+        )
+        assert len(items) == 1 and items[0].content_included
+        assert calls == ["run", "interactions", "resolve"]
     finally:
         await state.close()

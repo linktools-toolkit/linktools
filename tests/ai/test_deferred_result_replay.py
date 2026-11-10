@@ -44,7 +44,7 @@ from linktools.ai.persistence.contracts import (
     PendingDeferredCall,
     PendingToolContinuation,
 )
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from linktools.ai.model._tool_return_codec import encode_tool_return_content
@@ -253,7 +253,7 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         _AllowAuthorization(),
         objects=InMemoryObjectStore(),
         object_key_factory=object.__new__(ObjectKeyFactory),
-        payload_policy=PayloadPolicy(),
+
     )
     request = ExternalSupplyRequest(
         principal,
@@ -384,7 +384,7 @@ async def test_deferred_list_rejects_another_tenant(approvals: bool) -> None:
             object(), executions, TenantAuthorizationPolicy(),
             objects=InMemoryObjectStore(),
             object_key_factory=object.__new__(ObjectKeyFactory),
-            payload_policy=PayloadPolicy(),
+
         )
     with pytest.raises(AIError) as error:
         await service.list("execution", principal=Principal("other", "another-tenant", "service"))
@@ -407,7 +407,7 @@ async def test_deferred_list_respects_custom_authorization(approvals: bool) -> N
     else:
         service = DefaultExternalService(
             object(), executions, Deny(), objects=InMemoryObjectStore(),
-            object_key_factory=object.__new__(ObjectKeyFactory), payload_policy=PayloadPolicy(),
+            object_key_factory=object.__new__(ObjectKeyFactory),
         )
     with pytest.raises(AIError) as error:
         await service.list("execution", principal=Principal("approver", "tenant", "service"))
@@ -426,7 +426,7 @@ def _structured_external_service(*, inline: bool = True):
     service = DefaultExternalService(
         calls, _Executions(pending, approvals=False), _AllowAuthorization(),
         objects=objects, object_key_factory=factory,
-        payload_policy=PayloadPolicy(inline_limit_bytes=65536 if inline else 0),
+
     )
     request = ExternalSupplyRequest(
         Principal('workspace', 'tenant', PrincipalKind.LOCAL_TRUSTED.value), call_id, 'supply-key',
@@ -666,7 +666,7 @@ async def test_external_independent_sqlite_contenders_share_one_result_owner(
         pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}))
         services = [DefaultExternalService(
             Contender(state.checkpoint.external_calls), _Executions(pending, approvals=False), _AllowAuthorization(),
-            objects=objects, object_key_factory=factory, payload_policy=PayloadPolicy(),
+            objects=objects, object_key_factory=factory,
         ) for state in (first, second)]
         other = replace(request, resolution=ExternalCallSucceeded(
             StructuredContent({'count': 2 if changed else 1}, content='fixed rendering', tag='state')))

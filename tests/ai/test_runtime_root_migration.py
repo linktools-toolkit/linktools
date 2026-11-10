@@ -20,7 +20,7 @@ from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.persistence.runs import AgentRunRecord
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.memory import PersistentMemoryStore
-from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, PayloadPolicy, read_object
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, read_object
 
 from ._filesystem_legacy_fixture_helpers import _extract, legacy_provenance, load_legacy_source
 from .test_step_projection import _execution
@@ -216,7 +216,7 @@ async def test_filesystem_snapshot_preserves_core_memory_objects_and_replay_rece
         return PersistentMemoryStore(
             persistence.memory, object_store=persistence.object_store(PersistenceDomain.MEMORY),
             namespace=provenance["namespace"], tenant_id=provenance["tenant_id"], execution_id="execution",
-            memory_scope="retained", payload_policy=PayloadPolicy(inline_limit_bytes=64),
+            memory_scope="retained",
         )
 
     reference = await _export_legacy(source, objects, limits, provenance=provenance)

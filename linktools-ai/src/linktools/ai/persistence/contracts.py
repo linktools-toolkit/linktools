@@ -40,6 +40,7 @@ from ..execution import (
 import binascii
 import json
 from ..session import SessionRepository as SessionRepositoryContract
+from ..execution import ExecutionTimelineRecord
 from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -523,7 +524,7 @@ class ModelClientBodyRef:
     codec: str
     raw_digest: str
     raw_size: int
-    content: RuntimePayloadRef
+    content: RuntimePayloadRef | ArchiveRoot
 
     def __post_init__(self) -> None:
         if (
@@ -534,7 +535,8 @@ class ModelClientBodyRef:
             or isinstance(self.raw_size, bool)
             or not isinstance(self.raw_size, int)
             or self.raw_size < 0
-            or not isinstance(self.content, RuntimePayloadRef)
+            or not isinstance(self.content, (RuntimePayloadRef, ArchiveRoot))
+            or isinstance(self.content, ArchiveRoot) and (self.content.count != 1 or self.codec != "raw")
         ):
             raise ValueError("model client body reference is invalid")
 
@@ -1246,13 +1248,6 @@ class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
         execution_id: str,
         start_message_index: int,
         end_message_index: int,
-        stored_user_input: StoredUserInput,
-        output: StoredPayload | None,
-        status: ExecutionStatus,
-        created_at: datetime,
-        updated_at: datetime,
-        error_code: str | None,
-        safe_error_details: Mapping[str, JsonValue],
         allow_unadmitted: bool = False,
         admitted_turn: SessionTurnRef | None = None,
     ) -> SessionTurnCommit | None: ...
@@ -1333,6 +1328,10 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):
+    async def get_timeline_many(
+        self, execution_ids: Sequence[str], *, tenant_id: str,
+    ) -> Mapping[str, ExecutionTimelineRecord]: ...
+
     async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
     async def create_execution(
         self, record: ExecutionRecord
@@ -2025,9 +2024,11 @@ class EvaluationRepository(RuntimeRepository, Protocol):
     async def publish_report(self, report: EvaluationReport | ComparisonReport) -> EvaluationReport | ComparisonReport: ...
     async def purge_expired_datasets(self, *, now: datetime, owner_principal_id: str, limit: int) -> tuple[DatasetRef, ...]: ...
     async def list_expired(self, *, now: datetime, limit: int, owner_principal_id: str | None = None) -> tuple[EvaluationRecord, ...]: ...
-    async def purge(self, experiment_id: str, *, now: datetime, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = ()) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]: ...
+    async def purge(self, experiment_id: str, *, now: datetime, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = (),
+                    capture_keys: tuple[str, ...] = ()) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]: ...
     async def pending_cleanup(self, *, owner_principal_id: str, limit: int | None) -> tuple[EvaluationCleanupRecord, ...]: ...
-    async def acknowledge_cleanup(self, experiment_id: str, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...]) -> None: ...
+    async def acknowledge_cleanup(self, experiment_id: str, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = (),
+                                  *, capture_keys: tuple[str, ...] = ()) -> None: ...
     async def get_report_at(self, cutoff: EvaluationReadCutoff) -> EvaluationReport | None: ...
     async def get_report(self, report_id: str) -> EvaluationReport | ComparisonReport | None: ...
 

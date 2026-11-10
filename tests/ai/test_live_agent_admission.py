@@ -86,10 +86,10 @@ def _port(
     return AgentExecutionPort(
         persistence=SimpleNamespace(tenant_id="tenant"), compiled=compiled,
         _binding_contract=None if captured is None else captured.binding_contract,
-        compiler=old, service=admissions, sessions=admissions,
-        operations=SimpleNamespace(ensure_open=lambda: None), watch_tree=None,
+        _compiler=old, _service=admissions, _sessions=admissions,
+        _operations=SimpleNamespace(ensure_open=lambda: None), watch_tree=None,
         resolve_binding=resolver.resolve, default_principal=Principal("user", "tenant"),
-        correlation={}, captures=None, captured=captured is not None, agent_id=agent_id,
+        correlation={}, _captures=None, captured=captured is not None, agent_id=agent_id,
         resolve_current=resolver.resolve_agent, restore_binding=resolver.restore,
     )
 

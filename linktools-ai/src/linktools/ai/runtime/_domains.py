@@ -11,7 +11,7 @@ from ..core import BudgetUsage, Principal
 from ..observe import WaitResult, RuntimeMetricsControl
 from ..inputs import CaptureInputRequest, ExecutionInputCaptureRef, InputCaptures
 from ..execution import ExecutionRecoveryEffect, ResolveToolEffectRequest, ToolEffectResolutionResult
-from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, CloseSessionRequest, CreateSessionRequest, ExecutionEvent, ExecutionHandle, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ForkSessionRequest, ListExecutionRequest, ListSessionRequest, ModelInteractionItem, Page, RetryExecutionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UpdateSessionRequest, UsageReadCutoff, ExecutionService, SessionService
+from ..execution import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, ArtifactDownload, ArtifactView, CancelExecutionRequest, CancelExecutionResult, CloseSessionRequest, CreateSessionRequest, ExecutionEvent, ExecutionHistoryItem, ExecutionResult, ExecutionTraceItem, ExecutionTreeEvent, ExecutionObservationEvent, ExecutionView, ExternalCallView, ExternalResolution, ExternalSupplyRequest, ExternalSupplyResult, ForkExecutionRequest, ForkSessionRequest, ListExecutionRequest, ListSessionRequest, ModelInteractionItem, Page, RetryExecutionRequest, SessionDetail, SessionHistoryItem, SessionTurn, SessionView, TranscriptItem, UpdateSessionRequest, UsageReadCutoff, ExecutionService, SessionService
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -43,10 +43,12 @@ class RuntimeExecutions(Generic[AppT]):
         get_execution: Callable[[str, Principal | None], Awaitable["Execution[AppT]"]],
         input_captures: InputCaptures | None = None,
         *,
+        bind_execution: Callable[[str, Principal], "Execution[AppT]"],
         ensure_open: Callable[[], None] = lambda: None,
     ) -> None:
         self._service = service
         self._get_execution = get_execution
+        self._bind_execution = bind_execution
         self._input_captures = input_captures
         self._ensure_open = ensure_open
 
@@ -127,13 +129,15 @@ class RuntimeExecutions(Generic[AppT]):
             include_model_interactions=include_model_interactions,
         )
 
-    async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
+    async def retry(self, execution_id: str, request: RetryExecutionRequest) -> "Execution[AppT]":
         self._ensure_open()
-        return await self._service.retry(execution_id, request)
+        handle = await self._service.retry(execution_id, request)
+        return self._bind_execution(handle.execution_id, request.principal)
 
-    async def fork(self, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
+    async def fork(self, execution_id: str, request: ForkExecutionRequest) -> "Execution[AppT]":
         self._ensure_open()
-        return await self._service.fork(execution_id, request)
+        handle = await self._service.fork(execution_id, request)
+        return self._bind_execution(handle.execution_id, request.principal)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         self._ensure_open()
@@ -152,7 +156,7 @@ class RuntimeExecutions(Generic[AppT]):
         *,
         principal: Principal,
         idempotency_key: str | None = None,
-    ) -> ExecutionHandle:
+    ) -> "Execution[AppT]":
         """Take over recoverable work after its previous executor stopped.
 
         Reusing a key observes the same recovery attempt. Without a key each
@@ -162,9 +166,10 @@ class RuntimeExecutions(Generic[AppT]):
         key can be retried after its results arrive.
         """
         self._ensure_open()
-        return await self._service.recover(
+        handle = await self._service.recover(
             execution_id, principal=principal, idempotency_key=idempotency_key,
         )
+        return self._bind_execution(handle.execution_id, principal)
 
     async def trace(
         self,
@@ -252,14 +257,21 @@ class RuntimeSessions(Generic[AppT]):
         service: SessionService,
         get_session: Callable[[str, Principal | None], Awaitable["Session[AppT]"]],
         *,
+        bind_session: Callable[[SessionView, Principal], "Session[AppT]"],
         ensure_open: Callable[[], None] = lambda: None,
     ) -> None:
         self._service = service
         self._get_session = get_session
+        self._bind_session = bind_session
         self._ensure_open = ensure_open
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)
+
+    async def inspect(self, session_id: str, *, principal: Principal) -> SessionView:
+        """Read current session state without constructing a bound handle."""
+        self._ensure_open()
+        return await self._service.get(session_id, principal=principal)
 
     async def lookup_admission(
         self, session_id: str, *, principal: Principal, idempotency_key: str,
@@ -275,9 +287,10 @@ class RuntimeSessions(Generic[AppT]):
             session_id, principal=principal, idempotency_key=idempotency_key,
         )
 
-    async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
+    async def create(self, agent_id: str, request: CreateSessionRequest) -> "Session[AppT]":
         self._ensure_open()
-        return await self._service.create(agent_id, request)
+        view = await self._service.create(agent_id, request)
+        return self._bind_session(view, request.principal)
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
@@ -308,9 +321,10 @@ class RuntimeSessions(Generic[AppT]):
     async def timeline(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> Page[SessionTurn]:
         return await self._service.timeline(session_id, principal=principal, cursor=cursor, limit=limit)
 
-    async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> SessionView:
+    async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> "Session[AppT]":
         self._ensure_open()
-        return await self._service.fork(agent_id, session_id, request)
+        view = await self._service.fork(agent_id, session_id, request)
+        return self._bind_session(view, request.principal)
 
     async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         self._ensure_open()

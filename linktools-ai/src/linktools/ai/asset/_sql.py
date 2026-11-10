@@ -18,7 +18,6 @@ from ..storage import (
     MetadataLoadMode,
     ObjectRef,
     ObjectStore,
-    PayloadPolicy,
     SqlObjectStore,
     StorageBatchResult,
     StorageChange,
@@ -34,7 +33,6 @@ from ..storage import (
     build_object_sql_metadata,
     create_sql_storage_context,
     dialect_for_name,
-    payload_fits_inline,
     sql_audit_columns,
     sql_audit_indexes,
     sql_id_column,
@@ -209,7 +207,6 @@ class SqlAssetBackend:
         *,
         namespace: str,
         object_store: ObjectStore | None = None,
-        payload_policy: "PayloadPolicy | None" = None,
     ) -> None:
         validate_asset_namespace(namespace)
         dialect_for_name(engine.dialect.name)
@@ -219,7 +216,6 @@ class SqlAssetBackend:
         self._context = create_sql_storage_context(engine)
         self._metadata = build_asset_sql_metadata()
         self._object_store = object_store or SqlObjectStore.from_context(self._context)
-        self._payload_policy = payload_policy or PayloadPolicy()
         if object_store is None:
             build_object_sql_metadata(metadata=self._metadata)
         self._ready = False
@@ -511,23 +507,19 @@ class SqlAssetBackend:
                 info = _next_info(change, current[change.key], next_revision, self._root)
                 if change.operation is StorageOperation.PUT:
                     content = bytes(change.value or b"")
-                    inline = StoredPayload.inline_bytes(content)
-                    if payload_fits_inline(inline, self._payload_policy):
-                        info = replace(info, content=inline)
-                    else:
-                        object_key = _asset_object_key(self._namespace_digest, info.digest)
-                        await _put_asset_object(self._object_store, object_key, content)
-                        info = replace(
-                            info,
-                            content=StoredPayload.object(
-                                ObjectRef(
-                                    self._object_store.store_id,
-                                    object_key,
-                                    info.digest,
-                                    info.size,
-                                )
-                            ),
-                        )
+                    object_key = _asset_object_key(self._namespace_digest, info.digest)
+                    await _put_asset_object(self._object_store, object_key, content)
+                    info = replace(
+                        info,
+                        content=StoredPayload.object(
+                            ObjectRef(
+                                self._object_store.store_id,
+                                object_key,
+                                info.digest,
+                                info.size,
+                            )
+                        ),
+                    )
                 prepared[change.key] = info
         entries = self._metadata.tables["ai_asset_entries"]
         history = self._metadata.tables["ai_asset_changes"]
@@ -756,13 +748,13 @@ class SqlAssetBackend:
         parsed_history = [(row, self._audit_info(row, head_revision)) for row in history_rows]
         checked_objects: set[str] = set()
         for _, info in (*parsed_entries, *parsed_history):
-            object_key = _asset_object_key(self._namespace_digest, info.digest)
-            if info.status is not StorageEntryStatus.NORMAL or object_key in checked_objects:
+            if info.status is not StorageEntryStatus.NORMAL:
                 continue
-            checked_objects.add(object_key)
-            if info.content is not None and info.content.kind == "inline":
+            reference = _asset_object_ref(self._object_store, self._namespace_digest, info)
+            if reference.key in checked_objects:
                 continue
-            stat = await self._object_store.stat(object_key)
+            checked_objects.add(reference.key)
+            stat = await self._object_store.stat(reference.key)
             if stat is None or stat.digest != info.digest or stat.size != info.size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         grouped: dict[str, list[tuple[Mapping[str, object], AssetInfo]]] = {}
@@ -973,21 +965,19 @@ async def _put_asset_object(store: ObjectStore, key: str, value: bytes) -> None:
 
 
 async def _read_asset_object(store: ObjectStore, namespace_digest: bytes, key: AssetKey, info: AssetInfo) -> bytes:
-    if info.content is not None and info.content.kind == "inline":
-        value = info.content.decode()
-        if not isinstance(value, bytes):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value
-    if info.content is not None and info.content.ref is not None:
-        return await _read_object_bytes(
-            store,
-            info.content.ref.key,
-            info.digest,
-            info.size,
-        )
-    return await _read_object_bytes(
-        store, _asset_object_key(namespace_digest, info.digest), info.digest, info.size
-    )
+    if info.key != key:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    reference = _asset_object_ref(store, namespace_digest, info)
+    return await _read_object_bytes(store, reference.key, reference.digest, reference.size)
+
+
+def _asset_object_ref(store: ObjectStore, namespace_digest: bytes, info: AssetInfo) -> ObjectRef:
+    content = info.content
+    if (content is None or content.kind != "object" or content.ref is None
+            or content.ref.store_id != store.store_id
+            or content.ref.key != _asset_object_key(namespace_digest, info.digest)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return content.ref
 
 
 async def _read_object_bytes(store: ObjectStore, key: str, digest: str, size: int) -> bytes:

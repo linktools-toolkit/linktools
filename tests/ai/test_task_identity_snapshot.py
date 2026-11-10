@@ -12,7 +12,7 @@ import pytest
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.codec import _encode_persisted_domain, decode_record, encode_envelope, encode_record
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, read_object
@@ -36,7 +36,7 @@ async def _snapshot(
         features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         async with Runtime.attach(persistence=state, features=model_features(FixtureModels(), features)) as runtime:
             task = Task.from_agent("identity.agent", runtime.agents.get())
-            captures = TaskGraphBindingCaptureStore(state.namespace, state.object_store(PersistenceDomain.TASK))
+            captures = TaskGraphBindingCaptureStore(state.namespace, state.task.tasks.state_store)
             await captures.capture(submission.admission, submission.graph, tasks=(task,))
         if phase in {"admitted", "cancelled_admitted"}:
             await state.task.admissions.admit_prepared(submission)

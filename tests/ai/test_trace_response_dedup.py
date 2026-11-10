@@ -84,15 +84,15 @@ async def _stored_message_records(
     if isinstance(root, NativeMessageRoot):
         table = build_step_sql_metadata().tables["ai_step_messages"]
         async with archive.state_store.context.engine.connect() as connection:
-            bodies = (await connection.execute(select(table.c.message).where(
+            bodies = (await connection.execute(select(table).where(
                 table.c.store_digest == root.store_digest, table.c.sha256.in_(raw_ids),
-            ))).scalars().all()
-        return tuple(ContentRecord.from_json(json.loads(body)) for body in bodies)
+            ))).mappings().all()
+        return tuple(ContentRecord.from_native_row(body) for body in bodies)
     content = await archive.transcript_repository.content_archive()
     records = await content.store.read(lambda tx: tx.list_records(RecordQuery(
         kind="archive_content", scope_digest=bytes.fromhex(root.content_scope),
     )))
-    return tuple(value for record in records for value in (ContentRecord.from_json(record.data),)
+    return tuple(value for record in records for value in (ContentRecord.from_record(record),)
                  if value.codec == "model-message" and value.raw_digest in raw_ids)
 
 
@@ -175,15 +175,8 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 assert len(raw) == item.size and hashlib.sha256(raw).hexdigest() == item.digest
                 actual_bytes += len(raw)
             assert actual_bytes == sum(item.size for _, item in stats)
-            if size == 32:
-                assert response_content.payload.ref is None
-            else:
-                response_ref = response_content.payload.ref
-                assert response_ref is not None
-                assert [label for label, item in stats if item.key == response_ref.key] == ["archive"]
-                assert [(label, count) for label, key, count in puts if key == response_ref.key] == [
-                    ("archive", response_ref.size),
-                ]
+            assert response_content.payload is None and isinstance(response_content.body, bytes)
+            assert not puts, "plain response text must not create an object"
             report = {
                 "backend": backend, "response_chars": size,
                 "interaction_metadata_bytes": sum(len(canonical_json_bytes(item.data)) for item in persisted),
@@ -194,7 +187,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 "physical_store_count": len(physical_sources),
                 "archive_metadata_bytes": sum(len(canonical_json_bytes(item.data)) for item in archive_records),
                 "response_content_records": len(response_records),
-                "response_payload_bytes": response_content.payload.size,
+                "response_payload_bytes": len(response_content.body),
             }
 
             async def reject_content(key: str) -> AsyncIterator[bytes]:

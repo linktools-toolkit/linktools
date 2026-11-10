@@ -2408,17 +2408,11 @@ class StateCommands:
             )
             successful = execution.status is ExecutionStatus.SUCCEEDED
             if (session is None or committed is None or session.history_id != expected_session.history_id
-                    or committed.status is not execution.status
-                    or committed.stored_user_input.digest != execution.stored_user_input.digest
-                    or committed.error_code != execution.error_code
-                    or committed.safe_error_details != execution.safe_error_details
-                    or (committed.output is not None) != successful
                     or (result.result.output is not None) != successful):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if successful:
                 if (execution.conversation_agent_run_id is None
-                        or committed.end_message_index <= committed.start_message_index
-                        or committed.output.digest != result.result.output.digest):
+                        or committed.end_message_index <= committed.start_message_index):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             elif committed.start_message_index != 0 or committed.end_message_index != 0:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2603,24 +2597,6 @@ class StateCommands:
         assert resolved is not None
         return resolved
 
-    async def retain_conversation_turn_payloads(
-        self, execution: ExecutionRecord, result: ResultRecord | None,
-    ) -> tuple[StoredUserInput, StoredPayload | None]:
-        archive = self._conversation_run_store
-        if archive is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        history = archive.transcript_repository
-        stored_input = replace(
-            execution.stored_user_input,
-            payload=await history.retain_payload(
-                execution.stored_user_input.payload, source_domain=PersistenceDomain.EXECUTION,
-            ),
-        )
-        output = None if result is None else result.output
-        if output is not None:
-            output = await history.retain_payload(output, source_domain=PersistenceDomain.EXECUTION)
-        return stored_input, output
-
     async def commit_pending_turn(
         self, reservation: ExecutionStartReservation, commit: ExecutionTerminalCommit, *,
         expected_session: SessionRecord | None = None, next_cursor: ConversationCursor | None = None,
@@ -2761,7 +2737,6 @@ class StateCommands:
                 finally:
                     await prefix.abort()
             return existing
-        turn_payloads = None if expected_session is None else await self.retain_conversation_turn_payloads(execution, commit.result)
         prepared = None
         history = None
         final_cursor = None
@@ -2876,10 +2851,7 @@ class StateCommands:
                 await self._conversation.commit_pending_turn_in_transaction(
                     conversation_transaction, expected=expected_session, execution_id=execution.execution_id,
                     next_cursor=final_cursor, start_message_index=start, end_message_index=end,
-                    stored_user_input=turn_payloads[0], output=turn_payloads[1],
-                    status=commit.execution.status, created_at=commit.execution.created_at,
-                    updated_at=commit.execution.updated_at, error_code=commit.execution.error_code,
-                    safe_error_details=commit.execution.safe_error_details,
+                    successful=successful,
                 )
             elif prepared is not None:
                 assert archive is not None and conversation_agent_run is not None
@@ -3034,8 +3006,7 @@ class StateCommands:
             or expected_execution.event_seq != commit.expected_event_seq
         ):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
-        turn_payloads = (await self.retain_conversation_turn_payloads(commit.execution, commit.result)
-                         if session_id is not None and commit.execution.conversation else None)
+        publish_turn = session_id is not None and commit.execution.conversation
         effective_commit = commit
         if not commit.execution.durable_trace and (
             execution_run is not None or execution_events or execution_checkpoints or execution_projections
@@ -3257,16 +3228,12 @@ class StateCommands:
                     if session_id is not None:
                         conversation_transaction = group.transaction(self._conversation.state_store)
                         if conversation_agent_run is None or conversation_checkpoint is None:
-                            if turn_payloads is not None:
+                            if publish_turn:
                                 await self._conversation.commit_timeline_turn_in_transaction(
                                     conversation_transaction, session_id, tenant_id=self._tenant_id,
                                     execution_id=commit.execution.execution_id,
                                     start_message_index=0 if timeline_range is None else timeline_range[0],
                                     end_message_index=0 if timeline_range is None else timeline_range[1],
-                                    stored_user_input=turn_payloads[0], output=turn_payloads[1],
-                                    status=effective_commit.execution.status, created_at=effective_commit.execution.created_at,
-                                    updated_at=effective_commit.execution.updated_at, error_code=effective_commit.execution.error_code,
-                                    safe_error_details=effective_commit.execution.safe_error_details,
                                     allow_unadmitted=commit.execution.started_at is None, admitted_turn=session_turn,
                                 )
                             await self._conversation.release_execution_in_transaction(
@@ -3316,10 +3283,7 @@ class StateCommands:
                                 execution_id=commit.execution.execution_id,
                                 start_message_index=timeline_range[0],
                                 end_message_index=timeline_range[1],
-                                stored_user_input=turn_payloads[0], output=turn_payloads[1],
-                                status=effective_commit.execution.status, created_at=effective_commit.execution.created_at,
-                                updated_at=effective_commit.execution.updated_at, error_code=effective_commit.execution.error_code,
-                                safe_error_details=effective_commit.execution.safe_error_details, admitted_turn=session_turn,
+                                admitted_turn=session_turn,
                             )
                     elif conversation_agent_run is not None:
                         await self._conversation_run_store.materialize_checkpoint_in_transaction(
@@ -3828,16 +3792,12 @@ class StateCommands:
             result = await commit_execution_with_reconciliation(terminal_stores)
         if session_id is not None:
             async def release_conversation(transaction: StateTransaction) -> None:
-                if turn_payloads is not None:
+                if publish_turn:
                     await self._conversation.commit_timeline_turn_in_transaction(
                         transaction, session_id, tenant_id=self._tenant_id,
                         execution_id=commit.execution.execution_id,
                         start_message_index=0 if timeline_range is None else timeline_range[0],
                         end_message_index=0 if timeline_range is None else timeline_range[1],
-                        stored_user_input=turn_payloads[0], output=turn_payloads[1],
-                        status=effective_commit.execution.status, created_at=effective_commit.execution.created_at,
-                        updated_at=effective_commit.execution.updated_at, error_code=effective_commit.execution.error_code,
-                        safe_error_details=effective_commit.execution.safe_error_details,
                         allow_unadmitted=commit.execution.started_at is None,
                     )
                 await self._conversation.release_execution_in_transaction(
@@ -3856,7 +3816,7 @@ class StateCommands:
                         raise
                     session = await self._load_session(session_id, tenant_id=self._tenant_id)
                     if session is not None and session.active_execution_id is None:
-                        if turn_payloads is not None:
+                        if publish_turn:
                             await self.verify_conversation_turn(effective_commit.execution, effective_commit.result)
                         break
         return result
@@ -3871,17 +3831,15 @@ class StateCommands:
         if execution.status is ExecutionStatus.SUCCEEDED and message_range is None:
             await self.verify_conversation_turn(execution, result)
             return
-        payloads = await self.retain_conversation_turn_payloads(execution, result)
+        if result is None or execution.completed_at is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         start, end = (0, 0) if message_range is None else message_range
 
         async def finish(transaction: StateTransaction) -> None:
             await self._conversation.commit_timeline_turn_in_transaction(
                 transaction, execution.session_id, tenant_id=self._tenant_id,
                 execution_id=execution.execution_id, start_message_index=start,
-                end_message_index=end, stored_user_input=payloads[0], output=payloads[1],
-                status=execution.status, created_at=execution.created_at,
-                updated_at=execution.updated_at, error_code=execution.error_code,
-                safe_error_details=execution.safe_error_details,
+                end_message_index=end,
                 allow_unadmitted=execution.started_at is None,
             )
             await self._conversation.release_execution_in_transaction(
@@ -3913,17 +3871,8 @@ class StateCommands:
         )
         if value is None:
             return
-        expected_output = None if result is None else result.output
-        if (value.status is not execution.status
-                or value.created_at != execution.created_at
-                or value.updated_at > execution.updated_at
-                or value.updated_at < result.created_at
-                or value.error_code != execution.error_code
-                or value.safe_error_details != execution.safe_error_details
-                or value.stored_user_input.view != execution.stored_user_input.view
-                or value.stored_user_input.digest != execution.stored_user_input.digest
-                or (value.output is None) != (expected_output is None)
-                or value.output is not None and value.output.digest != expected_output.digest):
+        if (execution.completed_at is None or execution.result != result
+                or value.execution_id != execution.execution_id or value.session_id != execution.session_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _materialize_prepared_checkpoint_with_reconciliation(
@@ -4180,6 +4129,7 @@ class StateCommands:
                     updated_at=max(commit.execution.updated_at, current.updated_at),
                 ),
             )
+        commit = replace(commit, execution=commit.execution.finalize_terminal(commit.result))
         if commit.idempotency is not None:
             return commit
         return replace(
@@ -4285,7 +4235,7 @@ class StateCommands:
             revision=expected_revision,
             event_seq=expected_event_seq,
             result=commit.result,
-        )
+        ).finalize_terminal(commit.result)
         if not _same_execution_except_hold_metadata(execution, expected_terminal):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history_seal = await self._execution.get_history_seal(

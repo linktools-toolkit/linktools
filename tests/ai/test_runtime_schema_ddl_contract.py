@@ -271,7 +271,7 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     selected = captured[0]
     assert set(selected.tables) == {
         "ai_state_records", "ai_state_aliases", "ai_state_facts",
-        "ai_state_sequences", "ai_state_operations", "ai_step_messages", "ai_step_sequences",
+        "ai_state_sequences", "ai_state_operations", "ai_step_messages", "ai_step_sequences", "ai_native_content_edges",
     } | ({"ai_step_runs", "ai_step_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
     def compile_ddl(metadata: MetaData) -> list[str]:

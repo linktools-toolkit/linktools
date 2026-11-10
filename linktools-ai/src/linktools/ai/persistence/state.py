@@ -323,8 +323,11 @@ class StoredRecord:
     lease_expires_at: datetime | None
     data: Mapping[str, JsonValue]
     subject_digest: bytes | None = None
+    payload_bytes: bytes | None = None
 
     def __post_init__(self) -> None:
+        if self.payload_bytes is not None and type(self.payload_bytes) is not bytes:
+            raise TypeError("record binary payload must be frozen bytes")
         _require_digest(self.key_digest, "key_digest")
         if self.scope_digest is not None:
             _require_digest(self.scope_digest, "scope_digest")

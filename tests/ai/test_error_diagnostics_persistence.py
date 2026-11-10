@@ -42,7 +42,7 @@ from linktools.ai.persistence.contracts import (
     ResultRecord,
 )
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, StoredPayload
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -324,7 +324,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),
-        payload_policy=PayloadPolicy(),
+
     )
 
 

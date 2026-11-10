@@ -23,7 +23,7 @@ from linktools.ai.persistence import Persistence, PersistenceStorage, SqlStepSto
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore
 
 from ._runtime_test_helpers import (
     _Models, _UsageFunctionModel, model_features, native_checkpoint, tool_run_context,
@@ -45,7 +45,7 @@ def _bridge(
         state.checkpoint.tools, InMemoryObjectStore(), namespace="terminal-receipts",
         tenant_id="default", execution_id="execution", agent_run_id="run",
         binding_digest="b" * 64, owner="owner", background_tasks=set(),
-        payload_policy=PayloadPolicy(), fresh_execution=fresh,
+         fresh_execution=fresh,
         recovery_agent_run_id=recovery_run,
     )
 

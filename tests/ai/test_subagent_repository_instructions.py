@@ -32,7 +32,7 @@ from linktools.ai.spec import (
     RepositoryInstructionDocument,
     RepositoryInstructions,
 )
-from linktools.ai.storage import PayloadPolicy, StoredPayload
+from linktools.ai.storage import StoredPayload
 from ._runtime_test_helpers import execution_owner_fields
 
 
@@ -183,7 +183,6 @@ def _service(
         kwargs.update(
             instruction_resolver=resolver,
             object_key_factory=ObjectKeyFactory("subagent-instructions"),
-            payload_policy=PayloadPolicy(),
         )
     backend = _Launcher(state.execution.executions)
     runtime_bridge = _ExecutionRuntimeBridge()

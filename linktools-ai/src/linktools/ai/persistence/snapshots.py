@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from ._execution_binding import ExecutionBindingContent, expand_snapshot_binding, snapshot_binding_size
 
@@ -23,7 +23,7 @@ from ..errors import AIError, ErrorCode
 from ..steps import NativeStepSource, rekey_native_step_sources
 from ._step_backup import NativeStepBackup
 from ._native_backup_projection import NativeBackupProjections
-from ..storage import ObjectRef, ObjectStore, ObjectStoreInspection, StoredPayload, read_object
+from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
 from ._native_run_reference import NativeRunReferences
@@ -32,6 +32,7 @@ from ._sql import SqlStateStore
 from ._archive import ContentRecord
 from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
+from ..model.attachments import read_attachment_payload, attachment_payload_objects
 from ._archive_closure import (
     ArchiveClosure,
     NativeMessageClosure,
@@ -44,10 +45,8 @@ from ._archive_closure import (
 )
 from ._payload import decode_payload_bytes
 from .captures import (
-    input_capture_expiry_key,
-    input_capture_key,
-    iter_input_capture_dependencies,
-    validate_input_capture_payload,
+    CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
+    expand_snapshot_capture, snapshot_capture_size, restore_capture_value,
 )
 from ._capability_marker import has_capability_partition_marker
 from ._plan import PersistenceDomain
@@ -69,11 +68,13 @@ from ._snapshot import (
     SnapshotLimits,
     SnapshotExclusiveGuard,
     validate_snapshot_native_rows,
+    encode_native_message_row, decode_native_message_row,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
 from ._object_cleanup import (
-    ObjectCleanupResult,
+    ObjectCleanupResult, CaptureCleanupResult,
+    purge_unreferenced_captures as _purge_unreferenced_captures,
     purge_unreferenced_objects as _purge_unreferenced_objects,
 )
 from ._snapshot_validation import (
@@ -289,6 +290,37 @@ class RuntimeSnapshotOperations:
         self._resources = resources
         self._require_ready = require_ready
 
+    async def purge_unreferenced_captures(
+        self, candidates: tuple[str, ...], *, exclusive: SnapshotExclusiveGuard, limit: int = 100,
+    ) -> CaptureCleanupResult:
+        self._require_ready()
+        if self._resources.read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
+        return await _purge_unreferenced_captures(candidates,
+            namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
+            stores=self._resources.stores, capability_stores=self._resources.capability_stores,
+            exclusive=exclusive, limit=limit)
+
+    async def capture_objects(self, keys: tuple[str, ...]) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]:
+        """Read actual file references before capture metadata becomes cleanup work."""
+        from .captures import read_capture_record, capture_record_value, input_capture_expiry_key
+        from .codec import decode_domain
+        self._require_ready()
+        result = []
+        store = self._resources.stores[PersistenceDomain.TASK]
+        for key in keys:
+            record = await read_capture_record(store, namespace=self._resources.namespace,
+                tenant_id=self._resources.tenant_id, key=key)
+            if record is not None:
+                result.extend(iter_runtime_object_refs(capture_retention_value(record), default_domain=PersistenceDomain.TASK))
+            marker = await read_capture_record(store, namespace=self._resources.namespace,
+                tenant_id=self._resources.tenant_id, key=input_capture_expiry_key(key))
+            if marker is not None:
+                value = capture_record_value(marker)
+                if "cleanup_objects" in value:
+                    result.extend(decode_domain(value["cleanup_objects"], tuple[tuple[PersistenceDomain, ObjectRef], ...]))
+        return tuple(dict.fromkeys(result))
+
     async def purge_unreferenced_objects(
         self, candidates: tuple[tuple[PersistenceDomain, ObjectRef], ...], *,
         exclusive: SnapshotExclusiveGuard, limit: int = 100,
@@ -447,10 +479,6 @@ class RuntimeSnapshotOperations:
                             _validate_native_partition(root.store_digest, self._resources.namespace, self._resources.tenant_id)
                         sequences, messages = await _read_native_messages(store, roots, budget=capture_budget)
                         native_domain = PersistenceDomain.EXECUTION if scope in native_checkpoints else domain
-                        native_payloads[scope] = await _capture_native_payloads(
-                            scope, sequences, messages, budget=capture_budget,
-                            objects=self._resources.archive_object_store(native_domain),
-                            backup=native_checkpoints.get(scope))
                         native_rows[scope] = native_domain, sequences, messages
                 elif roots:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -458,6 +486,12 @@ class RuntimeSnapshotOperations:
             # Capture each physical group's roots and sources in the same read
             # view. Independent groups cannot share a database transaction.
             await group.read_many(tuple(store for _, store in members), capture_group)
+
+        for scope, (domain, sequences, messages) in native_rows.items():
+            native_payloads[scope] = await _capture_native_payloads(
+                scope, sequences, messages, budget=capture_budget,
+                objects=self._resources.archive_object_store(domain),
+                backup=native_checkpoints.get(scope))
 
         async def archives() -> AsyncIterator[_SnapshotArchive]:
             for archive in archive_sources:
@@ -566,18 +600,9 @@ async def _export_snapshot(
             }
         )
         copied_objects.add(identity)
-        if reference.key.startswith("v1/input-capture/"):
-            payload = await read_object(source_store, reference.key, expected_digest=reference.digest, expected_size=reference.size)
-            manifest = json.loads(payload)
-            validate_input_capture_payload(reference.key, manifest, namespace=source.namespace, tenant_id=source.tenant_id)
-            if _capture_contains_archived_context(manifest):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if not reference.key.startswith("v1/input-capture/result/"):
-                await copy_references(manifest, PersistenceDomain.TASK, archive_owner=False)
         if reference.key.startswith(
             (
                 "v1/asset-snapshot/",
-                "v1/task-graph-binding-capture/",
             )
         ):
             payload = await read_object(
@@ -599,36 +624,11 @@ async def _export_snapshot(
             for root in iter_native_message_roots(encoded):
                 _validate_native_partition(root.store_digest, source.namespace, source.tenant_id)
                 native_roots.setdefault(root.group_id, []).append(root)
-        for key, digest in iter_input_capture_dependencies(encoded, namespace=source.namespace, tenant_id=source.tenant_id):
-            capture_source = source.object_stores[PersistenceDomain.TASK]
-            marker = await capture_source.stat(input_capture_expiry_key(key))
-            if marker is not None:
-                await copy_reference(PersistenceDomain.TASK, ObjectRef(capture_source.store_id, marker.key, marker.digest, marker.size))
-                continue
-            stat = await capture_source.stat(key)
-            if stat is None or stat.digest != digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await copy_reference(PersistenceDomain.TASK, ObjectRef(capture_source.store_id, key, digest, stat.size))
         for source_domain, reference in iter_runtime_object_refs(
             encoded,
             default_domain=domain,
         ):
             await copy_reference(source_domain, reference)
-
-    if PersistenceDomain.TASK in source.readers:
-        capture_store = source.object_stores[PersistenceDomain.TASK]
-        if not isinstance(capture_store, ObjectStoreInspection):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        async for stat in capture_store.list_objects():
-            if not stat.key.startswith(tuple("v1/input-capture/" + kind + "/" for kind in ("agent", "task", "graph", "template", "expired"))):
-                continue
-            payload = await read_object(capture_store, stat.key, expected_digest=stat.digest, expected_size=stat.size)
-            value = json.loads(payload)
-            if not isinstance(value, Mapping) or value.get("namespace") != source.namespace or value.get("tenant_id") != source.tenant_id:
-                continue
-            if not stat.key.startswith("v1/input-capture/expired/") and await capture_store.stat(input_capture_expiry_key(stat.key)) is not None:
-                continue
-            await copy_reference(PersistenceDomain.TASK, ObjectRef(capture_store.store_id, stat.key, stat.digest, stat.size))
 
     for domain in sorted(source.readers, key=lambda item: item.value):
         store = source.readers[domain]
@@ -653,6 +653,8 @@ async def _export_snapshot(
             for value in page:
                 semantic_value = expand_snapshot_binding(value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
+                semantic_value = expand_snapshot_capture(semantic_value, binding_contents,
+                    namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
                 if domain is PersistenceDomain.EXECUTION and value.kind == "execution":
                     from .contracts import ExecutionRecord
                     execution = _decode_enveloped_domain(semantic_value.data, ExecutionRecord)
@@ -670,47 +672,16 @@ async def _export_snapshot(
                 domain_records.append(semantic_value)
                 encoded = encode_record(value)
                 raw_domain["records"].append(accept(encoded))
-                if value.kind != "evaluation_cleanup":
+                if value.kind in CAPTURE_RECORD_KINDS:
+                    if value.kind == "input_capture":
+                        await restore_capture_value(value, read_object=lambda ref: read_object(
+                            source.object_stores[PersistenceDomain.TASK], ref.key,
+                            expected_digest=ref.digest, expected_size=ref.size))
+                    if value.kind == "task_graph_binding_capture":
+                        _mark_archive_value(archive_closures, dict(value.data))
+                    await copy_references(capture_retention_value(semantic_value), domain, archive_owner=False)
+                elif value.kind != "evaluation_cleanup":
                     await copy_references(encoded, domain)
-                if value.kind in {"execution", "task_admission"}:
-                    if value.kind == "execution":
-                        from .contracts import ExecutionRecord
-                        identity = _decode_enveloped_domain(semantic_value.data, ExecutionRecord).execution_id
-                        capture_kind = "invocation"
-                    else:
-                        identity = _decode_enveloped_domain(value.data, TaskGraphAdmission).graph_id
-                        capture_kind = "declaration"
-                    key = input_capture_key(source.namespace, source.tenant_id, capture_kind, identity)
-                    stat = await source.object_stores[PersistenceDomain.TASK].stat(key)
-                    if stat is not None:
-                        await copy_reference(PersistenceDomain.TASK, ObjectRef(source.object_stores[PersistenceDomain.TASK].store_id, key, stat.digest, stat.size))
-                if (
-                    domain is PersistenceDomain.TASK
-                    and value.kind in {"task_admission", "task_submission_payload"}
-                ):
-                    admission = (
-                        _decode_enveloped_domain(value.data, TaskGraphAdmission)
-                        if value.kind == "task_admission"
-                        else _decode_enveloped_domain(value.data, TaskGraphSubmission).admission
-                    )
-                    key = task_graph_binding_capture_key(
-                        source.namespace,
-                        admission.principal.tenant_id,
-                        admission.graph_id,
-                        admission.initial_request_digest,
-                    )
-                    stat = await source.object_stores[PersistenceDomain.TASK].stat(key)
-                    if stat is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    await copy_reference(
-                        PersistenceDomain.TASK,
-                        ObjectRef(
-                            source.object_stores[PersistenceDomain.TASK].store_id,
-                            stat.key,
-                            stat.digest,
-                            stat.size,
-                        ),
-                    )
             last = page[-1]
             record_cursor = RecordScanCursor(last.kind, last.key_digest)
             if len(page) < 128:
@@ -772,6 +743,9 @@ async def _export_snapshot(
         snapshot_facts[domain] = tuple(domain_facts)
 
     validate_snapshot_references(snapshot_records, snapshot_facts)
+    capture_state_closure(tuple(record for records in snapshot_records.values() for record in records),
+        values=tuple(dict(fact.data) for facts in snapshot_facts.values() for fact in facts),
+        namespace=source.namespace, tenant_id=source.tenant_id, require_bindings=True)
     archives = []
     for scope, closure in archive_closures.items():
         domain = archive_domains[scope]
@@ -782,10 +756,9 @@ async def _export_snapshot(
             await copy_reference(domain, reference)
         for record in retained:
             if record.kind == "archive_content":
-                content = ContentRecord.from_json(record.data)
-                encoded = (content.payload.decode() if content.payload.ref is None else
-                           await read_object(source.archive_object_store(domain), content.payload.ref.key,
-                                             expected_digest=content.payload.digest, expected_size=content.payload.size))
+                content = ContentRecord.from_record(record)
+                encoded = await _read_content_payload(content, lambda ref: read_object(
+                    source.archive_object_store(domain), ref.key, expected_digest=ref.digest, expected_size=ref.size))
                 _validate_archive_content(content, encoded)
         archives.append({"scope_id": scope, "domain": domain.value,
                          "records": [accept(encode_record(record)) for record in retained]})
@@ -815,12 +788,13 @@ async def _export_snapshot(
             if captured is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             encoded = captured[(row["store_digest"], row["sha256"])]
-            content = ContentRecord.from_json(json.loads(row["message"]))
-            if content.payload.ref is not None:
-                await copy_reference(domain, content.payload.ref, encoded=encoded)
+            content = ContentRecord.from_native_row(row)
+            if content.payload is not None and content.payload.encoding == "json-attachments":
+                for reference, data in attachment_payload_objects(encoded, content.payload):
+                    await copy_reference(domain, reference, encoded=data)
         native_messages.append({"group_id": group_id, "domain": domain.value,
                                 "sequences": [accept(row) for row in retained_sequences],
-                                "messages": [accept(row) for row in retained_messages]})
+                                "messages": [accept(encode_native_message_row(row)) for row in retained_messages]})
     manifest = {
         "kind": "runtime-storage-snapshot",
         "format_version": 1,
@@ -943,6 +917,7 @@ async def restore_snapshot(
         if entry_count > limits.max_entries:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         validate_snapshot_native_rows(entry["sequences"], entry["messages"])
+        entry = {**entry, "messages": [decode_native_message_row(row) for row in entry["messages"]]}
         native_closures[entry["group_id"]] = NativeMessageClosure(entry["sequences"])
         native_entries[entry["group_id"]] = entry
     raw_checkpoints = manifest.get("native_checkpoints", [])
@@ -972,9 +947,6 @@ async def restore_snapshot(
             native_closures[group_id].mark(message_root.store_digest, message_root.slices)
     object_bytes = 0
     expected_objects: set[tuple[str, str, str, int]] = set()
-    expected_task_object_keys: set[str] = set()
-    capture_dependencies: set[tuple[str, str]] = set()
-    optional_capture_keys: set[str] = set()
     required_checkpoint_groups: set[str] = set()
     decoded_domains: dict[
         PersistenceDomain,
@@ -1037,7 +1009,8 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
         records = tuple(decode_record(value) for value in raw_records)
-        semantic_records = tuple(expand_snapshot_binding(record, binding_contents,
+        semantic_records = tuple(expand_snapshot_capture(expand_snapshot_binding(record, binding_contents,
+            namespace=namespace, tenant_id=tenant_id), binding_contents,
             namespace=namespace, tenant_id=tenant_id) for record in records)
         semantic_domains[domain] = semantic_records
         aliases = _decode_snapshot_aliases(raw_aliases)
@@ -1055,6 +1028,8 @@ async def restore_snapshot(
             sequences=sequences,
         )
         for value in (*records, *facts, *operations):
+            if isinstance(value, StoredRecord) and value.kind == "input_capture":
+                continue
             _mark_archive_value(archive_closures, dict(value.data))
             for native_root in iter_native_message_roots(value.data):
                 _validate_native_partition(native_root.store_digest, namespace, tenant_id)
@@ -1069,23 +1044,6 @@ async def restore_snapshot(
             operations,
             sequences,
         )
-        if domain is PersistenceDomain.TASK:
-            for record in records:
-                if record.kind not in {"task_admission", "task_submission_payload"}:
-                    continue
-                admission = (
-                    _decode_enveloped_domain(record.data, TaskGraphAdmission)
-                    if record.kind == "task_admission"
-                    else _decode_enveloped_domain(record.data, TaskGraphSubmission).admission
-                )
-                expected_task_object_keys.add(
-                    task_graph_binding_capture_key(
-                        namespace,
-                        admission.principal.tenant_id,
-                        admission.graph_id,
-                        admission.initial_request_digest,
-                    )
-                )
         for record in semantic_records:
             if record.kind == "execution":
                 from .contracts import ExecutionRecord
@@ -1097,14 +1055,9 @@ async def restore_snapshot(
                             or source.store_digest != native_checkpoints[source.group_id].store_digest):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     required_checkpoint_groups.add(source.group_id)
-                identity = execution.execution_id
-                optional_capture_keys.add(input_capture_key(namespace, tenant_id, "invocation", identity))
-            elif record.kind == "task_admission":
-                identity = _decode_enveloped_domain(record.data, TaskGraphAdmission).graph_id
-                optional_capture_keys.add(input_capture_key(namespace, tenant_id, "declaration", identity))
-        live_records = tuple(encoded for encoded, record in zip(raw_records, records) if record.kind != "evaluation_cleanup")
+        live_records = tuple(capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS else encoded
+                             for encoded, record in zip(raw_records, semantic_records) if record.kind != "evaluation_cleanup")
         for encoded in (*live_records, *raw_facts, *raw_operations):
-            capture_dependencies.update(iter_input_capture_dependencies(encoded, namespace=namespace, tenant_id=tenant_id))
             for source_domain, reference in iter_runtime_object_refs(
                 encoded,
                 default_domain=domain,
@@ -1122,6 +1075,9 @@ async def restore_snapshot(
         semantic_domains,
         {domain: values[2] for domain, values in decoded_domains.items()},
     )
+    capture_state_closure(tuple(record for records in semantic_domains.values() for record in records),
+        values=tuple(dict(value.data) for domain in decoded_domains.values() for value in (*domain[2], *domain[3])),
+        namespace=namespace, tenant_id=tenant_id, require_bindings=True)
     if required_checkpoint_groups != set(native_checkpoints):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_projections = manifest.get("native_projections", [])
@@ -1185,37 +1141,6 @@ async def restore_snapshot(
         if len(payload) + object_bytes > limits.max_bytes:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
-    for key in expected_task_object_keys:
-        matches = tuple(
-            identity
-            for identity in actual_objects
-            if identity[0] == PersistenceDomain.TASK.value
-            and identity[1] == key
-        )
-        if len(matches) != 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        expected_objects.add(matches[0])
-
-    def capture_identity(key: str, digest: str) -> tuple[str, str, str, int]:
-        matches = [identity for identity in actual_objects if identity[0] == PersistenceDomain.TASK.value and identity[1] == key and identity[2] == digest]
-        if not matches:
-            marker_key = input_capture_expiry_key(key)
-            matches = [identity for identity in actual_objects if identity[0] == PersistenceDomain.TASK.value and identity[1] == marker_key]
-        if len(matches) != 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return matches[0]
-
-    for key, digest in capture_dependencies:
-        expected_objects.add(capture_identity(key, digest))
-    expected_objects.update(identity for identity in actual_objects if identity[0] == PersistenceDomain.TASK.value and identity[1] in optional_capture_keys)
-    for identity in actual_objects:
-        if identity[0] != PersistenceDomain.TASK.value or not identity[1].startswith(tuple("v1/input-capture/" + kind + "/" for kind in ("agent", "task", "graph", "template", "expired"))):
-            continue
-        _, source, content_ref = decoded_by_identity[identity]
-        raw_capture = await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
-        capture = json.loads(raw_capture)
-        validate_input_capture_payload(source.key, capture, namespace=namespace, tenant_id=tenant_id)
-        expected_objects.add(identity)
     pending_objects = list(expected_objects)
     while pending_objects:
         identity = pending_objects.pop()
@@ -1223,27 +1148,9 @@ async def restore_snapshot(
         if decoded is None:
             continue
         domain, source, content_ref = decoded
-        if source.key.startswith("v1/input-capture/"):
-            raw_capture = await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
-            manifest_capture = json.loads(raw_capture)
-            validate_input_capture_payload(source.key, manifest_capture, namespace=namespace, tenant_id=tenant_id)
-            if _capture_contains_archived_context(manifest_capture):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if not source.key.startswith("v1/input-capture/result/"):
-                for key, digest in iter_input_capture_dependencies(manifest_capture, namespace=namespace, tenant_id=tenant_id):
-                    nested_identity = capture_identity(key, digest)
-                    if nested_identity not in expected_objects:
-                        expected_objects.add(nested_identity)
-                        pending_objects.append(nested_identity)
-                for nested_domain, nested in iter_runtime_object_refs(manifest_capture, default_domain=PersistenceDomain.TASK):
-                    nested_identity = (nested_domain.value, nested.key, nested.digest, nested.size)
-                    if nested_identity not in expected_objects:
-                        expected_objects.add(nested_identity)
-                        pending_objects.append(nested_identity)
         if not source.key.startswith(
             (
                 "v1/asset-snapshot/",
-                "v1/task-graph-binding-capture/",
             )
         ):
             continue
@@ -1275,18 +1182,16 @@ async def restore_snapshot(
         for record in closure.retained_records:
             if record.kind != "archive_content":
                 continue
-            content = ContentRecord.from_json(record.data)
-            reference = content.payload.ref
-            if reference is None:
-                encoded = content.payload.decode()
-            else:
+            content = ContentRecord.from_record(record)
+            async def resolve(reference: ObjectRef) -> bytes:
                 identity = domain.value, reference.key, reference.digest, reference.size
                 expected_objects.add(identity)
                 decoded = decoded_by_identity.get(identity)
                 if decoded is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 content_ref = decoded[2]
-                encoded = await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
+                return await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
+            encoded = await _read_content_payload(content, resolve)
             _validate_archive_content(content, encoded)
 
     for group_id, entry in native_entries.items():
@@ -1297,19 +1202,17 @@ async def restore_snapshot(
         for row in entry["messages"]:
             content = validate_native_message_content(row, group_id=group_id)
             message_keys.append((row["store_digest"], row["sha256"]))
-            reference = content.payload.ref
-            if reference is not None:
+            async def resolve(reference: ObjectRef) -> bytes:
                 identity = entry["domain"], reference.key, reference.digest, reference.size
                 expected_objects.add(identity)
                 decoded = decoded_by_identity.get(identity)
                 if decoded is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 content_ref = decoded[2]
-                encoded = await read_object(object_store, content_ref.key,
-                                            expected_digest=content_ref.digest, expected_size=content_ref.size)
-                _validate_archive_content(content, encoded)
-            else:
-                encoded = content.payload.decode()
+                return await read_object(object_store, content_ref.key,
+                                         expected_digest=content_ref.digest, expected_size=content_ref.size)
+            encoded = await _read_content_payload(content, resolve)
+            _validate_archive_content(content, encoded)
             if group_id in native_checkpoints:
                 raw = decode_payload_bytes(encoded, codec=content.compression,
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
@@ -1320,6 +1223,18 @@ async def restore_snapshot(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if group_id in native_checkpoints:
             _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
+
+    async def read_capture_attachment(reference: ObjectRef) -> bytes:
+        identity = PersistenceDomain.TASK.value, reference.key, reference.digest, reference.size
+        decoded = decoded_by_identity.get(identity)
+        if decoded is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _domain, _source, content = decoded
+        return await read_object(object_store, content.key, expected_digest=content.digest, expected_size=content.size)
+
+    for record in semantic_domains.get(PersistenceDomain.TASK, ()):
+        if record.kind == "input_capture":
+            await restore_capture_value(record, read_object=read_capture_attachment)
 
     if actual_objects != expected_objects:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1370,9 +1285,9 @@ async def restore_snapshot(
                     for record in archive_closures[source_scope].retained_records:
                         imported = record
                         if record.kind == "archive_content":
-                            content = ContentRecord.from_json(record.data)
-                            reference = content.payload.ref
-                            if reference is not None:
+                            content = ContentRecord.from_record(record)
+                            rewritten = {}
+                            for reference in content.object_refs():
                                 prefix = f"v1/archive/{source_scope}/"
                                 if not reference.key.startswith(prefix):
                                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1386,8 +1301,9 @@ async def restore_snapshot(
                                                           expected_size=reference.size, expected_digest=reference.digest)
                                 elif current.digest != reference.digest or current.size != reference.size:
                                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                                content = replace(content, payload=StoredPayload.object(
-                                    ObjectRef(reference.store_id, key, reference.digest, reference.size)))
+                                rewritten[reference] = ObjectRef(reference.store_id, key, reference.digest, reference.size)
+                            if rewritten:
+                                content = replace(content, payload=content.payload.map_object_refs(rewritten.__getitem__))
                                 imported = replace(record, data=content.to_json())
                         previous = archive_records.get(imported.key_digest)
                         if previous is not None and previous != imported:
@@ -1405,8 +1321,8 @@ async def restore_snapshot(
                     if (row["store_digest"], row["sha256"]) not in domain_closure.retained_messages:
                         continue
                     content = validate_native_message_content(row, group_id=source_group)
-                    reference = content.payload.ref
-                    if reference is not None and reference.key.startswith("v1/archive/"):
+                    rewritten = {}
+                    for reference in content.object_refs():
                         prefix = f"v1/archive/{source_group}/"
                         if not reference.key.startswith(prefix):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1415,9 +1331,10 @@ async def restore_snapshot(
                         destination = resources.archive_object_store(domain)
                         await destination.put(key, object_store.open(content_ref.key),
                                               expected_size=reference.size, expected_digest=reference.digest)
-                        content = replace(content, payload=StoredPayload.object(
-                            ObjectRef(reference.store_id, key, reference.digest, reference.size)))
-                    message_rows.append({**row, "message": canonical_json_bytes(content.to_json()).decode("utf-8")})
+                        rewritten[reference] = ObjectRef(reference.store_id, key, reference.digest, reference.size)
+                    if rewritten:
+                        content = replace(content, payload=content.payload.map_object_refs(rewritten.__getitem__))
+                    message_rows.append({**row, **content.to_native_values()})
                 sequence_rows = [row for row in entry["sequences"]
                                  if (row["store_digest"], row["sha256"]) in domain_closure.retained_sequences]
                 native_rows.append((sequence_rows, message_rows))
@@ -1523,7 +1440,7 @@ def snapshot_manifest_usage(
     for group in manifest.get("native_messages", []):
         for row in group["messages"]:
             try:
-                content = ContentRecord.from_json(json.loads(row["message"]))
+                content = ContentRecord.from_native_row(decode_native_message_row(row))
             except (KeyError, TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             object_bytes += content.raw_size
@@ -1532,7 +1449,7 @@ def snapshot_manifest_usage(
         records = tuple(decode_record(row) for row in group["records"]
                         if isinstance(row, Mapping) and row.get("kind") == "archive_content"
                         and isinstance(row.get("data"), Mapping)
-                        and row["data"].get("codec") == "execution-binding")
+                        and row["data"].get("codec") in {"execution-binding", "task-graph-binding"})
         if records:
             scope = group.get("scope_id")
             if not isinstance(scope, str) or not scope:
@@ -1540,8 +1457,9 @@ def snapshot_manifest_usage(
             binding_contents.update(ArchiveClosure(scope, records).binding_contents())
     for raw_domain in domains.values():
         for row in raw_domain["records"]:
-            if isinstance(row, Mapping) and row.get("kind") == "execution":
-                object_bytes += snapshot_binding_size(decode_record(row), binding_contents)
+            if isinstance(row, Mapping) and row.get("kind") in {"execution", "task_graph_binding_capture"}:
+                record = decode_record(row)
+                object_bytes += snapshot_binding_size(record, binding_contents) + snapshot_capture_size(record, binding_contents)
     return entries, object_bytes
 
 
@@ -1575,11 +1493,10 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
             key = f"v1/archive/{neutral}/{parts[3]}"
         return dict(_object_ref_payload(replace(ref, key=key)))
 
-    def content(value: object) -> dict[str, object]:
-        parsed = ContentRecord.from_json(value)
-        if parsed.payload.ref is not None:
-            parsed = replace(parsed, payload=StoredPayload.object(_object_ref_from_payload(
-                reference(_object_ref_payload(parsed.payload.ref)))))
+    def content(parsed: ContentRecord) -> dict[str, object]:
+        if parsed.payload is not None:
+            parsed = replace(parsed, payload=parsed.payload.map_object_refs(
+                lambda ref: _object_ref_from_payload(reference(_object_ref_payload(ref)))))
         return parsed.to_json()
 
     def ordered_unique(values: list[object]) -> list[object]:
@@ -1602,19 +1519,19 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         for row in rows:
             record = decode_record(row)
             if record.kind == "archive_content":
-                parsed = ContentRecord.from_json(record.data)
-                if parsed.payload.ref is not None:
-                    ref = parsed.payload.ref
+                parsed = ContentRecord.from_record(record)
+                for ref in parsed.object_refs():
                     nonnative_objects.add((ref.key, ref.digest, ref.size))
-                record = replace(record, data=content(record.data))
+                record = replace(record, data=content(parsed), payload_bytes=None)
             archive_records.append(encode_record(record))
     native_sequences = []
     native_messages = {}
     native_objects = set()
     for entry in native:
         validate_snapshot_native_rows(entry.get("sequences"), entry.get("messages"))
+        rows = [decode_native_message_row(row) for row in entry["messages"]]
         native_sequences.extend(entry["sequences"])
-        for row in entry["messages"]:
+        for row in rows:
             parsed = validate_native_message_content(row, group_id=entry["group_id"])
             # Raw bytes, not compression or transport location, define message
             # identity. Export/restore verify object bytes before this comparison;
@@ -1625,8 +1542,7 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
             if key in native_messages and native_messages[key] != message:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             native_messages[key] = message
-            if parsed.payload.ref is not None:
-                ref = parsed.payload.ref
+            for ref in parsed.object_refs():
                 native_objects.add((ref.key, ref.digest, ref.size))
     normalized_objects = []
     for raw in objects:
@@ -1695,10 +1611,10 @@ async def _capture_native_payloads(
     contents = []
     required_bytes = required_entries = 0
     for row in messages:
-        content = ContentRecord.from_json(json.loads(row["message"]))
+        content = ContentRecord.from_native_row(row)
         required_bytes += content.raw_size
-        if content.payload.ref is not None:
-            required_bytes += content.payload.size
+        for ref in content.object_refs():
+            required_bytes += ref.size
             required_entries += 1
         contents.append(content)
     if (budget.entries + required_entries > budget.limits.max_entries
@@ -1709,17 +1625,8 @@ async def _capture_native_payloads(
     encoded_payloads, raw_payloads = {}, {}
     for row, content in zip(messages, contents, strict=True):
         validate_native_message_content(row, group_id=group_id, verify_inline=False)
-        reference = content.payload.ref
-        encoded = (content.payload.decode() if reference is None else await read_object(
-            objects, reference.key, expected_digest=reference.digest, expected_size=reference.size))
-        if reference is None:
-            if content.payload.encoding == "json":
-                encoded = canonical_json_bytes(encoded)
-            elif isinstance(encoded, str):
-                encoded = encoded.encode("utf-8")
-        if (not isinstance(encoded, bytes) or len(encoded) != content.payload.size
-                or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        encoded = await _read_content_payload(content, lambda ref: read_object(
+            objects, ref.key, expected_digest=ref.digest, expected_size=ref.size))
         raw = decode_payload_bytes(encoded, codec=content.compression,
                                    raw_digest=content.raw_digest, raw_size=content.raw_size)
         decode_model_message_payloads((raw,))
@@ -1773,12 +1680,13 @@ async def _read_native_messages(
             while offset < len(identities):
                 batch = identities[offset:offset + budget.page_size(128)]
                 rows = await transaction.read_sql_rows(store.context, select(
-                    table.c.store_digest, table.c.sha256, table.c.message).where(
+                    table.c.store_digest, table.c.sha256, table.c.message,
+                    table.c.compression, table.c.raw_size, table.c.payload_json).where(
                     table.c.store_digest == partition, table.c.sha256.in_(batch)).order_by(table.c.sha256))
                 if len(rows) != len(batch):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for row in rows:
-                    budget.accept(row)
+                    budget.accept(encode_native_message_row(row))
                     messages.append(dict(row))
                 offset += len(batch)
         return sequences, messages
@@ -1799,14 +1707,12 @@ async def _insert_native_messages(
                 for start in range(0, len(rows), 128):
                     await store.context.run_statement(store.context.dialect.insert_ignore_conflict_many(
                         session, table=table, rows=rows[start:start + 128], index_elements=("store_digest", "sha256")))
+            from ._native_content_index import index_nodes
+            partitions = sorted({row["store_digest"] for row in sequences})
+            for partition in partitions:
+                await index_nodes(store.context, session, partition,
+                                  tuple(row for row in sequences if row["store_digest"] == partition), partial_restore=True)
     await transaction.run_sql(store.context, insert)
-
-
-def _capture_contains_archived_context(value: object) -> bool:
-    if not isinstance(value, Mapping) or value.get("kind") != "agent":
-        return False
-    context = value.get("input_context")
-    return isinstance(context, Mapping) and context.get("kind") == "execution-context"
 
 
 def _mark_archive_value(closures: Mapping[str, ArchiveClosure], value: object) -> None:
@@ -1820,6 +1726,14 @@ def _mark_archive_value(closures: Mapping[str, ArchiveClosure], value: object) -
         if closure is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         closure.mark_content(scope, content_scope, identity)
+
+
+async def _read_content_payload(
+    content: ContentRecord, reader: Callable[[ObjectRef], Awaitable[bytes]],
+) -> bytes:
+    if content.payload is None:
+        return cast(bytes, content.body)
+    return await read_attachment_payload(content.payload, read_object=reader)
 
 
 def _validate_archive_content(content: ContentRecord, encoded: object) -> None:

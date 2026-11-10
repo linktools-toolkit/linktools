@@ -127,6 +127,7 @@ class EvaluationCleanupRecord:
     owner_principal_id: str
     objects: tuple[tuple[PersistenceDomain, ObjectRef], ...]
     created_at: datetime
+    capture_keys: tuple[str, ...] = ()
 
 
 __all__ = [

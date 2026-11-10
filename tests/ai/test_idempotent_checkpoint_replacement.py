@@ -136,7 +136,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore
 from tests.ai.test_tool_effect_semantics import _call
 from tests.ai._runtime_test_helpers import tool_run_context
 from pydantic_ai.messages import ToolCallPart
@@ -154,7 +154,7 @@ async def test_recovered_idempotent_call_preserves_existing_receipt(tmp_path: Pa
             return RuntimeToolOperationBridge(
                 state.checkpoint.tools, objects, namespace="receipt-compat", tenant_id="tenant",
                 execution_id="execution", agent_run_id=run, binding_digest="b" * 64,
-                owner=owner, background_tasks=set(), payload_policy=PayloadPolicy(),
+                owner=owner, background_tasks=set(),
                 recovery_agent_run_id=recovery,
             )
         original = bridge("old-run", "old-worker")
@@ -211,7 +211,7 @@ async def test_default_idempotent_dispatch_obeys_budget_without_entering_leaf() 
             state.checkpoint.tools, InMemoryObjectStore(), namespace="idempotent-budget",
             tenant_id="tenant", execution_id="execution", agent_run_id="run",
             binding_digest="b" * 64, owner="worker", background_tasks=set(),
-            payload_policy=PayloadPolicy(),
+
         )
         effects = []
         async def effect():
@@ -421,7 +421,7 @@ async def test_mcp_defaults_safe_and_preserves_local_strict_policy() -> None:
         bridge = RuntimeToolOperationBridge(
             state.checkpoint.tools, InMemoryObjectStore(), namespace="mcp-policy", tenant_id="tenant",
             execution_id="execution", agent_run_id="run", binding_digest="b" * 64,
-            owner="worker", background_tasks=set(), payload_policy=PayloadPolicy(),
+            owner="worker", background_tasks=set(),
         )
         boundary = BoundaryToolset(
             (_MCPModelToolset(source, "same-server", None),), {}, id="mcp-policy",

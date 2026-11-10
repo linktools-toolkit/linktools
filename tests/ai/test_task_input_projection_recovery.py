@@ -332,7 +332,7 @@ async def test_terminal_hold_cleanup_only_skips_an_already_settled_missing_produ
             raise failure
 
         if case == "producer-error":
-            monkeypatch.setattr(port.service, "release_dependency_hold", broken_release)
+            monkeypatch.setattr(port._service, "release_dependency_hold", broken_release)
         elif case == "empty-ports-error":
             monkeypatch.setattr(tasks, "release_dependency_hold", broken_release)
         if case == "closed":

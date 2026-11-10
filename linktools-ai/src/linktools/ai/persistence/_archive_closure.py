@@ -21,6 +21,7 @@ from .codec import (
     encode_envelope,
 )
 from .state import StoredRecord, record_key_digest
+from .captures import task_binding_content_reference
 
 
 def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object], StoredPayload] | None:
@@ -105,7 +106,7 @@ def iter_archive_roots(value: object) -> Iterator[ArchiveRoot]:
 
 def iter_archive_content_refs(value: object) -> Iterator[tuple[str, str, str]]:
     if isinstance(value, Mapping):
-        reference = binding_reference(value)
+        reference = binding_reference(value) or task_binding_content_reference(value)
         if reference is not None:
             yield reference
         context = _context_payload(value)
@@ -362,12 +363,11 @@ class ArchiveClosure(_SequenceClosure):
         if scope_id != self.scope_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         record = self._record(content_scope, "archive_content", identity)
-        content = ContentRecord.from_json(record.data)
+        content = ContentRecord.from_record(record)
         if content.identity != identity:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if content.payload.ref is not None and not content.payload.ref.key.startswith(
-            f"v1/archive/{scope_id}/{content_scope}/"
-        ):
+        if any(not reference.key.startswith(f"v1/archive/{scope_id}/{content_scope}/")
+               for reference in content.object_refs()):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._retained.add(record.key_digest)
 
@@ -379,9 +379,9 @@ class ArchiveClosure(_SequenceClosure):
 
     def binding_contents(self) -> dict[tuple[str, str, str], ContentRecord]:
         """Expose immutable binding metadata for complete offline validation."""
-        return {(self.scope_id, scope, identity): ContentRecord.from_json(record.data)
+        return {(self.scope_id, scope, identity): ContentRecord.from_record(record)
                 for (scope, kind, identity), record in self._records.items()
-                if kind == "archive_content" and record.data.get("codec") == "execution-binding"}
+                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "task-graph-binding"}}
 
     @property
     def has_roots(self) -> bool:
@@ -398,10 +398,10 @@ class ArchiveClosure(_SequenceClosure):
     @property
     def object_refs(self) -> tuple[ObjectRef, ...]:
         return tuple(
-            content.payload.ref
+            reference
             for record in self.retained_records if record.kind == "archive_content"
-            for content in (ContentRecord.from_json(record.data),)
-            if content.payload.ref is not None
+            for content in (ContentRecord.from_record(record),)
+            for reference in content.object_refs()
         )
 
 
@@ -532,23 +532,22 @@ def validate_native_message_content(
 ) -> ContentRecord:
     """Verify native metadata and inline bytes without reinterpreting SDK JSON."""
     try:
-        content = ContentRecord.from_json(json.loads(row["message"]))
+        content = ContentRecord.from_native_row(row)
         if content.codec != "model-message" or content.raw_digest != row["sha256"]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (group_id is not None and content.payload.ref is not None
-                and not content.payload.ref.key.startswith(f"v1/archive/{group_id}/")):
+        if (group_id is not None and any(not reference.key.startswith(f"v1/archive/{group_id}/")
+                for reference in content.object_refs())):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if verify_inline and content.payload.kind == "inline":
-            encoded = content.payload.decode()
-            if content.payload.encoding == "json":
-                encoded = canonical_json_bytes(encoded)
-            elif isinstance(encoded, str):
-                encoded = encoded.encode("utf-8")
-            if (not isinstance(encoded, bytes) or len(encoded) != content.payload.size
-                    or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
+        if content.payload is None:
+            if verify_inline:
+                decode_payload_bytes(content.body, codec=content.compression,
+                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
+        elif content.payload.encoding == "json-attachments":
+            if (content.compression != "raw" or content.payload.digest != content.raw_digest
+                    or content.payload.size != content.raw_size):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            decode_payload_bytes(encoded, codec=content.compression,
-                                 raw_digest=content.raw_digest, raw_size=content.raw_size)
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return content
     except (KeyError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -599,7 +598,7 @@ def rekey_native_message_roots(
 def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValue:
     """Rewrite only typed archive roots and execution input-context references."""
     if isinstance(value, dict):
-        reference = binding_reference(value)
+        reference = binding_reference(value) or task_binding_content_reference(value)
         if reference is not None:
             if reference[0] not in scopes:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

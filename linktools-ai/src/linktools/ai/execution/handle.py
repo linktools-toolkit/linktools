@@ -73,6 +73,21 @@ class Execution(Generic[AppT]):
         [str | None, bool], Awaitable[CancelExecutionResult]
     ] | None = None
 
+    @property
+    def principal(self) -> Principal:
+        """The actor bound to this handle, not the original execution producer."""
+        return self._principal
+
+    async def inspect(self) -> ExecutionView:
+        """Read the current state without waiting for execution to finish."""
+        self._binding.ensure_open()
+        return await self._binding.service.inspect(self.execution_id, principal=self._principal)
+
+    async def result(self) -> ExecutionResult:
+        """Read the result now; use wait() to wait for completion."""
+        self._binding.ensure_open()
+        return await self._binding.service.result(self.execution_id, principal=self._principal)
+
     @overload
     async def wait(
         self, *, on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,

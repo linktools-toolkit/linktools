@@ -3,12 +3,12 @@
 """Object reclamation retires native metadata before its external bodies."""
 
 import asyncio
-import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from sqlalchemy import event, text
 
 from linktools.ai.errors import AIError, ErrorCode
@@ -16,6 +16,14 @@ from linktools.ai.persistence import Persistence, PersistenceDomain, Persistence
 from linktools.ai.persistence._archive import ContentRecord
 
 from .test_step_content_cleanup import _Offline, _snapshot
+
+
+@pytest.fixture(autouse=True)
+def _exercise_offline_reclamation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence import _native_content_index
+    async def defer(_context, **kwargs):
+        pass
+    monkeypatch.setattr(_native_content_index, "maintain_native_content", defer)
 
 
 @asynccontextmanager
@@ -37,23 +45,24 @@ async def _owners(path: Path):
 async def _bodies(native: SqlStepStore) -> dict[tuple[str, str], ContentRecord]:
     async with native.storage_context.engine.connect() as connection:
         rows = (await connection.execute(text(
-            "SELECT store_digest, sha256, message FROM ai_step_messages"
+            "SELECT store_digest, sha256, message, compression, raw_size, payload_json FROM ai_step_messages"
         ))).mappings().all()
-    return {(row["store_digest"], row["sha256"]): ContentRecord.from_json(json.loads(row["message"])) for row in rows}
+    return {(row["store_digest"], row["sha256"]): ContentRecord.from_native_row(row) for row in rows}
 
 
 @pytest.mark.asyncio
 async def test_object_cleanup_preserves_shared_scopes_and_republishes_retired_body(tmp_path: Path) -> None:
     async with _owners(tmp_path / "owners.db") as (state, native, foreign, archive):
-        retired = _snapshot("retired", 1, "external body " * 4000)
+        retired = replace(_snapshot("retired", 1), messages=[ModelRequest(parts=[UserPromptPart([
+            "retained message", BinaryContent(b"external file", media_type="image/png"),
+        ])])])
         shared = replace(retired, run_id="shared")
         await native.save_snapshot(retired)
         await native.save_snapshot(shared)
         await foreign.save_snapshot(shared)
         bodies = await _bodies(native)
         assert len(bodies) == 2
-        reference = next(iter(bodies.values())).payload.ref
-        assert reference is not None
+        reference, = next(iter(bodies.values())).object_refs()
         candidates = ((PersistenceDomain.TRACE, reference),)
         objects = state.archive_object_store(PersistenceDomain.TRACE)
         await native.save_snapshot(_snapshot("retired", 2))
@@ -91,11 +100,12 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
     async with _owners(tmp_path / "failures.db") as (state, native, foreign, archive):
-        retired = _snapshot("retired", 1, "external body " * 4000)
+        retired = replace(_snapshot("retired", 1), messages=[ModelRequest(parts=[UserPromptPart([
+            "retained message", BinaryContent(b"external file", media_type="image/png"),
+        ])])])
         await native.save_snapshot(retired)
         before = await _bodies(native)
-        reference = next(iter(before.values())).payload.ref
-        assert reference is not None
+        reference, = next(iter(before.values())).object_refs()
         await native.save_snapshot(_snapshot("retired", 2))
         context = native.storage_context
         original = type(context).run_mutation
@@ -138,3 +148,42 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
             assert await reader.latest_snapshot(run_id="revived") == revived
         finally:
             await reader.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ("missing", "corrupt"))
+async def test_retained_attachment_damage_aborts_before_native_or_object_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
+) -> None:
+    import hashlib
+    from linktools.ai.storage import ObjectRef
+
+    async with _owners(tmp_path / "damaged.db") as (state, native, _foreign, _archive):
+        retained = replace(_snapshot("retained", 1), messages=[ModelRequest(parts=[UserPromptPart([
+            BinaryContent(b"retained file", media_type="image/png"),
+        ])])])
+        await native.save_snapshot(retained)
+        bodies = await _bodies(native)
+        reference, = next(iter(bodies.values())).object_refs()
+        objects = state.archive_object_store(PersistenceDomain.TRACE)
+        orphan_data = b"orphan file"
+        digest = hashlib.sha256(orphan_data).hexdigest()
+        orphan = ObjectRef("runtime", reference.key.rsplit("/", 1)[0] + "/" + digest, digest, len(orphan_data))
+        async def chunks():
+            yield orphan_data
+        await objects.put(orphan.key, chunks(), expected_size=orphan.size, expected_digest=orphan.digest)
+        if damage == "missing":
+            assert await objects.delete_object(reference.key, expected_digest=reference.digest)
+        else:
+            original = objects.open
+            async def corrupt(key):
+                if key == reference.key:
+                    yield b"corrupt"
+                else:
+                    async for chunk in original(key):
+                        yield chunk
+            monkeypatch.setattr(objects, "open", corrupt)
+        with pytest.raises(AIError):
+            await state.purge_unreferenced_objects(((PersistenceDomain.TRACE, orphan),), exclusive=_Offline())
+        assert await _bodies(native) == bodies
+        assert await objects.stat(orphan.key) is not None

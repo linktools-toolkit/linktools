@@ -22,8 +22,9 @@ from ..core import (
     idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
+from ..storage import ObjectStore, StoredPayload
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..model.attachments import read_attachment_payload, store_attachment_payload
 from ..model.messages import encode_tool_return_content, tool_return_content_matches
 from ..execution import (
     ExternalCallFailed,
@@ -67,7 +68,6 @@ class DefaultExternalService:
         *,
         objects: ObjectStore,
         object_key_factory: ObjectKeyFactory,
-        payload_policy: PayloadPolicy,
         continuation: _DeferredContinuation | None = None,
     ) -> None:
         self._calls = calls
@@ -75,7 +75,6 @@ class DefaultExternalService:
         self._authorization = authorization
         self._objects = objects
         self._object_key_factory = object_key_factory
-        self._payload_policy = payload_policy
         self._continuation = continuation
 
     async def list(
@@ -235,18 +234,13 @@ class DefaultExternalService:
         resolution = request.resolution
         if isinstance(resolution, ExternalCallSucceeded):
             value = encode_tool_return_content(resolution.value)
-            raw = canonical_json_bytes(value)
-            inline = StoredPayload.inline_json(value)
-            if payload_fits_inline(inline, self._payload_policy):
-                return inline, "succeeded"
-            reference = await put_runtime_object(
-                self._objects,
-                self._object_key_factory,
-                PersistenceDomain.CHECKPOINT,
-                request.principal.tenant_id,
-                raw,
+            payload = await store_attachment_payload(
+                canonical_json_bytes(value), format="tool-return", write_object=lambda data: put_runtime_object(
+                    self._objects, self._object_key_factory, PersistenceDomain.CHECKPOINT,
+                    request.principal.tenant_id, data,
+                ),
             )
-            return StoredPayload.object(reference), "succeeded"
+            return payload if payload is not None else StoredPayload.inline_json(value), "succeeded"
         if isinstance(resolution, ExternalCallRetry):
             return StoredPayload.inline_text(resolution.message), "retry"
         if isinstance(resolution, ExternalCallFailed):
@@ -276,6 +270,10 @@ def _pending_call(
 
 
 async def _decode_json_payload(objects: ObjectStore, payload: StoredPayload) -> JsonValue:
+    if payload.encoding == "json-attachments":
+        return json.loads(await read_attachment_payload(
+            payload, read_object=lambda ref: read_runtime_object(objects, ref),
+        ))
     if payload.kind == "inline":
         if payload.encoding != "json":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

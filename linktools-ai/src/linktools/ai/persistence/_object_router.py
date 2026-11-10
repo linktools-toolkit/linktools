@@ -58,7 +58,6 @@ class _RuntimeObjectRouter:
         cache: CacheBackend | None = None,
         domain_caches: Mapping[PersistenceDomain, CacheBackend | None] | None = None,
         cache_domains: Sequence[PersistenceDomain] = (),
-        durable_domains: Sequence[PersistenceDomain] = (),
         namespace: str = "",
         tenant_id: str = "",
     ) -> None:
@@ -75,7 +74,6 @@ class _RuntimeObjectRouter:
             for domain, candidate in self._caches.items()
         }
         self._cache_domains = frozenset(cache_domains)
-        self._durable_domains = frozenset(durable_domains)
         self._cache_scope = (namespace, tenant_id)
         self._closing = False
         self._pending_reads: set[asyncio.Task[bytes]] = set()
@@ -216,23 +214,6 @@ class _RuntimeObjectRouter:
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
 
-    async def can_reuse_retained_object(
-        self, target_domain: PersistenceDomain, source_domain: PersistenceDomain,
-        reference: ObjectRef,
-    ) -> bool:
-        """Prove both routes retain the same currently present immutable object."""
-        if not {source_domain, target_domain} <= self._durable_domains:
-            return False
-        source = self.object_store(source_domain)
-        if source is not self.object_store(target_domain):
-            return False
-        # Cached source bytes alone do not prove that the retained object still exists.
-        current = await source.stat(reference.key)
-        return current is not None and (
-            current.key == reference.key and current.digest == reference.digest
-            and current.size == reference.size
-        )
-
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         try:
             return self._archive_stores[domain]
@@ -352,10 +333,6 @@ def build_runtime_object_router(
         close_guard_stores=close_guard_stores,
         domain_caches={domain: plan.route(domain).cache for domain in values},
         cache_domains=tuple(
-            domain for domain in values
-            if plan.route(domain).retention is StorageRetentionMode.DURABLE
-        ),
-        durable_domains=tuple(
             domain for domain in values
             if plan.route(domain).retention is StorageRetentionMode.DURABLE
         ),

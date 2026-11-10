@@ -55,10 +55,11 @@ users before disposing those resources. For a shared SQL database, pass its
 existing provisioned engine instead of creating a local engine.
 
 Without an injected ObjectStore, the SQL backend uses `SqlObjectStore`.
-`PayloadPolicy` keeps small content inline and places larger content in the
-selected ObjectStore. A filesystem ObjectStore therefore remains useful even
-though the Asset metadata is in SQL. Do not remove its files independently of
-the versions that still reference them.
+Every file, including an empty or small file, is stored in the selected
+ObjectStore. Current entries, version history and batch receipts retain only
+content references, digests and sizes. A filesystem ObjectStore therefore
+remains useful even though the Asset metadata is in SQL. Do not remove its files
+independently of the versions that still reference them.
 
 ## Directory assets are not a history database
 

@@ -17,7 +17,6 @@ from linktools.ai.storage import (
     InMemoryObjectStore,
     MetadataLoad,
     ObjectStat,
-    PayloadPolicy,
     StorageBatchPartialError,
     StorageBatchResult,
     StorageChange,
@@ -391,7 +390,7 @@ async def test_overlay_lifecycle_sqlite_write_finishes_after_object_preparation(
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.sqlite'}")
     objects = PausedObjects()
-    writer = SqlAssetBackend(engine, namespace="lifecycle", object_store=objects, payload_policy=PayloadPolicy(0))
+    writer = SqlAssetBackend(engine, namespace="lifecycle", object_store=objects)
     store = AssetStore(StorageOverlay(writer, writer=writer))
     pending: asyncio.Task[AssetInfo] | None = None
     closing: asyncio.Task[None] | None = None

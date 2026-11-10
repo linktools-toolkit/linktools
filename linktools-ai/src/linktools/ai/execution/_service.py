@@ -17,10 +17,10 @@ from ..agent import restore_output
 from ..core import (AuthorizationAction, AuthorizationPolicy, BudgetUsage, CorrelationData,
     ExecutionEventType, ExecutionLineageKind, ExecutionStatus, HandoffGate, HandoffState,
     IdempotencyStatus, JsonValue, Principal, ResourceKind, ResourceRef, StopReason, UsageMetrics,
-    canonical_json_bytes, canonical_sha256, normalize_json_value, overlay_correlation,
+    canonical_sha256, normalize_json_value, overlay_correlation,
     principal_identity_payload, idempotency_key_digest as compute_idempotency_key_digest)
 from ..errors import AIError, ErrorCode
-from ..storage import PayloadPolicy, StoredPayload, payload_fits_inline
+from ..storage import StoredPayload
 from ..task import TaskBindingContract, TaskEffectResolution
 from ._api import CancelExecutionResult, ExecutionHandle, ExecutionResult, ExecutionView, project_execution_view
 from ._management import (
@@ -155,7 +155,6 @@ class TaskExecutionService:
         task_admissions: TaskAdmissionRepository | None = None,
         operation_ids: Callable[[], str] | None = None,
         release_terminal: ExecutionReleaseCallback | None = None,
-        payload_policy: PayloadPolicy | None = None,
         retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
     ) -> None:
         self._repositories = state
@@ -164,7 +163,6 @@ class TaskExecutionService:
         self._admissions = task_admissions
         self._new_operation_id = operation_ids or (lambda: uuid.uuid4().hex)
         self._release_terminal = release_terminal or _no_release_terminal
-        self._output_policy = payload_policy
         self._retained_turn_confirmed = retained_turn_confirmed
         self._handoff = HandoffGate[tuple[str, str], bool]()
         self._port = port
@@ -1227,11 +1225,7 @@ class TaskExecutionService:
         *,
         tenant_id: str,
     ) -> StoredPayload:
-        inline = StoredPayload.inline_json(output)
-        if self._output_policy is None or payload_fits_inline(inline, self._output_policy):
-            return inline
-        reference = await self._port.write_output(canonical_json_bytes(output), tenant_id=tenant_id)
-        return StoredPayload.object(reference)
+        return StoredPayload.inline_json(output)
 
     async def _task_terminal_idempotency(
         self,

@@ -39,7 +39,7 @@ from linktools.ai.persistence.state import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.persistence import Persistence
-from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy
+from linktools.ai.storage import FilesystemObjectStore
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -381,7 +381,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             binding_digest="a" * 64,
             owner="owner",
             background_tasks=background_tasks,
-            payload_policy=PayloadPolicy(),
+
             terminal_commands=_runtime_commands(
                 state, "parallel-tools", background_tasks
             ),

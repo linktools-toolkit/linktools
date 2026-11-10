@@ -11,7 +11,6 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, PreparedArchive
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.storage import StoredPayload
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
@@ -168,17 +167,15 @@ async def test_verified_content_detaches_views_and_rejects_replaced_body(tmp_pat
         await archive.prepare_content(values, prepared)
         expected = dict(record.data)
 
-        source["payload"]["value"] = "caller edit"
-        view = record.data["payload"]
-        view["value"] = "consumer edit"
+        source["codec"] = "caller edit"
+        view = dict(record.data)
+        view["codec"] = "consumer edit"
         assert dict(record.data) == expected
         with pytest.raises(FrozenInstanceError):
             record.kind = "changed"
         assert await archive.prepare_content(values, prepared) == identities
 
-        changed = replace(record, data={
-            **record.data, "payload": StoredPayload.inline_bytes(b"evil").to_json(),
-        })
+        changed = replace(record, payload_bytes=b"evil")
         prepared.records[key] = changed
         with pytest.raises(AIError) as caught:
             await archive.prepare_content(values, prepared)

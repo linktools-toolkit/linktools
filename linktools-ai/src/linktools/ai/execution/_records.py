@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -91,8 +91,14 @@ class ExecutionRecord:
     conversation: bool = True
     recovery: ExecutionRecoveryDetail | None = None
     history_seal_digest: str | None = None
+    completed_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if self.completed_at is not None and (not isinstance(self.completed_at, datetime)
+                or self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None):
+            raise ValueError("execution completed_at must be timezone-aware")
+        if self.completed_at is not None:
+            _validate_terminal(self)
         if self.native_step_source is not None and (
                 not isinstance(self.native_step_source, NativeStepSource) or not self.restart_checkpoints):
             raise ValueError("native checkpoint source requires checkpoint retention")
@@ -218,6 +224,14 @@ class ExecutionRecord:
         ):
             raise ValueError("only failed execution can carry error diagnostics")
 
+    def finalize_terminal(self, result: ResultRecord) -> ExecutionRecord:
+        """Record completion once, independently of later control updates."""
+        if self.completed_at is not None:
+            if self.result != result:
+                raise ValueError("execution terminal result is immutable")
+            return self
+        return replace(self, result=result, completed_at=self.updated_at)
+
     @property
     def recovery_state(self) -> ExecutionRecoveryState | None:
         detail = self.recovery
@@ -265,6 +279,60 @@ class ExecutionRecord:
             if isinstance(self.binding, TaskBindingContract)
             else None
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionTimelineRecord:
+    """Read-only projection of the Execution owner, without its executable binding."""
+    execution_id: str
+    session_id: str | None
+    parent_execution_id: str | None
+    principal_id: str
+    principal_kind: str
+    status: ExecutionStatus
+    stored_user_input: StoredUserInput
+    result: ResultRecord | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+    error_code: str | None
+    safe_error_details: Mapping[str, JsonValue]
+    error_diagnostics: ErrorDiagnostics | None
+    conversation: bool
+
+    def __post_init__(self) -> None:
+        if self.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            _validate_terminal(self)
+        elif self.completed_at is not None:
+            raise ValueError("active execution cannot carry a completion timestamp")
+
+    @property
+    def invalidates_session_history(self) -> bool:
+        return self.session_id is not None and not self.conversation and self.status is ExecutionStatus.SUCCEEDED
+
+    def terminal_matches(self, value: ExecutionRecord) -> bool:
+        """Terminal facts are owned once, while control metadata may still advance."""
+        return (
+            self.execution_id == value.execution_id
+            and self.session_id == value.session_id
+            and self.parent_execution_id == value.parent_execution_id
+            and self.principal_id == value.principal_id and self.principal_kind == value.principal_kind
+            and self.status == value.status and self.stored_user_input == value.stored_user_input
+            and self.result == value.result and self.created_at == value.created_at
+            and self.completed_at == value.completed_at and self.error_code == value.error_code
+            and self.safe_error_details == value.safe_error_details
+            and self.error_diagnostics == value.error_diagnostics
+            and self.conversation == value.conversation
+        )
+
+
+def _validate_terminal(value: ExecutionRecord | ExecutionTimelineRecord) -> None:
+    if (value.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+            or value.result is None or value.completed_at is None
+            or value.completed_at.tzinfo is None):
+        raise ValueError("execution terminal result and completion timestamp are required")
+    if (value.result.output is not None) != (value.status is ExecutionStatus.SUCCEEDED):
+        raise ValueError("execution terminal output does not match status")
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,4 +688,4 @@ class ExecutionRecoveryDetail:
             raise ValueError("terminal recovery cannot retain deferred continuation")
 
 
-__all__ = ['PendingDeferredCall', 'PendingToolContinuation', 'RepositoryInstructionBarrier', 'ExecutionRecoveryState', 'RecoveryHandoffPhase', 'RecoveryTerminalOutcome', 'RecoveryConversationIntent', 'RecoveryTerminalHandoff', 'ExecutionRecoveryDetail', 'RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']
+__all__ = ['ExecutionTimelineRecord', 'PendingDeferredCall', 'PendingToolContinuation', 'RepositoryInstructionBarrier', 'ExecutionRecoveryState', 'RecoveryHandoffPhase', 'RecoveryTerminalOutcome', 'RecoveryConversationIntent', 'RecoveryTerminalHandoff', 'ExecutionRecoveryDetail', 'RuntimePayloadRef', 'StoredUserInput', 'ExecutionRecord', 'ExecutionStartClaim', 'ExecutionStartUnknownCommit', 'ExecutionCancelRequestCommit', 'ExecutionStartReservation', 'ExecutionStartReservationResult', 'IdempotencyRecord', 'ResultRecord', 'ExecutionTerminalCommit', 'IdempotencyTerminalUpdate', 'OperationTerminalUpdate', 'ExecutionTerminalCommitResult']

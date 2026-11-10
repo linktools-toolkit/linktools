@@ -45,7 +45,6 @@ from linktools.ai.persistence._step_contracts import (
     AgentRunRecord,
 )
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
-from linktools.ai.storage import PayloadPolicy
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -1859,7 +1858,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             binding_digest="a" * 64,
             owner="worker-1",
             background_tasks=set(),
-            payload_policy=PayloadPolicy(),
+
         )
         context = RunContext(
             deps=None,
@@ -1899,7 +1898,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             binding_digest="a" * 64,
             owner="worker-2",
             background_tasks=set(),
-            payload_policy=PayloadPolicy(),
+
         )
         replay_context = RunContext(
             deps=None,

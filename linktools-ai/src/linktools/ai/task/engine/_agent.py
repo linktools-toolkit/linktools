@@ -242,7 +242,7 @@ class AgentTaskRunner(Generic[AppT]):
         principal: Principal,
         hold_id: str,
     ) -> None:
-        await self.execution_port.service.acquire_dependency_hold(
+        await self.execution_port.acquire_dependency_hold(
             execution_id,
             tenant_id=principal.tenant_id,
             hold_id=hold_id,
@@ -256,7 +256,7 @@ class AgentTaskRunner(Generic[AppT]):
 
 
     async def _inspect_execution(self, execution_id: str, principal: Principal) -> "ExecutionView":
-        return await self.execution_port.service.inspect(execution_id, principal=principal)
+        return await self.execution_port.inspect(execution_id, principal=principal)
 
     async def bind_existing_execution(self, execution_id: str, principal: Principal) -> None:
         await self._get_execution(execution_id, principal)

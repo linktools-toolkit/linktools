@@ -11,6 +11,11 @@ Runtime.open(namespace, storage=..., features=...)
     -> runtime.history: retained readback
 ```
 
+The [entry-point and handle guide](docs/runtime-entrypoints.md) gives the return-type matrix,
+principal and lifecycle rules, and a complete offline start/result/cancel/recovery example.
+The [storage layout](docs/storage-layout.md) documents database bodies, file attachments,
+table ownership and the remaining cost boundaries.
+
 The main ownership rules are:
 
 - `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.attach(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.

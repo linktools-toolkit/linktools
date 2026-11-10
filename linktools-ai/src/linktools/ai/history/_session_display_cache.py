@@ -27,7 +27,7 @@ from ._session_timeline import SessionTimelineCapture, SessionTimelineTranscript
 from ..persistence.runs import ConversationPersistence
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.contracts import ConversationRepositories, ExecutionRepository
-from ..execution import ExecutionRecord
+from ..execution import ExecutionRecord, ExecutionTimelineRecord
 from ..session import SessionRecord, SessionTurnCommit
 from ..persistence.repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
@@ -74,15 +74,16 @@ class SessionDisplayCache:
                 record.history_id, record.created_at)
 
     @staticmethod
-    def _display_execution_identity(record: ExecutionRecord) -> tuple[object, ...]:
+    def _display_execution_identity(record: ExecutionRecord | ExecutionTimelineRecord) -> tuple[object, ...]:
         return (record.execution_id, record.session_id, record.parent_execution_id,
                 record.created_at, record.principal_id, record.principal_kind,
-                record.binding_digest)
+                record.completed_at)
 
 
     @staticmethod
-    def _display_commit_identity(record: SessionTurnCommit) -> tuple[int, str, str, datetime]:
-        return record.turn_seq, record.session_id, record.execution_id, record.created_at
+    def _display_commit_identity(record: SessionTurnCommit) -> tuple[int, str, str, int, int]:
+        return (record.turn_seq, record.session_id, record.execution_id,
+                record.start_message_index, record.end_message_index)
 
     @staticmethod
     def _decode_display(value: object) -> SessionDetail:
@@ -166,10 +167,10 @@ class SessionDisplayCache:
                     or set(identities) & set(commits)):
                 return None
             for execution_id, identity in commits.items():
-                sequence, source_session_id, committed_execution_id, created_at = identity
+                sequence, source_session_id, committed_execution_id, start, end = identity
                 if (type(sequence) is not int or sequence < 1
                         or source_session_id != header.id or committed_execution_id != execution_id
-                        or not isinstance(created_at, datetime)):
+                        or type(start) is not int or type(end) is not int or start < 0 or end < start):
                     return None
             if len({identity[0] for identity in commits.values()}) != len(commits):
                 return None
@@ -208,11 +209,11 @@ class SessionDisplayCache:
                     or self._display_session_identity(record) != entry["root"]
                     or record.revision > detail.session.revision):
                 return False
-            ids = tuple(identities)
+            ids = tuple(dict.fromkeys((*identities, *commits)))
             current_revision = record.revision == detail.session.revision
             if current_revision and record.active_execution_id is not None and record.active_execution_id not in identities:
                 ids += (record.active_execution_id,)
-            records = await self._executions.get_many(ids, tenant_id=principal.tenant_id) if ids else {}
+            records = await self._executions.get_timeline_many(ids, tenant_id=principal.tenant_id) if ids else {}
             if len(records) != len(ids):
                 # A pre-admission negative cache entry can outlive the source
                 # capture. Only authoritative absence is an integrity failure.
@@ -230,7 +231,7 @@ class SessionDisplayCache:
             # bounded session cache. Do not replace that newer whole snapshot
             # merely because the same resource's older revision is still hot.
             if any(value.session_id != record.session_id or value.parent_execution_id is not None
-                   for value in records.values()):
+                   or value.principal_id != record.owner_principal_id for value in records.values()):
                 return False
             if any(self._display_execution_identity(records[key]) != identity
                    for key, identity in identities.items()):
@@ -242,6 +243,8 @@ class SessionDisplayCache:
                     start_turn_seq=min(sequences), end_turn_seq=max(sequences) + 1,
                 )
                 retained = {value.execution_id: self._display_commit_identity(value) for value in current_commits}
+                if any(records[key].completed_at is None for key in commits):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if any(retained.get(key) != identity for key, identity in commits.items()):
                     return False
             if required_end == 0:
@@ -273,7 +276,8 @@ class SessionDisplayCache:
                 turn = SessionTurn(
                     pending.execution_id, pending.status, pending.created_at, pending.updated_at,
                     stored_user_input_view(pending.stored_user_input)
-                    if pending.stored_user_input.view is not None or pending.stored_user_input.payload.kind == "inline"
+                    if pending.stored_user_input.view is not None or (pending.stored_user_input.payload.kind == "inline"
+                        and pending.stored_user_input.payload.encoding != "json-attachments")
                     else await load_stored_input_view(pending.stored_user_input, self._transcript_store.read_execution_payload),
                     False, (),
                     pending.error_code, pending.safe_error_details,
@@ -307,7 +311,8 @@ class SessionDisplayCache:
                 "root": self._display_session_identity(state.root),
                 "executions": {key: self._display_execution_identity(value)
                                for key, value in state.executions.items()
-                               if pending is None or key != pending.execution_id},
+                               if (pending is None or key != pending.execution_id)
+                               and key not in {item.execution_id for item in state.commits.values()}},
                 "commits": {value.execution_id: self._display_commit_identity(value)
                             for value in state.commits.values()},
                 "pending": None if pending is None else self._display_execution_identity(pending),

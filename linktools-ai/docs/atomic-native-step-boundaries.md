@@ -156,27 +156,49 @@ and the latest complete recovery point. It does not authorize dropping history
 owned by Conversation, Trace, a task handoff, or another retained snapshot.
 Active snapshots use the `(store_digest, run_digest, pruned)` index and equality
 on the non-null boolean, including on MySQL 5.7. Tombstones therefore do not
-expand the active scan. Pruning reads only one row containing the retention
-cutoff and latest complete ID, then retires the older range without loading a
-client-side list. With a fixed retention limit K, active metadata work is O(K),
+expand the active scan. Pruning reads one row containing the retention cutoff
+and latest complete ID, then retires older roots in metadata batches of at most
+128, without loading an unbounded client-side list. With a fixed retention limit K, active metadata work is O(K),
 independent of historical tombstones. Reducing an unlimited existing history
 can still require a larger one-time scan and update. The update also preserves
 complete points that become visible after the retention read.
 
-Native content collection remains an explicitly exclusive, offline operation.
-It discovers candidate messages using hashes only, then reads retained bodies
-in batches of at most 128 and verifies their full inline/object content before
-deleting anything. Orphan bodies are never loaded merely to delete them. Root
-and sequence metadata still scale with the namespace; all durable state owners
-must be scanned because there is no separate transactional root index. A single
-large retained body may exceed the batch's typical memory size. This is bounded
-by body count, not an absolute byte cap or a constant-memory collector.
+Native SQL message and sequence reclamation follows a derived dependency index.
+Actual State and snapshot owners publish or release their roots in the same SQL
+transaction as their conditional write. Sequence edges preserve shared content.
+The index is rebuildable data, not a second history or retention owner. It adds
+linear metadata space in exchange for incremental reclamation; it is not a
+claim that every workload occupies fewer rows.
 
-Automatic online deletion is not inferred from an execution reaching terminal
-state. Safe online collection requires a retention decision and coordination
-with every owner publishing or releasing shared roots, including cached content
-proofs. No lifecycle signal bypasses the existing offline exclusion, integrity,
-lease, authorization, or unknown-commit contracts.
+Relevant successful commits run a separate best-effort maintenance transaction
+with a budget of 32 candidates, limited to the native partitions bound to that
+storage group. Work beyond the budget remains queued for later boundaries;
+there is no additional background scheduler. Target revisions protect publication racing a
+delete, and candidate revisions prevent an old collector from swallowing newly
+queued work. They are optimistic concurrency counters, not signatures or new
+content identities. A failed collector leaves work for a later boundary and
+does not change an already committed execution result. Replay tombstones and
+all visible retained histories remain owned. Terminal state alone never
+authorizes deleting them. Partial-slice owners conservatively pin their full
+forest; a new publication canonicalizes its visible message sequence.
+
+Owner selection and native SQL row capture share one consistent read snapshot.
+Decoding and external object reads occur after releasing that transaction; a
+paused iterator does not retain a database transaction. A bare native root is a
+locator rather than a permanent retention claim. If a cached publication proof
+has lost its old dependencies, a confirmed transaction rollback permits one
+cold rebuild per prepared candidate from its immutable messages, with the same
+canonical root. A multi-root transaction may encounter more than one such
+candidate; the same candidate cannot repeatedly restart it. Unknown commit
+outcomes never enter that retry path.
+
+External object bytes and generic archive content still use the explicitly
+exclusive offline collector. It discovers orphan message candidates by hash,
+validates retained bodies in batches of at most 128 before deleting anything,
+and never loads orphan bodies merely to delete them. Its retained root and
+sequence metadata still scale with the namespace. A single large retained body
+may exceed the typical batch size: this is bounded by body count, not a fixed
+byte cap. Existing offline exclusion and unresolved-retention checks remain.
 
 ## Why other storage owners remain
 
@@ -196,19 +218,25 @@ Checkpoint control owns tool-effect admission, fencing and unknown outcomes;
 native snapshots remain the recovery history owner. History is an authorized
 read facade, not an additional durable database.
 
-AssetStore owns logical asset versions, ObjectStore owns immutable large bytes,
+AssetStore owns logical asset versions, ObjectStore owns immutable file and attachment bytes,
 Memory owns cross-execution mutable state, and Evaluation and Metrics own their
 independent evidence and observations. Those semantics are not removable copies
 of StepStore. Large execution bindings already share content-addressed storage;
 small bindings stay with their execution row to avoid another read. Their
 physical placement does not create a second mutable source of truth.
 
-Retaining an execution payload in Conversation still validates every byte. When
-both routes are explicitly durable, resolve to the same ObjectStore instance,
-and use the same canonical key, a fresh membership check permits reusing that
-object without another put. Different backends, retention policies, keys or
-missing objects follow the original copy path. Logical store IDs and cached
-bytes alone are not proof of physical ownership or retained availability.
+Conversation turn receipts retain execution identity and message range, not a
+second input, result, error or timestamp payload. Execution is the sole terminal
+content owner. Its first completion time remains stable while later handoff and
+retention-control updates may advance the record's normal update time. The
+repository's existing conditional writes preserve terminal facts; no additional
+terminal signature or content digest is introduced. Timeline pages batch-read
+the required Execution fields without expanding frozen bindings. Durable
+Conversation already requires durable Execution. Missing or mismatched owners
+fail closed instead of serving an independent stale copy.
+
+See [storage layout](storage-layout.md) for the direct binary body format, typed
+attachments, capture cleanup and the complete SQL table decisions.
 
 ## Verification
 

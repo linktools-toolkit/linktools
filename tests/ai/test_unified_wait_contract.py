@@ -258,7 +258,7 @@ class _Bundle:
             self.get_calls += 1
             return self.execution_run
 
-        self.facade = RuntimeExecutions(self.execution, get_execution)
+        self.facade = RuntimeExecutions(self.execution, get_execution, bind_execution=None)
 
     async def close(self) -> None:
         await self.evaluations.close()

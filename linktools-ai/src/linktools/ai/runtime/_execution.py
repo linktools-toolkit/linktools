@@ -84,7 +84,6 @@ from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
     ObjectRef,
     ObjectStore,
-    PayloadPolicy,
     StoredPayload,
     TurnCoordination,
 )
@@ -396,7 +395,6 @@ class DefaultExecutionService(TaskExecutionService):
         release_terminal: _ExecutionReleaseCallback | None = None,
         instruction_resolver: "RepositoryInstructionResolver | None" = None,
         object_key_factory: "ObjectKeyFactory | None" = None,
-        payload_policy: "PayloadPolicy | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
         task_admissions: TaskAdmissionRepository | None = None,
         object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
@@ -413,11 +411,10 @@ class DefaultExecutionService(TaskExecutionService):
         self._sessions = sessions
         self._task_admissions = task_admissions
         self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
-        self._payload_policy = payload_policy
         super().__init__(
             state, authorization, port=_ExecutionManagementAdapter(self), sessions=sessions,
             task_admissions=task_admissions, operation_ids=operation_ids,
-            release_terminal=release_terminal, payload_policy=payload_policy,
+            release_terminal=release_terminal,
             retained_turn_confirmed=retained_turn_confirmed,
         )
         self._context_archive = context_archive
@@ -429,12 +426,6 @@ class DefaultExecutionService(TaskExecutionService):
         self._live_broker = live_broker
         self._history_reader = history_reader
         self._history_service = history_service
-        if instruction_resolver is not None and (
-            object_key_factory is None or payload_policy is None
-        ):
-            raise ValueError(
-                "repository instruction resolver requires object key factory and payload policy"
-            )
         self._instruction_resolver = instruction_resolver
         self._input_materializer = input_materializer
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
@@ -1779,8 +1770,7 @@ class DefaultExecutionService(TaskExecutionService):
     ) -> ExecutionHandle:
         proposed_reservation = replace(proposed_reservation, execution=await _materialize_execution_payloads(
             proposed_reservation.execution, input_materializer=self._input_materializer,
-            objects=self._object_store, keys=self._object_key_factory,
-            policy=self._payload_policy, tenant_id=request.principal.tenant_id,
+            tenant_id=request.principal.tenant_id,
         ))
         prepared_context = None
         captured_context = proposed_reservation.execution.input_context

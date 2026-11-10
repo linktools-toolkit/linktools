@@ -19,7 +19,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.persistence.state import StoredFact
 
-from .test_session_timeline import _commit_fields, _execution
+from .test_session_timeline import _execution
 
 
 def _session() -> SessionRecord:
@@ -75,7 +75,6 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
                 execution_id="success",
                 start_message_index=0,
                 end_message_index=2,
-                **_commit_fields(_execution("success", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         await state.conversation.sessions.state_store.mutate(commit)
@@ -176,7 +175,6 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
                 execution_id="duplicate",
                 start_message_index=0,
                 end_message_index=2,
-                **_commit_fields(_execution("duplicate", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         with pytest.raises(AIError) as captured:

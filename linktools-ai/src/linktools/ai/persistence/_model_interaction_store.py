@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from ..errors import AIError, ErrorCode
 from .contracts import (
@@ -35,16 +35,16 @@ from .state import (
 class ModelInteractionStateStepArchive(StateStepArchive):
     """Durable archive with one CAS-protected record per admitted model request."""
 
-    async def resolve_model_interactions(
+    async def capture_model_interactions(
         self,
         interactions: Sequence[object],
         *,
         include_client_requests: bool = False,
         include_content: bool = True,
-    ) -> list[object]:
+    ) -> Callable[[], Awaitable[list[object]]]:
         values = tuple(interactions)
         if not values:
-            return []
+            return await super().capture_model_interactions(())
         if any(not isinstance(value, ModelInteractionRecord) for value in values):
             raise TypeError("model interaction is invalid")
         records = tuple(
@@ -52,7 +52,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         )
         if any(record.agent_run_id != records[0].agent_run_id for record in records):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await super().resolve_model_interactions(
+        return await super().capture_model_interactions(
             records, include_client_requests=include_client_requests, include_content=include_content,
         )
 

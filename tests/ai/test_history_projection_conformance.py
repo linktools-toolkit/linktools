@@ -87,9 +87,9 @@ async def _message_content_records(
             async with context.sessions() as session, session.begin():
                 rows = (await session.execute(query.statement)).mappings().all()
             records.extend(validate_native_message_content(
-                {"sha256": row["message_sha256"], "message": row["message"]},
+                {**row, "sha256": row["message_sha256"]},
                 group_id=root.group_id,
-            ) for row in rows if row["message"] is not None)
+            ) for row in rows if row["raw_size"] is not None)
         else:
             identities = await contents.content_ids(root)
             records.extend(await contents.content_records(identities))
@@ -832,17 +832,9 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-@pytest.mark.parametrize(
-    "storage_kind, corruption",
-    tuple(
-        (storage_kind, corruption)
-        for storage_kind in ("inline", "object")
-        for corruption in ("none", "raw-digest", "raw-size", "zlib", "truncated-zlib")
-    ) + (("inline", "non-binary"), ("inline", "unknown-codec")),
-)
+@pytest.mark.parametrize("corruption", ("none", "raw-digest", "raw-size", "zlib", "truncated-zlib", "non-binary", "unknown-codec"))
 async def test_public_transcript_rejects_corrupt_chunk_content(
     backend: str,
-    storage_kind: str,
     corruption: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -867,42 +859,29 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
         contents = await repository.content_archive()
         content = (await _message_content_records(contents, (chunk.content,)))[0]
         identity = content.identity
-        encoded = (await contents.read_payload_object(content.payload.ref)
-                   if content.payload.ref is not None else content.payload.decode())
-        raw = decode_payload_bytes(encoded, codec=content.compression,
+        raw = decode_payload_bytes(content.body, codec=content.compression,
                                    raw_digest=content.raw_digest, raw_size=content.raw_size)
-        compressed = raw if corruption == "unknown-codec" else zlib.compress(raw)
+        compressed = zlib.compress(raw)
         if corruption == "zlib":
             compressed = b"not a zlib stream"
         elif corruption == "truncated-zlib":
             compressed = compressed[:-1]
-        if storage_kind == "inline":
-            payload = StoredPayload.inline_bytes(compressed)
-        else:
-            async def chunks() -> AsyncIterator[bytes]:
-                yield compressed
-            digest = hashlib.sha256(compressed).hexdigest()
-            stat = await objects.put(
-                contents._object_prefix + digest, chunks(), expected_digest=digest,
-                expected_size=len(compressed),
-            )
-            payload = StoredPayload.object(ObjectRef("runtime", stat.key, stat.digest, stat.size))
-        if corruption == "non-binary":
-            payload = StoredPayload.inline_text("not binary")
-        changed = replace(
-            content,
-            compression="unknown-compression" if corruption == "unknown-codec" else "zlib",
-            payload=payload,
-            raw_digest="0" * 64 if corruption == "raw-digest" else content.raw_digest,
-            raw_size=content.raw_size + 1 if corruption == "raw-size" else content.raw_size,
-        )
+        metadata = {**content.to_json(), "compression": "zlib"}
+        if corruption == "unknown-codec":
+            metadata["compression"] = "unknown-compression"
+        elif corruption == "raw-digest":
+            metadata["raw_digest"] = "0" * 64
+        elif corruption == "raw-size":
+            metadata["raw_size"] += 1
+        elif corruption == "non-binary":
+            metadata["payload"] = StoredPayload.inline_text("not a binary content body").to_json()
         content_key = contents._key("archive_content", identity)
 
         async def corrupt_content(transaction):
             stored = await transaction.get_record(content_key)
             assert stored is not None
             assert await transaction.replace_record(
-                replace(stored, data=changed.to_json(), storage_revision=stored.storage_revision + 1),
+                replace(stored, data=metadata, payload_bytes=compressed, storage_revision=stored.storage_revision + 1),
                 expected_storage_revision=stored.storage_revision,
             )
 
@@ -912,7 +891,9 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
                 result = await sql.execute(table.update().where(
                     table.c.store_digest == chunk.content.store_digest,
                     table.c.sha256 == content.raw_digest,
-                ).values(message=json.dumps(changed.to_json())))
+                ).values(message=compressed, compression=metadata["compression"], raw_size=metadata["raw_size"],
+                         sha256=metadata["raw_digest"],
+                         payload_json=None if metadata["payload"] is None else json.dumps(metadata["payload"])))
                 assert result.rowcount == 1
         else:
             await contents.store.mutate(corrupt_content)

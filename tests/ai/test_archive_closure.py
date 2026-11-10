@@ -7,8 +7,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
 from linktools.ai.core import canonical_sha256
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._archive_closure import (
@@ -34,9 +36,9 @@ class Offline:
         yield
 
 
-async def _prepare(archive: ContentArchive, values: tuple[bytes, ...]):
+async def _prepare(archive: ContentArchive, values: tuple[bytes, ...], *, codec: str = "bytes"):
     prepared = PreparedArchive()
-    identities = await archive.prepare_content(tuple(("bytes", value) for value in values), prepared)
+    identities = await archive.prepare_content(tuple((codec, value) for value in values), prepared)
     root = await archive.append(archive.empty_root(), identities, prepared)
     await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
     return root, identities
@@ -126,17 +128,20 @@ async def test_archive_gc_scans_unrouted_owner_and_collects_only_excluded_conten
     objects = InMemoryObjectStore()
     archive = ContentArchive(store, scope, namespace="archive", tenant_id="tenant", object_store=objects)
     values = tuple(b"".join(hashlib.sha256(f"{item}:{index}".encode()).digest() for index in range(1024)) for item in range(3))
-    root, identities = await _prepare(archive, values)
+    values = tuple(encode_model_messages((ModelRequest(parts=[UserPromptPart([
+        BinaryContent(value, media_type="application/octet-stream"),
+    ])]),)) for value in values)
+    root, identities = await _prepare(archive, values, codec="model-message")
     record = StoredRecord(hashlib.sha256(b"hidden-owner").digest(), None, None, "probe", "hidden", None,
                           0, None, 0, None, {"root": encode_domain(root.slice(1, 2))})
     await hidden.mutate(lambda tx: tx.insert_record(record))
-    contents = {item.sort_key: ContentRecord.from_json(item.data) for item in await store.read(lambda tx: tx.scan_records()) if item.kind == "archive_content"}
-    candidates = tuple((PersistenceDomain.EXECUTION, contents[identity].payload.ref) for identity in identities)
+    contents = {item.sort_key: ContentRecord.from_record(item) for item in await store.read(lambda tx: tx.scan_records()) if item.kind == "archive_content"}
+    candidates = tuple((PersistenceDomain.EXECUTION, contents[identity].object_refs()[0]) for identity in identities)
     result = await purge_unreferenced_objects(candidates, namespace="archive", tenant_id="tenant",
         stores={PersistenceDomain.EXECUTION: owner}, object_stores={domain: objects for domain in PersistenceDomain}, exclusive=Offline())
     assert result.retained == (candidates[1],)
     assert set(result.deleted) == {candidates[0], candidates[2]}
-    assert await archive.read_contents(await archive.content_ids(root.slice(1, 2)), codec="bytes") == (values[1],)
+    assert await archive.read_contents(await archive.content_ids(root.slice(1, 2)), codec="model-message") == (values[1],)
     remaining = await store.read(lambda tx: tx.scan_records())
     assert {item.sort_key for item in remaining if item.kind == "archive_content"} == {identities[1]}
 

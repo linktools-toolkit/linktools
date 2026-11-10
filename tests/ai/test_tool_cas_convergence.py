@@ -16,7 +16,7 @@ from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperation
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.commands import StateCommands
 from linktools.ai.persistence.contracts import ToolOperationAdmission
-from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, StoredPayload
 from linktools.ai.persistence.state import Observed
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -323,7 +323,7 @@ def _readback_bridge(repository: _ReadbackRepository) -> RuntimeToolOperationBri
     return RuntimeToolOperationBridge(
         repository, InMemoryObjectStore(), namespace="tool-cas", tenant_id="tenant",
         execution_id="execution", agent_run_id="agent-run", owner="tool-owner",
-        binding_digest=repository.record.binding_digest, background_tasks=set(), payload_policy=PayloadPolicy(),
+        binding_digest=repository.record.binding_digest, background_tasks=set(),
     )
 
 

@@ -15,10 +15,10 @@ from linktools.ai.capability import CapabilityLoadContext, CapabilityLoadEntry
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay, read_object
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, StorageChange, StorageOperation, StorageOverlay, read_object
 
 
-@pytest_asyncio.fixture(params=("memory", "sqlite-inline", "sqlite-object", "sqlite-filesystem"))
+@pytest_asyncio.fixture(params=("memory", "sqlite-object", "sqlite-filesystem"))
 async def asset_store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[AssetStore]:
     engine = None
     if request.param == "memory":
@@ -31,7 +31,6 @@ async def asset_store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIt
         backend = SqlAssetBackend(
             engine, namespace="conformance",
             object_store=FilesystemObjectStore(tmp_path / "objects") if request.param == "sqlite-filesystem" else None,
-            payload_policy=None if request.param == "sqlite-inline" else PayloadPolicy(0),
         )
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()

@@ -3,16 +3,18 @@
 """Group-owned immutable content and exact persistent sequence ranges."""
 
 import hashlib
+import json
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
+from ..model.attachments import read_attachment_payload, store_attachment_payload, validate_attachment_payload
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
-from ._payload import PAYLOAD_COMPRESS_MINIMUM, decode_payload_bytes, encode_payload_bytes
+from ._payload import decode_payload_bytes, encode_payload_bytes
 from .state import StateStore, StateTransaction, StoredRecord, record_key_digest
 
 
@@ -178,24 +180,58 @@ class ContentRecord:
     raw_digest: str
     raw_size: int
     compression: str
-    payload: StoredPayload
+    payload: StoredPayload | None = None
+    body: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.codec, str) or not self.codec or self.compression not in {"raw", "zlib"}:
+            raise _integrity()
+        _digest(self.raw_digest)
+        _count(self.raw_size)
+        if self.payload is None:
+            if type(self.body) is not bytes:
+                raise _integrity()
+        elif (self.body is not None or self.payload.encoding != "json-attachments"
+              or self.compression != "raw" or self.payload.digest != self.raw_digest
+              or self.payload.size != self.raw_size):
+            raise _integrity()
 
     @property
     def identity(self) -> str:
         return canonical_sha256([self.codec, self.raw_digest])
 
+    def object_refs(self) -> tuple[ObjectRef, ...]:
+        return () if self.payload is None else self.payload.object_refs()
+
     def to_json(self) -> dict[str, JsonValue]:
         return {"codec": self.codec, "raw_digest": self.raw_digest, "raw_size": self.raw_size,
-                "compression": self.compression, "payload": self.payload.to_json()}
+                "compression": self.compression, "payload": None if self.payload is None else self.payload.to_json()}
 
     @classmethod
-    def from_json(cls, value: Mapping[str, JsonValue]) -> "ContentRecord":
+    def from_json(cls, value: Mapping[str, JsonValue], *, body: bytes | None = None) -> "ContentRecord":
         try:
-            codec, compression = value["codec"], value["compression"]
-            if not isinstance(codec, str) or not codec or compression not in {"raw", "zlib"}:
-                raise _integrity()
-            return cls(codec, _digest(value["raw_digest"]), _count(value["raw_size"]),
-                       compression, StoredPayload.from_json(dict(value["payload"])))
+            payload = value["payload"]
+            return cls(value["codec"], _digest(value["raw_digest"]), _count(value["raw_size"]),
+                       value["compression"], None if payload is None else StoredPayload.from_json(dict(payload)), body)
+        except (KeyError, TypeError, ValueError) as error:
+            raise _integrity() from error
+
+    @classmethod
+    def from_record(cls, record: StoredRecord) -> "ContentRecord":
+        return cls.from_json(record.data, body=record.payload_bytes)
+
+    def to_native_values(self) -> dict[str, object]:
+        return {"message": self.body, "compression": self.compression, "raw_size": self.raw_size,
+                "payload_json": None if self.payload is None else canonical_json_bytes(self.payload.to_json()).decode("utf-8")}
+
+    @classmethod
+    def from_native_row(cls, row: Mapping[str, object]) -> "ContentRecord":
+        try:
+            payload = row["payload_json"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            return cls("model-message", row.get("message_sha256", row.get("sha256")), row["raw_size"],
+                       row["compression"], None if payload is None else StoredPayload.from_json(payload), row["message"])
         except (KeyError, TypeError, ValueError) as error:
             raise _integrity() from error
 
@@ -294,9 +330,10 @@ class ContentArchive:
     def _key(self, kind: str, identity: str) -> bytes:
         return record_key_digest("", "", "archive", kind, [self.content_scope, identity])
 
-    def _record(self, kind: str, identity: str, data: Mapping[str, JsonValue]) -> StoredRecord:
+    def _record(self, kind: str, identity: str, data: Mapping[str, JsonValue],
+                *, payload_bytes: bytes | None = None) -> StoredRecord:
         return StoredRecord(self._key(kind, identity), bytes.fromhex(self.content_scope), None, kind, identity,
-                            None, 0, None, 0, None, data)
+                            None, 0, None, 0, None, data, payload_bytes=payload_bytes)
 
     def content_record_keys(self, values: Sequence[tuple[str, bytes]]) -> tuple[bytes, ...]:
         return tuple(dict.fromkeys(self._key("archive_content", canonical_sha256(
@@ -316,7 +353,7 @@ class ContentArchive:
             if (record.key_digest != key or record.kind != "archive_content"
                     or record.scope_digest != bytes.fromhex(self.content_scope)):
                 raise _integrity()
-            content = ContentRecord.from_json(record.data)
+            content = ContentRecord.from_record(record)
             if record.sort_key != content.identity or self._key("archive_content", content.identity) != key:
                 raise _integrity()
         observed = {key: records.get(key) for key in keys}
@@ -350,7 +387,7 @@ class ContentArchive:
             if stored is not None:
                 if stored.kind != "archive_content":
                     raise _integrity()
-                content = ContentRecord.from_json(stored.data)
+                content = ContentRecord.from_record(stored)
                 if content.identity != identity or content.raw_size != len(raw):
                     raise _integrity()
                 if not prepared.content_verified(stored):
@@ -359,35 +396,44 @@ class ContentArchive:
                     prepared.verify_content(stored)
                 prepared.records[key] = stored
                 continue
-            compression, payload, _encoded = await self.prepare_payload(raw)
+            compression, payload, encoded = await self.prepare_payload(raw, codec=codec)
             digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
-            content = ContentRecord(codec, digest, size, compression, payload)
-            prepared.records[key] = self._record("archive_content", identity, content.to_json())
+            content = ContentRecord(codec, digest, size, compression, payload, encoded if payload is None else None)
+            prepared.records[key] = self._record("archive_content", identity, content.to_json(), payload_bytes=content.body)
             prepared.verify_content(prepared.records[key])
         return identities
 
     async def prepare_payload(
-        self, raw: bytes, *, existing: ContentRecord | None = None,
-    ) -> tuple[str, StoredPayload, bytes]:
+        self, raw: bytes, *, existing: ContentRecord | None = None, codec: str = "model-message",
+    ) -> tuple[str, StoredPayload | None, bytes]:
         """Prepare the shared representation without reading or publishing SQL rows."""
-        compression, raw_digest, size, encoded = encode_payload_bytes(raw)
-        if self._objects is None or size < PAYLOAD_COMPRESS_MINIMUM:
-            payload = StoredPayload.inline_bytes(encoded)
-        else:
-            stored_digest = hashlib.sha256(encoded).hexdigest()
-            object_key = self._object_prefix + stored_digest
-            async def chunks() -> AsyncIterator[bytes]:
-                yield encoded
-            expected = StoredPayload.object(ObjectRef("runtime", object_key, stored_digest, len(encoded)))
-            if (existing is not None and existing.codec == "model-message"
-                    and existing.raw_digest == raw_digest and existing.raw_size == size
-                    and existing.compression == compression and existing.payload == expected):
-                payload = existing.payload
-            else:
-                stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
-                                               expected_digest=stored_digest)
-                payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
-        return compression, payload, encoded
+        if existing is not None:
+            if (existing.codec != codec or existing.raw_size != len(raw)
+                    or existing.raw_digest != hashlib.sha256(raw).hexdigest()):
+                raise _integrity()
+            if existing.payload is not None:
+                if any(ref.store_id != "runtime" or ref.key != self._object_prefix + ref.digest
+                       for ref in existing.object_refs()):
+                    raise _integrity()
+                validate_attachment_payload(raw, existing.payload)
+                return existing.compression, existing.payload, raw
+            if decode_payload_bytes(existing.body, codec=existing.compression,
+                                    raw_digest=existing.raw_digest, raw_size=existing.raw_size) != raw:
+                raise _integrity()
+            return existing.compression, None, existing.body
+        if codec == "model-message" and self._objects is not None:
+            async def write(data: bytes) -> ObjectRef:
+                digest = hashlib.sha256(data).hexdigest()
+                key = self._object_prefix + digest
+                async def chunks() -> AsyncIterator[bytes]:
+                    yield data
+                await self._objects.put(key, chunks(), expected_size=len(data), expected_digest=digest)
+                return ObjectRef("runtime", key, digest, len(data))
+            payload = await store_attachment_payload(raw, format="model-messages", write_object=write)
+            if payload is not None:
+                return "raw", payload, raw
+        compression, _raw_digest, _size, encoded = encode_payload_bytes(raw)
+        return compression, None, encoded
 
     async def read_payload_object(self, reference: ObjectRef) -> bytes:
         """Resolve a canonical message's object through this physical archive route."""
@@ -689,7 +735,8 @@ class ContentArchive:
             current = existing.get(key)
             if current is None:
                 missing.append(record)
-            elif current.kind != record.kind or current.data != record.data:
+            elif (current.kind != record.kind or current.data != record.data
+                  or current.payload_bytes != record.payload_bytes):
                 raise _integrity()
         if missing:
             await transaction.insert_records(missing)
@@ -825,7 +872,7 @@ class ContentArchive:
                         node = self._decode_node_record(record)
                         nodes[node.identity] = node
                     elif record.kind == "archive_content":
-                        content = ContentRecord.from_json(record.data)
+                        content = ContentRecord.from_record(record)
                         if (record.sort_key != content.identity
                                 or key != self._key(record.kind, content.identity)):
                             raise _integrity()
@@ -844,7 +891,7 @@ class ContentArchive:
                     content_id = nodes[identity].content_id
                     record = prepared.records.get(self._key("archive_content", content_id))
                     if record is not None:
-                        content = ContentRecord.from_json(record.data)
+                        content = ContentRecord.from_record(record)
                         if content.identity != content_id:
                             raise _integrity()
                         contents[content_id] = content
@@ -883,7 +930,7 @@ class ContentArchive:
             record = records.get(key)
             if record is None or record.kind != "archive_content":
                 raise _integrity()
-            content = ContentRecord.from_json(record.data)
+            content = ContentRecord.from_record(record)
             if content.identity != identity:
                 raise _integrity()
             values[identity] = content
@@ -893,10 +940,14 @@ class ContentArchive:
         self, roots: Sequence[ArchiveRoot], *, codec: str,
         append_frontiers: dict[ArchiveRoot, tuple[StoredRecord, ...]] | None = None,
     ) -> tuple[tuple[bytes, ...], ...]:
-        """Capture dependent immutable metadata together, then read bodies outside the state scope."""
-        if not roots:
-            return ()
+        load = await self.capture_ranges(roots, codec=codec, append_frontiers=append_frontiers)
+        return await load()
 
+    async def capture_ranges(
+        self, roots: Sequence[ArchiveRoot], *, codec: str,
+        append_frontiers: dict[ArchiveRoot, tuple[StoredRecord, ...]] | None = None,
+    ) -> Callable[[], Awaitable[tuple[tuple[bytes, ...], ...]]]:
+        """Capture immutable metadata; defer object I/O until the owner scope closes."""
         frontiers = {} if append_frontiers is not None else None
 
         async def capture(transaction: StateTransaction):
@@ -905,15 +956,19 @@ class ContentArchive:
             assert resolved is not None
             return resolved
 
-        groups, records = await self.store.read(capture)
-        decoded: dict[str, bytes] = {}
-        for identity, content in records.items():
-            if content.codec != codec:
-                raise _integrity()
-            decoded[identity] = await self._read_content(content)
+        groups, records = await self.store.read(capture) if roots else ((), {})
         if append_frontiers is not None and frontiers is not None:
             append_frontiers.update(frontiers)
-        return tuple(tuple(decoded[identity] for identity in group) for group in groups)
+
+        async def load() -> tuple[tuple[bytes, ...], ...]:
+            decoded: dict[str, bytes] = {}
+            for identity, content in records.items():
+                if content.codec != codec:
+                    raise _integrity()
+                decoded[identity] = await self._read_content(content)
+            return tuple(tuple(decoded[identity] for identity in group) for group in groups)
+
+        return load
 
     async def read_contents(self, identities: Sequence[str], *, codec: str,
                             reserve: Callable[[str, int], None] | None = None) -> tuple[bytes, ...]:
@@ -924,7 +979,7 @@ class ContentArchive:
             record = records.get(key)
             if record is None or record.kind != "archive_content":
                 raise _integrity()
-            content = ContentRecord.from_json(record.data)
+            content = ContentRecord.from_record(record)
             if content.identity != identity or content.codec != codec:
                 raise _integrity()
             if reserve is not None:
@@ -933,21 +988,8 @@ class ContentArchive:
         return tuple(decoded[identity] for identity in identities)
 
     async def _read_content(self, content: ContentRecord) -> bytes:
-        payload = content.payload
-        if payload.ref is None:
-            raw = payload.decode()
-            if not isinstance(raw, bytes):
-                raise _integrity()
-        else:
-            if self._objects is None or not payload.ref.key.startswith(self._object_prefix):
-                raise _integrity()
-            if self._object_reader is None:
-                raw = await read_object(self._objects, payload.ref.key, expected_digest=payload.digest,
-                                        expected_size=payload.size)
-            else:
-                raw = await self._object_reader(payload.ref)
-                if len(raw) != payload.size or hashlib.sha256(raw).hexdigest() != payload.digest:
-                    raise _integrity()
+        raw = (content.body if content.payload is None else
+               await read_attachment_payload(content.payload, read_object=self.read_payload_object))
         return decode_payload_bytes(raw, codec=content.compression,
                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
 

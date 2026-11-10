@@ -339,6 +339,7 @@ class StepExecutionHistoryReader:
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         store = self._store_for(record)
+        content_loaders: dict[int, Callable[[], Awaitable[list[object]]]] = {}
 
         async def capture() -> tuple[_ExecutionHistoryStore, dict[tuple[int, int], ModelInteractionRecord | StagedModelInteraction]]:
             selected: dict[tuple[int, int], ModelInteractionRecord | StagedModelInteraction] = {}
@@ -376,17 +377,26 @@ class StepExecutionHistoryReader:
                             selected[(run_seq, value.model_request_seq)] = value
                     if any((run_seq, sequence) not in selected for sequence in range(first, last + 1)):
                         raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if type(store) is ModelInteractionStateStepArchive and (include_content or include_client_requests):
+                for run_seq in dict.fromkeys(run for run, _ in keys):
+                    content_loaders[run_seq] = await store.capture_model_interactions(
+                        tuple(selected[key] for key in keys if key[0] == run_seq),
+                        include_content=include_content, include_client_requests=include_client_requests,
+                    )
             return store, selected
 
-        store, selected = await self._read_model_metadata(self._executions, capture)
+        store, selected = await self._read_model_metadata(
+            self._executions, capture, include_content=include_content and store is self._store,
+        )
         resolved: dict[tuple[int, int], object] = {}
         if include_content or include_client_requests:
             for run_seq in dict.fromkeys(run for run, _ in keys):
                 run_keys = tuple(key for key in keys if key[0] == run_seq)
-                values = await store.resolve_model_interactions(
-                    tuple(selected[key] for key in run_keys), include_content=include_content,
-                    include_client_requests=include_client_requests,
-                )
+                values = (await content_loaders[run_seq]() if run_seq in content_loaders else
+                          await store.resolve_model_interactions(
+                              tuple(selected[key] for key in run_keys), include_content=include_content,
+                              include_client_requests=include_client_requests,
+                          ))
                 if len(values) != len(run_keys):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 resolved.update(zip(run_keys, values))
@@ -677,7 +687,14 @@ class StepExecutionHistoryReader:
 
     async def _read_model_metadata(
         self, executions: ExecutionRepository, read: Callable[[], Awaitable[_ModelMetadataT]],
+        *, include_content: bool = False,
     ) -> _ModelMetadataT:
+        if include_content and type(self._store) is ModelInteractionStateStepArchive:
+            stores = ()
+            if (executions is self._executions and type(executions) is ExecutionRepositoryImpl
+                    and executions.state_store.storage_group is self._store.state_store.storage_group):
+                stores = (executions.state_store,)
+            return await self._store.transcript_repository.read_content(read, stores=stores)
         # Only known metadata-only owners can safely share the read callback.
         if (executions is self._executions
                 and type(executions) is ExecutionRepositoryImpl
@@ -933,6 +950,7 @@ class StepExecutionHistoryReader:
         cursor_prefix = None if cursor_source is None else cursor_source.merge_prefix
 
         page: list[_InteractionOccurrence] = []
+        content_loaders: dict[str, Callable[[], Awaitable[list[object]]]] = {}
         for source in sources:
             if cursor_prefix is not None and source.merge_prefix < cursor_prefix:
                 continue
@@ -959,9 +977,25 @@ class StepExecutionHistoryReader:
                 agent_run_seq=source.agent_run_seq,
             )
             fetch_limit = min(remaining, available)
-            interactions = await self._store_for(source.record).list_model_interactions(
-                agent_run_id=agent_run_id, after_model_request_seq=after_model_request_seq, limit=fetch_limit,
-            )
+            store = self._store_for(source.record)
+            if type(store) is ModelInteractionStateStepArchive and (include_content or include_client_requests):
+                async def capture_page():
+                    records = await store.list_model_interactions(
+                        agent_run_id=agent_run_id, after_model_request_seq=after_model_request_seq, limit=fetch_limit,
+                    )
+                    selected_count = min(len(records), max(limit - len(page), 0))
+                    load = await store.capture_model_interactions(
+                        records[:selected_count], include_content=include_content,
+                        include_client_requests=include_client_requests,
+                    )
+                    return records, load
+
+                interactions, load = await store.transcript_repository.read_content(capture_page)
+                content_loaders[agent_run_id] = load
+            else:
+                interactions = await store.list_model_interactions(
+                    agent_run_id=agent_run_id, after_model_request_seq=after_model_request_seq, limit=fetch_limit,
+                )
             if len(interactions) != fetch_limit:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for expected_sequence, interaction in enumerate(interactions, after_model_request_seq + 1):
@@ -985,11 +1019,12 @@ class StepExecutionHistoryReader:
             resolved_values: tuple[object, ...]
             if include_content or include_client_requests:
                 source = source_by_identity[(occurrence_group[0].source_execution_id, occurrence_group[0].agent_run_seq)]
-                resolved_values = tuple(await self._store_for(source.record).resolve_model_interactions(
-                    tuple(value.interaction for value in occurrence_group),
-                    include_client_requests=include_client_requests,
-                    include_content=include_content,
-                ))
+                run_id = occurrence_group[0].interaction.agent_run_id
+                resolved_values = tuple(await content_loaders[run_id]() if run_id in content_loaders else
+                    await self._store_for(source.record).resolve_model_interactions(
+                        tuple(value.interaction for value in occurrence_group),
+                        include_client_requests=include_client_requests, include_content=include_content,
+                    ))
                 if len(resolved_values) != len(occurrence_group):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             else:

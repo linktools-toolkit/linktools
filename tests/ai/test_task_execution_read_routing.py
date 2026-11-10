@@ -189,7 +189,7 @@ async def test_agent_inspect_requires_both_authorities_and_returns_producer_view
                 return producer_view
 
         key = "execution" if route == "direct" else "root"
-        ports = {key: SimpleNamespace(service=Producer())} if denial != "missing" else {"unrelated": object()}
+        ports = {key: Producer()} if denial != "missing" else {"unrelated": object()}
         reads = TaskExecutionReads(_service(state, authorization=Authorization()), ports)
         if denial == "none":
             assert await reads.inspect("execution", principal=_PRINCIPAL) is producer_view
@@ -270,7 +270,7 @@ async def test_noninspect_reads_call_selected_service_operation(
             return marker
 
         monkeypatch.setattr(selected, method, operation, raising=False)
-        ports = {"execution": SimpleNamespace(service=selected)}
+        ports = {"execution": selected}
         reads = TaskExecutionReads(service, ports)
         kwargs = {"timeout_seconds": 0.25} if method == "wait" else {}
         assert await getattr(reads, method)("execution", principal=_PRINCIPAL, **kwargs) is marker

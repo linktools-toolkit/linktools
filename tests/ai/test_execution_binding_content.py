@@ -39,7 +39,7 @@ def _shared_record():
     binding = data["value"]["payload"]["fields"]["binding"]
     raw = canonical_json_bytes(binding)
     compression, digest, size, encoded = encode_payload_bytes(raw)
-    content = ContentRecord("execution-binding", digest, size, compression, StoredPayload.inline_bytes(encoded))
+    content = ContentRecord("execution-binding", digest, size, compression, body=encoded)
     scope = canonical_sha256(["bindings", "tenant"])
     reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope}
     compact = replace(record, data={**data, "value": {**data["value"], "payload": {
@@ -95,7 +95,7 @@ def test_binding_snapshot_rejects_missing_or_corrupt_content(corruption: str) ->
     if corruption == "missing":
         contents = {}
     elif corruption == "body":
-        contents[key] = replace(content, payload=StoredPayload.inline_bytes(b"corrupt"))
+        contents[key] = replace(content, body=b"corrupt")
     elif corruption == "codec":
         contents[key] = replace(content, codec="different")
     with pytest.raises(AIError) as error:

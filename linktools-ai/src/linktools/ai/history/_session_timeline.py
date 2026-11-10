@@ -37,14 +37,14 @@ from ..persistence.contracts import (
     ExecutionRepository,
     TranscriptHeadRecord,
 )
-from ..execution import ExecutionRecord, StoredUserInput
+from ..execution import ExecutionRecord, ExecutionTimelineRecord, StoredUserInput
 from ..session import SessionRecord, SessionTurnCommit, SessionTurnRef
 from ..persistence.runs import ConversationPersistence
 from ..persistence.repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from ..persistence.repositories import ExecutionRepositoryImpl
 from ..persistence.runs import ModelInteractionStateStepArchive
 from ..persistence.runs import StateStepArchive
-from ..persistence.state import StateGroupTransaction
+from ..persistence.state import GroupRecordReader, StateGroupTransaction
 from ..persistence.runs import project_session_history_message
 
 _TIMELINE_PROJECTION_VERSION = 1
@@ -255,7 +255,7 @@ class SessionTimelineCapture:
     root: SessionRecord
     blocks: _TimelineBlocks
     next_coordinate: tuple[str, int] | None
-    executions: Mapping[str, ExecutionRecord]
+    executions: Mapping[str, ExecutionTimelineRecord | ExecutionRecord]
     commits: dict[tuple[str, int], SessionTurnCommit]
     pending_execution: ExecutionRecord | None = None
     histories: Mapping[str, tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord]] = field(default_factory=dict)
@@ -280,7 +280,7 @@ async def capture_session_timeline(
     refresh_phase: Literal["initial", "final"] | None = None,
     include_active: bool = False,
     transcript_store: SessionTimelineTranscriptStore | None = None,
-    validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None] | None = None,
+    validate_active: Callable[[SessionRecord, ExecutionRecord | ExecutionTimelineRecord | None], ExecutionRecord | ExecutionTimelineRecord | None] | None = None,
 ) -> SessionTimelineCapture:
     shared_native_scope = (
         type(conversation.sessions) is SessionRepositoryImpl
@@ -303,11 +303,6 @@ async def capture_session_timeline(
         if refresh_phase == "initial" and root.active_execution_id is not None:
             if not shared_native_scope or validate_active is None:
                 raise _ActiveSessionAdmission(root)
-            active = await executions.get(root.active_execution_id, tenant_id=tenant_id)
-            if validate_active(root, active) is None:
-                # Terminal admission cleanup precedes page validation and must
-                # leave the snapshot before attempting any mutation.
-                raise _ActiveSessionAdmission(root)
         if refresh_phase is not None and transcript_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if pending_execution is not None:
@@ -318,7 +313,7 @@ async def capture_session_timeline(
                     or pending_execution.session_id != root.session_id
                     or pending_execution.principal_id != root.owner_principal_id
                     or pending_execution.created_at < root.created_at
-                    or await executions.get(pending_execution.execution_id, tenant_id=tenant_id) is not None):
+                    or pending_execution.execution_id in await executions.get_timeline_many((pending_execution.execution_id,), tenant_id=tenant_id)):
                 pending_execution = None
         page_limit = validate_page_limit(limit)
         coordinate = _decode_timeline_cursor(
@@ -333,10 +328,9 @@ async def capture_session_timeline(
     async def execution_records(
         root: SessionRecord, blocks: _TimelineBlocks,
         commits: Mapping[tuple[str, int], SessionTurnCommit],
-    ) -> Mapping[str, ExecutionRecord]:
+    ) -> Mapping[str, ExecutionTimelineRecord | ExecutionRecord]:
         ids = tuple(
             ref.execution_id for _record, refs in blocks for ref in refs
-            if (ref.session_id, ref.turn_seq) not in commits
         )
         if (include_active or refresh_phase is not None) and root.active_execution_id is not None:
             ids += (root.active_execution_id,)
@@ -345,10 +339,22 @@ async def capture_session_timeline(
         # A continuation consists entirely of persisted references.
         pending = {} if pending_execution is None or cursor is not None else {pending_execution.execution_id: pending_execution}
         ids = tuple(value for value in ids if value not in pending)
-        records = await executions.get_many(ids, tenant_id=tenant_id) if ids else {}
+        records = await executions.get_timeline_many(ids, tenant_id=tenant_id) if ids else {}
         if len(records) != len(ids):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return {**pending, **records}
+        combined = {**pending, **records}
+        if refresh_phase == "initial" and root.active_execution_id is not None and validate_active is not None:
+            if validate_active(root, combined.get(root.active_execution_id)) is None:
+                raise _ActiveSessionAdmission(root)
+        for source, refs in blocks:
+            for ref in refs:
+                execution = combined[ref.execution_id]
+                commit = commits.get((ref.session_id, ref.turn_seq))
+                if (execution.session_id != source.session_id or execution.parent_execution_id is not None
+                        or execution.principal_id != source.owner_principal_id
+                        or commit is not None and execution.completed_at is None):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return combined
 
     async def commit_records(
         blocks: _TimelineBlocks,
@@ -407,7 +413,17 @@ async def capture_session_timeline(
                     if record.history_id is not None and record.continuation is not None:
                         keys.extend(histories.history_record_keys(record.history_id))
                 if keys:
-                    await transaction.get_records(tuple(dict.fromkeys(keys)))
+                    execution_ids = tuple(ref.execution_id for _record, refs in blocks for ref in refs)
+                    if (include_active or refresh_phase is not None) and root.active_execution_id is not None:
+                        execution_ids += (root.active_execution_id,)
+                    if isinstance(_group, GroupRecordReader):
+                        requests = {session_store: tuple(dict.fromkeys(keys))}
+                        requests[execution_store] = tuple(dict.fromkeys((*requests.get(execution_store, ()), *(
+                            executions.execution_record_key(identity) for identity in execution_ids
+                        ))))
+                        await _group.get_records(requests)
+                    else:
+                        await transaction.get_records(tuple(dict.fromkeys(keys)))
             commits = await commit_records(blocks)
             records = await execution_records(root, blocks, commits)
             history_captures: dict[str, tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord]] = {}
@@ -456,7 +472,7 @@ async def capture_session_refresh(
     limit: int,
     reconcile: Callable[[SessionRecord], Awaitable[SessionRecord]],
     transcript_store: SessionTimelineTranscriptStore | None,
-    validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None],
+    validate_active: Callable[[SessionRecord, ExecutionRecord | ExecutionTimelineRecord | None], ExecutionRecord | ExecutionTimelineRecord | None],
     pending_execution: ExecutionRecord | None = None,
     authorized_header: ResourceRef | None = None,
 ) -> SessionTimelineCapture:
@@ -579,8 +595,13 @@ async def project_captured_session_timeline(
         commit = commits.get((ref.session_id, ref.turn_seq))
         items: tuple[SessionTurnItem, ...] = ()
         output: JsonValue = None
+        execution = execution_records[ref.execution_id]
+        if execution.session_id != ref.session_id or execution.parent_execution_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if commit is not None:
-            if commit.execution_id != ref.execution_id or commit.session_id != ref.session_id:
+            if (commit.execution_id != ref.execution_id or commit.session_id != ref.session_id
+                    or execution.completed_at is None
+                    or execution.result is None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if commit.end_message_index > commit.start_message_index:
                 base = message_bases[ref.session_id]
@@ -590,30 +611,24 @@ async def project_captured_session_timeline(
                 if start < 0 or end > len(source) or end <= start:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 items = _timeline_items(source[start:end])
-            if commit.status is ExecutionStatus.SUCCEEDED:
-                if commit.output is None:
+            if execution.status is ExecutionStatus.SUCCEEDED:
+                if execution.result.output is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                output = await _committed_output(commit.output, transcript_store)
-            elif commit.output is not None or commit.status not in {
-                ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-            }:
+                output = await _committed_output(execution.result.output, transcript_store)
+            elif execution.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            status, created_at, updated_at = commit.status, commit.created_at, commit.updated_at
-            user_input = commit.stored_user_input
-            error_code, safe_error_details = commit.error_code, commit.safe_error_details
+            updated_at = execution.completed_at
         else:
-            execution = execution_records[ref.execution_id]
-            if execution.session_id != ref.session_id or execution.parent_execution_id is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.conversation and execution.status in {
                 ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
             }:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             if execution.status is ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            status, created_at, updated_at = execution.status, execution.created_at, execution.updated_at
-            user_input = execution.stored_user_input
-            error_code, safe_error_details = execution.error_code, execution.safe_error_details
+            updated_at = execution.updated_at
+        status, created_at = execution.status, execution.created_at
+        user_input = execution.stored_user_input
+        error_code, safe_error_details = execution.error_code, execution.safe_error_details
         turns.append(
             SessionTurn(
                 ref.execution_id,
@@ -621,10 +636,10 @@ async def project_captured_session_timeline(
                 created_at,
                 updated_at,
                 stored_user_input_view(user_input)
-                if user_input.view is not None or user_input.payload.kind == "inline"
+                if user_input.view is not None or (user_input.payload.kind == "inline"
+                    and user_input.payload.encoding != "json-attachments")
                 else await load_stored_input_view(
-                    user_input, transcript_store.read_conversation_payload
-                    if commit is not None else transcript_store.read_execution_payload,
+                    user_input, transcript_store.read_execution_payload,
                 ),
                 commit is not None,
                 items,
@@ -650,7 +665,8 @@ async def project_captured_session_timeline(
 async def load_stored_input_view(
     value: StoredUserInput, read_payload: Callable[[StoredPayload], Awaitable[bytes]],
 ) -> dict[str, JsonValue]:
-    if value.view is not None or value.payload.kind == "inline":
+    if value.view is not None or (value.payload.kind == "inline"
+            and value.payload.encoding != "json-attachments"):
         return stored_user_input_view(value)
     try:
         raw = await read_payload(value.payload)
@@ -672,7 +688,7 @@ async def _committed_output(
         if payload.kind == "inline":
             value = payload.decode()
         else:
-            raw = await transcript_store.read_conversation_payload(payload)
+            raw = await transcript_store.read_execution_payload(payload)
             value = raw.decode("utf-8") if payload.encoding == "utf-8" else json.loads(raw.decode("utf-8"))
         return normalize_json_value(value)
     except AIError:

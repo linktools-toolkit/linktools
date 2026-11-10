@@ -24,7 +24,7 @@ from linktools.ai.persistence._step_message_content import (
     NativeMessageContent, NativeMessageRoot, NativeMessageSlice, NativeRangeBudget, PreparedMessagePayload,
 )
 from linktools.ai.persistence._transcript_staging import MessageArchive
-from linktools.ai.storage import StoredPayload, dialect_for_name
+from linktools.ai.storage import dialect_for_name
 
 
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -32,7 +32,7 @@ _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 async def _payload(raw: bytes) -> PreparedMessagePayload:
     compression, _, _, encoded = encode_payload_bytes(raw)
-    return PreparedMessagePayload(raw, encoded=encoded, compression=compression, payload=StoredPayload.inline_bytes(encoded))
+    return PreparedMessagePayload(raw, encoded=encoded, compression=compression, payload=None)
 
 
 class _Transaction:

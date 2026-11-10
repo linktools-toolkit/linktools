@@ -29,7 +29,7 @@ from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_refresh import _admit
-from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _materialize_conversation, _session
 from .test_runtime_content_cache_integration import WriteOnlyCache
 
 pytestmark = pytest.mark.asyncio
@@ -94,7 +94,6 @@ async def _prepare(state, *, body=False, namespace="display"):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="active",
                 start_message_index=0, end_message_index=count,
-                **_commit_fields(execution),
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="active", expected=None,
@@ -367,7 +366,7 @@ async def test_display_cache_facade_passes_max_age_to_custom_service():
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit, max_age))
             return "custom"
-    facade = RuntimeSessions(Custom(), object(), ensure_open=lambda: None)
+    facade = RuntimeSessions(Custom(), object(), bind_session=None, ensure_open=lambda: None)
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=0) == "custom"
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=3) == "custom"
     assert calls == [("session", _PRINCIPAL, None, 100, 0), ("session", _PRINCIPAL, None, 100, 3)]
@@ -477,7 +476,6 @@ async def test_display_cache_terminal_active_refreshes_complete_page(status, rel
                 await sessions.commit_timeline_turn_in_transaction(
                     transaction, "session", tenant_id="tenant", execution_id="active",
                     start_message_index=0, end_message_index=count,
-                    **_commit_fields(execution),
                 )
                 await sessions.advance_continuation_in_transaction(
                     transaction, "session", tenant_id="tenant", execution_id="active", expected=None,
@@ -549,7 +547,6 @@ async def test_display_cache_idle_completion_observes_continuation_revision():
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="second",
                 start_message_index=0, end_message_index=count,
-                **_commit_fields(execution),
             )
             return await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="second", expected=None,

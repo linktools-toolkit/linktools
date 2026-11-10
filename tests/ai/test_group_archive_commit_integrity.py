@@ -3,15 +3,15 @@
 """Completed metadata reads cannot bypass body checks or fresh publication."""
 
 import hashlib
-import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from sqlalchemy import insert, select
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
-from linktools.ai.core import canonical_json_bytes
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.state import GroupRecordReader
 from linktools.ai.persistence import PersistenceDomain
@@ -72,7 +72,7 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
         step = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         original = step.prepare_conversation_checkpoint
         captured: list[tuple[object, ...]] = []
-        rivals: list[dict[str, str]] = []
+        rivals: list[dict[str, object]] = []
         native = step.transcript_repository._native_messages
         assert native is not None
         metadata = build_step_sql_metadata()
@@ -96,10 +96,8 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
             prepared = result[1][0].archive
             retained = next(iter(prepared.native_messages.values()))
             identity, body = retained.messages[0]
-            corrupt = json.loads(body)
-            corrupt["raw_size"] += 1
             rival = {"store_digest": native.store_digest, "sha256": identity,
-                     "message": canonical_json_bytes(corrupt).decode("utf-8")}
+                     **body.to_native_values(), "raw_size": body.raw_size + 1}
             async with native.storage_context.engine.begin() as connection:
                 await connection.execute(insert(messages).values(**rival))
             rivals.append(rival)
@@ -115,6 +113,7 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
         async with native.storage_context.engine.connect() as connection:
             remaining = await connection.execute(select(
                 messages.c.store_digest, messages.c.sha256, messages.c.message,
+                messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ))
             assert tuple(dict(row) for row in remaining.mappings()) == tuple(rivals)
         assert await state.storage.execution.executions.get("execution", tenant_id="tenant") is None
@@ -130,15 +129,17 @@ async def test_observed_existing_metadata_still_requires_the_object_body(
         objects = _OutsideScopeObjects()
         archive = await _archive(owner, objects)
         raw = b"".join(hashlib.sha256(str(index).encode()).digest() for index in range(1100))
-        values = (("bytes", raw),)
+        raw = encode_model_messages((ModelRequest(parts=[UserPromptPart([
+            BinaryContent(raw, media_type="application/octet-stream"),
+        ])]),))
+        values = (("model-message", raw),)
         initial = PreparedArchive()
         await archive.prepare_content(values, initial)
         await _publish(archive, initial)
         prepared = PreparedArchive()
         observed = await _observe(owner, archive, values, prepared)
         record = next(iter(observed.values()))
-        reference = ContentRecord.from_json(record.data).payload.ref
-        assert reference is not None
+        reference, = ContentRecord.from_record(record).object_refs()
         assert await objects.delete_object(reference.key, expected_digest=reference.digest)
         if damage == "corrupt":
             corrupt = b"!" * reference.size
@@ -194,7 +195,9 @@ async def test_combining_preparations_does_not_carry_body_validation_to_another_
     async with _database(tmp_path / "combine.db") as (_, owner, unused):
         objects = _OutsideScopeObjects()
         archive = await _archive(owner, objects)
-        values = (("bytes", b"large" * 4000),)
+        values = (("model-message", encode_model_messages((ModelRequest(parts=[UserPromptPart([
+            BinaryContent(b"large" * 4000, media_type="application/octet-stream"),
+        ])]),))),)
         initial = PreparedArchive()
         await archive.prepare_content(values, initial)
         await _publish(archive, initial)
@@ -203,8 +206,7 @@ async def test_combining_preparations_does_not_carry_body_validation_to_another_
         await archive.prepare_content(values, prepared)
         assert prepared._verified_content
         combined = PreparedArchive.combine((prepared,))
-        reference = ContentRecord.from_json(next(iter(observed.values())).data).payload.ref
-        assert reference is not None
+        reference, = ContentRecord.from_record(next(iter(observed.values()))).object_refs()
         assert await objects.delete_object(reference.key, expected_digest=reference.digest)
         with pytest.raises(AIError) as raised:
             await archive.prepare_content(values, combined)

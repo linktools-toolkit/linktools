@@ -29,7 +29,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ModelInteractionRecord, RuntimePayloadRef
 from linktools.ai.persistence._model_client import resolve_client_requests
-from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._archive import ArchiveRoot, ContentRecord, PreparedArchive
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
@@ -111,10 +111,16 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
         assert _decode_step_envelope(_encode_step_envelope(record)) == record
         first, retry = record.client_requests[:2]
         assert first.body == retry.body
-        assert first.body.codec == ("zlib" if large else "raw")
+        assert first.body.codec == "raw"
         assert first.body.raw_size == len(requests[0].body)
         assert first.body.raw_digest == hashlib.sha256(requests[0].body).hexdigest()
-        assert first.body.content.payload.kind == ("object" if large else "inline")
+        assert isinstance(first.body.content, ArchiveRoot)
+        content_archive = await source.transcript_repository.content_archive()
+        content_ids = await content_archive.content_ids(first.body.content, prepared=prepared)
+        content = next(ContentRecord.from_record(item) for item in prepared.records.values()
+                       if item.kind == "archive_content" and item.sort_key == content_ids[0])
+        assert content.compression == ("zlib" if large else "raw")
+        assert content.payload is None and isinstance(content.body, bytes)
         await source.sync_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)
         archived = await source.list_model_interactions(agent_run_id="run")
         resolved = await source.resolve_model_interactions(archived, include_client_requests=True)
@@ -128,14 +134,15 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
         target = target_storage.run_store.read_store(PersistenceDomain.TRACE)
-        relocated = await target.prepare_relocated_interactions(archived, resolved, prepared=prepared)
+        target_prepared = PreparedArchive()
+        relocated = await target.prepare_relocated_interactions(archived, resolved, prepared=target_prepared)
         expected = [(None, None, None, requests, None)]
         assert relocated[0].client_requests[0].body.raw_digest == record.client_requests[0].body.raw_digest
         assert relocated[0].model == record.model
         assert relocated[0].usage == record.usage
-        await target.sync_projection(run, events=(), checkpoints=(), interactions=relocated, execution_id="execution", archive=prepared)
+        await target.sync_projection(run, events=(), checkpoints=(), interactions=relocated, execution_id="execution", archive=target_prepared)
         assert await target.resolve_model_interactions(relocated, include_client_requests=True) == expected
-        restored_to_trace = await source.prepare_relocated_interactions(relocated, expected, prepared=prepared)
+        restored_to_trace = await source.prepare_relocated_interactions(relocated, expected, prepared=PreparedArchive())
         assert await source.resolve_model_interactions(restored_to_trace, include_client_requests=True) == expected
         await source.release_agent_run("run", execution_id="execution")
         assert await target.resolve_model_interactions(relocated, include_client_requests=True) == expected
@@ -168,7 +175,7 @@ async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ("raw_digest", "raw_size", "compressed_bytes", "domain", "codec"))
+@pytest.mark.parametrize("corruption", ("raw_digest", "raw_size", "compressed_bytes", "missing", "domain", "codec"))
 async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> None:
     prepared = PreparedArchive()
     storage = Persistence(PersistenceStorage.in_memory())
@@ -177,6 +184,8 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
     try:
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}", prepared=prepared)
+        await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=(record,),
+                                      execution_id="execution", archive=prepared)
         if corruption == "codec":
             encoded = _encode_persisted_domain(record)
             # Unsupported storage compression is not guessed from the bytes.
@@ -190,12 +199,21 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
             body = replace(body, raw_digest="a" * 64)
         elif corruption == "raw_size":
             body = replace(body, raw_size=body.raw_size + 1)
-        elif corruption == "compressed_bytes":
-            body = replace(body, content=RuntimePayloadRef(
-                StoredPayload.inline_bytes(b"not zlib"), PersistenceDomain.TRACE,
-            ))
+        elif corruption in {"compressed_bytes", "missing"}:
+            contents = await archive.transcript_repository.content_archive()
+            identity, = await contents.content_ids(body.content)
+            key = contents._key("archive_content", identity)
+            async def damage(tx):
+                if corruption == "missing":
+                    assert await tx.delete_record(key)
+                    return
+                record = await tx.get_record(key)
+                assert await tx.replace_record(replace(record, payload_bytes=b"not zlib",
+                                                       storage_revision=record.storage_revision + 1),
+                                               expected_storage_revision=record.storage_revision)
+            await contents.store.mutate(damage)
         else:
-            body = replace(body, content=replace(body.content, source_domain=PersistenceDomain.CHECKPOINT))
+            body = replace(body, content=replace(body.content, content_scope="0" * 64))
         invalid = replace(record, client_requests=(replace(request, body=body),))
         with pytest.raises(AIError) as raised:
             await archive.resolve_model_interaction(invalid, include_client_requests=True)
@@ -207,7 +225,7 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("exclusive_sqlite", "sqlite"))
-async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
+async def test_client_body_database_content_survives_snapshot_and_follows_owner_cleanup(
     tmp_path: Path, backend: str,
 ) -> None:
     prepared = PreparedArchive()
@@ -219,10 +237,12 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=prepared)
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)
-        references = tuple(set(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=PersistenceDomain.TRACE)))
-        assert len(references) == 2
-        retained = await storage.purge_unreferenced_objects(references, exclusive=Offline())
-        assert retained.retained == references
+        assert not tuple(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=PersistenceDomain.TRACE))
+        contents = await archive.transcript_repository.content_archive()
+        root = records[0].client_requests[0].body.content
+        identities = await contents.content_ids(root)
+        await storage.purge_unreferenced_objects((), exclusive=Offline())
+        assert await contents.read_contents(identities, codec="model-client-body") == (requests[0].body,)
     finally:
         await storage.close()
 
@@ -242,10 +262,14 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
         archive = restored.run_store.read_store(PersistenceDomain.TRACE)
         records = await archive.list_model_interactions(agent_run_id="run")
         assert await archive.resolve_model_interactions(records, include_client_requests=True) == [(None, None, None, requests, None)]
-        references = tuple(set(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=PersistenceDomain.TRACE)))
+        contents = await archive.transcript_repository.content_archive()
+        root = records[0].client_requests[0].body.content
+        identities = await contents.content_ids(root)
         await archive.release_agent_run("run", execution_id="execution")
-        result = await restored.purge_unreferenced_objects(references, exclusive=Offline())
-        assert result.deleted == references
+        await restored.purge_unreferenced_objects((), exclusive=Offline())
+        with pytest.raises(AIError) as removed:
+            await contents.read_contents(identities, codec="model-client-body")
+        assert removed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await restored.close()
 
@@ -322,20 +346,16 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (staged,), payloads.__getitem__, prepared=prepared)
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)
-        objects = storage.object_store(PersistenceDomain.TRACE)
-        original_open = objects.open
-        raw_keys = {ref.key for _, ref in iter_runtime_object_refs(
-            _encode_persisted_domain(records[0]), default_domain=PersistenceDomain.TRACE,
-        )}
+        contents = await archive.transcript_repository.content_archive()
+        original_capture = contents.capture_ranges
 
-        async def reject_raw_open(key):
-            if key in raw_keys:
+        async def reject_raw_capture(roots, *, codec, **kwargs):
+            if codec == "model-client-body":
                 raise AssertionError("unrequested native content read")
-            async for chunk in original_open(key):
-                yield chunk
+            return await original_capture(roots, codec=codec, **kwargs)
 
         with monkeypatch.context() as patch:
-            patch.setattr(objects, "open", reject_raw_open)
+            patch.setattr(contents, "capture_ranges", reject_raw_capture)
             assert await archive.list_model_interactions(agent_run_id="run") == list(records)
             assert await archive.resolve_model_interactions(records) == [
                 (sdk_request, sdk_response, b'{"streaming":true}', None, None),
@@ -364,7 +384,7 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_preparation_leaves_no_owner_and_body_is_reclaimable(
+async def test_cancelled_client_preparation_leaves_no_owner_or_binary_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared = PreparedArchive()
@@ -374,24 +394,27 @@ async def test_cancelled_preparation_leaves_no_owner_and_body_is_reclaimable(
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
     try:
-        objects = storage.object_store(PersistenceDomain.TRACE)
-        original_put = objects.put
-        references = []
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
+        contents = await archive.transcript_repository.content_archive(create=True)
+        append = contents.prepare_append
 
-        async def put_then_cancel(key, chunks, **kwargs):
-            from linktools.ai.storage import ObjectRef
-            stat = await original_put(key, chunks, **kwargs)
-            references.append((PersistenceDomain.TRACE, ObjectRef("runtime", key, stat.digest, stat.size)))
+        async def prepare_then_cancel(*args, **kwargs):
+            await append(*args, **kwargs)
             raise asyncio.CancelledError
 
-        monkeypatch.setattr(objects, "put", put_then_cancel)
-        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
-        with pytest.raises(asyncio.CancelledError):
-            await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}", prepared=prepared)
+        with monkeypatch.context() as patch:
+            patch.setattr(contents, "prepare_append", prepare_then_cancel)
+            with pytest.raises(asyncio.CancelledError):
+                await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}", prepared=prepared)
         assert await archive.list_model_interactions(agent_run_id="run") == []
-        assert len(references) == 1
-        result = await storage.purge_unreferenced_objects(tuple(references), exclusive=Offline())
-        assert result.deleted == tuple(references)
+        rows = await contents.store.read(lambda tx: tx.scan_records())
+        assert not any(record.kind == "archive_content" for record in rows)
+        retry = PreparedArchive()
+        requests = _requests(large=True)
+        records = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=retry)
+        await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records,
+                                      execution_id="execution", archive=retry)
+        assert await archive.resolve_model_interactions(records, include_client_requests=True) == [(None, None, None, requests, None)]
     finally:
         await storage.close()
 
@@ -442,20 +465,16 @@ async def test_recovery_preserves_existing_trace_bodies_without_reading_them(
             run, AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),
             execution_id="execution",
         )
-        objects = storage.object_store(PersistenceDomain.TRACE)
-        original_open = objects.open
-        raw_keys = {ref.key for _, ref in iter_runtime_object_refs(
-            _encode_persisted_domain(traced[0]), default_domain=PersistenceDomain.TRACE,
-        )}
+        contents = await trace.transcript_repository.content_archive()
+        original_capture = contents.capture_ranges
 
-        async def reject_raw_open(key):
-            if key in raw_keys:
+        async def reject_raw_capture(roots, *, codec, **kwargs):
+            if codec == "model-client-body":
                 raise AssertionError("recovery must not read native bodies")
-            async for chunk in original_open(key):
-                yield chunk
+            return await original_capture(roots, codec=codec, **kwargs)
 
         with monkeypatch.context() as patch:
-            patch.setattr(objects, "open", reject_raw_open)
+            patch.setattr(contents, "capture_ranges", reject_raw_capture)
             await storage.run_store.materialize_from_recovery(
                 target=PersistenceDomain.TRACE, agent_run_id="run", execution_id="execution",
             )
@@ -468,5 +487,43 @@ async def test_recovery_preserves_existing_trace_bodies_without_reading_them(
         assert await trace.resolve_model_interactions(loaded, include_client_requests=True) == [
             (None, None, None, requests, None),
         ]
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_client_body_capture_defers_binary_decode_until_owner_scope_closes(tmp_path: Path, monkeypatch) -> None:
+    from linktools.ai.persistence.state import active_state_scope
+
+    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "body-read.db"))
+    await storage.initialize(namespace="native-client", tenant_id="tenant")
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+    try:
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
+        prepared = PreparedArchive()
+        requests = _requests(large=True)
+        records = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=prepared)
+        await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records,
+                                      execution_id="execution", archive=prepared)
+        contents = await archive.transcript_repository.content_archive()
+        read = contents._read_content
+        decoded = []
+
+        async def outside_scope(content):
+            assert active_state_scope() is None
+            decoded.append(content.raw_digest)
+            return await read(content)
+
+        monkeypatch.setattr(contents, "_read_content", outside_scope)
+        async def capture():
+            assert active_state_scope() is not None
+            return await archive.capture_model_interactions(records, include_client_requests=True, include_content=False)
+
+        load = await archive.transcript_repository.read_content(capture)
+        assert not decoded
+        assert await load() == [(None, None, None, requests, None)]
+        assert set(decoded) == {hashlib.sha256(body).hexdigest() for request in requests
+                               for body in (request.body, None if request.response is None else request.response.body)
+                               if body is not None}
     finally:
         await storage.close()

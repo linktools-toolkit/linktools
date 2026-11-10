@@ -24,7 +24,7 @@ from linktools.ai.persistence.contracts import ConversationCursor
 from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
-from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _materialize_conversation, _session
 
 pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
@@ -243,7 +243,7 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
         page = await service.timeline("session", principal=_PRINCIPAL, limit=1)
         assert page.next_cursor is not None
         executions = state.execution.executions
-        get_many = executions.get_many
+        get_many = executions.get_timeline_many
         seen = []
 
         async def checked(ids, **kwargs):
@@ -254,13 +254,12 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
             elif corruption == "child":
                 values["active"] = replace(
                     values["active"], parent_execution_id="parent",
-                    parent_invocation_id="invocation", lineage_kind=ExecutionLineageKind.SUBAGENT,
                 )
             elif corruption == "missing":
                 del values["active"]
             return values
 
-        monkeypatch.setattr(executions, "get_many", checked)
+        monkeypatch.setattr(executions, "get_timeline_many", checked)
         if corruption:
             with pytest.raises(AIError) as error:
                 await service.refresh("session", principal=_PRINCIPAL, limit=1, cursor=page.next_cursor)
@@ -285,7 +284,7 @@ async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: P
         await state.conversation.sessions.create(_session())
         await _admit(state, status=ExecutionStatus.PENDING_START)
         checked = []
-        facade = RuntimeSessions(_service(state), object(), ensure_open=lambda: checked.append(True))
+        facade = RuntimeSessions(_service(state), object(), bind_session=None, ensure_open=lambda: checked.append(True))
         detail = await facade.refresh("session", principal=_PRINCIPAL)
         assert detail.session.active_execution_id == "active"
         assert detail.timeline.items[0].execution_id == "active"
@@ -341,7 +340,6 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
                 start_message_index=0, end_message_index=count,
-                **_commit_fields(execution),
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
@@ -416,7 +414,7 @@ async def test_runtime_sessions_refresh_delegates_to_the_injected_service() -> N
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit))
             return result
-    facade = RuntimeSessions(Service(), object(), ensure_open=lambda: calls.append("open"))
+    facade = RuntimeSessions(Service(), object(), bind_session=None, ensure_open=lambda: calls.append("open"))
     assert await facade.refresh("session", principal=_PRINCIPAL, cursor="cursor", limit=2) is result
     assert calls == ["open", ("session", _PRINCIPAL, "cursor", 2)]
 

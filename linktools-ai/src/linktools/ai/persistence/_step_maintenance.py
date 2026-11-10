@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..errors import AIError, ErrorCode
+from ..model.attachments import read_attachment_payload
 from ..storage import ObjectRef
 from ._archive_closure import (
     NativeMessageClosure, iter_native_message_roots, require_known_retention,
@@ -172,6 +173,7 @@ async def purge_step_content(
             batch = retained_ids[offset:offset + 128]
             body_rows = (await session.execute(select(
                 messages.c.store_digest, messages.c.sha256, messages.c.message,
+                messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ).where(
                 messages.c.store_digest == store_digest, messages.c.sha256.in_(batch),
             ))).mappings().all()
@@ -179,10 +181,10 @@ async def purge_step_content(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for row in body_rows:
                 content = validate_native_message_content(row, group_id=group_id)
-                if content.payload.ref is not None:
+                if content.payload is not None:
                     if read_object is None:
                         raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
-                    encoded = await read_object(content.payload.ref)
+                    encoded = await read_attachment_payload(content.payload, read_object=read_object)
                     if len(encoded) != content.payload.size or hashlib.sha256(encoded).hexdigest() != content.payload.digest:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     decode_payload_bytes(encoded, codec=content.compression,
@@ -192,6 +194,18 @@ async def purge_step_content(
         for table, identities in ((sequences, unused_nodes), (messages, unused_messages)):
             for offset in range(0, len(identities), 128):
                 batch = identities[offset:offset + 128]
+                from ._native_content_index import replace_owner_edges
+                if table is sequences:
+                    sources = select(table.c.id).where(table.c.store_digest == store_digest, table.c.sha256.in_(batch))
+                    await replace_owner_edges(context, session, "sequence", sources, ())
+                    await replace_owner_edges(context, session, "message", sources, ())
+                edge_table = metadata.tables["ai_native_content_edges"]
+                target_ids = select(table.c.id).where(table.c.store_digest == store_digest, table.c.sha256.in_(batch))
+                edge_kinds = (("record", "fact", "operation", "snapshot", "sequence", "candidate_sequence")
+                              if table is sequences else ("message", "candidate_message"))
+                await session.execute(delete(edge_table).where(
+                    edge_table.c.edge_kind.in_(edge_kinds), edge_table.c.target_id.in_(target_ids),
+                ))
                 removed = await session.execute(delete(table).where(
                     table.c.store_digest == store_digest, table.c.sha256.in_(batch),
                 ))

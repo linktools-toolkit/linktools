@@ -111,7 +111,7 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
 
     tombstone = EvaluationTombstone(record.experiment_id, "owner", record.request_digest,
         record.idempotency_key_digest, record.manifest_digest, NOW)
-    cleanup = EvaluationCleanupRecord(record.experiment_id, "owner", (), NOW)
+    cleanup = EvaluationCleanupRecord(record.experiment_id, "owner", (), NOW, ("v1/input-capture/task/owned",))
     for value, wire_id, fields in (
         (tombstone, "evaluation_tombstone", {
             "evaluation_id": record.experiment_id,
@@ -126,6 +126,7 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
             "owner_principal_id": "owner",
             "objects": {"$tuple": []},
             "created_at": {"$datetime": NOW.isoformat()},
+            "capture_keys": {"$tuple": ["v1/input-capture/task/owned"]},
         }),
     ):
         wire = {"$dataclass": wire_id, "fields": fields}

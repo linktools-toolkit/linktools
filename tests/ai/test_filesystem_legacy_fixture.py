@@ -14,7 +14,7 @@ from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, Pers
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.snapshot import SnapshotLimits
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore
 
 
 @pytest.mark.asyncio
@@ -77,7 +77,7 @@ async def test_current_memory_snapshot_preserves_content_and_operation_receipt(t
         return PersistentMemoryStore(
             state.memory, object_store=state.object_store(PersistenceDomain.MEMORY), namespace=namespace,
             tenant_id=tenant, execution_id="execution", memory_scope="retained",
-            payload_policy=PayloadPolicy(inline_limit_bytes=64),
+
         )
 
     async with Persistence.open(namespace, tenant_id=tenant,

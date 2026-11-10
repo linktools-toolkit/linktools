@@ -43,7 +43,7 @@ class ParallelExecutions:
         self.get_header = repository.get_header
         self.get_result = repository.get_result
 
-    async def get_many(
+    async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionRecord]:
         records = await asyncio.gather(*(
@@ -53,7 +53,7 @@ class ParallelExecutions:
 
 
 class ParallelExecutionSubclass(ExecutionRepositoryImpl):
-    async def get_many(
+    async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionRecord]:
         records = await asyncio.gather(*(
@@ -119,9 +119,9 @@ def _history(
 async def _populate(state: Persistence) -> None:
     await state.initialize(namespace="timeline-owner", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
-    await state.execution.executions.create(replace(
-        _execution("failed", status=ExecutionStatus.FAILED, prompt="original"), result=None,
-    ))
+    await state.execution.executions.create(
+        _execution("failed", status=ExecutionStatus.FAILED, prompt="original"),
+    )
     await state.conversation.sessions.admit_execution(
         "session", tenant_id="tenant", execution_id="failed", expected=None,
     )

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Completed preparation captures bind missing observations to exact owner keys."""
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -158,11 +157,10 @@ async def test_unobserved_content_is_validated_before_owner_commit(
         if native is not None:
             await native.prepare_archived_messages(checkpoint.messages[:1], actual)
             identity, body = next(iter(actual.native_messages.values())).messages[0]
-            corrupt = json.loads(body)
-            corrupt["raw_size"] += 1
             async with native.storage_context.engine.begin() as connection:
                 await connection.execute(native._message_content._messages.insert().values(
-                    store_digest=native.store_digest, sha256=identity, message=json.dumps(corrupt),
+                    store_digest=native.store_digest, sha256=identity,
+                    **{**body.to_native_values(), "raw_size": body.raw_size + 1},
                 ))
             _relocated, batch = await archive.prepare_conversation_checkpoint(
                 run, checkpoint, observed_records=observed,
@@ -180,8 +178,7 @@ async def test_unobserved_content_is_validated_before_owner_commit(
         values = (("model-message", encode_model_messages((checkpoint.messages[0],))),)
         await content.prepare_content(values, actual)
         record = actual.records[content.content_record_keys(values)[0]]
-        from linktools.ai.storage import StoredPayload
-        corrupt = replace(record, data={**record.data, "payload": StoredPayload.inline_bytes(b"bad").to_json()})
+        corrupt = replace(record, payload_bytes=b"bad")
         await content.store.mutate(lambda transaction: transaction.insert_record(corrupt))
         read_content = content._read_content
         checked = []

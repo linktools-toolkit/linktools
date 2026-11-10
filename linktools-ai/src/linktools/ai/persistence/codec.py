@@ -15,6 +15,7 @@ import types
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from ..steps import NativeStepSource
+from ..execution import ExecutionTimelineRecord
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -206,11 +207,6 @@ from .contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
-)
-from ._task_graph_binding_capture import (
-    TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
-    TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS,
-    read_task_graph_binding_capture_declarations,
 )
 from ._budget_records import BudgetModelReservation, BudgetToolReservation
 from ._plan import PersistenceDomain
@@ -1313,6 +1309,7 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
             else record.lease_expires_at.isoformat(),
         },
         "data": dict(record.data),
+        "payload_bytes": None if record.payload_bytes is None else base64.b64encode(record.payload_bytes).decode("ascii"),
     }
 
 
@@ -1355,6 +1352,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             _optional_datetime(lease["expires_at"]),
             dict(data),
             subject_digest=_optional_digest(value["subject"]),
+            payload_bytes=None if value.get("payload_bytes") is None else base64.b64decode(value["payload_bytes"], validate=True),
         )
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -1699,6 +1697,41 @@ def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:
     return _decode_domain(value, target, _CURRENT_CODEC)  # type: ignore[return-value]
 
 
+def decode_execution_timeline(value: Mapping[str, JsonValue]) -> ExecutionTimelineRecord:
+    """Validate the envelope and strictly decode only the read-only timeline fields."""
+    envelope = decode_envelope(value)
+    try:
+        if envelope.version not in _VERSION_CODECS or envelope.value.get("type") != "execution_record":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload = envelope.value["payload"]
+        if not isinstance(payload, Mapping) or payload.get("$dataclass") != "execution_record":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_required_keys(payload, frozenset({"$dataclass", "schema", "fields"}))
+        if type(payload["schema"]) is not int or payload["schema"] != envelope.version:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        source = payload["fields"]
+        if not isinstance(source, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        codec = _VERSION_CODECS[envelope.version]
+        values = {}
+        for name, (target, _init) in _dataclass_fields(ExecutionTimelineRecord).items():
+            if name in source:
+                values[name] = _decode_domain(source[name], target, codec, persisted=True)
+                continue
+            # The projection inherits omission semantics from its canonical owner,
+            # not a separately maintained set of timeline defaults.
+            declaration = next(field for field in fields(ExecutionRecord) if field.name == name)
+            if declaration.default is not MISSING:
+                values[name] = declaration.default
+            elif declaration.default_factory is not MISSING:
+                values[name] = declaration.default_factory()
+            else:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return ExecutionTimelineRecord(**values)
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 def encode_session_turn_commit(value: SessionTurnCommit) -> Mapping[str, JsonValue]:
     """Encode the current flat conversation commit row."""
     encoded = cast(Mapping[str, JsonValue], encode_domain(value))
@@ -1813,43 +1846,6 @@ def iter_runtime_object_dependencies(
             yield default_domain, nested
         return
 
-    if reference.key.startswith("v1/task-graph-binding-capture/"):
-        format_version = manifest.get("format_version")
-        if (
-            isinstance(format_version, bool)
-            or not isinstance(format_version, int)
-            or format_version < 1
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if format_version != TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if (
-            set(manifest) != TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS
-            or manifest.get("kind") != "task-graph-binding-capture"
-            or not isinstance(manifest.get("namespace"), str)
-            or not manifest.get("namespace")
-            or not isinstance(manifest.get("tenant_id"), str)
-            or not manifest.get("tenant_id")
-            or not isinstance(manifest.get("graph_id"), str)
-            or not manifest.get("graph_id")
-            or not isinstance(manifest.get("request_digest"), str)
-            or len(manifest.get("request_digest", "")) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in manifest.get("request_digest", "")
-            )
-            or not isinstance(manifest.get("tasks"), list)
-            or not isinstance(manifest.get("expanders"), list)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        read_task_graph_binding_capture_declarations(
-            manifest["tasks"],
-            manifest["expanders"],
-        )
-        return
-
-    return
-
 
 def _iter_runtime_object_refs(
     value: object,
@@ -1857,8 +1853,8 @@ def _iter_runtime_object_refs(
     codec: _VersionCodec,
 ) -> Iterator[tuple[PersistenceDomain, ObjectRef]]:
     if isinstance(value, StoredPayload):
-        if value.ref is not None:
-            yield domain, value.ref
+        for reference in value.object_refs():
+            yield domain, reference
         return
     if isinstance(value, ObjectRef):
         yield domain, value
@@ -1871,24 +1867,16 @@ def _iter_runtime_object_refs(
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
-        if dataclass_name in {
-            codec.wire_ids.get(TaskNode),
-        }:
-            node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted="schema" in value))
-            task_input = node.input
-            prompt = task_input.get("prompt")
-            if (
-                isinstance(node, AgentTaskNode)
-                and isinstance(prompt, Mapping)
-                and prompt.get("kind") == "stored-user-content-v1"
-            ):
-                stored = cast(
-                    StoredUserInput,
-                    _decode_domain(prompt.get("value"), StoredUserInput, codec),
-                )
-                yield from _iter_runtime_object_refs(
-                    stored.payload, PersistenceDomain.TASK, codec,
-                )
+        if dataclass_name == codec.wire_ids.get(TaskNode):
+            fields = value.get("fields")
+            if not isinstance(fields, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            task_input = _decode_domain(fields.get("input"), object, codec, persisted="schema" in value)
+            prompt = task_input.get("prompt") if isinstance(task_input, Mapping) else None
+            if (fields.get("input_semantics") == "agent-task-input-v1"
+                    and isinstance(prompt, Mapping) and prompt.get("kind") == "stored-user-content-v1"):
+                stored = cast(StoredUserInput, _decode_domain(prompt.get("value"), StoredUserInput, codec))
+                yield from _iter_runtime_object_refs(stored.payload, PersistenceDomain.TASK, codec)
         if dataclass_name == codec.wire_ids.get(ExecutionRecord):
             fields_value = value.get("fields")
             if not isinstance(fields_value, Mapping):
@@ -2604,4 +2592,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

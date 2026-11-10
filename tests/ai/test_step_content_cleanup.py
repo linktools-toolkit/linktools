@@ -18,6 +18,18 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
 
 
+@pytest.fixture(autouse=True)
+def _exercise_explicit_offline_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence import _native_content_index
+
+    async def defer(_context, **kwargs) -> None:
+        pass
+
+    # These tests deliberately accumulate orphans for the explicit offline
+    # collector. Automatic collection has its own owner/concurrency coverage.
+    monkeypatch.setattr(_native_content_index, "maintain_native_content", defer)
+
+
 class _Offline:
     def __init__(self) -> None:
         self.entered = False

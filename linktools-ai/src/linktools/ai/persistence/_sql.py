@@ -207,6 +207,11 @@ class SqlStateStorageGroup:
         self._archive_scope_initialized = False
         self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
+        self._native_partitions: set[str] = set()
+
+    def bind_native_partition(self, store_digest: str) -> None:
+        """Limit automatic physical maintenance to explicitly bound native owners."""
+        self._native_partitions.add(store_digest)
 
     def add_member(self, store: "SqlStateStore") -> None:
         self._members.setdefault(store.store_digest, store)
@@ -501,6 +506,10 @@ class SqlStateStorageGroup:
                 for transaction in transactions.values():
                     if transaction._mutation_error is not None:
                         raise transaction._mutation_error
+                if "ai_native_content_edges" in self._metadata.tables:
+                    from ._native_content_index import flush_owners
+                    await flush_owners(self._context, session,
+                                       group_id=None if self._opened_archive is None else self._opened_archive[0])
                 captures = {
                     store: tuple(record for key, record in transaction._record_cache.items()
                                  if key in transaction._guarded_record_revisions
@@ -521,13 +530,13 @@ class SqlStateStorageGroup:
             await lock.acquire()
         try:
             domains = ",".join(store.partition for store in members)
-            result = await self._context.run_mutation(
-                execute,
-                domain=f"runtime.state.group[{domains}]",
-            )
+            from ._native_content_index import maintain_native_content, run_native_mutation
+            result, maintenance = await run_native_mutation(self._context, execute, domain=f"runtime.state.group[{domains}]")
             confirmed = True
             if self._archive_on_mutation:
                 self._archive_scope_initialized = True
+            if maintenance and self._native_partitions:
+                await maintain_native_content(self._context, store_digests=tuple(self._native_partitions))
             return result
         except asyncio.CancelledError:
             raise
@@ -1017,6 +1026,26 @@ class _SqlTransaction:
             self._abort_mutation(error)
             raise
 
+    def _stage_native_owner(
+        self, kind: str, identity: Sequence[str | int], data: object | None, *,
+        state: object = None, inserting: bool = False,
+    ) -> None:
+        if "ai_native_content_edges" in self._metadata.tables:
+            from ._native_content_index import stage_owner
+            stage_owner(self._session, kind, self._store_hex, identity, data, state=state, inserting=inserting)
+
+    async def _retire_native_rows(self, kind: str, table: "Table", *conditions: "ColumnElement[bool]") -> None:
+        if "ai_native_content_edges" not in self._metadata.tables:
+            return
+        from sqlalchemy import select
+        from ._native_content_index import replace_owner_edges
+        await replace_owner_edges(self._context, self._session, kind, select(table.c.id).where(*conditions), ())
+
+    async def _retire_native_facts(self, owner_keys: Sequence[str]) -> None:
+        table = self._table("ai_state_facts")
+        await self._retire_native_rows("fact", table,
+            table.c.store_digest == self._store_hex, table.c.owner_key_digest.in_(owner_keys))
+
     def _abort_mutation(self, error: BaseException) -> None:
         if self._mutation_error is None:
             self._mutation_error = error
@@ -1268,6 +1297,8 @@ class _SqlTransaction:
                 ]
             )
         )
+        for record in values:
+            self._stage_native_owner("record", (_hex(record.key_digest),), record.data, state=record.state, inserting=True)
         self._log_batch("insert_records", len(values), 1)
         for record in values:
             self._guarded_record_revisions[record.key_digest] = record.storage_revision
@@ -1291,6 +1322,7 @@ class _SqlTransaction:
             self._abort_mutation(error)
             raise
         for record in values:
+            self._stage_native_owner("record", (_hex(record.key_digest),), record.data, state=record.state, inserting=True)
             self._guarded_record_revisions[record.key_digest] = record.storage_revision
             self._record_cache[record.key_digest] = record
 
@@ -1369,7 +1401,7 @@ class _SqlTransaction:
         table = self._table("ai_state_records")
         prepared = tuple(_record_values(value.record) for value in ordered)
         columns = ("state", "storage_revision", "lease_owner", "lease_fence",
-                   "lease_expires_at", "payload_json")
+                   "lease_expires_at", "payload_json", "payload_bytes")
         identity_columns = ("scope_digest", "parent_digest", "subject_digest", "kind", "sort_key")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
@@ -1435,6 +1467,9 @@ class _SqlTransaction:
                     if existing is not None and existing.storage_revision == value.expected_storage_revision:
                         validate_record_replacement(existing, value.record)
                 raise error
+        for replacement in ordered:
+            record = replacement.record
+            self._stage_native_owner("record", (_hex(record.key_digest),), record.data, state=record.state)
         self._log_batch("replace_records", len(ordered), statement_count)
         for replacement in ordered:
             self._guarded_record_revisions[replacement.record.key_digest] = replacement.record.storage_revision
@@ -1542,7 +1577,7 @@ class _SqlTransaction:
         unique_keys = tuple(dict.fromkeys(keys))
         if not unique_keys:
             return
-        from sqlalchemy import delete, tuple_
+        from sqlalchemy import delete, tuple_, update
 
         table = self._table("ai_state_records")
         aliases = self._table("ai_state_aliases")
@@ -1561,6 +1596,19 @@ class _SqlTransaction:
                     for key, record in sorted(current.items())
                 )
                 key_hexes = tuple(key for key, _revision in cas_conditions)
+                # Win the existing owner CAS before retiring dependent facts.
+                # Fact writers must advance this same revision before insertion.
+                guarded = await self._execute(update(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.key_digest.in_(key_hexes),
+                    tuple_(table.c.key_digest, table.c.storage_revision).in_(cas_conditions),
+                ).values(storage_revision=table.c.storage_revision + 1))
+                if guarded.rowcount != len(current):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                cas_conditions = tuple((key, revision + 1) for key, revision in cas_conditions)
+                await self._retire_native_facts(key_hexes)
+                await self._retire_native_rows("record", table,
+                    table.c.store_digest == self._store_hex, table.c.key_digest.in_(key_hexes))
                 # Deleting the CAS-matched owners fences concurrent alias/fact writers.
                 result = await self._execute(
                     delete(table).where(
@@ -1583,6 +1631,8 @@ class _SqlTransaction:
                         facts.c.owner_key_digest.in_(key_hexes),
                     )
                 )
+                for key in current:
+                    self._stage_native_owner("record", (_hex(key),), None)
                 deleted_keys.update(current)
                 statement_count += 3
         except BaseException as error:
@@ -1630,6 +1680,9 @@ class _SqlTransaction:
         )
         children_changed = False
         try:
+            await self._retire_native_facts((_hex(key),))
+            await self._retire_native_rows("record", table,
+                table.c.store_digest == self._store_hex, table.c.key_digest == _hex(key))
             await self._execute(
                 delete(self._table("ai_state_aliases")).where(
                     self._table("ai_state_aliases").c.store_digest == self._store_hex,
@@ -1651,6 +1704,7 @@ class _SqlTransaction:
         if result.rowcount != 1:
             self._abort_mutation(AIError(ErrorCode.STORAGE_CONFLICT))
         if result.rowcount == 1:
+            self._stage_native_owner("record", (_hex(key),), None)
             self._deleted_records = True
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
@@ -2076,6 +2130,8 @@ class _SqlTransaction:
                 ]
             )
         )
+        for fact in facts:
+            self._stage_native_owner("fact", (_hex(fact.stream_digest), fact.sequence), fact.data, state=fact.state, inserting=True)
         self._log_batch("insert_facts", len(facts), 1)
 
     async def get_facts(
@@ -2186,6 +2242,14 @@ class _SqlTransaction:
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         from sqlalchemy import delete
 
+        if owner_key not in self._guarded_record_revisions:
+            current = await self.get_record(owner_key)
+            if current is not None and await self.guard_record_revision(
+                owner_key, expected_storage_revision=current.storage_revision,
+            ) is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await self._retire_native_facts((_hex(owner_key),))
+
         await self._execute(
             delete(self._table("ai_state_facts")).where(
                 self._table("ai_state_facts").c.store_digest == self._store_hex,
@@ -2201,6 +2265,7 @@ class _SqlTransaction:
                 {**_operation_values(value), "store_digest": self._store_hex}
             )
         )
+        self._stage_native_owner("operation", (_hex(value.key_digest),), value.data, state=value.state, inserting=True)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         from sqlalchemy import select
@@ -2239,6 +2304,8 @@ class _SqlTransaction:
             )
             .values(_operation_values(value, updating=True))
         )
+        if result.rowcount == 1:
+            self._stage_native_owner("operation", (_hex(value.key_digest),), value.data, state=value.state)
         return result.rowcount == 1
 
     async def list_operations(
@@ -2301,9 +2368,21 @@ class _SqlTransaction:
         self, query: OperationQuery
     ) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)
-        from sqlalchemy import delete
+        from sqlalchemy import delete, update
 
         if values:
+            table = self._table("ai_state_operations")
+            for value in values:
+                guarded = await self._execute(update(table).where(
+                    table.c.store_digest == self._store_hex, table.c.key_digest == _hex(value.key_digest),
+                    table.c.state == value.state,
+                ).values(state=value.state))
+                if guarded.rowcount != 1:
+                    error = AIError(ErrorCode.STORAGE_CONFLICT)
+                    self._abort_mutation(error)
+                    raise error
+            await self._retire_native_rows("operation", table,
+                table.c.store_digest == self._store_hex, table.c.key_digest.in_(tuple(_hex(value.key_digest) for value in values)))
             await self._execute(
                 delete(self._table("ai_state_operations")).where(
                     self._table("ai_state_operations").c.store_digest == self._store_hex,
@@ -2312,6 +2391,8 @@ class _SqlTransaction:
                     ),
                 )
             )
+        for value in values:
+            self._stage_native_owner("operation", (_hex(value.key_digest),), None)
         return values
 
     def _record_identity_conditions(
@@ -2369,6 +2450,7 @@ def _record_values(
         "lease_fence": record.lease_fence,
         "lease_expires_at": record.lease_expires_at,
         "payload_json": canonical_json_bytes(dict(record.data)).decode("utf-8"),
+        "payload_bytes": record.payload_bytes,
     }
     if updating:
         from sqlalchemy import func
@@ -2392,6 +2474,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             _datetime_or_none(row["lease_expires_at"]),
             _row_mapping(row["payload_json"]),
             subject_digest=_row_digest_or_none(row["subject_digest"]),
+            payload_bytes=row["payload_bytes"],
         )
         validate_record_identity(record)
     except AIError:

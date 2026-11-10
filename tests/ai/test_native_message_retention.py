@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -29,6 +30,18 @@ from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from .test_step_content_cleanup import _Offline, _snapshot
+
+@pytest.fixture(autouse=True)
+def _exercise_explicit_offline_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence import _native_content_index
+
+    async def defer(_context, **kwargs) -> None:
+        pass
+
+    # These tests deliberately accumulate orphans for the explicit offline
+    # collector. Automatic collection has its own owner/concurrency coverage.
+    monkeypatch.setattr(_native_content_index, "maintain_native_content", defer)
+
 
 
 def _row(node: ImmutableSequenceNode, scope: str = "a" * 64) -> dict[str, object]:
@@ -100,14 +113,18 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
     native.bind_message_archive(archive)
     table = build_step_sql_metadata().tables["ai_step_snapshots"]
     try:
-        old = _snapshot("run", 1, "retained elsewhere" * (10_000 if object_backed else 1))
+        old = _snapshot("run", 1, "retained elsewhere" * 10_000)
+        if object_backed:
+            old = replace(old, messages=[ModelRequest(parts=[UserPromptPart([
+                "retained elsewhere", BinaryContent(b"retained file", media_type="image/png"),
+            ])])])
         await native.save_snapshot(old)
         async with engine.connect() as connection:
             first = await connection.scalar(select(table.c.sequence_root).where(table.c.store_digest == native.store_digest))
             messages = build_step_sql_metadata().tables["ai_step_messages"]
             body = (await connection.execute(select(messages))).mappings().one()
         content = validate_native_message_content(body, group_id=group_id)
-        reference = content.payload.ref
+        reference = next(iter(content.payload.object_refs()), None)
         assert (reference is not None) is object_backed
         root = NativeMessageRoot(group_id, native.store_digest, (NativeMessageSlice(first, 1, 0, 1),))
         value = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))
@@ -161,22 +178,33 @@ async def test_unbound_cleanup_cannot_skip_cross_owner_state(tmp_path: Path) -> 
         await engine.dispose()
 
 
-def test_native_inline_integrity_and_object_group_boundaries_fail_closed() -> None:
-    import json
-
+@pytest.mark.asyncio
+async def test_native_database_integrity_and_attachment_group_boundaries_fail_closed() -> None:
+    from linktools.ai.model.attachments import store_attachment_payload
+    from linktools.ai.model.messages import encode_model_messages
     from linktools.ai.persistence._archive import ContentRecord
     from linktools.ai.storage import ObjectRef
 
     raw = b'[{"kind":"request","parts":[]}]'
     digest = hashlib.sha256(raw).hexdigest()
-    content = ContentRecord("model-message", digest, len(raw), "raw", StoredPayload.inline_bytes(raw))
-    row = dict(store_digest="a" * 64, sha256=digest, message=json.dumps(content.to_json()))
+    content = ContentRecord("model-message", digest, len(raw), "raw", body=raw)
+    row = dict(store_digest="a" * 64, sha256=digest, **content.to_native_values())
     assert validate_native_message_content(row) == content
     with pytest.raises(AIError):
         validate_native_message_content({**row, "sha256": "f" * 64})
-    content = replace(content, payload=StoredPayload.object(ObjectRef("runtime", "v1/archive/other/scope/body", digest, len(raw))))
     with pytest.raises(AIError):
-        validate_native_message_content({**row, "message": json.dumps(content.to_json())}, group_id="group")
+        validate_native_message_content({**row, "message": b"corrupt"})
+
+    raw = encode_model_messages([ModelRequest(parts=[UserPromptPart([
+        BinaryContent(b"file", media_type="image/png"),
+    ])])])
+    async def write(data):
+        return ObjectRef("runtime", "v1/archive/other/scope/body", hashlib.sha256(data).hexdigest(), len(data))
+    payload = await store_attachment_payload(raw, format="model-messages", write_object=write)
+    content = ContentRecord("model-message", payload.digest, payload.size, "raw", payload)
+    with pytest.raises(AIError):
+        validate_native_message_content(dict(store_digest="a" * 64, sha256=payload.digest,
+                                            **content.to_native_values()), group_id="group")
 
 
 @pytest.mark.parametrize("checkpoint", [False, {}, {"output_retries_used": True, "message_sha256": "a" * 64},
@@ -226,19 +254,20 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
     native = SqlStepStore(engine, namespace="steps", tenant_id="one")
     native.bind_message_archive(archive)
     try:
-        raw = encode_model_messages(_snapshot("retained", 1, "retained body " * 4000).messages)
+        raw = encode_model_messages([ModelRequest(parts=[UserPromptPart([
+            "retained body", BinaryContent(b"retained file", media_type="image/png"),
+        ])])])
         compression, payload, encoded = await archive.prepare_payload(raw)
-        reference = payload.ref
-        assert reference is not None
+        reference, = payload.object_refs()
         content = ContentRecord("model-message", hashlib.sha256(raw).hexdigest(), len(raw), compression, payload)
         orphan_raw = b'[{"kind":"response","parts":[]}]'
         orphan = ContentRecord("model-message", hashlib.sha256(orphan_raw).hexdigest(), len(orphan_raw),
-                               "raw", StoredPayload.inline_bytes(orphan_raw))
+                               "raw", body=orphan_raw)
         nodes = [ImmutableSequenceNode(value.raw_digest) for value in (content, orphan)]
         async with engine.begin() as connection:
             for value, node in zip((content, orphan), nodes):
                 await connection.execute(metadata.tables["ai_step_messages"].insert().values(
-                    store_digest=native.store_digest, sha256=value.raw_digest, message=json.dumps(value.to_json())))
+                    store_digest=native.store_digest, sha256=value.raw_digest, **value.to_native_values()))
                 await connection.execute(metadata.tables["ai_step_sequences"].insert().values(_row(node, native.store_digest)))
         root = NativeMessageRoot(group_id, native.store_digest, (NativeMessageSlice(nodes[0].identity, 1, 0, 1),))
         key = hashlib.sha256(b"native-only-owner").digest()
@@ -258,7 +287,7 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
                                    ("ai_step_sequences", nodes[0].identity)):
                 table = metadata.tables[name]
                 assert (await connection.execute(select(table.c.sha256))).scalars().all() == [identity]
-        assert await archive.read_payload_object(reference) == encoded
+        assert await archive.read_payload_object(reference) == b"retained file"
         retained = await native.purge_unreferenced_content(exclusive=_Offline())
         assert retained.retained_messages == retained.retained_sequences == 1
         assert retained.deleted_messages == retained.deleted_sequences == 0

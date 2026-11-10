@@ -18,7 +18,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence._filesystem_layout import _FilesystemCache
 from linktools.ai.snapshot import SnapshotLimits
-from linktools.ai.storage import FilesystemObjectStore, FilesystemWriterLock, InMemoryObjectStore, PayloadPolicy, read_object
+from linktools.ai.storage import FilesystemObjectStore, FilesystemWriterLock, InMemoryObjectStore, read_object
 from linktools.ai.memory import PersistentMemoryStore
 
 from ._filesystem_legacy_fixture_helpers import (
@@ -39,7 +39,7 @@ def _memory(state: Persistence) -> PersistentMemoryStore:
     return PersistentMemoryStore(
         state.memory, object_store=state.object_store(PersistenceDomain.MEMORY), namespace=NAMESPACE,
         tenant_id=TENANT, execution_id="execution", memory_scope="retained",
-        payload_policy=PayloadPolicy(inline_limit_bytes=64),
+
     )
 
 

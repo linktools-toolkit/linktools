@@ -66,7 +66,7 @@ def snapshot_binding_size(record: StoredRecord, contents: Mapping[tuple[str, str
         return 0
     content = contents.get(reference)
     if (content is None or content.identity != reference[2] or content.codec != BINDING_CODEC
-            or content.payload.ref is not None):
+            or content.payload is not None):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return content.raw_size
 
@@ -83,14 +83,11 @@ def expand_snapshot_binding(record: StoredRecord, contents: Mapping[tuple[str, s
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     content = contents.get(reference)
     if (content is None or content.identity != reference[2] or content.codec != BINDING_CODEC
-            or content.payload.ref is not None):
+            or content.payload is not None):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if reserve is not None:
         reserve(content.raw_size)
-    encoded = content.payload.decode()
-    if (not isinstance(encoded, bytes) or len(encoded) != content.payload.size
-            or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    encoded = content.body
     return expand_binding(record, decode_payload_bytes(encoded, codec=content.compression,
                           raw_digest=content.raw_digest, raw_size=content.raw_size))
 
@@ -131,7 +128,7 @@ class ExecutionBindingContent:
         if opened is None:
             return
         scope, store = opened
-        # Binding bodies are shared compressed metadata. Keeping them inline also
+        # Binding bodies are shared compressed metadata. Keeping them in the state database also
         # permits complete offline snapshot validation before any state is admitted.
         self._content_archive = ContentArchive(store, scope, namespace=self._namespace,
                                                tenant_id=self._tenant_id, object_store=None)

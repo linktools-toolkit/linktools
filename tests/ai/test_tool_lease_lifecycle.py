@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from pydantic_ai.exceptions import CallDeferred
+from pydantic_ai.messages import BinaryContent
 from pydantic_ai.toolsets import FunctionToolset
 
 from linktools.ai.capability import ToolCallFailed, ToolCallRetry
@@ -23,7 +24,7 @@ from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDesc
 from linktools.ai.persistence import Persistence, PersistenceStorage, _checkpoint_repositories, _memory_transaction
 from linktools.ai.persistence.commands import StateCommands
 from linktools.ai.persistence._memory_transaction import _MemoryTransaction
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore
 
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 from .test_step_projection import _execution
@@ -72,7 +73,7 @@ async def _runtime(
         binding_digest="b" * 64,
         owner="owner",
         background_tasks=set(),
-        payload_policy=PayloadPolicy(),
+
     )
     try:
         yield state, bridge, clock
@@ -82,7 +83,7 @@ async def _runtime(
 
 async def _call(
     bridge: RuntimeToolOperationBridge,
-    handler: Callable[[], Awaitable[str]],
+    handler: Callable[[], Awaitable[object]],
     *,
     replay_safe: bool = False,
     budget: RunBudgetContext | None = None,
@@ -318,7 +319,7 @@ async def _owned_bridge(state: Persistence) -> tuple[RuntimeToolOperationBridge,
         state.checkpoint.tools, InMemoryObjectStore(), namespace="tool-lease",
         tenant_id="tenant", execution_id="execution", agent_run_id="run",
         binding_digest="b" * 64, owner="owner", background_tasks=set(),
-        payload_policy=PayloadPolicy(), terminal_commands=commands,
+         terminal_commands=commands,
         producer_generation=1, require_active=require_active,
     ), commands
 
@@ -472,11 +473,11 @@ async def test_slow_budget_admission_preserves_current_turn_tool_ownership(
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_large_result_put_preserves_exact_known_outcome(
+async def test_cancellation_during_attachment_put_preserves_exact_known_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with _runtime(monkeypatch) as (_, bridge, _):
-        result = "x" * (80 * 1024)
+        result = BinaryContent(b"x" * (80 * 1024), media_type="application/octet-stream")
         entered_put, release_put = asyncio.Event(), asyncio.Event()
         put = bridge._checkpoint_objects.put
         effects: list[str] = []
@@ -486,7 +487,7 @@ async def test_cancellation_during_large_result_put_preserves_exact_known_outcom
             await release_put.wait()
             return await put(*args, **kwargs)
 
-        async def effect() -> str:
+        async def effect() -> BinaryContent:
             effects.append("committed external effect")
             return result
 
@@ -503,7 +504,8 @@ async def test_cancellation_during_large_result_put_preserves_exact_known_outcom
             operation, = await bridge.list_operations()
             assert operation.status is ToolOperationStatus.COMPLETED
             assert operation.result_payload is not None
-            assert operation.result_payload.kind == "object"
+            assert operation.result_payload.kind == "inline"
+            assert operation.result_payload.encoding == "json-attachments"
             assert (operation.owner, operation.fence) == ("owner", 1)
             assert await _call(bridge, effect) == result
             assert effects == ["committed external effect"]

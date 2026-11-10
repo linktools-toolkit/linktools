@@ -29,6 +29,8 @@ class _SqlTraffic:
         verb = statement.split()[0].upper()
         # Recursive sequence reads start WITH but still consume one SELECT.
         self.statements["SELECT" if verb == "WITH" else verb] += 1
+        if verb in {"SELECT", "WITH"} and "ai_step_messages.message" in statement:
+            self.statements["message_body_select"] += 1
         self.bound_bytes += self._bytes(parameters)
         if statement.startswith("INSERT INTO ai_step_messages "):
             self.statements["message_insert"] += 1
@@ -75,8 +77,8 @@ async def test_repeated_snapshots_skip_only_confirmed_message_body_submissions(
         await store.save_snapshot(second)
         assert traffic.message_rows == submitted
         assert traffic.statements["snapshot_insert"] == 2
-        # Retention reads belong to the existing pruning contract, not the cache.
-        assert traffic.statements["SELECT"] == 2
+        # Native owner guards may read bounded identities, never cached bodies.
+        assert traffic.statements["message_body_select"] == 0
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
         assert await store.latest_snapshot(run_id="run") == second
@@ -237,7 +239,7 @@ async def test_cache_is_bounded_and_misses_resubmit_without_source_reads(tmp_pat
         assert traffic.message_rows == 4
         await store.save_snapshot(replace(snapshots[2], idempotency_key="retained"))
         assert traffic.message_rows == 4
-        assert traffic.statements["SELECT"] == 0
+        assert traffic.statements["message_body_select"] == 0
         assert await store.latest_snapshot(run_id="run") == replace(snapshots[2], idempotency_key="retained")
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
@@ -310,7 +312,7 @@ async def test_ignored_snapshot_retry_does_not_confirm_its_unpublished_message_b
         published = replace(ignored, idempotency_key="new-key")
         await store.save_snapshot(published)
         assert traffic.message_rows == 2
-        assert traffic.statements["SELECT"] == 0
+        assert traffic.statements["message_body_select"] == 0
         assert await store.latest_snapshot(run_id="run") == published
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)

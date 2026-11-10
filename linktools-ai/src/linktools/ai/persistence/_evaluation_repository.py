@@ -516,7 +516,8 @@ class EvaluationRepositoryImpl(RepositoryBase):
         return await self._store.mutate(write)
 
     async def purge(self, experiment_id: str, *, now: datetime,
-                    objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = ()) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]:
+                    objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = (),
+                    capture_keys: tuple[str, ...] = ()) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]:
         additional_objects = objects
         async def write(transaction: StateTransaction) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]:
             stored = await transaction.get_record(self._key("evaluation", experiment_id))
@@ -580,7 +581,9 @@ class EvaluationRepositoryImpl(RepositoryBase):
                                   revision=record.revision + 1, updated_at=now)
                 await replace_checked(transaction, projected_record(self, stored, changed), stored.storage_revision)
             candidates = tuple(sorted(objects, key=lambda item: (item[0].value, item[1].key, item[1].digest)))
-            updated = EvaluationCleanupRecord(experiment_id, owner, candidates, now if cleanup is None else cleanup.created_at)
+            pending_captures = tuple(sorted(set((*capture_keys, *(() if cleanup is None else cleanup.capture_keys)))))
+            updated = EvaluationCleanupRecord(experiment_id, owner, candidates,
+                now if cleanup is None else cleanup.created_at, pending_captures)
             if cleanup_stored is None:
                 await self._put(transaction, "evaluation_cleanup", experiment_id, updated)
             else:
@@ -598,7 +601,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
             rows = await self._records("evaluation_cleanup", cursor=cursor, limit=1000)
             for row in rows:
                 value = await self._decode(row, EvaluationCleanupRecord)
-                if value.owner_principal_id == owner_principal_id and value.objects:
+                if value.owner_principal_id == owner_principal_id and (value.objects or value.capture_keys):
                     found.append(value)
                     if limit is not None and len(found) == limit:
                         break
@@ -608,15 +611,17 @@ class EvaluationRepositoryImpl(RepositoryBase):
         return tuple(found)
 
     async def acknowledge_cleanup(
-        self, experiment_id: str, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...],
+        self, experiment_id: str, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = (),
+        *, capture_keys: tuple[str, ...] = (),
     ) -> None:
         async def write(transaction: StateTransaction) -> None:
             row = await transaction.get_record(self._key("evaluation_cleanup", experiment_id))
             if row is None:
                 return
             value = await self._decode(row, EvaluationCleanupRecord)
-            updated = replace(value, objects=tuple(item for item in value.objects if item not in objects))
-            if not updated.objects:
+            updated = replace(value, objects=tuple(item for item in value.objects if item not in objects),
+                capture_keys=tuple(key for key in value.capture_keys if key not in capture_keys))
+            if not updated.objects and not updated.capture_keys:
                 await transaction.delete_record(row.key_digest, expected_storage_revision=row.storage_revision)
             elif updated != value:
                 await replace_checked(transaction, projected_record(self, row, updated), row.storage_revision)

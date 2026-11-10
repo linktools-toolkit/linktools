@@ -36,6 +36,15 @@ class Session(Generic[AppT]):
     _derivations: tuple[Mapping[str, object], ...] = ()
     _observed_binding: "AgentBinding | None" = None
 
+    @property
+    def principal(self) -> Principal:
+        return self._runtime.default_principal if self._principal is None else self._principal
+
+    async def inspect(self, *, principal: Principal | None = None) -> SessionView:
+        return await self._runtime.sessions.inspect(
+            self.session_id, principal=self.principal if principal is None else principal,
+        )
+
     def _definition(self) -> "Agent[AppT]":
         return Agent(self._runtime, self.agent_id, self._agent_revision,
                      self._compiled_agent, self._binding_contract, self._derivations,

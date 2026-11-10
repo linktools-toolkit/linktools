@@ -209,7 +209,7 @@ class Evaluations:
         self._asset_readers = asset_readers
         self._retention = EvaluationRetention(
             authorization, self._cancel_submission, captures, tenant_id=self._tenant_id,
-            repository=self._state, task_objects=self._object_stores[PersistenceDomain.TASK],
+            repository=self._state,
             maintenance=persistence.snapshot_operations(), release_scopes=self._close_trial_scopes,
         )
         self._watchers: dict[str, asyncio.Task[None]] = {}

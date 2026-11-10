@@ -32,9 +32,8 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from ..persistence import PersistenceDomain
+from ..storage import ObjectStore, StoredPayload
+from ..persistence.objects import read_runtime_object
 from ..persistence.contracts import MemoryRecord, MemoryRepositories
 
 _logger = environ.get_logger("ai.memory")
@@ -143,7 +142,6 @@ class PersistentMemoryStore:
         execution_id: str,
         memory_scope: str,
         transient: bool = False,
-        payload_policy: PayloadPolicy | None = None,
     ) -> None:
         try:
             validate_tenant_id(tenant_id)
@@ -154,7 +152,6 @@ class PersistentMemoryStore:
         self._object_store = object_store
         self._namespace = namespace
         self._tenant_id = tenant_id
-        self._payload_policy = payload_policy or PayloadPolicy()
         scope_digest = canonical_sha256(memory_scope)
         self._memory_scope_digest = (
             canonical_sha256(
@@ -258,15 +255,6 @@ class PersistentMemoryStore:
             operation.id,
         )
         stored_content = StoredPayload.inline_text(content)
-        if not payload_fits_inline(stored_content, self._payload_policy):
-            reference = await put_runtime_object(
-                self._object_store,
-                ObjectKeyFactory(self._namespace),
-                PersistenceDomain.MEMORY,
-                self._tenant_id,
-                content.encode("utf-8"),
-            )
-            stored_content = StoredPayload.object(reference)
         now = datetime.now(timezone.utc)
         next_record = MemoryRecord(
             _memory_id(self._memory_scope_digest, logical_path),

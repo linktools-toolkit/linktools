@@ -7,7 +7,6 @@ from dataclasses import replace
 from datetime import datetime
 from linktools.core import environ
 from ..core import (
-    ExecutionStatus,
     JsonValue,
     OperationKind,
     OperationLedgerInput,
@@ -18,8 +17,6 @@ from ..core import (
     validate_agent_id,
 )
 from ..errors import AIError, ErrorCode
-from ..model import StoredUserInput
-from ..storage import StoredPayload
 from .codec import (
     _decode_enveloped_domain,
     encode_session_turn_commit,
@@ -1013,13 +1010,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str,
         start_message_index: int,
         end_message_index: int,
-        stored_user_input: StoredUserInput,
-        output: StoredPayload | None,
-        status: ExecutionStatus,
-        created_at: datetime,
-        updated_at: datetime,
-        error_code: str | None,
-        safe_error_details: Mapping[str, JsonValue],
         allow_unadmitted: bool = False,
         admitted_turn: SessionTurnRef | None = None,
     ) -> SessionTurnCommit | None:
@@ -1050,13 +1040,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if (
                 committed.end_message_index != end_message_index
                 or committed.start_message_index != start_message_index
-                or committed.stored_user_input != stored_user_input
-                or committed.output != output
-                or committed.status != status
-                or committed.created_at != created_at
-                or committed.updated_at != updated_at
-                or committed.error_code != error_code
-                or committed.safe_error_details != safe_error_details
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return committed
@@ -1068,7 +1051,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             execution_id,
             start_message_index,
             end_message_index,
-            stored_user_input, output, status, created_at, updated_at, error_code, safe_error_details,
         )
         await transaction.insert_record(self._stored_timeline_commit(committed))
         return committed
@@ -1571,13 +1553,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         self, transaction: StateTransaction, *, expected: SessionRecord,
         execution_id: str, next_cursor: ConversationCursor | None,
         start_message_index: int, end_message_index: int,
-        stored_user_input: StoredUserInput,
-        output: StoredPayload | None,
-        status: ExecutionStatus,
-        created_at: datetime,
-        updated_at: datetime,
-        error_code: str | None,
-        safe_error_details: Mapping[str, JsonValue],
+        successful: bool,
     ) -> SessionRecord:
         _require_tenant(expected, self._tenant_id)
         record = await transaction.get_record(self._key("session", expected.session_id))
@@ -1587,10 +1563,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         if (current != expected or current.status is not SessionStatus.OPEN
                 or current.active_execution_id is not None):
             raise AIError(ErrorCode.SESSION_BUSY)
-        successful = status is ExecutionStatus.SUCCEEDED
-        if (status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
-                or successful != (next_cursor is not None)
-                or (output is not None) != successful
+        if (successful != (next_cursor is not None)
                 or not successful and (start_message_index != 0 or end_message_index != 0)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         final = replace(current,
@@ -1610,7 +1583,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         ))
         await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommit(
             current.session_id, sequence, execution_id, start_message_index, end_message_index,
-            stored_user_input, output, status, created_at, updated_at, error_code, safe_error_details,
         )))
         return final
 

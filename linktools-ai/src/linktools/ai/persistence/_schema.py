@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Canonical DBA-reviewed SQL metadata for Runtime StateStore primitives."""
+"""Canonical SQL metadata for Runtime StateStore primitives."""
 
 from typing import TYPE_CHECKING
 
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
+    sql_blob,
     sql_id_column,
     sql_query_index,
     sql_sha256,
@@ -149,6 +150,8 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Canonical domain JSON encoded as a JSON string preserving numeric representations.",
         ),
+        Column("payload_bytes", sql_blob(), nullable=True,
+               comment="Optional binary content body owned by this record; ordinary domain state remains JSON."),
         *_audit(),
         comment=_RECORD_COMMENT,
         **sql_table_options(),

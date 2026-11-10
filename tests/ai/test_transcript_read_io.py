@@ -104,7 +104,7 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
                         if partition in parameters:
                             scopes[partition].add(scope_index)
             assert len(scopes[domain_partition]) == len(scopes[native_partition]) == 1
-            assert scopes[domain_partition].isdisjoint(scopes[native_partition])
+            assert scopes[domain_partition] == scopes[native_partition]
             # Native bodies use one bounded range query, not generic archive rows.
             native_reads = [statement for statement, _ in statements
                             if "AI_STEP_MESSAGES" in statement.upper()
@@ -115,7 +115,7 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
             assert len(body_ids) == len(set(body_ids)) == 4
             # Keep the aggregate cost visible alongside the domain-only budget.
             assert len(_record_selects(statements)) + len(native_reads) == 2
-            assert len(begins) == 2
+            assert len(begins) == 1
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", listener)
             event.remove(engine.sync_engine, "begin", capture_begin)
@@ -376,7 +376,7 @@ async def test_transcript_first_yield_prefetches_only_one_bounded_fact_page(
         await state.close()
 
 
-async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
+async def test_session_transcript_store_fallback_enlists_both_read_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from linktools.ai.persistence._memory import InMemoryStateStore
@@ -406,13 +406,16 @@ async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
         original = other.read
         read_separate = False
 
-        async def read_outside_history(callback):
+        async def read_enlisted(callback):
             nonlocal read_separate
-            assert active_state_scope() is None
+            scope = active_state_scope()
+            assert scope is not None
+            assert other in scope.transactions
+            assert state.conversation.histories.state_store in scope.transactions
             read_separate = True
             return await original(callback)
 
-        monkeypatch.setattr(other, "read", read_outside_history)
+        monkeypatch.setattr(other, "read", read_enlisted)
         messages = [message async for message in repository.iter_session_message_range(
             session.history_id, tenant_id="tenant", start=0, end=2,
         )]
@@ -620,3 +623,96 @@ async def test_history_batch_preserves_head_decode_error_priority() -> None:
         assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("reader", (
+    "spans", "messages", "owner_range", "session_range", "raw_context", "context",
+    "latest_checkpoint", "committed_checkpoint",
+))
+async def test_owner_content_read_survives_concurrent_native_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str,
+) -> None:
+    from sqlalchemy import text
+
+    from linktools.ai.persistence import SqlStepStore
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'read-lifetime.db'}")
+    async with engine.begin() as connection:
+        await connection.execute(text("PRAGMA journal_mode=WAL"))
+    await provision_database(engine)
+    state = Persistence(PersistenceStorage.sql(engine))
+    await state.initialize(namespace="native-read-lifetime", tenant_id="tenant")
+    captured_owner = asyncio.Event()
+    collected = asyncio.Event()
+    task = None
+    try:
+        session = await state.conversation.sessions.create(_session())
+        await _materialize(state, "run", ("retained",))
+        archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
+        history = archive.transcript_repository
+        assert session.history_id is not None
+        checkpoint = await archive.checkpoint_at_sequence(agent_run_id="run", checkpoint_sequence=1)
+        original_capture = SqlStepStore.capture_message_roots
+        paused = False
+
+        async def capture_native(self, roots, **kwargs):
+            nonlocal paused
+            if roots and not paused:
+                paused = True
+                assert active_state_scope() is not None
+                captured_owner.set()
+                await collected.wait()
+            load = await original_capture(self, roots, **kwargs)
+
+            async def hydrate():
+                assert active_state_scope() is None
+                return await load()
+
+            return hydrate
+
+        monkeypatch.setattr(SqlStepStore, "capture_message_roots", capture_native)
+
+        async def read():
+            if reader == "spans":
+                return (await history.load_message_spans(session.history_id, ((0, 2),)))[0]
+            if reader == "messages":
+                return await history.load_messages(session.history_id)
+            if reader == "owner_range":
+                return tuple([value async for value in history.iter_message_range(session.history_id, start=0, end=2)])
+            if reader == "session_range":
+                return tuple([value async for value in history.iter_session_message_range(
+                    session.history_id, tenant_id="tenant", start=0, end=2,
+                )])
+            if reader == "raw_context":
+                return (await history.load_session_raw_model_context(
+                    session.history_id, tenant_id="tenant", message_count=2,
+                )).model_messages()
+            if reader == "context":
+                return (await history.load_model_context(session.history_id)).model_messages()
+            if reader == "latest_checkpoint":
+                result = await archive.latest_checkpoint(agent_run_id="run")
+                assert result is not None
+                return result.messages
+            return (await archive.load_committed_session_model_context(
+                agent_run_id="run", checkpoint_sequence=1,
+                projection_digest=checkpoint.projection_digest, tenant_id="tenant",
+            )).model_messages()
+
+        task = asyncio.create_task(read())
+        await asyncio.wait_for(captured_owner.wait(), timeout=5)
+        # Simulate the committed result of retiring all owners and collecting
+        # their native rows while the reader is between owner and body queries.
+        async with engine.begin() as connection:
+            for table in ("ai_state_facts", "ai_state_records", "ai_step_sequences", "ai_step_messages"):
+                await connection.execute(text(f"DELETE FROM {table}"))
+        collected.set()
+        messages = await asyncio.wait_for(task, timeout=5)
+        assert [message.parts[0].content for message in messages] == ["retained", "answer:retained"]
+        assert active_state_scope() is None
+    finally:
+        collected.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await state.close()
+        await engine.dispose()

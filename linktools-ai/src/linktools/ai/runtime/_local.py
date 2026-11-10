@@ -51,7 +51,8 @@ from ..inputs import (
 )
 from ..capability.planning import PlanningStore
 from ..persistence.planning import PlanStateStore
-from ._execution_payload import _materialize_execution_json, _materialize_execution_payloads
+from ._execution_payload import _materialize_execution_payloads
+from ..model.attachments import read_attachment_payload, store_attachment_payload
 from ._execution_buffer import _ExecutionPayloadBuffer, _ExecutionPayloadCapture
 from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
 from ..core import (
@@ -86,11 +87,9 @@ from ..observe import MetricRecorder
 from ..storage import (
     ObjectRef,
     ObjectStore,
-    PayloadPolicy,
     StoredPayload,
     TurnCoordination,
     TurnScope,
-    payload_fits_inline,
 )
 from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
@@ -320,7 +319,6 @@ class LocalExecutionBackend:
         input_materializer: ExecutionInputMaterializer | None = None,
         subagent_dispatcher: "_SubagentDispatcher | None" = None,
         live_broker: "LiveExecutionEventBroker | None" = None,
-        payload_policy: "PayloadPolicy | None" = None,
         execution_objects_durable: bool = True,
         tool_operations: "_ToolOperationRuntimeRepository | None" = None,
         metric_recorder: "MetricRecorder | None" = None,
@@ -369,7 +367,6 @@ class LocalExecutionBackend:
         self._input_materializer = input_materializer
         self._subagent_dispatcher = subagent_dispatcher
         self._live_broker = live_broker or LiveExecutionEventBroker()
-        self._payload_policy = payload_policy or PayloadPolicy()
         self._tool_operations = tool_operations
         self._execution_objects_durable = execution_objects_durable
         self._run_stores = dict(run_stores)
@@ -1608,8 +1605,7 @@ class LocalExecutionBackend:
                 context = captured.execution.input_context
             reservation = replace(reservation, execution=await _materialize_execution_payloads(
                 reservation.execution, input_materializer=self._input_materializer,
-                objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
-                policy=self._payload_policy, tenant_id=self._tenant_id,
+                tenant_id=self._tenant_id,
             ))
             context_write = None
             if context is not None:
@@ -2519,15 +2515,6 @@ class LocalExecutionBackend:
                 "repository_instruction_frontier": repository_instruction_frontier,
             }
         arguments_payload = StoredPayload.inline_json(arguments)
-        if not payload_fits_inline(arguments_payload, self._payload_policy):
-            reference = await put_runtime_object(
-                self._checkpoint_objects,
-                ObjectKeyFactory(self._namespace),
-                PersistenceDomain.CHECKPOINT,
-                self._tenant_id,
-                canonical_json_bytes(arguments),
-            )
-            arguments_payload = StoredPayload.object(reference)
         return PendingDeferredCall(
             call.tool_call_id,
             call.tool_name,
@@ -2683,7 +2670,11 @@ class LocalExecutionBackend:
         return resumed
 
     async def read_deferred_payload(self, payload: StoredPayload) -> JsonValue:
-        if payload.kind == "inline":
+        if payload.encoding == "json-attachments":
+            value = json.loads(await read_attachment_payload(
+                payload, read_object=lambda ref: read_runtime_object(self._checkpoint_objects, ref),
+            ))
+        elif payload.kind == "inline":
             value = payload.decode()
         else:
             if payload.ref is None:
@@ -4659,7 +4650,6 @@ class LocalExecutionBackend:
                     binding_digest=current.binding_digest,
                     owner=current.producer_claim_id,
                     background_tasks=execution_tasks,
-                    payload_policy=self._payload_policy,
                     recovery_agent_run_id=recovery_history_agent_run_id,
                     fresh_execution=original.agent_run_seq == 0 and current.agent_run_seq == 1,
                     producer_generation=producer_generation,
@@ -5348,13 +5338,6 @@ class LocalExecutionBackend:
             selected.execution, stored_user_input=current.stored_user_input,
             repository_instructions=current.repository_instructions, input_context=current.input_context,
         ))
-        output = selected_commit.result.output
-        if output is not None:
-            output = await _materialize_execution_json(
-                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
-                policy=self._payload_policy, tenant_id=self._tenant_id,
-            )
-            selected_commit = replace(selected_commit, result=replace(selected_commit.result, output=output))
         return selected_commit, selected.checkpoint_payload, ids
 
     def _audit_lock(self, execution_id: str) -> asyncio.Lock:
@@ -6564,38 +6547,22 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
         data: bytes,
     ) -> StoredPayload:
-        inline = StoredPayload.inline_bytes(data)
-        if payload_fits_inline(inline, self._payload_policy):
-            return inline
-        return StoredPayload.object(
-            await put_runtime_object(
-                self._checkpoint_objects,
-                ObjectKeyFactory(self._namespace),
-                PersistenceDomain.CHECKPOINT,
-                self._tenant_id,
-                data,
-            )
+        payload = await store_attachment_payload(
+            data, format="model-messages", write_object=lambda body: put_runtime_object(
+                self._checkpoint_objects, ObjectKeyFactory(self._namespace), PersistenceDomain.CHECKPOINT,
+                self._tenant_id, body,
+            ),
         )
+        return payload if payload is not None else StoredPayload.inline_bytes(data)
 
     async def _store_repository_instructions(
         self,
         execution: ExecutionRecord,
         instructions: RepositoryInstructions,
     ) -> RuntimePayloadRef:
-        payload = instructions.to_payload()
-        inline = StoredPayload.inline_json(payload)
-        if payload_fits_inline(inline, self._payload_policy):
-            stored = inline
-        else:
-            reference = await put_runtime_object(
-                self._checkpoint_objects,
-                ObjectKeyFactory(self._namespace),
-                PersistenceDomain.CHECKPOINT,
-                self._tenant_id,
-                canonical_json_bytes(payload),
-            )
-            stored = StoredPayload.object(reference)
-        return RuntimePayloadRef(stored, PersistenceDomain.CHECKPOINT)
+        return RuntimePayloadRef(
+            StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.CHECKPOINT,
+        )
 
     async def commit_repository_instruction_barrier(
         self,
@@ -6808,20 +6775,6 @@ class LocalExecutionBackend:
             current = await self.load_execution(current.execution_id, tenant_id=self._tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (self._execution_buffer is None and output is not None and output.kind == "inline"
-                and not payload_fits_inline(output, self._payload_policy)):
-            output = await _materialize_execution_json(
-                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
-                policy=self._payload_policy, tenant_id=self._tenant_id,
-            )
-            current = await self.load_execution(execution.execution_id, tenant_id=self._tenant_id)
-            if current is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if expected_revision is not None and current.revision != expected_revision:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED,
-                                  ExecutionStatus.CANCELLED, ExecutionStatus.RECOVERY_REQUIRED}:
-                return current
         recovered = await self._check_reconcile_tool_effects(
             current, producer_generation=producer_generation,
             tool_operations=tool_operations,
@@ -7222,19 +7175,13 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         terminal = await _materialize_execution_payloads(
             commit.execution, input_materializer=self._input_materializer,
-            objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
-            policy=self._payload_policy, tenant_id=self._tenant_id,
+            tenant_id=self._tenant_id,
         )
         reservation = replace(reservation, execution=replace(
             reservation.execution, stored_user_input=terminal.stored_user_input,
             repository_instructions=terminal.repository_instructions,
         ))
         output = commit.result.output
-        if output is not None:
-            output = await _materialize_execution_json(
-                output, objects=self._execution_objects, keys=ObjectKeyFactory(self._namespace),
-                policy=self._payload_policy, tenant_id=self._tenant_id,
-            )
         prepared_context = None if context is None else await self._context_archive.prepare(context,
             history_root=turn.history_root, history_digest=turn.history_digest)
         commit = replace(commit,

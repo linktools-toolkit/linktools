@@ -28,7 +28,7 @@ from ..task import (
     TaskNodeView,
     TaskResultRecord,
 )
-from .codec import _decode_enveloped_domain, decode_envelope, decode_session_turn_commit
+from .codec import _decode_enveloped_domain, decode_envelope, decode_session_turn_commit, decode_execution_timeline
 from .contracts import (
     ApprovalRecord,
     ArtifactRecord,
@@ -66,6 +66,7 @@ from ._repository_common import (
 )
 from ._step_contracts import TOOL_ERROR_CODE_METADATA_KEY, AgentRunRecord, StepEvent
 from .turns import validate_turn_records
+from .captures import CAPTURE_RECORD_KINDS, capture_record_value, validate_capture_record
 from .state import (
     StoredAlias,
     StoredFact,
@@ -128,6 +129,8 @@ _ALLOWED_RECORD_KINDS = {
             "task_node_state",
             "task_result",
             "task_prepared_input",
+            "input_capture",
+            "task_graph_binding_capture",
         }
     ),
     PersistenceDomain.EVALUATION: frozenset({"evaluation", "idempotency", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison", "evaluation_tombstone", "evaluation_content_tombstone", "evaluation_cleanup"}),
@@ -335,6 +338,27 @@ def validate_snapshot_references(
     facts: Mapping[PersistenceDomain, tuple[StoredFact, ...]],
 ) -> None:
     """Validate cross-domain references against the snapshot's durable owners."""
+    executions = {
+        value.execution_id: value
+        for record in records.get(PersistenceDomain.EXECUTION, ()) if record.kind == "execution"
+        for value in (decode_execution_timeline(record.data),)
+    }
+    sessions = {
+        value.session_id: value
+        for record in records.get(PersistenceDomain.CONVERSATION, ()) if record.kind == "session"
+        for value in (_decode_enveloped_domain(record.data, SessionRecord),)
+    }
+    for record in records.get(PersistenceDomain.CONVERSATION, ()):
+        if record.kind != "session_turn_commit":
+            continue
+        turn = decode_session_turn_commit(record.data)
+        execution = executions.get(turn.execution_id)
+        session = sessions.get(turn.session_id)
+        if (execution is None or session is None or execution.completed_at is None
+                or execution.session_id != turn.session_id or execution.parent_execution_id is not None
+                or execution.principal_id != session.owner_principal_id):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     transcript_heads: dict[tuple[PersistenceDomain, str], TranscriptHeadRecord] = {}
     interactions: list[ModelInteractionRecord] = []
     for domain, domain_records in records.items():
@@ -427,6 +451,8 @@ def _canonical_aliases(
 
 
 def _decode_record(record: StoredRecord) -> object:
+    if record.kind in CAPTURE_RECORD_KINDS:
+        return capture_record_value(record)
     if record.kind in _TURN_RECORD_KINDS:
         return record
     if record.kind == "session_turn_commit":
@@ -582,6 +608,9 @@ def _expected_record(
     graph_parents: Mapping[bytes, str],
 ) -> StoredRecord:
     kind = record.kind
+    if kind in CAPTURE_RECORD_KINDS:
+        validate_capture_record(record, namespace=namespace, tenant_id=tenant_id)
+        return record
     if kind == "session_turn_commit":
         return _expected_session_turn_commit(
             namespace,

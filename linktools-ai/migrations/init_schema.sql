@@ -16,6 +16,7 @@ CREATE TABLE ai_state_records (
     lease_fence BIGINT NOT NULL DEFAULT 0 COMMENT 'Monotonic fencing token for the current durable record lease.',
     lease_expires_at TIMESTAMP(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
     payload_json JSON NOT NULL COMMENT 'Canonical domain JSON encoded as a JSON string preserving numeric representations.',
+    payload_bytes LONGBLOB NULL COMMENT 'Optional binary content body owned by this record; ordinary domain state remains JSON.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest),
@@ -220,14 +221,18 @@ CREATE TABLE ai_step_events (
 CREATE TABLE ai_step_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
-	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the exact stored upstream message JSON.',
-	message LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'One upstream ModelMessage JSON body.',
+	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical uncompressed upstream message JSON.',
+	message LONGBLOB NULL COMMENT 'Raw or compressed canonical message bytes, absent for attachment manifests.',
+	compression VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Message body compression codec: raw or zlib.',
+	raw_size BIGINT NOT NULL COMMENT 'Canonical uncompressed message byte count for bounded decompression.',
+	payload_json JSON NULL COMMENT 'Typed attachment manifest without attachment bytes, absent for ordinary message bodies.',
+	gc_revision BIGINT NOT NULL COMMENT 'Optimistic native dependency publication fence.' DEFAULT 0,
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
 	UNIQUE KEY uk_store_digest_sha256 (store_digest, sha256),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Deduplicated upstream ModelMessage JSON bodies.' COLLATE utf8mb4_bin;
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Deduplicated upstream ModelMessage bodies and attachment manifests.' COLLATE utf8mb4_bin;
 
 CREATE TABLE ai_step_runs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -260,6 +265,7 @@ CREATE TABLE ai_step_sequences (
 	left_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable left subtree root.',
 	right_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable right subtree root.',
 	next_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Next immutable tree in the sequence forest.',
+	gc_revision BIGINT NOT NULL COMMENT 'Optimistic native dependency publication fence.' DEFAULT 0,
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
@@ -290,3 +296,18 @@ CREATE TABLE ai_step_snapshots (
 	UNIQUE KEY uk_key_digest (key_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream complete or interrupted message-history snapshots.' COLLATE utf8mb4_bin;
+
+
+CREATE TABLE ai_native_content_edges (
+    id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+    edge_kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical source and target table relationship.',
+    source_id BIGINT NOT NULL COMMENT 'Source table surrogate identifier; zero for candidates.',
+    target_id BIGINT NOT NULL COMMENT 'Native target table surrogate identifier.',
+    revision BIGINT NOT NULL COMMENT 'Candidate enqueue revision protecting concurrent reclamation.' DEFAULT 0,
+    updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_edge_kind_source_id_target_id (edge_kind, source_id, target_id),
+    KEY ix_target_id_edge_kind (target_id, edge_kind),
+    KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Rebuildable native content dependencies and reclamation candidates.' COLLATE utf8mb4_bin;

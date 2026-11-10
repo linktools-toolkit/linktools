@@ -233,7 +233,7 @@ async def test_archive_payload_rejects_foreign_group_before_object_io(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_bound_snapshot_media_and_text_metadata_roundtrip_through_payload_owner(tmp_path: Path) -> None:
-    import json
+    from linktools.ai.persistence._archive import ContentRecord
     from pydantic_ai.messages import BinaryContent, TextContent
     from pydantic_ai_harness.step_persistence import ContinuableSnapshot
     from sqlalchemy import text
@@ -253,8 +253,11 @@ async def test_bound_snapshot_media_and_text_metadata_roundtrip_through_payload_
             restored = await reader.latest_snapshot(run_id="media")
             assert encode_model_messages(restored.messages) == encode_model_messages(messages)
             async with writer.storage_context.sessions() as session:
-                body = json.loads(await session.scalar(text("SELECT message FROM ai_step_messages")))
-            assert body["payload"]["kind"] == "object"
+                row = (await session.execute(text("SELECT * FROM ai_step_messages"))).mappings().one()
+            content = ContentRecord.from_native_row(row)
+            assert content.body is None and content.payload.encoding == "json-attachments"
+            reference, = content.object_refs()
+            assert reference.size == len(messages[0].parts[0].content[0].data)
         finally:
             await reader.close()
             await writer.close()

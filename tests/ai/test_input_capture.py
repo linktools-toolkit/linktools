@@ -23,8 +23,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import AgentTaskInputContext, CaptureInputRequest, CaptureGraphRequest
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.captures import input_capture_key
+from linktools.ai.persistence.captures import capture_record, capture_record_value, input_capture_key, read_capture_record
+from linktools.ai.persistence.codec import decode_record
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskNodeResultRef
 from .test_task_mixed_node_reliability import _TaskTestModels
 
@@ -53,21 +53,19 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
         assert result.status is TaskStatus.SUCCEEDED
         execution = await source_run.execution("target")
         if extra_invocation_fields:
-            objects = runtime._state.object_store(PersistenceDomain.TASK)
+            state = runtime._state.task.tasks.state_store
             key = input_capture_key("input-capture", principal.tenant_id, "invocation", execution.execution_id)
-            stat = await objects.stat(key)
-            payload = json.loads(b"".join([chunk async for chunk in objects.open(key)]))
+            record = await read_capture_record(state, namespace="input-capture", tenant_id=principal.tenant_id, key=key)
+            assert record is not None
+            payload = dict(capture_record_value(record))
             payload["dependency_results"] = {"$mapping": [["source", {
                 "$dataclass": "task_dependency_result",
                 "fields": {"result_digest": "0" * 64, "execution_id": "unused"},
             }]]}
-            data = canonical_json_bytes(payload)
-
-            async def chunks() -> AsyncIterator[bytes]:
-                yield data
-
-            assert await objects.delete_object(key, expected_digest=stat.digest)
-            await objects.put(key, chunks(), expected_size=len(data), expected_digest=canonical_sha256(payload))
+            changed = capture_record("input-capture", principal.tenant_id, key, payload,
+                                     storage_revision=record.storage_revision + 1)
+            assert await state.mutate(lambda transaction: transaction.replace_record(
+                changed, expected_storage_revision=record.storage_revision))
         capture = await runtime_engine.inputs.capture_input(execution.execution_id,
             CaptureInputRequest(principal, "capture-task-input-0001", "clean"))
         rerun = await engine.start(TaskGraph("rerun-graph", (
@@ -303,7 +301,10 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
         assert await replay.result("use") == "owned result"
     chunks = [chunk async for chunk in archive.open(snapshot.key)]
     manifest = json.loads(b"".join(chunks))
-    manifest["objects"] = [item for item in manifest["objects"] if not item["source"]["key"].startswith("v1/input-capture/result/")]
+    records = manifest["domains"]["task"]["records"]
+    retained = [item for item in records if not decode_record(item).sort_key.startswith("v1/input-capture/result/")]
+    assert len(retained) < len(records)
+    manifest["domains"]["task"]["records"] = retained
     data = canonical_json_bytes(manifest)
     digest = canonical_sha256(manifest)
 
