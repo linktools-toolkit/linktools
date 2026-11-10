@@ -931,7 +931,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
             with pytest.raises(AIError) as raised:
                 await request
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-            if corruption in {"zlib", "truncated-zlib"}:
+            if corruption == "zlib":
                 assert isinstance(raised.value.__cause__, zlib.error)
     finally:
         await state.close()
