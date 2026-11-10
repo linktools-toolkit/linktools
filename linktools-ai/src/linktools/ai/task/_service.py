@@ -143,7 +143,14 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
 
     async def start_prepared(
         self, submission: TaskGraphSubmission
-    ) -> TaskSubmissionResult: ...
+    ) -> TaskSubmissionResult:
+        """Start the retained identity; post-admission errors retain durable_admitted.
+
+        AIError.safe_details["durable_admitted"] is True only when admission is
+        confirmed. Its absence does not prove non-admission. Keep the original
+        submission for retry or cancellation; caller cancellation is not rollback.
+        """
+        ...
 
     async def cancel_submission(
         self,
