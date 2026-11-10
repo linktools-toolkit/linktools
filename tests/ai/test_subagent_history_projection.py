@@ -13,9 +13,12 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
+    ResourceRef,
+    ResourceKind,
     agent_conversation_id as make_agent_conversation_id,
     agent_run_id as make_agent_run_id,
 )
+from linktools.ai.execution import ExecutionView, project_execution_view
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history._projection import StepExecutionHistoryReader
 from linktools.ai.persistence.contracts import ExecutionRecord
@@ -86,6 +89,19 @@ class _Executions:
     ) -> ExecutionRecord | None:
         assert tenant_id == "tenant"
         return self._records.get(execution_id)
+
+    async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+        record = await self.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            return None
+        return (
+            ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, record.principal_id),
+            project_execution_view(record),
+        )
+
+    async def list_child_views(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
+        return tuple(project_execution_view(record) for record in
+                     await self.list_children(execution_id, tenant_id=tenant_id))
 
     async def list_children(
         self,

@@ -398,7 +398,11 @@ async def capture_session_timeline(
     session_store = conversation.sessions.state_store
     execution_store = executions.state_store
     if session_store.storage_group is execution_store.storage_group:
+        initial_pending = pending_execution
         async def read(_group: StateGroupTransaction) -> SessionTimelineCapture:
+            nonlocal pending_execution
+            pending_execution = initial_pending
+            admitted_records.clear()
             root, blocks, next_coordinate = await read_blocks()
             histories = conversation.histories
             capture_histories = (
@@ -456,9 +460,7 @@ async def capture_session_timeline(
                 root, blocks, next_coordinate, records, commits, pending_execution, history_captures,
             )
 
-        return await session_store.storage_group.read_many(
-            (session_store, execution_store), read,
-        )
+        return await executions.read_content(read, stores=(session_store,))
 
     # Separate routes keep their own snapshots; no cross-database scope is implied.
     async def read_conversation(_transaction: object):

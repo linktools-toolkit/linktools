@@ -22,6 +22,7 @@ from .codec import (
 )
 from .state import StoredRecord, record_key_digest
 from .captures import task_binding_content_reference
+from .codec import execution_payload_slots, payload_reference, map_execution_payload_slots
 
 
 def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object], StoredPayload] | None:
@@ -88,6 +89,8 @@ def iter_archive_roots(value: object) -> Iterator[ArchiveRoot]:
     if isinstance(value, ArchiveRoot):
         yield value
     elif isinstance(value, Mapping):
+        if value.get("$dataclass") in {"stored_payload", "stored_user_input"}:
+            return
         if value.get("$dataclass") == "archive_root":
             yield (_decode_enveloped_domain(encode_envelope({"type": "archive_root", "payload": value}), ArchiveRoot)
                    if "schema" in value else decode_domain(value, ArchiveRoot))
@@ -106,6 +109,12 @@ def iter_archive_roots(value: object) -> Iterator[ArchiveRoot]:
 
 def iter_archive_content_refs(value: object) -> Iterator[tuple[str, str, str]]:
     if isinstance(value, Mapping):
+        if value.get("$dataclass") in {"stored_payload", "stored_user_input"}:
+            return
+        for _path, payload in execution_payload_slots(value):
+            reference = payload_reference(payload)
+            if reference is not None:
+                yield reference
         reference = binding_reference(value) or task_binding_content_reference(value)
         if reference is not None:
             yield reference
@@ -147,7 +156,7 @@ def iter_native_message_roots(value: object) -> Iterator[NativeMessageRoot]:
             root = _context_history(context[1].decode())
             if isinstance(root, NativeMessageRoot):
                 yield root
-        if kind in {"stored_payload", "runtime_payload_ref", "object_ref"}:
+        if kind in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
             return
         if kind in _NATIVE_ROOT_SLOTS:
             fields = value.get("fields")
@@ -185,7 +194,7 @@ def require_known_retention(value: object, *, state: object = None) -> None:
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
     if isinstance(value, Mapping):
         kind = value.get("$dataclass")
-        if kind in {"stored_payload", "runtime_payload_ref", "object_ref"}:
+        if kind in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
             return
         if kind == "execution_record":
             fields = value.get("fields")
@@ -381,7 +390,7 @@ class ArchiveClosure(_SequenceClosure):
         """Expose immutable binding metadata for complete offline validation."""
         return {(self.scope_id, scope, identity): ContentRecord.from_record(record)
                 for (scope, kind, identity), record in self._records.items()
-                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "task-graph-binding"}}
+                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "task-graph-binding", "execution-payload"}}
 
     @property
     def has_roots(self) -> bool:
@@ -568,7 +577,7 @@ def rekey_native_message_roots(
 
     if isinstance(value, dict):
         kind = value.get("$dataclass")
-        if kind in {"stored_payload", "runtime_payload_ref", "object_ref"}:
+        if kind in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
             return value
         # Validate all declared slots before rewriting even an empty root.
         roots = tuple(iter_native_message_roots(value)) if kind in _NATIVE_ROOT_SLOTS else ()
@@ -596,8 +605,20 @@ def rekey_native_message_roots(
 
 
 def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValue:
-    """Rewrite only typed archive roots and execution input-context references."""
+    """Rewrite only typed archive roots and declared execution content references."""
     if isinstance(value, dict):
+        if value.get("$dataclass") in {"stored_payload", "stored_user_input"}:
+            return value
+        if value.get("$dataclass") == "execution_record":
+            def rekey_payload(payload: Mapping) -> JsonValue:
+                reference = payload_reference(payload)
+                if reference is None:
+                    return payload
+                if reference[0] not in scopes:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return {**payload, "fields": {"content": {**payload["fields"]["content"],
+                    "archive_scope": scopes[reference[0]]}}}
+            value = map_execution_payload_slots(value, rekey_payload)
         reference = binding_reference(value) or task_binding_content_reference(value)
         if reference is not None:
             if reference[0] not in scopes:

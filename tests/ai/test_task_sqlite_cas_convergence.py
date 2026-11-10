@@ -454,7 +454,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
             return ExecutionView(
                 execution_id, "default",
                 ExecutionStatus.FAILED if execution_id == "execution-child-failed" else ExecutionStatus.SUCCEEDED,
-                ExecutionLineageKind.RUN, None, execution_id, None,
+                ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                 binding_kind=(
                     "agent"
                     if execution_id in {

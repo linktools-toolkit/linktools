@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ._execution_binding import ExecutionBindingContent, expand_snapshot_binding, snapshot_binding_size
+from ._execution_content import ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size
 
 from ..core import (
     JsonValue,
@@ -387,7 +387,7 @@ class RuntimeSnapshotOperations:
 
             execution_bindings = None
             if PersistenceDomain.EXECUTION in {domain for domain, _ in members}:
-                execution_bindings = ExecutionBindingContent(self._resources.stores[PersistenceDomain.EXECUTION],
+                execution_bindings = ExecutionContent(self._resources.stores[PersistenceDomain.EXECUTION],
                     namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
                 await execution_bindings.initialize(create=False)
 
@@ -654,7 +654,7 @@ async def _export_snapshot(
             if not page:
                 break
             for value in page:
-                semantic_value = expand_snapshot_binding(value, binding_contents,
+                semantic_value = expand_snapshot_execution_content(value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
                 semantic_value = expand_snapshot_capture(semantic_value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
@@ -685,6 +685,8 @@ async def _export_snapshot(
                     await copy_references(capture_retention_value(semantic_value), domain, archive_owner=False)
                 elif value.kind != "evaluation_cleanup":
                     await copy_references(encoded, domain)
+                    if value.kind == "execution":
+                        await copy_references(encode_record(semantic_value), domain, archive_owner=False)
             last = page[-1]
             record_cursor = RecordScanCursor(last.kind, last.key_digest)
             if len(page) < 128:
@@ -1012,7 +1014,7 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
         records = tuple(decode_record(value) for value in raw_records)
-        semantic_records = tuple(expand_snapshot_capture(expand_snapshot_binding(record, binding_contents,
+        semantic_records = tuple(expand_snapshot_capture(expand_snapshot_execution_content(record, binding_contents,
             namespace=namespace, tenant_id=tenant_id), binding_contents,
             namespace=namespace, tenant_id=tenant_id) for record in records)
         semantic_domains[domain] = semantic_records
@@ -1058,7 +1060,8 @@ async def restore_snapshot(
                             or source.store_digest != native_checkpoints[source.group_id].store_digest):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     required_checkpoint_groups.add(source.group_id)
-        live_records = tuple(capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS else encoded
+        live_records = tuple(capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS else
+                             encode_record(record) if record.kind == "execution" else encoded
                              for encoded, record in zip(raw_records, semantic_records) if record.kind != "evaluation_cleanup")
         for encoded in (*live_records, *raw_facts, *raw_operations):
             for source_domain, reference in iter_runtime_object_refs(
@@ -1455,7 +1458,7 @@ def snapshot_manifest_usage(
         records = tuple(decode_record(row) for row in group["records"]
                         if isinstance(row, Mapping) and row.get("kind") == "archive_content"
                         and isinstance(row.get("data"), Mapping)
-                        and row["data"].get("codec") in {"execution-binding", "task-graph-binding"})
+                        and row["data"].get("codec") in {"execution-binding", "task-graph-binding", "execution-payload"})
         if records:
             scope = group.get("scope_id")
             if not isinstance(scope, str) or not scope:
@@ -1465,7 +1468,7 @@ def snapshot_manifest_usage(
         for row in raw_domain["records"]:
             if isinstance(row, Mapping) and row.get("kind") in {"execution", "task_graph_binding_capture"}:
                 record = decode_record(row)
-                object_bytes += snapshot_binding_size(record, binding_contents) + snapshot_capture_size(record, binding_contents)
+                object_bytes += snapshot_execution_content_size(record, binding_contents) + snapshot_capture_size(record, binding_contents)
     return entries, object_bytes
 
 

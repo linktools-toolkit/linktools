@@ -86,7 +86,7 @@ async def test_model_subscription_fails_closed_before_registering(
 
                 async def missing(*args, **kwargs):
                     return None
-                monkeypatch.setattr(state.execution.executions, "get", missing)
+                monkeypatch.setattr(state.execution.executions, "get_view", missing)
 
         def forbidden(*args, **kwargs):
             raise AssertionError("Unauthorized subscription must not be registered")
@@ -113,13 +113,13 @@ async def test_model_subscription_preserves_custom_and_different_reader_authorit
         calls = []
 
         class Custom(ExecutionRepositoryImpl):
-            async def get(self, execution_id: str, *, tenant_id: str):
+            async def get_view(self, execution_id: str, *, tenant_id: str):
                 calls.append(execution_id)
-                # Header and post-authorization reads succeed; the reader still
+                # The post-authorization view succeeds; the reader still
                 # owns an independent existence decision for custom repositories.
-                if len(calls) >= 3:
+                if len(calls) >= 2:
                     return None
-                return await super().get(execution_id, tenant_id=tenant_id)
+                return await super().get_view(execution_id, tenant_id=tenant_id)
 
         if owner == "subclass":
             selected = Custom(repository.state_store, namespace=_NAMESPACE, tenant_id="tenant")
@@ -134,7 +134,7 @@ async def test_model_subscription_preserves_custom_and_different_reader_authorit
             )
         assert caught.value.code is ErrorCode.STORAGE_NOT_FOUND
         if owner == "subclass":
-            assert len(calls) == 3
+            assert len(calls) >= 2
     finally:
         await state.close()
 

@@ -189,14 +189,14 @@ class TaskExecutionService:
 
     @observed_query
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
-        execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
-        return project_execution_view(execution)
+        return await self._manager.load_view_authorized(
+            execution_id, principal, AuthorizationAction.EXECUTION_READ,
+        )
 
     @observed_query
     async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:
-        await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
-        children = await self._repositories.executions.list_children(execution_id, tenant_id=principal.tenant_id)
-        return tuple(project_execution_view(child) for child in children)
+        await self._manager.load_view_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+        return await self._repositories.executions.list_child_views(execution_id, tenant_id=principal.tenant_id)
 
     @consumed_terminal_query
     async def wait(
@@ -208,11 +208,18 @@ class TaskExecutionService:
         async def wait_once() -> ExecutionResult:
             backoff = 1.0
             while True:
-                execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
-                if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
-                    raise _execution_recovery_error(execution)
-                if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                    return await self.consume_result_from_execution(execution, tenant_id=principal.tenant_id)
+                view = await self._manager.load_view_authorized(
+                    execution_id, principal, AuthorizationAction.EXECUTION_READ,
+                )
+                if view.status in {ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.SUCCEEDED,
+                                   ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                    execution = await self.load_authorized(
+                        execution_id, principal, AuthorizationAction.EXECUTION_READ,
+                    )
+                    if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+                        raise _execution_recovery_error(execution)
+                    if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                        return await self.consume_result_from_execution(execution, tenant_id=principal.tenant_id)
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 2)
 

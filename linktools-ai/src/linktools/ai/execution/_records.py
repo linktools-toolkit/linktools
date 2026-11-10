@@ -34,7 +34,7 @@ class RuntimePayloadRef:
     source_domain: PersistenceDomain | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ExecutionRecord:
     execution_id: str
     session_id: str | None

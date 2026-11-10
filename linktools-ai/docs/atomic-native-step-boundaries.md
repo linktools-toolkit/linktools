@@ -221,9 +221,33 @@ read facade, not an additional durable database.
 AssetStore owns logical asset versions, ObjectStore owns immutable file and attachment bytes,
 Memory owns cross-execution mutable state, and Evaluation and Metrics own their
 independent evidence and observations. Those semantics are not removable copies
-of StepStore. Large execution bindings already share content-addressed storage;
-small bindings stay with their execution row to avoid another read. Their
-physical placement does not create a second mutable source of truth.
+of StepStore. Large execution bindings, complete stored inputs (including their
+model-visible views), results and prepared terminal outcomes use the existing
+content archive in the database. Only declared Execution slots contain references;
+ordinary JSON is opaque. Small values stay with their Execution row. Terminal
+publication still folds a matching recovery outcome into the canonical result.
+Their physical placement does not create a second mutable source of truth.
+
+Control writes reuse immutable value encodings and existing content addresses.
+A confirmed Execution observation permits retaining its references without a
+source readback or another body publication. Weak encoding entries expire with
+the immutable values; they never prove that a body exists. Complete reads still
+check the referenced scope and original body bytes, and batch reads decode each
+shared input or result body once. New bodies are prepared before entering the owning transaction
+and published atomically with the Execution record. Failure, cancellation and
+unknown commit handling keep the same source receipts and retry rules.
+
+Execution inspection and child listings decode only their management projection
+and binding, preserving tenant and actor authorization and management-field checks. Task wait polls this
+projection, then reads the complete terminal or recovery result when required.
+Metadata reads do not substitute for full-content integrity validation. Native
+history capture enlists the Execution archive in its read snapshot. A cold reader
+that first discovers a declared content reference opens the existing archive
+outside the callback and restarts that read-only capture once. It discards the
+first capture's observations and rechecks session ownership; inline-only reads
+perform no archive discovery. Missing content and unrelated scope failures still
+fail closed. Portable snapshots and offline collection follow the references and the typed
+binary attachments in the resolved content, with unchanged retention policy.
 
 Conversation turn receipts retain execution identity and message range, not a
 second input, result, error or timestamp payload. Execution is the sole terminal

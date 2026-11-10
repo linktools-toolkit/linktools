@@ -79,6 +79,15 @@ Execution terminal data and message range. Timeline reads batch the needed
 Execution fields without expanding execution bindings. Session controls admission
 and sequencing; it is not a replacement for standalone or Task executions.
 
+Large Execution input, result and prepared terminal bodies are compressed database
+archive content, alongside large binding contracts. The control record retains
+scoped content addresses; ordinary text and JSON are not ObjectStore files. Only
+typed attachment slots contribute binary dependencies. The archived input also
+owns its display/model view so a repeated prompt is not copied into control CAS.
+Snapshots include and budget the referenced content before decoding it, rekey
+physical archive scopes on restore, and verify the same typed attachment closure.
+Offline collection keeps content while its Execution owner is retained.
+
 ## Cost boundaries
 
 Removing duplicate content and Base64 database bodies reduces those specific

@@ -12,7 +12,7 @@ from linktools.ai.core import (
     ResourceKind, ResourceRef, StopReason, TenantAuthorizationPolicy, UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import ExecutionManager, IdempotencyRecord, ResultRecord
+from linktools.ai.execution import ExecutionManager, IdempotencyRecord, ResultRecord, project_execution_view
 from linktools.ai.storage import StoredPayload
 
 from .test_runtime_persistence_evidence import _execution
@@ -31,6 +31,12 @@ class _ReadPort:
     async def read_execution(self, execution_id, *, tenant_id):
         self.reads.append(("execution", execution_id, tenant_id))
         return self.execution
+
+    async def read_view(self, execution_id, *, tenant_id, observed=False):
+        if self.execution is None:
+            return None
+        return (ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, self.execution.principal_id),
+                project_execution_view(self.execution))
 
     async def read_source_execution(self, execution_id, *, tenant_id):
         self.reads.append(("source_execution", execution_id, tenant_id))

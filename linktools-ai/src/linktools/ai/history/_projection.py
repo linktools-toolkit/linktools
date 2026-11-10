@@ -52,6 +52,7 @@ from ..persistence.runs import StagedModelInteraction, project_public_messages
 from ..execution import (
     AttachmentFact,
     ExecutionHistoryItem,
+    ExecutionView,
     ExecutionTraceItem,
     ModelInteractionItem,
     ModelStreamAttemptItem,
@@ -142,7 +143,7 @@ class _AttachmentOccurrence:
 
 @dataclass(frozen=True, slots=True)
 class _HistorySource:
-    record: ExecutionRecord
+    record: ExecutionRecord | ExecutionView
     depth: int
     agent_run_seq: int
     merge_prefix: tuple[object, ...]
@@ -305,12 +306,23 @@ class StepExecutionHistoryReader:
                 return pending
         return await repository.get(execution_id, tenant_id=tenant_id)
 
-    def _store_for(self, record: ExecutionRecord) -> _ExecutionHistoryStore:
+    async def _read_execution_metadata(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository | None = None,
+    ) -> ExecutionRecord | ExecutionView | None:
+        repository = self._executions if executions is None else executions
+        if repository is self._executions and self._pending_execution is not None:
+            pending = await self._pending_execution(execution_id, tenant_id=tenant_id)
+            if pending is not None:
+                return pending
+        value = await repository.get_view(execution_id, tenant_id=tenant_id)
+        return None if value is None else value[1]
+
+    def _store_for(self, record: ExecutionRecord | ExecutionView) -> _ExecutionHistoryStore:
         if not record.durable_trace and self._transient_store is not None:
             return self._transient_store
         return self._store
 
-    def _durable_for(self, record: ExecutionRecord) -> bool:
+    def _durable_for(self, record: ExecutionRecord | ExecutionView) -> bool:
         return record.durable_trace and self._durable_history_available
 
     async def read_model_interactions(
@@ -335,7 +347,7 @@ class StepExecutionHistoryReader:
 
         # Pending execution lookup can reconcile durable state; keep it outside
         # the metadata-only owner scope used for the selected archive records.
-        record = await self._read_execution(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution_metadata(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         store = self._store_for(record)
@@ -675,8 +687,8 @@ class StepExecutionHistoryReader:
 
     async def _capture_authorized_model_interaction_cutoffs(
         self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
-    ) -> tuple[ExecutionRecord, ModelInteractionReadBoundary]:
-        record = await self._read_execution(execution_id, tenant_id=tenant_id, executions=executions)
+    ) -> tuple[ExecutionRecord | ExecutionView, ModelInteractionReadBoundary]:
+        record = await self._read_execution_metadata(execution_id, tenant_id=tenant_id, executions=executions)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
@@ -705,9 +717,7 @@ class StepExecutionHistoryReader:
                 async def capture(_group: StateGroupTransaction) -> _ModelMetadataT:
                     return await read()
 
-                return await execution_store.storage_group.read_many(
-                    (execution_store, history_store), capture,
-                )
+                return await executions.read_content(capture, stores=(history_store,))
         # Separate routes and custom owners retain independent reads.
         return await read()
 
@@ -715,13 +725,13 @@ class StepExecutionHistoryReader:
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionReadBoundary:
         """Capture committed identities and declared run coverage without tree discovery."""
-        record = await self._read_execution(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution_metadata(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
 
     async def _capture_model_interaction_cutoffs(
-        self, execution_id: str, record: ExecutionRecord, *, tenant_id: str,
+        self, execution_id: str, record: ExecutionRecord | ExecutionView, *, tenant_id: str,
     ) -> ModelInteractionReadBoundary:
         if record.agent_run_seq < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -760,7 +770,7 @@ class StepExecutionHistoryReader:
     ) -> tuple[ModelInteractionItem, ...]:
         """Read authorized execution and bounded request metadata in one owner scope."""
         async def read() -> tuple[ModelInteractionItem, ...]:
-            record = await self._read_execution(execution_id, tenant_id=tenant_id, executions=executions)
+            record = await self._read_execution_metadata(execution_id, tenant_id=tenant_id, executions=executions)
             if record is None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
@@ -788,7 +798,7 @@ class StepExecutionHistoryReader:
         limit = validate_model_metadata_range(
             agent_run_seq, after_model_request_seq, through_model_request_seq, limit,
         )
-        record = await self._read_execution(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution_metadata(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return await self._read_model_interaction_metadata(
@@ -798,7 +808,7 @@ class StepExecutionHistoryReader:
         )
 
     async def _read_model_interaction_metadata(
-        self, execution_id: str, record: ExecutionRecord, *, tenant_id: str, agent_run_seq: int,
+        self, execution_id: str, record: ExecutionRecord | ExecutionView, *, tenant_id: str, agent_run_seq: int,
         after_model_request_seq: int, through_model_request_seq: int, limit: int,
     ) -> tuple[ModelInteractionItem, ...]:
         if agent_run_seq > record.agent_run_seq:
@@ -844,7 +854,7 @@ class StepExecutionHistoryReader:
         self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
     ) -> ModelInteractionSubscription | None:
         """Keep the post-authorization read without repeating the same owner lookup."""
-        if await self._read_execution(execution_id, tenant_id=tenant_id, executions=executions) is None:
+        if await self._read_execution_metadata(execution_id, tenant_id=tenant_id, executions=executions) is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
             return await self.subscribe_model_interactions(execution_id, tenant_id=tenant_id)
@@ -853,7 +863,7 @@ class StepExecutionHistoryReader:
     async def subscribe_model_interactions(
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionSubscription | None:
-        if await self._read_execution(execution_id, tenant_id=tenant_id) is None:
+        if await self._read_execution_metadata(execution_id, tenant_id=tenant_id) is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return self._subscribe_model_interactions(execution_id, tenant_id=tenant_id)
 
@@ -888,11 +898,11 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name})
         filters = {name: value for name, value in selectors.items() if value is not None}
         limit = validate_page_limit(limit)
-        record = await self._read_execution(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution_metadata(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._recursive_history_tree(
-            record, tenant_id, include_children=agent_run_seq is None,
+            record, tenant_id, include_children=agent_run_seq is None, metadata_only=True,
         )
         current_sources = await self._capture_sources(entries, tenant_id, agent_run_seq)
         source_by_identity = {
@@ -1186,7 +1196,7 @@ class StepExecutionHistoryReader:
         tenant_id: str,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
-        record = await self._read_execution(
+        record = await self._read_execution_metadata(
             execution_id,
             tenant_id=tenant_id,
         )
@@ -1751,7 +1761,7 @@ class StepExecutionHistoryReader:
             # Resuming a completed native snapshot can finish a new attempt
             # without a model request. Its own Trace lifecycle remains evidence;
             # native context is never substituted for missing Trace messages.
-            events = (() if not source.record.restart_checkpoints or source.agent_run_seq < 2
+            events = (() if not cast(ExecutionRecord, source.record).restart_checkpoints or source.agent_run_seq < 2
                       or source.capture.model_interaction_count or event_high_water != 2
                       else await self._store_for(source.record).list_event_range(
                           agent_run_id=agent_run_id, start=0, end=event_high_water,
@@ -1913,7 +1923,7 @@ class StepExecutionHistoryReader:
         return Page(selected, next_cursor)
 
     async def _capture_sources(
-        self, entries: Sequence[tuple[ExecutionRecord, int]], tenant_id: str,
+        self, entries: Sequence[tuple[ExecutionRecord | ExecutionView, int]], tenant_id: str,
         selected_run_sequence: int | None = None, *, include_pending: bool = False,
     ) -> list[_HistorySource]:
         candidates = tuple(
@@ -1994,8 +2004,9 @@ class StepExecutionHistoryReader:
 
 
     async def _recursive_history_tree(
-        self, selected: ExecutionRecord, tenant_id: str, *, include_children: bool,
-    ) -> list[tuple[ExecutionRecord, int]]:
+        self, selected: ExecutionRecord | ExecutionView, tenant_id: str, *, include_children: bool,
+        metadata_only: bool = False,
+    ) -> list[tuple[ExecutionRecord | ExecutionView, int]]:
         if selected.lineage_kind.value == "SUBAGENT":
             if (
                 selected.parent_execution_id is None
@@ -2010,17 +2021,17 @@ class StepExecutionHistoryReader:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        result: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
+        result: list[tuple[ExecutionRecord | ExecutionView, int]] = [(selected, 0)]
         if not include_children:
             return result
         visited = {selected.execution_id}
-        pending: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
+        pending: list[tuple[ExecutionRecord | ExecutionView, int]] = [(selected, 0)]
         while pending:
             parent, depth = pending.pop(0)
-            for child in await self._executions.list_children(
-                parent.execution_id,
-                tenant_id=tenant_id,
-            ):
+            children = (await self._executions.list_child_views(parent.execution_id, tenant_id=tenant_id)
+                        if metadata_only else
+                        await self._executions.list_children(parent.execution_id, tenant_id=tenant_id))
+            for child in children:
                 if (
                     child.execution_id in visited
                     or child.lineage_kind.value != "SUBAGENT"

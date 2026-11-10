@@ -13,9 +13,9 @@ import json
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass, replace
 from ..steps import NativeStepSource
-from ..execution import ExecutionTimelineRecord
+from ..execution import ExecutionTimelineRecord, ExecutionView
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -1020,11 +1020,13 @@ def _replace_execution_outcome_fields(
 
 def _encode_v1_execution_record(
     value: object, codec: "_VersionCodec", persisted: bool,
+    *, binding: JsonValue | None = None,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, ExecutionRecord):
         raise TypeError("V1 execution_record encoder received the wrong type")
     encoded = {
-        name: _encode_domain(getattr(value, name), codec, persisted=persisted)
+        name: binding if name == "binding" and binding is not None else
+        _encode_domain(getattr(value, name), codec, persisted=persisted)
         for name in _dataclass_fields(ExecutionRecord)
         if not (persisted and name == "repository_instructions" and value.input_context is not None)
     }
@@ -1697,7 +1699,218 @@ def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:
     return _decode_domain(value, target, _CURRENT_CODEC)  # type: ignore[return-value]
 
 
-def decode_execution_timeline(value: Mapping[str, JsonValue]) -> ExecutionTimelineRecord:
+def _execution_projection_fields(value: Mapping[str, JsonValue]) -> tuple[Mapping[str, JsonValue], _VersionCodec]:
+    envelope = decode_envelope(value)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    payload = envelope.value.get("payload")
+    if (envelope.value.get("type") != "execution_record" or not isinstance(payload, Mapping)
+            or payload.get("$dataclass") != "execution_record"):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _require_required_keys(payload, frozenset({"$dataclass", "schema", "fields"}))
+    if type(payload["schema"]) is not int or payload["schema"] != envelope.version:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    source = payload["fields"]
+    if not isinstance(source, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return source, codec
+
+
+def _execution_projection_field(source: Mapping[str, JsonValue], name: str, codec: _VersionCodec) -> object:
+    target, _init = _dataclass_fields(ExecutionRecord)[name]
+    if name in source:
+        try:
+            return _decode_domain(source[name], target, codec, persisted=True)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    declaration = next(field for field in fields(ExecutionRecord) if field.name == name)
+    if declaration.default is not MISSING:
+        return declaration.default
+    if declaration.default_factory is not MISSING:
+        return declaration.default_factory()
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def decode_execution_header(value: Mapping[str, JsonValue], *, tenant_id: str) -> ResourceRef:
+    """Decode the execution's authorization identity without loading content."""
+    source, codec = _execution_projection_fields(value)
+    identity = _execution_projection_field(source, "execution_id", codec)
+    if not isinstance(identity, str) or not identity:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return ResourceRef(ResourceKind.EXECUTION, identity, tenant_id)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _validate_execution_view(view: ExecutionView, binding: AgentBindingContract | TaskBindingContract) -> None:
+    # Preserve the owner's invariants for fields consumed by this projection.
+    if isinstance(binding, AgentBindingContract):
+        if view.task_attempt != 0 or view.task_deadline_at is not None or view.task_next_attempt_at is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    else:
+        if (view.session_id is not None or view.lineage_kind is not ExecutionLineageKind.RUN
+                or view.parent_execution_id is not None or view.parent_invocation_id is not None
+                or view.agent_run_seq != 0
+                or view.task_attempt < 0 or view.task_attempt > binding.max_attempts):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if view.lineage_kind is ExecutionLineageKind.SUBAGENT:
+        if not view.parent_execution_id or not view.parent_invocation_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    elif view.parent_execution_id is not None or view.parent_invocation_id is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def decode_execution_view(value: Mapping[str, JsonValue], *, tenant_id: str) -> tuple[ResourceRef, ExecutionView]:
+    """Decode the public view and admitted principal from an expanded binding row."""
+    source, codec = _execution_projection_fields(value)
+    names = ("execution_id", "status", "lineage_kind", "parent_execution_id", "root_execution_id",
+             "parent_invocation_id", "session_id", "task_attempt", "task_deadline_at",
+             "task_next_attempt_at", "event_seq", "started_at", "agent_run_seq", "durable_trace", "created_at")
+    values = {name: _execution_projection_field(source, name, codec) for name in names}
+    binding = _execution_projection_field(source, "binding", codec)
+    principal_id = _execution_projection_field(source, "principal_id", codec)
+    if not isinstance(principal_id, str) or not principal_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result = source.get("result")
+    terminal_at = None
+    if result is not None:
+        if (not isinstance(result, Mapping) or result.get("$dataclass") != "result_record"
+                or not isinstance(result.get("fields"), Mapping)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if type(result.get("schema")) is not int or result["schema"] != codec.version:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        result_fields = result["fields"]
+        if "created_at" not in result_fields:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        terminal_at = _decode_domain(result_fields["created_at"], datetime, codec, persisted=True)
+        if terminal_at.tzinfo is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        view = ExecutionView(**values,
+            agent_id=binding.agent_spec.id if isinstance(binding, AgentBindingContract) else None,
+            task_id=binding.id if isinstance(binding, TaskBindingContract) else None,
+            binding_kind="agent" if isinstance(binding, AgentBindingContract) else "task",
+            terminal_at=terminal_at)
+        _validate_execution_view(view, binding)
+        return ResourceRef(ResourceKind.EXECUTION, view.execution_id, tenant_id, principal_id), view
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+_PAYLOAD_PATHS = (
+    ("stored_user_input",),
+    ("result", "fields", "output"),
+    ("recovery", "fields", "terminal_handoff", "fields", "outcome", "fields", "output"),
+)
+
+
+def execution_payload_slots(value: object) -> tuple[tuple[tuple[str, ...], Mapping], ...]:
+    """Select declared payload owners, without entering application JSON."""
+    if not isinstance(value, Mapping) or value.get("$dataclass") != "execution_record":
+        return ()
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result = []
+    for path in _PAYLOAD_PATHS:
+        item = fields
+        for name in path:
+            item = item.get(name) if isinstance(item, Mapping) else None
+        if item is not None:
+            if not isinstance(item, Mapping) or item.get("$dataclass") != ("stored_user_input" if path == _PAYLOAD_PATHS[0] else "stored_payload"):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result.append((path, item))
+    return tuple(result)
+
+
+def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if "content" not in fields:
+        return None
+    reference = execution_payload_reference(fields["content"])
+    if reference is None or set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return reference
+
+
+def map_execution_payload_slots(value: Mapping, mapper: Callable[[Mapping], JsonValue]) -> dict:
+    fields = dict(value["fields"])
+    for path, payload in execution_payload_slots(value):
+        current = fields
+        for name in path[:-1]:
+            current[name] = dict(current[name])
+            current = current[name]
+        current[path[-1]] = mapper(payload)
+    return {**value, "fields": fields}
+
+
+
+def encode_execution_content(
+    value: ExecutionRecord, payloads: Mapping[int, JsonValue],
+    *, binding: JsonValue | None = None,
+) -> JsonValue:
+    """Encode references only in the declared input and result owner slots."""
+    def input_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
+        if id(item) in payloads:
+            return payloads[id(item)]["fields"]
+        return _encode_v1_stored_user_input(item, codec, persisted)
+    def output_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
+        return {name: (payloads[id(getattr(item, name))]
+            if name == "output" and id(getattr(item, name)) in payloads else
+            _encode_domain(getattr(item, name), codec, persisted=persisted))
+            for name in _dataclass_fields(type(item))}
+    def execution_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
+        return _encode_v1_execution_record(item, codec, persisted, binding=binding)
+    codec = replace(_CURRENT_CODEC, dataclass_encoders={**_CURRENT_CODEC.dataclass_encoders,
+        "execution_record": execution_encoder,
+        "stored_user_input": input_encoder, "result_record": output_encoder,
+        "recovery_terminal_outcome": output_encoder,
+    })
+    return _encode_domain(value, codec, persisted=True)
+
+
+def execution_payload_reference(value: object) -> tuple[str, str, str] | None:
+    """Recognize a storage reference only in a typed StoredPayload slot."""
+    if not isinstance(value, Mapping) or "$execution_payload" not in value:
+        return None
+    return binding_reference({"$execution_binding": value["$execution_payload"],
+        **{key: item for key, item in value.items() if key != "$execution_payload"}})
+
+
+def decode_execution_content(
+    value: Mapping[str, JsonValue], payloads: Mapping[tuple[str, str, str], StoredPayload | StoredUserInput],
+    *, timeline: bool = False,
+) -> ExecutionRecord | ExecutionTimelineRecord:
+    """Inject verified immutable bodies without encoding or decoding them again."""
+    envelope = decode_envelope(value)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    def decoder(original: DataclassDecoder) -> DataclassDecoder:
+        def decode_payload(raw: Mapping[str, object], current: _VersionCodec, persisted: bool) -> object:
+            reference = execution_payload_reference(raw.get("content"))
+            if reference is None:
+                return original(raw, current, persisted)
+            if set(raw) != {"content"} or reference not in payloads:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return payloads[reference]
+        return decode_payload
+    current = replace(codec, dataclass_decoders={**codec.dataclass_decoders,
+        "stored_payload": decoder(_decode_v1_stored_payload),
+        "stored_user_input": decoder(_decode_v1_stored_user_input),
+    })
+    if timeline:
+        return decode_execution_timeline(value, codec=current)
+    if envelope.value.get("type") != "execution_record":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _decode_domain(envelope.value.get("payload"), ExecutionRecord, current, persisted=True)
+
+
+def decode_execution_timeline(value: Mapping[str, JsonValue], *, codec: _VersionCodec | None = None) -> ExecutionTimelineRecord:
     """Validate the envelope and strictly decode only the read-only timeline fields."""
     envelope = decode_envelope(value)
     try:
@@ -1712,7 +1925,7 @@ def decode_execution_timeline(value: Mapping[str, JsonValue]) -> ExecutionTimeli
         source = payload["fields"]
         if not isinstance(source, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        codec = _VERSION_CODECS[envelope.version]
+        codec = codec or _VERSION_CODECS[envelope.version]
         values = {}
         for name, (target, _init) in _dataclass_fields(ExecutionTimelineRecord).items():
             if name in source:
@@ -1881,6 +2094,9 @@ def _iter_runtime_object_refs(
             fields_value = value.get("fields")
             if not isinstance(fields_value, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            def skip_content(payload: Mapping) -> JsonValue:
+                return None if payload_reference(payload) is not None else payload
+            fields_value = map_execution_payload_slots(value, skip_content)["fields"]
             for key, item in fields_value.items():
                 if (
                     key == "binding"
@@ -1919,6 +2135,10 @@ def _iter_runtime_object_refs(
                 persisted="schema" in value,
             )
             yield from _iter_runtime_object_refs(decoded, domain, codec)
+            return
+        if dataclass_name == codec.wire_ids[StoredUserInput]:
+            decoded = _decode_domain(value, StoredUserInput, codec, persisted="schema" in value)
+            yield from _iter_runtime_object_refs(decoded.payload, domain, codec)
             return
         if dataclass_name == codec.wire_ids[StoredPayload]:
             decoded = _decode_domain(value, StoredPayload, codec, persisted="schema" in value)
@@ -2592,4 +2812,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

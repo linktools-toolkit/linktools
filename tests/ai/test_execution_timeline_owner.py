@@ -34,8 +34,9 @@ async def test_timeline_projection_reads_terminal_owners_without_expanding_bindi
         async def no_binding(*_args, **_kwargs):
             pytest.fail("timeline reads must not materialize executable bindings")
 
-        monkeypatch.setattr(repository._binding_content, "expand", no_binding)
-        monkeypatch.setattr(repository._binding_content, "expand_many", no_binding)
+        monkeypatch.setattr(repository._execution_content, "expand", no_binding)
+        monkeypatch.setattr(repository._execution_content, "expand_many", no_binding)
+        monkeypatch.setattr(repository._execution_content, "expand_bindings", no_binding)
         projected = await repository.get_timeline_many(tuple(value.execution_id for value in values), tenant_id="tenant")
         assert set(projected) == {value.execution_id for value in values}
         for value in values:

@@ -39,6 +39,8 @@ class _ExecutionViewSource(Protocol):
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
+    agent_run_seq: int
+    created_at: datetime
     session_id: str | None
     binding_kind: str
     task_id: str | None
@@ -48,6 +50,7 @@ class _ExecutionViewSource(Protocol):
     event_seq: int
     started_at: datetime | None
     result: "ResultRecord | None"
+    durable_trace: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +68,8 @@ class ExecutionView:
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
+    agent_run_seq: int = field(kw_only=True)
+    created_at: datetime = field(kw_only=True)
     session_id: str | None = None
     binding_kind: str = "agent"
     task_id: str | None = None
@@ -74,6 +79,7 @@ class ExecutionView:
     event_seq: int = 0
     started_at: datetime | None = None
     terminal_at: datetime | None = None
+    durable_trace: bool = False
 
 
 def project_execution_view(source: object) -> ExecutionView:
@@ -87,6 +93,9 @@ def project_execution_view(source: object) -> ExecutionView:
         parent_execution_id=value.parent_execution_id,
         root_execution_id=value.root_execution_id,
         parent_invocation_id=value.parent_invocation_id,
+        agent_run_seq=value.agent_run_seq,
+        created_at=value.created_at,
+        durable_trace=value.durable_trace,
         session_id=value.session_id,
         binding_kind=value.binding_kind,
         task_id=value.task_id,

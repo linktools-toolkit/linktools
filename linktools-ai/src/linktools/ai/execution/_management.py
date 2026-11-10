@@ -22,7 +22,7 @@ from ..storage import ObjectRef
 from ._records import (ExecutionRecord, ResultRecord, IdempotencyRecord,
     ExecutionCancelRequestCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult,
     IdempotencyTerminalUpdate, OperationTerminalUpdate)
-from ._api import CancelExecutionRequest, CancelExecutionResult, ExecutionResult
+from ._api import CancelExecutionRequest, CancelExecutionResult, ExecutionResult, ExecutionView
 
 _logger = environ.get_logger("ai.execution")
 _TerminalMetricDelivery = Callable[[], Awaitable[None]]
@@ -62,6 +62,7 @@ class ExecutionManagementPort(Protocol):
     def has_pending_cancel_promotion(self) -> bool: ...
     async def promote_pending_cancel(self, execution_id: str) -> None: ...
     async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
+    async def read_view(self, execution_id: str, *, tenant_id: str, observed: bool = False) -> tuple[ResourceRef, ExecutionView] | None: ...
     async def read_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def read_source_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     def has_local_pending(self, execution_id: str, *, tenant_id: str) -> bool: ...
@@ -855,6 +856,31 @@ class ExecutionManager:
             ValueError,
         ) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+    async def load_view_authorized(
+        self, execution_id: str, principal: Principal, action: AuthorizationAction,
+        *, authorized_header: ResourceRef | None = None, observed: bool = False,
+    ) -> ExecutionView:
+        loaded = await self._port.read_view(execution_id, tenant_id=principal.tenant_id, observed=observed)
+        if loaded is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        owner, view = loaded
+        if (authorized_header is None or authorized_header.owner_principal_id is None
+                or authorized_header.owner_principal_id != owner.owner_principal_id):
+            await self._authorization.authorize(principal, action, owner)
+        if type(self._authorization) is TenantAuthorizationPolicy:
+            return view
+        current = await self._port.read_view(execution_id, tenant_id=principal.tenant_id, observed=observed)
+        if current is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if current[0].owner_principal_id != owner.owner_principal_id:
+            await self._authorization.authorize(principal, action, current[0])
+            authorized_owner = current[0].owner_principal_id
+            current = await self._port.read_view(execution_id, tenant_id=principal.tenant_id, observed=observed)
+            if current is None or current[0].owner_principal_id != authorized_owner:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        return current[1]
 
 
     async def load_authorized(

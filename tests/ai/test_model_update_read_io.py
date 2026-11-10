@@ -120,12 +120,12 @@ async def test_update_read_does_not_disclose_metadata_without_current_authority(
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 authorized = True
         repository = state.execution.executions
-        get = repository.get
+        get = repository.get_view
         async def fresh_get(*args, **kwargs):
             return None if authorized and failure == "missing" else await get(*args, **kwargs)
         async def unexpected(*args, **kwargs):
             raise AssertionError("denied metadata must not be read")
-        monkeypatch.setattr(repository, "get", fresh_get)
+        monkeypatch.setattr(repository, "get_view", fresh_get)
         monkeypatch.setattr(state.run_store.read_store(PersistenceDomain.TRACE), "capture_history", unexpected)
         principal = Principal("other", "tenant") if failure == "principal" else (
             Principal("owner", "other") if failure == "tenant" else _PRINCIPAL

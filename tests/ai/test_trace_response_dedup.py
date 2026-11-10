@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import BinaryImage, FilePart, ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -21,7 +22,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import agent_run_id, canonical_json_bytes
+from linktools.ai.core import AuthorizationAction, Page, Principal, ResourceKind, ResourceRef, agent_run_id, canonical_json_bytes
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.history import DefaultExecutionHistoryService
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import NativeMessageRoot, PersistenceStorage
@@ -213,6 +216,29 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 assert len(page.items) == 1
                 assert not page.items[0].content_included
                 assert page.items[0].request == {} and page.items[0].response is None
+                history = runtime.history
+                assert history is not None
+                boundary = await history.capture_model_interaction_cutoffs(
+                    execution.execution_id, principal=execution.principal,
+                )
+                assert boundary.cutoffs[0].model_request_seq == 1
+                updates_boundary, updates = await history.read_model_interaction_updates(
+                    execution.execution_id, principal=execution.principal,
+                )
+                assert updates_boundary == boundary and len(updates) == 1
+                metadata = await history.read_model_interaction_metadata(
+                    execution.execution_id, principal=execution.principal, agent_run_seq=1,
+                    after_model_request_seq=0, through_model_request_seq=1,
+                )
+                assert metadata == updates
+                assert (await history.usage(execution.execution_id, principal=execution.principal)).logical_requests == 1
+                inspected = await history._service.inspect(execution.execution_id, principal=execution.principal)
+                assert inspected.agent_run_seq == 1 and inspected.durable_trace
+                subscription = await history.subscribe_model_interactions(
+                    execution.execution_id, principal=execution.principal,
+                )
+                if subscription is not None:
+                    await subscription.close()
                 assert await archive.resolve_model_interactions(records, include_content=False) == [(None, None, None, None, None)]
             opens: list[tuple[str, str]] = []
             with monkeypatch.context() as patch:
@@ -481,3 +507,65 @@ async def test_interrupted_partial_response_shares_retained_transcript(
             assert response[0].state == "interrupted"
             transcript = await archive.transcript_repository.load_messages(run_id)
             assert transcript == (*request, *response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ("persisted", "pending"))
+@pytest.mark.parametrize("outcome", ("allowed", "denied", "removed", "foreign"))
+async def test_history_metadata_authorization_preserves_owner_and_source_existence(
+    source: str, outcome: str,
+) -> None:
+    available = True
+    reached_reader = False
+    principal = Principal("actor", "other" if outcome == "foreign" else "tenant", "service")
+
+    class Executions:
+        tenant_id = "tenant"
+
+        async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
+            if source == "pending":
+                return None
+            if available and tenant_id == self.tenant_id:
+                return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, "owner")
+            return None
+
+        async def get(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("history metadata authorization loaded execution body")
+
+    class Policy:
+        async def authorize(
+            self, actor: Principal, action: AuthorizationAction, resource: ResourceRef,
+        ) -> None:
+            nonlocal available
+            assert actor is principal
+            assert action is AuthorizationAction.EXECUTION_READ
+            assert resource == ResourceRef(ResourceKind.EXECUTION, "execution", "tenant", "owner")
+            if outcome == "denied":
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if outcome == "removed":
+                available = False
+
+    class Reader:
+        async def model_interactions(self, execution_id: str, *, tenant_id: str, **kwargs: object) -> Page:
+            nonlocal reached_reader
+            assert execution_id == "execution" and tenant_id == "tenant"
+            reached_reader = True
+            return Page(())
+
+    async def pending(execution_id: str, *, tenant_id: str) -> object | None:
+        assert execution_id == "execution"
+        if source == "pending" and available and tenant_id == "tenant":
+            return SimpleNamespace(principal_id="owner")
+        return None
+
+    service = DefaultExecutionHistoryService(
+        Executions(), Policy(), Reader(), pending_execution=pending,
+    )
+    if outcome == "allowed":
+        assert (await service.model_interactions("execution", principal=principal)).items == ()
+        assert reached_reader
+    else:
+        with pytest.raises(AIError) as error:
+            await service.model_interactions("execution", principal=principal)
+        assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert not reached_reader

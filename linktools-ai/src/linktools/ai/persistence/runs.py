@@ -2123,6 +2123,15 @@ class RuntimeAgentRunStore(AgentRunStore):
             checkpoint = (await self.checkpoint_persistence.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
                           if self.execution_persistence(agent_run_id)[1]
                           else await self.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True))
+            if checkpoint is None and not self.execution_persistence(agent_run_id)[1]:
+                archive = self._archive_for_run(PersistenceDomain.CONVERSATION, agent_run_id)
+                if archive is not None:
+                    # A prepared handoff may outlive this Runtime's staging.
+                    checkpoint = await archive.latest_checkpoint(
+                        agent_run_id=agent_run_id, include_interrupted=True,
+                    )
+                    if checkpoint is not None and checkpoint.agent_run_id != agent_run_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if checkpoint is None or checkpoint.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

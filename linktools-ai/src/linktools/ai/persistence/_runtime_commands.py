@@ -1005,6 +1005,7 @@ class StateCommands:
             stores.append(self._conversation.state_store)
         if not _same_group(stores):
             return None
+        await self._execution.prepare_content(initial)
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, initial.revision, initial.event_seq,
                                     identity.scope, identity.idempotency_key_digest,
@@ -2262,6 +2263,8 @@ class StateCommands:
             or checkpoint.revision != expected_revision + 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(self._execution, ExecutionRepositoryImpl):
+            await self._execution.prepare_content(checkpoint)
         stores = (self._execution.state_store,)
 
         async def operation() -> ExecutionRecord:
@@ -2516,6 +2519,7 @@ class StateCommands:
         stores = tuple(_dedupe_stores(stores))
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        await self._execution.prepare_content(initial)
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
                                     identity.idempotency_key_digest, identity.request_digest,
@@ -2616,6 +2620,7 @@ class StateCommands:
         if type(self._execution) is not ExecutionRepositoryImpl:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         execution = commit.execution
+        await self._execution.prepare_content(replace(execution, result=commit.result))
         successful = execution.status is ExecutionStatus.SUCCEEDED
         for candidate in (reservation.execution, execution):
             if (not candidate.conversation or candidate.binding_kind != "agent"
@@ -3006,6 +3011,8 @@ class StateCommands:
             or expected_execution.event_seq != commit.expected_event_seq
         ):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+        if isinstance(self._execution, ExecutionRepositoryImpl):
+            await self._execution.prepare_content(replace(commit.execution, result=commit.result))
         publish_turn = session_id is not None and commit.execution.conversation
         effective_commit = commit
         if not commit.execution.durable_trace and (

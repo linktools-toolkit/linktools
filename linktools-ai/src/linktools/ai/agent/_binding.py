@@ -34,7 +34,7 @@ _BINDING_FIELDS = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class AgentBindingContract:
     """Persist Agent semantics and admitted capability identities."""
 
@@ -85,6 +85,7 @@ class AgentBindingContract:
             or len({ref.id for ref in self.selected}) != len(self.selected)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        object.__setattr__(self, "selected", tuple(self.selected))
         subagents = tuple(sorted(self.subagents, key=lambda item: item.id))
         if subagents != self.subagents or len({item.id for item in subagents}) != len(subagents):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

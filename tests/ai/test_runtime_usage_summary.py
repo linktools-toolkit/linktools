@@ -9,6 +9,9 @@ import pytest
 
 from linktools.ai.core import (
     ExecutionStatus,
+    ExecutionLineageKind,
+    ResourceKind,
+    ResourceRef,
     HmacCursorSigner,
     Principal,
     TaskStatus,
@@ -18,7 +21,7 @@ from linktools.ai.core import (
     agent_run_id as make_agent_run_id,
 )
 from linktools.ai.history import History
-from linktools.ai.execution import UsageReadCutoff, UsageSummary
+from linktools.ai.execution import ExecutionView, UsageReadCutoff, UsageSummary
 from linktools.ai.history._projection import StepExecutionHistoryReader
 from linktools.ai.execution import ExecutionHistoryService
 from linktools.ai.persistence import PersistenceDomain
@@ -68,6 +71,12 @@ class _Executions:
         if execution_id != self.record.execution_id:
             return None
         return self.record
+
+    async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+        record = await self.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            return None
+        return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id), record
 
 
 class _UsageStore:
@@ -179,8 +188,14 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
             duration_ns=999,
         ),
     )
-    record = SimpleNamespace(
+    record = ExecutionView(
         execution_id=execution_id,
+        agent_id="default",
+        lineage_kind=ExecutionLineageKind.RUN,
+        parent_execution_id=None,
+        root_execution_id=execution_id,
+        parent_invocation_id=None,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         binding_kind="agent",
         status=ExecutionStatus.STARTED,
         agent_run_seq=1,

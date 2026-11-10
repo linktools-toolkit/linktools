@@ -30,7 +30,7 @@ class PayloadPolicy:
             raise ValueError("inline payload limit must be between 0 and 256 KiB")
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class StoredPayload:
     """Own immutable payload data and expose detached JSON consumer views."""
 

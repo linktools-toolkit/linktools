@@ -40,7 +40,7 @@ from ..execution import (
 import binascii
 import json
 from ..session import SessionRepository as SessionRepositoryContract
-from ..execution import ExecutionTimelineRecord
+from ..execution import ExecutionTimelineRecord, ExecutionView
 from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -1328,6 +1328,14 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):
+    async def get_view(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> tuple[ResourceRef, ExecutionView] | None: ...
+
+    async def list_child_views(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> tuple[ExecutionView, ...]: ...
+
     async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionTimelineRecord]: ...

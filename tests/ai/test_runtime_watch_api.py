@@ -34,7 +34,7 @@ class _ExecutionService:
     async def inspect(self, execution_id: str, *, principal: Principal):
         del principal
         return ExecutionView(execution_id, "agent", ExecutionStatus.SUCCEEDED,
-            ExecutionLineageKind.RUN, None, execution_id, None, event_seq=1)
+            ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), event_seq=1)
 
     async def list_children(self, execution_id: str, *, principal: Principal):
         return ()
@@ -883,7 +883,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                 ExecutionLineageKind.RUN,
                 None,
                 "execution",
-                None,
+                None, agent_run_seq=0, created_at=now,
                 event_seq=2,
             )
 
@@ -1004,7 +1004,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             ExecutionLineageKind.RUN,
             None,
             "root",
-            None,
+            None, agent_run_seq=0, created_at=now,
             event_seq=1,
         ),
         "child": ExecutionView(
@@ -1014,7 +1014,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             ExecutionLineageKind.SUBAGENT,
             "root",
             "root",
-            "call-child",
+            "call-child", agent_run_seq=0, created_at=now,
             event_seq=1,
         ),
         "grandchild": ExecutionView(
@@ -1024,7 +1024,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             ExecutionLineageKind.SUBAGENT,
             "child",
             "root",
-            "call-grandchild",
+            "call-grandchild", agent_run_seq=0, created_at=now,
             event_seq=1,
         ),
     }
@@ -1649,7 +1649,7 @@ async def test_graph_live_subagent_root_cursor_binds_selected_execution():
     async def inspect(execution_id, *, principal):
         assert execution_id == "selected"
         return ExecutionView("selected", "agent", ExecutionStatus.SUCCEEDED,
-            ExecutionLineageKind.SUBAGENT, "parent", "lineage-root", "invocation", event_seq=1)
+            ExecutionLineageKind.SUBAGENT, "parent", "lineage-root", "invocation", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), event_seq=1)
     async def tree(execution_id, *, principal, after_event_seqs=None, include_content=False, ready=None):
         assert execution_id == "selected"
         if ready is not None:

@@ -337,6 +337,31 @@ class _ExecutionManagementAdapter(StoredExecutionManagementAdapter):
     async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self._service.load_execution(execution_id, tenant_id=tenant_id)
 
+    async def read_view(
+        self, execution_id: str, *, tenant_id: str, observed: bool = False,
+    ) -> tuple[ResourceRef, ExecutionView] | None:
+        service = self._service
+        pending = await service._runtime_bridge.pending_turns.read_execution(
+            execution_id, tenant_id=tenant_id,
+        )
+        if pending is not None:
+            return (ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, pending.principal_id),
+                    _execution_view(pending))
+        current = (await service._state.executions.get_view(execution_id, tenant_id=tenant_id)
+                   if observed else await self.read_source_view(execution_id, tenant_id=tenant_id))
+        if current is not None:
+            return current
+        pending = await service._runtime_bridge.pending_turns.read_remote_execution(
+            execution_id, tenant_id=tenant_id,
+        )
+        current = await self.read_source_view(execution_id, tenant_id=tenant_id)
+        if current is not None:
+            return current
+        if pending is not None:
+            return (ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, pending.principal_id),
+                    _execution_view(pending))
+        return None
+
     @property
     def driver(self) -> ExecutionDriver | None:
         return self._service._runtime_bridge.port
@@ -1018,39 +1043,25 @@ class DefaultExecutionService(TaskExecutionService):
                         principal, AuthorizationAction.EXECUTION_READ, header,
                     )
 
-                async def read(
-                    _transaction: "StateTransaction",
-                ) -> tuple[ExecutionRecord | None, tuple[ExecutionView, ...]]:
-                    current = await repository.get(
-                        execution_id, tenant_id=principal.tenant_id,
-                    )
-                    if current is None:
-                        if remote_pending is not None:
-                            # A child cannot exist before its parent is promoted.
-                            return None, ()
-                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                    children = await repository.list_children(
-                        execution_id, tenant_id=principal.tenant_id,
-                    )
-                    return current, tuple(_execution_view(child) for child in children)
-
-                # Authorization may await arbitrary application work; only the
-                # known metadata owner shares the post-authorization snapshot.
-                current, children = await repository.state_store.read(read)
-                if current is not None:
-                    await self.authorize_loaded_execution(
-                        current, principal, AuthorizationAction.EXECUTION_READ,
-                        owner_principal_id=header.owner_principal_id,
+                # Policy callbacks complete before capturing the parent and children.
+                current, children = await repository.get_view_with_children(
+                    execution_id, tenant_id=principal.tenant_id,
+                )
+                if current is None and remote_pending is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                if current is not None and (header.owner_principal_id is None
+                        or current[0].owner_principal_id != header.owner_principal_id):
+                    await self._authorization.authorize(
+                        principal, AuthorizationAction.EXECUTION_READ, current[0],
                     )
                 return children
-            await self.load_authorized(
+            await self.manager.load_view_authorized(
                 execution_id, principal, AuthorizationAction.EXECUTION_READ
             )
-            children = await self._state.executions.list_children(
+            return await self._state.executions.list_child_views(
                 execution_id,
                 tenant_id=principal.tenant_id,
             )
-            return tuple(_execution_view(child) for child in children)
 
     async def _start(
         self,
@@ -2330,8 +2341,9 @@ class DefaultExecutionService(TaskExecutionService):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView:
-        execution = await self.load_observed_authorized(
-            execution_id, principal, AuthorizationAction.EXECUTION_READ
+        header = await self.authorize_execution(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+        execution = await self.manager.load_view_authorized(
+            execution_id, principal, AuthorizationAction.EXECUTION_READ, authorized_header=header, observed=True,
         )
         if (
             execution.status
@@ -2348,7 +2360,7 @@ class DefaultExecutionService(TaskExecutionService):
             )
             if failure is not None:
                 raise failure
-        return _execution_view(execution)
+        return execution
 
     async def list(self, request: ListExecutionRequest) -> Page[ExecutionView]:
         if self._history_service is None:

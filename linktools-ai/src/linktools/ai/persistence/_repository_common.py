@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Generic, TypeVar
 from linktools.core import environ
 from ..core import (
+    JsonValue,
     OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -42,7 +43,7 @@ from .contracts import (
     MemoryRecord,
     SessionRecord,
 )
-from ._execution_binding import ExecutionBindingContent
+from ._execution_content import ExecutionContent
 from ._evaluation_records import (
     EvaluationCaseRecord,
     EvaluationDatasetRecord,
@@ -86,7 +87,7 @@ class _RepositoryBase:
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._domain = domain
-        self._binding_content = ExecutionBindingContent(store, namespace=namespace, tenant_id=tenant_id)
+        self._execution_content = ExecutionContent(store, namespace=namespace, tenant_id=tenant_id)
 
     async def initialize(self) -> None:
         return None
@@ -101,9 +102,9 @@ class _RepositoryBase:
         if self._domain is PersistenceDomain.EXECUTION:
             if deferred:
                 if create:
-                    self._binding_content.enable_sharing()
+                    self._execution_content.enable_sharing()
             else:
-                await self._binding_content.initialize(create=create)
+                await self._execution_content.initialize(create=create)
 
     async def close(self) -> None:
         return None
@@ -170,13 +171,30 @@ class _RepositoryBase:
     async def _stored_content(
         self, kind: str, identity: object, value: object, *, scope: bytes | None = None,
         parent: bytes | None = None, state: str | None = None,
+        previous_value: ExecutionRecord | None = None,
     ) -> StoredRecord:
-        return await self._binding_content.compact(self._stored(
-            kind, identity, value, scope=scope, parent=parent, state=state,
-        ))
+        if isinstance(value, ExecutionRecord):
+            previous = None if previous_value is None else self._execution_content.projection(previous_value)
+            encoded = await self._execution_content.encode(value, previous=previous)
+            record = project_record(
+                namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
+                kind=kind, identity=identity, value=value, scope=scope, parent=parent,
+                state=state, encoded=encoded,
+            )
+            self._execution_content.remember_projection(value, record)
+            return record
+        return self._stored(kind, identity, value, scope=scope, parent=parent, state=state)
 
     async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
-        return await self._binding_content.compact(_projected_record(self, current, value), previous=current)
+        if isinstance(value, ExecutionRecord):
+            _require_tenant(value, self._tenant_id)
+            encoded = await self._execution_content.encode(value, previous=current)
+            record = project_record(namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
+                kind=current.kind, identity=value.execution_id, value=value, state=_record_state(value),
+                storage_revision=current.storage_revision + 1, encoded=encoded)
+            self._execution_content.remember_projection(value, record)
+            return record
+        return _projected_record(self, current, value)
 
     async def _record(self, key: bytes) -> StoredRecord | None:
         return await self._store.read(lambda transaction: transaction.get_record(key))
@@ -278,14 +296,13 @@ class _RepositoryBase:
         return await self._store.read(lambda transaction: transaction.get_records(keys))
 
     async def _insert(self, record: StoredRecord) -> None:
-        await self._binding_content.prepare(record)
         async def insert(transaction: StateTransaction) -> None:
-            await transaction.insert_record(await self._binding_content.compact(record))
+            await transaction.insert_record(record)
         await self._store.mutate(insert)
 
     async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
         if target is ExecutionRecord:
-            record = await self._binding_content.expand(record)
+            return await self._execution_content.decode(record)
         value = _decode_enveloped_domain(
             record.data,
             target,
@@ -337,12 +354,13 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
 
     async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
         value = await super()._decode(record, target)
-        if target is self._value_type and (
-            record.kind != self._kind
-            or record.key_digest != self._key(self._kind, self._identity(value))
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if target is self._value_type:
+            self._validate_record_identity(record, value)
         return value
+
+    def _validate_record_identity(self, record: StoredRecord, value: ValueT) -> None:
+        if record.kind != self._kind or record.key_digest != self._key(self._kind, self._identity(value)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def create(self, value: ValueT) -> ValueT:
         _require_tenant(value, self._tenant_id)
@@ -735,6 +753,7 @@ def project_record(
     state: str | None = None,
     sort_key: str | None = None,
     storage_revision: int = 0,
+    encoded: JsonValue | None = None,
 ) -> StoredRecord:
     """Project one logical value into its canonical physical Runtime record."""
     if scope is None:
@@ -767,7 +786,7 @@ def project_record(
         lease_owner,
         lease_fence,
         lease_expires_at,
-        _domain_data(value),
+        _domain_data(value) if encoded is None else encode_envelope({"type": wire_type_id(value), "payload": encoded}),
         subject_digest=subject_digest(value.tool_call_id) if isinstance(value, ToolOperationRecord) else None,
     )
 

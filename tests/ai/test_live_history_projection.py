@@ -17,6 +17,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
+from linktools.ai.core import ExecutionLineageKind
 from linktools.ai.core import (
     ExecutionStatus,
     HmacCursorSigner,
@@ -394,6 +395,12 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
     record = SimpleNamespace(
         durable_trace=True,
         execution_id="execution",
+        agent_id="default",
+        lineage_kind=ExecutionLineageKind.RUN,
+        parent_execution_id=None,
+        root_execution_id="execution",
+        parent_invocation_id=None,
+        created_at=interaction.started_at,
         status=ExecutionStatus.STARTED,
         binding_kind="agent",
         agent_run_seq=1,
