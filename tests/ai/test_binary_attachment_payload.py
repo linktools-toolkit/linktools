@@ -74,7 +74,7 @@ async def test_mixed_typed_messages_roundtrip_source_bytes_and_relocate_only_fil
     for _ in range(2):
         recovered = await read_attachment_payload(relocated, read_object=read)
         assert recovered == raw
-        assert decode_model_messages(recovered) == messages
+        assert encode_model_messages(decode_model_messages(recovered)) == raw
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,18 @@ def test_terminal_completion_time_is_independent_of_control_updates() -> None:
     assert updated.finalize_terminal(updated.result).completed_at == execution.completed_at
 
 
+@pytest.mark.parametrize("status", (ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED))
+def test_timeline_projection_preserves_unfinalized_owner_state(status: ExecutionStatus) -> None:
+    from linktools.ai.persistence.codec import _encode_persisted_domain, decode_execution_timeline, encode_envelope
+
+    execution = replace(_execution("execution", status=status, prompt="input"), result=None, completed_at=None)
+    projected = decode_execution_timeline(encode_envelope({
+        "type": "execution_record", "payload": _encode_persisted_domain(execution),
+    }))
+    assert projected.status is status
+    assert projected.result is None and projected.completed_at is None
+
+
 def test_timeline_projection_inherits_execution_constructor_defaults() -> None:
     from linktools.ai.persistence.codec import _encode_persisted_domain, decode_execution_timeline, encode_envelope
 

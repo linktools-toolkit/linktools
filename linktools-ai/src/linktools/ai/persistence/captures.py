@@ -11,6 +11,7 @@ from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..task import TaskDependencyCapture, TaskGraphCaptureRef, TaskGraphTemplateRef, TaskInvocationInputRef
 from ..storage import ObjectRef, PayloadPolicy, StoredPayload
+from ..model import StoredUserInput
 from ..model.attachments import store_attachment_payload, read_attachment_payload
 from ._archive import ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
@@ -86,8 +87,9 @@ def capture_record_digest(record: StoredRecord) -> str:
     return digest
 
 
-async def _map_capture_attachments(
-    key: str, value: JsonValue, transform: Callable[[JsonValue, str, bool], Awaitable[JsonValue]],
+def _map_capture_attachments(
+    key: str, value: JsonValue, transform: Callable[[JsonValue, str, bool], JsonValue],
+    reference: Callable[[JsonValue], None] = lambda value: None,
 ) -> JsonValue:
     def mapping(value: JsonValue, encoded: bool) -> dict[str, JsonValue] | None:
         if not isinstance(value, Mapping):
@@ -102,92 +104,111 @@ async def _map_capture_attachments(
     def mapped(original: JsonValue, result: Mapping[str, JsonValue], encoded: bool) -> JsonValue:
         return {"$mapping": [[name, result[name]] for name, _item in original["$mapping"]]} if encoded else dict(result)
 
-    async def prompt(value: JsonValue, encoded: bool = False) -> JsonValue:
+    def prompt(value: JsonValue, encoded: bool = False) -> JsonValue:
         fields = mapping(value, encoded)
         if fields is None:
             return value
-        if fields.get("kind") == "pydantic-user-content-v1":
-            fields["value"] = await transform(fields["value"], "user-content", encoded)
+        if fields.get("kind") == "stored-user-content-v1":
+            stored = decode_domain(fields["value"], object) if encoded else fields["value"]
+            reference(encode_domain(decode_domain(stored, StoredUserInput).payload))
+        elif fields.get("kind") == "pydantic-user-content-v1":
+            fields["value"] = transform(fields["value"], "user-content", encoded)
         elif fields.get("kind") == "task-user-content-v1":
             items = []
             for item in fields["items"]:
                 entry = mapping(item, encoded)
                 if entry is not None and entry.get("kind") == "native":
-                    entry["value"] = await transform(entry["value"], "user-content", encoded)
+                    entry["value"] = transform(entry["value"], "user-content", encoded)
                     item = mapped(item, entry, encoded)
                 items.append(item)
             fields["items"] = items
         return mapped(value, fields, encoded)
 
-    async def context(value: JsonValue, encoded: bool = False) -> JsonValue:
+    def context(value: JsonValue, encoded: bool = False) -> JsonValue:
         fields = mapping(value, encoded)
         if fields is None:
             return value
-        fields["history"] = await transform(fields["history"], "model-messages", encoded)
+        fields["history"] = transform(fields["history"], "model-messages", encoded)
         return mapped(value, fields, encoded)
 
-    async def agent_input(value: JsonValue, *, encoded: bool = False, fallback: bool = False) -> JsonValue:
+    def agent_input(value: JsonValue, *, encoded: bool = False, fallback: bool = False) -> JsonValue:
         fields = mapping(value, encoded)
         if fields is None or (not fallback and fields.get("kind") != "agent-task-input"):
             return value
         for name in ("prompt", "capture_files"):
             if name in fields:
-                fields[name] = await prompt(fields[name], encoded)
+                fields[name] = prompt(fields[name], encoded)
         if fields.get("capture_context") is not None:
-            fields["capture_context"] = await context(fields["capture_context"], encoded)
+            fields["capture_context"] = context(fields["capture_context"], encoded)
         return mapped(value, fields, encoded)
 
-    async def contract(value: JsonValue) -> JsonValue:
+    def contract(value: JsonValue) -> JsonValue:
         if not isinstance(value, Mapping):
             return value
         fields = value.get("fields")
         if value.get("$dataclass") != "task_invocation_input_contract" or not isinstance(fields, Mapping):
             return value
+        reference(fields.get("dependencies"))
         binding = mapping(fields.get("binding"), True)
         if binding is None or binding.get("type") != "agent":
             return value
         return {**value, "fields": {**fields,
-            "input": await agent_input(fields["input"], encoded=True),
-            "original_input": await agent_input(fields["original_input"], encoded=True, fallback=True)}}
+            "input": agent_input(fields["input"], encoded=True),
+            "original_input": agent_input(fields["original_input"], encoded=True, fallback=True)}}
 
-    async def node(value: JsonValue) -> JsonValue:
+    def node(value: JsonValue) -> JsonValue:
         if not isinstance(value, Mapping) or value.get("$dataclass") != "task_node":
             return value
         fields = value["fields"]
+        reference(fields.get("input_capture"))
         if fields.get("input_semantics") != "agent-task-input-v1":
             return value
-        result = {**fields, "input": await agent_input(fields["input"], encoded=True)}
+        result = {**fields, "input": agent_input(fields["input"], encoded=True)}
         if result.get("original_input") is not None:
-            result["original_input"] = await agent_input(result["original_input"], encoded=True, fallback=True)
+            result["original_input"] = agent_input(result["original_input"], encoded=True, fallback=True)
         return {**value, "fields": result}
 
-    async def template(value: JsonValue) -> JsonValue:
+    def template(value: JsonValue) -> JsonValue:
         if not isinstance(value, Mapping) or value.get("$dataclass") != "task_graph_template":
             return value
         fields = value["fields"]
         nodes = fields["nodes"]
-        return {**value, "fields": {**fields, "nodes": {"$tuple": [await node(item) for item in nodes["$tuple"]]}}}
+        return {**value, "fields": {**fields, "nodes": {"$tuple": [node(item) for item in nodes["$tuple"]]}}}
 
     if key.startswith("v1/input-capture/agent/"):
         payload = value["payload"]
-        result = {**payload, "prompt": await prompt(payload["prompt"]),
-                  "original_input": await agent_input(payload["original_input"], fallback=True)}
+        result = {**payload, "prompt": prompt(payload["prompt"]),
+                  "original_input": agent_input(payload["original_input"], fallback=True)}
         if payload.get("input_view") is not None:
-            result["input_view"] = await agent_input(payload["input_view"], fallback=True)
+            result["input_view"] = agent_input(payload["input_view"], fallback=True)
         if payload.get("input_context") is not None:
-            result["input_context"] = await context(payload["input_context"])
+            result["input_context"] = context(payload["input_context"])
         if payload.get("task_input") is not None:
-            result["task_input"] = await contract(payload["task_input"])
+            result["task_input"] = contract(payload["task_input"])
         return {**value, "payload": result}
     if key.startswith("v1/input-capture/task/"):
-        return {**value, "payload": {**value["payload"], "contract": await contract(value["payload"]["contract"])}}
+        return {**value, "payload": {**value["payload"], "contract": contract(value["payload"]["contract"])}}
     if key.startswith(("v1/input-capture/graph/", "v1/input-capture/template/")):
-        return {**value, "payload": {**value["payload"], "template": await template(value["payload"]["template"])}}
+        return {**value, "payload": {**value["payload"], "template": template(value["payload"]["template"])}}
     if key.startswith("v1/input-capture/invocation/"):
-        return {**value, "node": await node(value["node"])}
+        return {**value, "node": node(value["node"])}
     if key.startswith("v1/input-capture/declaration/"):
-        return await template(value)
+        return template(value)
     return value
+
+
+async def _transform_capture_attachments(
+    key: str, value: JsonValue, transform: Callable[[JsonValue, str, bool], Awaitable[JsonValue]],
+) -> JsonValue:
+    slots: list[tuple[JsonValue, str, bool]] = []
+
+    def collect(content: JsonValue, format: str, encoded: bool) -> JsonValue:
+        slots.append((content, format, encoded))
+        return content
+
+    _map_capture_attachments(key, value, collect)
+    transformed = iter([await transform(*slot) for slot in slots])
+    return _map_capture_attachments(key, value, lambda *_args: next(transformed))
 
 
 async def prepare_capture_value(key: str, value: JsonValue, *,
@@ -196,7 +217,7 @@ async def prepare_capture_value(key: str, value: JsonValue, *,
         content = decode_domain(value, object) if encoded else value
         payload = await store_attachment_payload(canonical_json_bytes(content), format=format, write_object=write_object)
         return value if payload is None else encode_domain(payload)
-    return await _map_capture_attachments(key, value, transform)
+    return await _transform_capture_attachments(key, value, transform)
 
 
 async def restore_capture_value(record: StoredRecord, *,
@@ -209,7 +230,7 @@ async def restore_capture_value(record: StoredRecord, *,
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         content = json.loads(await read_attachment_payload(payload, read_object=read_object))
         return encode_domain(content) if encoded else content
-    value = await _map_capture_attachments(record.sort_key, capture_record_value(record), transform)
+    value = await _transform_capture_attachments(record.sort_key, capture_record_value(record), transform)
     if canonical_sha256(value) != capture_record_digest(record):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
@@ -225,9 +246,22 @@ def capture_record_scope(record: StoredRecord) -> tuple[str, str]:
 
 
 def capture_retention_value(record: StoredRecord) -> JsonValue:
-    """Only capture contracts, not result business JSON, contain durable references."""
+    """Project references only from the capture owner's declared durable slots."""
     value = capture_record_value(record)
-    return None if record.sort_key.startswith(("v1/input-capture/result/", "v1/input-capture/expired/")) else value
+    references: list[JsonValue] = []
+
+    def attachment(content: JsonValue, format: str, encoded: bool) -> JsonValue:
+        if isinstance(content, Mapping) and content.get("$dataclass") == "stored_payload":
+            payload = decode_domain(content, StoredPayload)
+            if payload.encoding != "json-attachments" or payload.value["format"] != format:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            references.append(content)
+        return content
+
+    _map_capture_attachments(record.sort_key, value, attachment, references.append)
+    if record.kind == "task_graph_binding_capture" and isinstance(value, Mapping):
+        references.append(value.get("declarations"))
+    return references
 
 
 def capture_state_closure(records: Sequence[StoredRecord], *,

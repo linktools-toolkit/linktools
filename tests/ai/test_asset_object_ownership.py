@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.asset import AssetKey, SqlAssetBackend, build_asset_sql_metadata
+from linktools.ai.asset._store import _batch_request_digest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
@@ -37,7 +38,8 @@ async def test_sql_asset_files_have_one_byte_owner_across_metadata_and_receipts(
     try:
         await provision_asset_database(engine)
         await backend.initialize()
-        committed = await backend.apply_batch((change,), idempotency_key="upload")
+        committed = await backend.apply_batch((change,), idempotency_key="upload",
+                                              request_digest=_batch_request_digest((change,), None))
         info = await backend.stat(key)
         assert info is not None and info.content is not None and info.content.ref is not None
         assert info.content.kind == "object"
@@ -63,7 +65,8 @@ async def test_sql_asset_files_have_one_byte_owner_across_metadata_and_receipts(
             assert b"".join(bodies) == content
 
         assert await backend.get(key) == content
-        assert await backend.apply_batch((change,), idempotency_key="upload") == committed
+        assert await backend.apply_batch((change,), idempotency_key="upload",
+                                              request_digest=_batch_request_digest((change,), None)) == committed
         await backend.delete(key)
         assert await backend.get(key) is None
         assert await backend.get_at_revision(key, info.revision) == content
@@ -88,9 +91,10 @@ async def test_small_asset_object_failure_does_not_publish_metadata(tmp_path: Pa
         await provision_asset_database(engine)
         await backend.initialize()
         before = await backend.head_revision()
+        change = StorageChange(StorageOperation.PUT, key, b"small", None)
         with pytest.raises(AIError) as caught:
             await backend.apply_batch(
-                (StorageChange(StorageOperation.PUT, key, b"small", None),), idempotency_key="upload",
+                (change,), idempotency_key="upload", request_digest=_batch_request_digest((change,), None),
             )
         assert caught.value.code is ErrorCode.STORAGE_UNAVAILABLE
         assert await backend.head_revision() == before

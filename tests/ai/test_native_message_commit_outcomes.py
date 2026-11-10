@@ -3,12 +3,19 @@
 """Native message reuse follows the actual enclosing owner commit outcome."""
 
 import asyncio
+import hashlib
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 
+from linktools.ai.model.messages import encode_model_messages
+from linktools.ai.persistence.codec import encode_domain
+from linktools.ai.persistence.contracts import ArchivedContextBlock
+from linktools.ai.storage import SqlObjectStore
+from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
@@ -22,10 +29,15 @@ async def _bound(state):
     opened = await state.storage_group.open_archive(create=True)
     assert opened is not None
     group_id, records = opened
-    archive = ContentArchive(records, group_id, namespace="native", tenant_id="one", object_store=None)
+    archive = ContentArchive(records, group_id, namespace="native", tenant_id="one", object_store=SqlObjectStore.from_context(state.storage_group.context))
     native = SqlStepStore(state.context, namespace="native", tenant_id="one")
     native.bind_message_archive(archive)
     return native, archive
+
+
+def _owner_data(root: NativeMessageRoot, messages: Sequence[ModelMessage]) -> JsonValue:
+    raw = encode_model_messages(list(messages))
+    return encode_domain(ArchivedContextBlock(root, hashlib.sha256(raw).hexdigest(), len(raw)))
 
 
 @pytest.mark.asyncio
@@ -36,7 +48,7 @@ async def test_nested_owner_receipts_wait_for_outer_commit(tmp_path: Path, monke
         messages = [ModelRequest(parts=[UserPromptPart("owner body")])]
         prepared = PreparedArchive()
         root = await native.prepare_archived_messages(messages, prepared)
-        owner = replace(_record("owner"), data={"root": root.to_json()})
+        owner = replace(_record("owner"), data=_owner_data(root, messages))
         actual_mutation = type(state.context).run_mutation
 
         if outcome == "unknown":
@@ -82,8 +94,9 @@ async def test_expired_receipt_cannot_turn_a_committed_owner_into_failure(tmp_pa
     async with _database(tmp_path / "expired.db") as (_engine, state, _other):
         native, archive = await _bound(state)
         prepared = PreparedArchive()
-        root = await native.prepare_archived_messages([ModelRequest(parts=[UserPromptPart("body")])], prepared)
-        owner = replace(_record("owner"), data={"root": root.to_json()})
+        messages = [ModelRequest(parts=[UserPromptPart("body")])]
+        root = await native.prepare_archived_messages(messages, prepared)
+        owner = replace(_record("owner"), data=_owner_data(root, messages))
         async def write(transaction):
             await transaction.insert_record(owner)
             await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
@@ -103,7 +116,7 @@ async def test_foreign_baseline_rejected_even_when_its_content_matches_local_pro
         prepared = PreparedArchive()
         root = await native.prepare_archived_messages(messages, prepared)
         async def write(transaction):
-            await transaction.insert_record(replace(_record("owner"), data={"root": root.to_json()}))
+            await transaction.insert_record(replace(_record("owner"), data=_owner_data(root, messages)))
             await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
         await state.mutate(write)
         digest, size = messages.encoded_digest()
@@ -119,10 +132,11 @@ async def test_failed_owner_cas_cannot_confirm_candidate_and_retry_can_publish(t
         original = _record("owner")
         await state.mutate(lambda tx: tx.insert_record(original))
         prepared = PreparedArchive()
-        root = await native.prepare_archived_messages([ModelRequest(parts=[UserPromptPart("candidate")])], prepared)
+        messages = [ModelRequest(parts=[UserPromptPart("candidate")])]
+        root = await native.prepare_archived_messages(messages, prepared)
 
         async def replace_owner(transaction, expected):
-            updated = replace(original, storage_revision=expected + 1, data={"root": root.to_json()})
+            updated = replace(original, storage_revision=expected + 1, data=_owner_data(root, messages))
             if not await transaction.replace_record(updated, expected_storage_revision=expected):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await native.publish_archived_messages(transaction, prepared)
@@ -146,8 +160,10 @@ async def test_concurrent_rollback_does_not_change_other_owners_confirmed_commit
         await concurrent.initialize()
         success = PreparedArchive()
         failure = PreparedArchive()
-        root = await native.prepare_archived_messages([ModelRequest(parts=[UserPromptPart("committed")])], success)
-        await native.prepare_archived_messages([ModelRequest(parts=[UserPromptPart("rolled back")])], failure)
+        messages = [ModelRequest(parts=[UserPromptPart("committed")])]
+        root = await native.prepare_archived_messages(messages, success)
+        failed_messages = [ModelRequest(parts=[UserPromptPart("rolled back")])]
+        failed_root = await native.prepare_archived_messages(failed_messages, failure)
         actual_mutation = type(state.context).run_mutation
         committed, resume = asyncio.Event(), asyncio.Event()
         successful_task = None
@@ -162,11 +178,11 @@ async def test_concurrent_rollback_does_not_change_other_owners_confirmed_commit
         monkeypatch.setattr(type(state.context), "run_mutation", delay_success)
 
         async def success_owner(transaction):
-            await transaction.insert_record(_record("success"))
+            await transaction.insert_record(replace(_record("success"), data=_owner_data(root, messages)))
             await native.publish_archived_messages(transaction, success)
 
         async def failed_owner(transaction):
-            await transaction.insert_record(_record("failure"))
+            await transaction.insert_record(replace(_record("failure"), data=_owner_data(failed_root, failed_messages)))
             await native.publish_archived_messages(transaction, failure)
             raise ValueError("rollback after publication")
 
@@ -197,7 +213,8 @@ async def test_retryable_abort_reuses_frozen_preparation_inside_original_mutatio
     async with _database(tmp_path / "retry.db") as (_engine, state, _other):
         native, _archive = await _bound(state)
         prepared = PreparedArchive()
-        root = await native.prepare_archived_messages([ModelRequest(parts=[UserPromptPart("retry body")])], prepared)
+        messages = [ModelRequest(parts=[UserPromptPart("retry body")])]
+        root = await native.prepare_archived_messages(messages, prepared)
         dialect = type(state.context.dialect)
         original_classifier = dialect.classify_transaction_error
         def classify(self, error, *, phase, connection_invalidated):
@@ -209,7 +226,7 @@ async def test_retryable_abort_reuses_frozen_preparation_inside_original_mutatio
         async def write(transaction):
             nonlocal attempts
             attempts += 1
-            await transaction.insert_record(replace(_record("owner"), data={"root": root.to_json()}))
+            await transaction.insert_record(replace(_record("owner"), data=_owner_data(root, messages)))
             await native.publish_archived_messages(transaction, prepared)
             assert not native._message_proofs
             if attempts == 1:
@@ -236,7 +253,8 @@ async def test_bound_snapshot_media_and_text_metadata_roundtrip_through_payload_
     from linktools.ai.persistence._archive import ContentRecord
     from pydantic_ai.messages import BinaryContent, TextContent
     from pydantic_ai_harness.step_persistence import ContinuableSnapshot
-    from sqlalchemy import text
+    from sqlalchemy import select
+    from linktools.ai.persistence._step_schema import build_step_sql_metadata
     from linktools.ai.model.messages import encode_model_messages
     from linktools.ai.persistence import Persistence, PersistenceStorage
 
@@ -252,8 +270,9 @@ async def test_bound_snapshot_media_and_text_metadata_roundtrip_through_payload_
             await writer.save_snapshot(snapshot)
             restored = await reader.latest_snapshot(run_id="media")
             assert encode_model_messages(restored.messages) == encode_model_messages(messages)
+            table = build_step_sql_metadata().tables["ai_step_messages"]
             async with writer.storage_context.sessions() as session:
-                row = (await session.execute(text("SELECT * FROM ai_step_messages"))).mappings().one()
+                row = (await session.execute(select(table))).mappings().one()
             content = ContentRecord.from_native_row(row)
             assert content.body is None and content.payload.encoding == "json-attachments"
             reference, = content.object_refs()

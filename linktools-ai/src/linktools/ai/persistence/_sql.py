@@ -208,10 +208,12 @@ class SqlStateStorageGroup:
         self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
         self._native_partitions: set[str] = set()
+        self._native_content_index = False
 
     def bind_native_partition(self, store_digest: str) -> None:
         """Limit automatic physical maintenance to explicitly bound native owners."""
         self._native_partitions.add(store_digest)
+        self._native_content_index = True
 
     def add_member(self, store: "SqlStateStore") -> None:
         self._members.setdefault(store.store_digest, store)
@@ -387,6 +389,15 @@ class SqlStateStorageGroup:
         await self._context.initialize()
         if not self._read_only:
             await self._context.require_write_access()
+        from sqlalchemy import inspect
+        # State metadata describes logical primitives, not every provisioned
+        # physical table. Cold owners must retain native roots even without a
+        # bound StepStore in this process.
+        async with self._context.engine.connect() as connection:
+            provisioned_native_index = await connection.run_sync(
+                lambda sync: inspect(sync).has_table("ai_native_content_edges"),
+            )
+        self._native_content_index = self._native_content_index or provisioned_native_index
         self._initialized = True
         _logger.info(
             "SQL StateStorageGroup initialized: dialect=%s tables=%s",
@@ -461,6 +472,7 @@ class SqlStateStorageGroup:
             if digest not in partitions:
                 partitions[digest] = _SqlTransaction(
                     session, self._metadata, self._context, digest, clock=clock, observers=observers,
+                    native_content_index=self._native_content_index,
                 )
             transactions[store] = partitions[digest]
         return transactions
@@ -506,7 +518,7 @@ class SqlStateStorageGroup:
                 for transaction in transactions.values():
                     if transaction._mutation_error is not None:
                         raise transaction._mutation_error
-                if "ai_native_content_edges" in self._metadata.tables:
+                if self._native_content_index:
                     from ._native_content_index import flush_owners
                     await flush_owners(self._context, session,
                                        group_id=None if self._opened_archive is None else self._opened_archive[0])
@@ -915,6 +927,7 @@ class _SqlTransaction:
         *,
         clock: _SqlTransactionClock | None = None,
         observers: list[Callable[[bool], None]] | None = None,
+        native_content_index: bool = False,
     ) -> None:
         if not isinstance(store_digest, bytes) or len(store_digest) != 32:
             raise ValueError("store_digest must be a 32-byte digest")
@@ -931,6 +944,7 @@ class _SqlTransaction:
         self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
         self._observers = observers
+        self._native_content_index = native_content_index
 
     def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]:
         if not is_active_state_transaction(self):
@@ -1030,12 +1044,12 @@ class _SqlTransaction:
         self, kind: str, identity: Sequence[str | int], data: object | None, *,
         state: object = None, inserting: bool = False,
     ) -> None:
-        if "ai_native_content_edges" in self._metadata.tables:
+        if self._native_content_index:
             from ._native_content_index import stage_owner
             stage_owner(self._session, kind, self._store_hex, identity, data, state=state, inserting=inserting)
 
     async def _retire_native_rows(self, kind: str, table: "Table", *conditions: "ColumnElement[bool]") -> None:
-        if "ai_native_content_edges" not in self._metadata.tables:
+        if not self._native_content_index:
             return
         from sqlalchemy import select
         from ._native_content_index import replace_owner_edges

@@ -232,7 +232,9 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
             reference["content_id"] for reference in manifest["memory"].values()
         ))
         assert len(memory_contents) == 2
-        assert all(content.payload.kind == "object" for content in memory_contents)
+        assert all(content.payload is None and isinstance(content.body, bytes) for content in memory_contents)
+        assert all(content.object_refs() == () for content in memory_contents)
+        assert (await runtime._execution_service.runtime_backend().load_input_context(record.input_context)).digest == baseline.digest
         assert sum(content.raw_size for content in memory_contents) >= 80000
     archive = InMemoryObjectStore("context-snapshot")
     storage = PersistenceStorage.from_root(source_root, exclusive_writer=True)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import ExecutionStatus, UsageMetrics
+from linktools.ai.core import ExecutionStatus, UsageMetrics, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
@@ -316,8 +316,9 @@ async def test_volatile_archive_and_staging_keep_original_attempt_views() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("envelope_size", (16, 80 * 1024))
 async def test_sdk_projection_and_native_bytes_remain_separate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, envelope_size: int,
 ) -> None:
     prepared = PreparedArchive()
     from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -336,15 +337,21 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
     try:
         sdk_request = (ModelRequest(parts=[UserPromptPart("SDK input")]),)
         sdk_response = (ModelResponse(parts=[TextPart("SDK projection")]),)
+        envelope = canonical_json_bytes({"streaming": True, "settings": {
+            "note": "x" * envelope_size, "opaque": {"kind": "binary", "data": "not base64"},
+        }})
         requests = _requests(large=True)
         staged = replace(
             _staged(requests), status="SUCCEEDED",
             request_context=build_context_projection((), sdk_request, intern),
-            request_envelope_digest=intern(b'{"streaming":true}')[0],
+            request_envelope_digest=intern(envelope)[0],
             response_context=build_context_projection((), sdk_response, intern),
         )
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (staged,), payloads.__getitem__, prepared=prepared)
+        assert records[0].request_envelope.payload.kind == "inline"
+        assert records[0].request_envelope.payload.encoding == "json"
+        assert not records[0].request_envelope.payload.object_refs()
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)
         contents = await archive.transcript_repository.content_archive()
         original_capture = contents.capture_ranges
@@ -358,16 +365,17 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
             patch.setattr(contents, "capture_ranges", reject_raw_capture)
             assert await archive.list_model_interactions(agent_run_id="run") == list(records)
             assert await archive.resolve_model_interactions(records) == [
-                (sdk_request, sdk_response, b'{"streaming":true}', None, None),
+                (sdk_request, sdk_response, envelope, None, None),
             ]
             assert (await archive.resolve_model_interaction(records[0]))[3] is None
             metadata = await resolve_client_requests(
                 records[0].client_requests, PersistenceDomain.TRACE, include_bodies=False,
             )
             relocated = await archive.prepare_relocated_interactions(
-                records, [(sdk_request, sdk_response, b'{"streaming":true}', metadata, None)],
+                records, [(sdk_request, sdk_response, envelope, metadata, None)],
             prepared=prepared)
             assert relocated[0].client_requests[0].body is None
+            assert relocated[0].request_envelope == records[0].request_envelope
             assert relocated[0].client_requests[0].response.status_code == 429
             assert relocated[0].client_requests[0].record_http_bodies is True
             with pytest.raises(AssertionError, match="unrequested native"):
@@ -377,7 +385,7 @@ async def test_sdk_projection_and_native_bytes_remain_separate(
                     records, await archive.resolve_model_interactions(records),
                 prepared=prepared)
         assert await archive.resolve_model_interactions(records, include_client_requests=True) == [
-            (sdk_request, sdk_response, b'{"streaming":true}', requests, None),
+            (sdk_request, sdk_response, envelope, requests, None),
         ]
     finally:
         await storage.close()

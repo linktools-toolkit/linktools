@@ -1439,12 +1439,9 @@ class StateStepArchive(AgentRunStore):
                 replace(
                     interaction,
                     request_context=None if request is None else await archived_context(request),
-                    request_envelope=None if envelope is None else await self._prepare_inline_payload(
-                        interaction.agent_run_id,
-                        RuntimePayloadRef(
-                            StoredPayload.inline_bytes(envelope),
-                            self._runtime_domain,
-                        ),
+                    request_envelope=None if envelope is None else RuntimePayloadRef(
+                        StoredPayload.inline_json(json.loads(envelope)),
+                        self._runtime_domain,
                     ),
                     response_context=(
                         None
@@ -1734,12 +1731,9 @@ class StateStepArchive(AgentRunStore):
                 staged.request_context, extend=True,
                 stored=None if previous is None else previous.request_context,
             )
-            request_envelope = None if staged.request_envelope_digest is None else await self._prepare_inline_payload(
-                run.agent_run_id,
-                RuntimePayloadRef(
-                    StoredPayload.inline_bytes(payload(staged.request_envelope_digest)),
-                    self._runtime_domain,
-                ),
+            request_envelope = None if staged.request_envelope_digest is None else RuntimePayloadRef(
+                StoredPayload.inline_json(json.loads(payload(staged.request_envelope_digest))),
+                self._runtime_domain,
             )
             response_context = None if staged.response_context is None else await prepare_context(
                 staged.response_context, extend=False,
@@ -1776,20 +1770,6 @@ class StateStepArchive(AgentRunStore):
                 )
             )
         return tuple(result)
-
-    async def _prepare_inline_payload(
-        self,
-        agent_run_id: str,
-        content: RuntimePayloadRef,
-    ) -> RuntimePayloadRef:
-        projection = await self._history.prepare_projection(
-            agent_run_id,
-            ContextProjection((InlineContextBlock(content),)),
-        )
-        item = projection.items[0]
-        if not isinstance(item, InlineContextBlock):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return item.content
 
     async def checkpoint_count(self, *, agent_run_id: str) -> int:
         require_no_run_history_lock("StateStepArchive.checkpoint_count")

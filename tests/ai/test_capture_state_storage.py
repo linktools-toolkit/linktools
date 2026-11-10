@@ -3,17 +3,18 @@
 """Captures keep metadata in state and only typed binary bodies in objects."""
 
 import base64
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, TextContent, UserPromptPart
 
 from linktools.ai.core import canonical_json_bytes, canonical_sha256
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.inputs import AgentTaskInput, TaskGraphBindingCaptureStore, task_prompt_draft
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence.captures import (
-    capture_record, capture_record_value, input_capture_key, input_capture_state_dependency,
+    capture_record, capture_record_value, capture_retention_value, capture_state_closure, input_capture_key, input_capture_state_dependency,
     prepare_capture_value, read_capture_record, restore_capture_value,
 )
 from linktools.ai.persistence.codec import encode_domain, iter_runtime_object_refs
@@ -43,13 +44,17 @@ async def test_agent_capture_stores_only_binary_files_in_objects_and_roundtrips_
         key, _ = input_capture_state_dependency(captured)
         stored = await read_capture_record(state.task.tasks.state_store, namespace=namespace, tenant_id=PRINCIPAL.tenant_id, key=key)
         assert base64.b64encode(body) not in canonical_json_bytes(dict(stored.data))
-        refs = tuple(iter_runtime_object_refs(capture_record_value(stored), default_domain=PersistenceDomain.TASK))
+        refs = tuple(iter_runtime_object_refs(capture_retention_value(stored), default_domain=PersistenceDomain.TASK))
         assert refs
+        assert await state.snapshot_operations().capture_objects((key,)) == tuple(dict.fromkeys(refs))
+        await state.snapshot_operations().purge_unreferenced_objects(refs, exclusive=Offline())
         for _domain, ref in refs:
             assert await read_runtime_object(objects, ref) == body
         assert len([item async for item in objects.list_objects()]) == 1
         restored = await engine.inputs.read_agent(captured, principal=PRINCIPAL)
-        assert restored.prompt[1].data == body
+        assert [item.data for item in restored.prompt if isinstance(item, BinaryContent)] == [body]
+        assert restored.prompt[0] == "Inspect this file" or (
+            isinstance(restored.prompt[0], TextContent) and restored.prompt[0].text == "Inspect this file")
         assert (await engine.inputs.read_agent(text, principal=PRINCIPAL)).prompt == "plain text" * 10000
 
     snapshots = InMemoryObjectStore()
@@ -59,7 +64,8 @@ async def test_agent_capture_stores_only_binary_files_in_objects_and_roundtrips_
     target = tmp_path / "restored"
     await Persistence.restore_snapshot(snapshot, object_store=snapshots, root=target, limits=limits)
     async with Persistence.open(namespace, storage=PersistenceStorage.from_root(target), tenant_id=PRINCIPAL.tenant_id) as state, TaskEngine.open(persistence=state, context=CONTEXT) as engine:
-        assert (await engine.inputs.read_agent(captured, principal=PRINCIPAL)).prompt[1].data == body
+        assert [item.data for item in (await engine.inputs.read_agent(captured, principal=PRINCIPAL)).prompt
+                if isinstance(item, BinaryContent)] == [body]
 
 
 @pytest.mark.asyncio
@@ -82,6 +88,7 @@ async def test_capture_attachment_codec_preserves_context_original_input_and_sou
         objects, ObjectKeyFactory(namespace), PersistenceDomain.TASK, tenant, raw))
     assert base64.b64encode(body) not in canonical_json_bytes(stored)
     record = capture_record(namespace, tenant, key, stored, source_digest=canonical_sha256(value))
+    assert tuple(iter_runtime_object_refs(capture_retention_value(record), default_domain=PersistenceDomain.TASK))
     assert await restore_capture_value(record, read_object=lambda ref: read_runtime_object(objects, ref)) == value
     opaque_key = input_capture_key(namespace, tenant, "result", "result")
     opaque = {"kind": "binary", "data": base64.b64encode(body).decode(), "prompt": prompt}
@@ -117,3 +124,45 @@ async def test_large_task_declarations_share_database_content_and_collect_withou
         await state.snapshot_operations().purge_unreferenced_objects((), exclusive=Offline())
         assert await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content"))) == ()
         assert await store.read(lambda tx: tx.list_records(RecordQuery(kind="task_graph_binding_capture"))) == ()
+
+
+@pytest.mark.asyncio
+async def test_capture_expiry_keeps_attachment_cleanup_references(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    objects = InMemoryObjectStore()
+    storage = PersistenceStorage.sqlite(tmp_path / "expiry.sqlite", object_store=objects)
+    async with Persistence.open("capture-expiry", storage=storage, tenant_id=PRINCIPAL.tenant_id) as state, TaskEngine.open(persistence=state, context=CONTEXT) as engine:
+        captured = await engine.inputs.create_agent_input(
+            (BinaryContent(b"expired binary", media_type="application/octet-stream"),),
+            principal=PRINCIPAL, idempotency_key="binary", expires_at=now + timedelta(hours=1))
+        key, _ = input_capture_state_dependency(captured)
+        maintenance = state.snapshot_operations()
+        references = await maintenance.capture_objects((key,))
+        assert references
+        assert await engine.inputs.expire_inputs(principal=PRINCIPAL, now=now + timedelta(hours=2)) == (key,)
+        await maintenance.purge_unreferenced_captures((key,), exclusive=Offline())
+        assert await maintenance.capture_objects((key,)) == references
+        await maintenance.purge_unreferenced_objects(references, exclusive=Offline())
+        assert [item async for item in objects.list_objects()] == []
+
+
+@pytest.mark.asyncio
+async def test_capture_opaque_metadata_does_not_create_retention_dependencies() -> None:
+    namespace, tenant = "opaque-capture", PRINCIPAL.tenant_id
+    fake = {"kind": "binary", "digest": "a" * 64, "size": 3,
+            "$dataclass": "agent_input_capture_ref", "fields": {}}
+    contract = TaskInvocationInputContract("execution", TaskRef("custom", 1), fake, fake,
+                                           {"type": "custom", "config": fake})
+    key = input_capture_key(namespace, tenant, "task", "custom")
+    record = capture_record(namespace, tenant, key, {
+        "kind": "task", "version": 1, "namespace": namespace, "tenant_id": tenant,
+        "payload": {"contract": encode_domain(contract)}})
+    assert tuple(iter_runtime_object_refs(capture_retention_value(record), default_domain=PersistenceDomain.TASK)) == ()
+    assert capture_state_closure((record,)) == frozenset({key})
+    agent_key = input_capture_key(namespace, tenant, "agent", "opaque")
+    agent_record = capture_record(namespace, tenant, agent_key, {
+        "kind": "agent", "version": 1, "namespace": namespace, "tenant_id": tenant,
+        "payload": {"prompt": "ordinary text", "original_input": {"opaque": fake},
+                    "input_view": {"prompt": fake}, "task_input": None, "input_context": None}})
+    assert tuple(iter_runtime_object_refs(capture_retention_value(agent_record), default_domain=PersistenceDomain.TASK)) == ()
+    assert capture_state_closure((agent_record,)) == frozenset({agent_key})

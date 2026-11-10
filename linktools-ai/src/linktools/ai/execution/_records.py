@@ -301,10 +301,8 @@ class ExecutionTimelineRecord:
     conversation: bool
 
     def __post_init__(self) -> None:
-        if self.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        if self.completed_at is not None:
             _validate_terminal(self)
-        elif self.completed_at is not None:
-            raise ValueError("active execution cannot carry a completion timestamp")
 
     @property
     def invalidates_session_history(self) -> bool:

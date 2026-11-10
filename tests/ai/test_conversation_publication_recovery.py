@@ -143,10 +143,14 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
             end_turn_seq=head + 1,
         )
         assert head == 1 and len(commits) == 1
-        assert (
-            commits[0].stored_user_input.payload.decode() == "original rejected input"
+        owner = await runtime._state.execution.executions.get(
+            commits[0].execution_id, tenant_id=runtime.default_principal.tenant_id,
         )
-        assert commits[0].output is None
+        assert owner.stored_user_input.payload.decode() == "original rejected input"
+        assert owner.result.output is None
+        rejected_page = await session.timeline()
+        assert rejected_page.items[0].user_input["prompt"]["text"] == "original rejected input"
+        assert rejected_page.items[0].output is None
         assert commits[0].start_message_index == commits[0].end_message_index == 0
         monkeypatch.setattr(runtime._state.execution.executions, "claim_start", original_claim)
         await session.run("next real input", timeout_seconds=5)
@@ -172,7 +176,7 @@ async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it
             assert record is not None
             malformed = replace(
                 record,
-                data=dict(record.data, status="invalid"),
+                data=dict(record.data, end_message_index=-1),
                 storage_revision=record.storage_revision + 1,
             )
             assert await transaction.replace_record(

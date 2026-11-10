@@ -103,7 +103,7 @@ async def test_completed_output_uses_execution_owner_after_reopen(
                     "error_code", "safe_error_details"}.intersection(encoded)
         owner = await runtime._state.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
         assert owner is not None and owner.result.output.decode() == output
-        assert owner.stored_user_input.view["prompt"]["text"] == "original user input"
+        assert owner.stored_user_input.payload.decode() == "original user input"
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), tenant_id="default", read_only=True) as history_persistence_115, History.open(persistence=history_persistence_115) as history:
         page = await history.session_timeline("session", principal=principal)
         assert page.items == live
@@ -222,8 +222,11 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
             attachment, media_type="text/plain", identifier="retained-file",
         )), timeout_seconds=5)).result
         record = await runtime._state.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
-        assert record.result.output.kind == "object"
-        assert record.stored_user_input.payload.kind == "object"
+        assert record.result.output.kind == "inline"
+        assert record.result.output.decode() == output
+        assert record.result.output.object_refs() == ()
+        assert record.stored_user_input.payload.kind == "inline"
+        assert record.stored_user_input.payload.encoding == "json-attachments"
         references = tuple(set(iter_runtime_object_refs(
             _encode_persisted_domain(record), default_domain=PersistenceDomain.EXECUTION,
         )))
@@ -234,7 +237,11 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
         assert tuple(iter_runtime_object_refs(
             encode_session_turn_commit(commits[0]), default_domain=PersistenceDomain.CONVERSATION,
         )) == ()
-        assert len(references) >= 2, "canonical output and binary input must be discoverable GC roots"
+        assert references == tuple(
+            (PersistenceDomain.EXECUTION, ref)
+            for ref in record.stored_user_input.payload.object_refs()
+        )
+        assert len(references) == 1, "binary input must remain a discoverable GC root"
         assert all(domain is PersistenceDomain.EXECUTION for domain, _ in references)
     for _, ref in references:
         assert await objects.stat(ref.key) is not None
@@ -585,8 +592,12 @@ async def test_split_object_stores_read_canonical_result_and_binary_input_after_
         )), timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         owner = await persistence.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
-        source_refs = (owner.result.output.ref, owner.stored_user_input.payload.ref)
-        assert all(ref is not None for ref in source_refs)
+        assert owner.result.output.kind == "inline"
+        assert owner.result.output.decode() == output
+        assert owner.result.output.object_refs() == ()
+        assert owner.stored_user_input.payload.encoding == "json-attachments"
+        source_refs = owner.stored_user_input.payload.object_refs()
+        assert len(source_refs) == 1
         commits = await persistence.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
         )

@@ -44,7 +44,8 @@ async def test_large_memory_text_is_owned_by_the_memory_record(tmp_path: Path, b
             state.memory, object_store=objects, namespace=state.namespace,
             tenant_id=state.tenant_id, execution_id="execution", memory_scope="notes",
         )
-        text = "Memory remains ordinary text.\n" * 10000
+        text = "Memory remains ordinary text 中文🙂.\n" * 1900
+        assert len(text) <= 65_536 < len(text.encode("utf-8"))
         await memory.write("memory/note.md", text, expected_version=None)
         captured = await memory.capture()
         assert captured["memory/note.md"]["content"] == text

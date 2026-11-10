@@ -254,10 +254,10 @@ async def finish_publications(context: "SqlStorageContext", session: "AsyncSessi
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
     import hashlib
     import json
-    from sqlalchemy import column, select, table
+    from sqlalchemy import JSON, column, select, table
     pending = session.info.pop(_PENDING, {})
     if group_id is None and any(pending.values()):
-        records = table("ai_state_records", column("store_digest"), column("key_digest"), column("payload_json"))
+        records = table("ai_state_records", column("store_digest"), column("key_digest"), column("payload_json", JSON()))
         wire = await session.scalar(select(records.c.payload_json).where(
             records.c.store_digest == hashlib.sha256(b"linktools-ai:state-group-metadata").hexdigest(),
             records.c.key_digest == hashlib.sha256(b"archive_scope_id").hexdigest(),

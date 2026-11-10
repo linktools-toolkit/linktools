@@ -8,12 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
-from sqlalchemy import event, text
+from pydantic_ai.messages import BinaryImage, ModelRequest, UserPromptPart
+from sqlalchemy import event, select, text
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence._archive import ContentRecord
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
 
 from .test_step_content_cleanup import _Offline, _snapshot
 
@@ -43,18 +44,50 @@ async def _owners(path: Path):
 
 
 async def _bodies(native: SqlStepStore) -> dict[tuple[str, str], ContentRecord]:
+    messages = build_step_sql_metadata().tables["ai_step_messages"]
     async with native.storage_context.engine.connect() as connection:
-        rows = (await connection.execute(text(
-            "SELECT store_digest, sha256, message, compression, raw_size, payload_json FROM ai_step_messages"
-        ))).mappings().all()
+        rows = (await connection.execute(select(messages))).mappings().all()
     return {(row["store_digest"], row["sha256"]): ContentRecord.from_native_row(row) for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_offline_cleanup_releases_shared_content_for_online_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.persistence import _native_content_index
+
+    async with _owners(tmp_path / "online-resume.db") as (state, native, foreign, archive):
+        await native.save_snapshot(_snapshot("run", 1, "shared", "retired"))
+        latest = _snapshot("run", 2, "shared")
+        await native.save_snapshot(latest)
+        foreign_snapshot = _snapshot("foreign", 1, "shared", "retired")
+        await foreign.save_snapshot(foreign_snapshot)
+        await state.purge_unreferenced_objects((), exclusive=_Offline())
+        assert await native.latest_snapshot(run_id="run") == latest
+        assert await foreign.latest_snapshot(run_id="foreign") == foreign_snapshot
+
+        monkeypatch.undo()
+        await native.save_snapshot(_snapshot("run", 3))
+        await _native_content_index.maintain_native_content(
+            native.storage_context, store_digests=(native.store_digest,),
+        )
+        async with native.storage_context.engine.connect() as connection:
+            for table in ("ai_step_sequences", "ai_step_messages"):
+                assert await connection.scalar(text(
+                    f"SELECT count(*) FROM {table} WHERE store_digest = :store"
+                ), {"store": native.store_digest}) == 0
+        assert await foreign.latest_snapshot(run_id="foreign") == foreign_snapshot
+        await foreign.save_snapshot(_snapshot("foreign", 2))
+        async with native.storage_context.engine.connect() as connection:
+            for table in ("ai_step_sequences", "ai_step_messages", "ai_native_content_edges"):
+                assert await connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
 
 
 @pytest.mark.asyncio
 async def test_object_cleanup_preserves_shared_scopes_and_republishes_retired_body(tmp_path: Path) -> None:
     async with _owners(tmp_path / "owners.db") as (state, native, foreign, archive):
         retired = replace(_snapshot("retired", 1), messages=[ModelRequest(parts=[UserPromptPart([
-            "retained message", BinaryContent(b"external file", media_type="image/png"),
+            "retained message", BinaryImage(b"external file", media_type="image/png"),
         ])])])
         shared = replace(retired, run_id="shared")
         await native.save_snapshot(retired)
@@ -101,13 +134,17 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
 ) -> None:
     async with _owners(tmp_path / "failures.db") as (state, native, foreign, archive):
         retired = replace(_snapshot("retired", 1), messages=[ModelRequest(parts=[UserPromptPart([
-            "retained message", BinaryContent(b"external file", media_type="image/png"),
+            "retained message", BinaryImage(b"external file", media_type="image/png"),
         ])])])
         await native.save_snapshot(retired)
         before = await _bodies(native)
         reference, = next(iter(before.values())).object_refs()
         await native.save_snapshot(_snapshot("retired", 2))
         context = native.storage_context
+        async with context.engine.connect() as connection:
+            edges_before = (await connection.execute(text(
+                "SELECT edge_kind, source_id, target_id, revision FROM ai_native_content_edges ORDER BY id"
+            ))).all()
         original = type(context).run_mutation
 
         async def unacknowledged(context, callback, **kwargs):
@@ -140,6 +177,10 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
         assert await _bodies(native) == (before if outcome == "rollback" else {})
         async with context.engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == (1 if outcome == "rollback" else 0)
+            edges_after = (await connection.execute(text(
+                "SELECT edge_kind, source_id, target_id, revision FROM ai_native_content_edges ORDER BY id"
+            ))).all()
+            assert edges_after == (edges_before if outcome == "rollback" else [])
         revived = replace(retired, run_id="revived")
         await native.save_snapshot(revived)
         reader = SqlStepStore(context, namespace="native-gc", tenant_id="one", max_cached_messages=0)
@@ -160,7 +201,7 @@ async def test_retained_attachment_damage_aborts_before_native_or_object_deletio
 
     async with _owners(tmp_path / "damaged.db") as (state, native, _foreign, _archive):
         retained = replace(_snapshot("retained", 1), messages=[ModelRequest(parts=[UserPromptPart([
-            BinaryContent(b"retained file", media_type="image/png"),
+            BinaryImage(b"retained file", media_type="image/png"),
         ])])])
         await native.save_snapshot(retained)
         bodies = await _bodies(native)

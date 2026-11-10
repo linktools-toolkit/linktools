@@ -10,8 +10,11 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import StepPersistenceCapability
-from linktools.ai.core import ExecutionStatus, Principal, TaskStatus
+from linktools.ai.capability import ExecutionCapability, StepPersistenceCapability
+from linktools.ai.core import (
+    AuthorizationAction, ExecutionStatus, Principal, ResourceKind, ResourceRef,
+    TaskStatus, TenantAuthorizationPolicy,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import (
     CreateSessionRequest, Execution, ExecutionHandle, ForkExecutionRequest,
@@ -29,6 +32,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_session_and_execution_entry_points_return_bound_entities() -> None:
     features = model_features(RuntimeUsageModels())
+    features.capability(ExecutionCapability(retain_history=True))
     actor = Principal("caller", "default", "service")
     async with Runtime.open("entity-handles", storage=PersistenceStorage.in_memory(), features=features) as runtime:
         assert runtime.agents.get().session("lazy").principal is runtime.default_principal
@@ -50,13 +54,17 @@ async def test_session_and_execution_entry_points_return_bound_entities() -> Non
         )
         assert isinstance(forked_session, Session) and forked_session.principal is actor
         assert (await forked_session.inspect()).session_id == "forked"
+        independent = await runtime.agents.get().start(
+            "independent", principal=actor, idempotency_key="independent",
+        )
+        await independent.wait(timeout_seconds=10)
         retried = await runtime.executions.retry(
-            execution.execution_id, RetryExecutionRequest("retry", actor, "retry"),
+            independent.execution_id, RetryExecutionRequest("retry", actor, "retry"),
         )
         assert isinstance(retried, Execution) and retried.principal is actor
         await retried.wait(timeout_seconds=10)
         forked = await runtime.executions.fork(
-            execution.execution_id, ForkExecutionRequest("fork", actor, "fork-execution"),
+            independent.execution_id, ForkExecutionRequest("fork", actor, "fork-execution"),
         )
         assert isinstance(forked, Execution) and forked.principal is actor
         await forked.wait(timeout_seconds=10)
@@ -111,8 +119,18 @@ async def test_recovery_returns_handle_and_preserves_original_admitted_principal
         yield "recovered"
 
     features.model("default", _Models(FunctionModel(stream_function=answer)))
-    async with Runtime.open("recover-handle", storage=storage, features=features, auto_recover=False) as runtime:
-        actor = runtime.default_principal
+    actor = Principal("controller", "default", "service")
+
+    class RecoveryAuthorization(TenantAuthorizationPolicy):
+        async def authorize(self, principal: Principal, action: AuthorizationAction, resource: ResourceRef) -> None:
+            if (principal == actor and resource.kind is ResourceKind.EXECUTION
+                    and resource.id == execution.execution_id
+                    and action in {AuthorizationAction.EXECUTION_RECOVER, AuthorizationAction.EXECUTION_READ}):
+                principal = original
+            await super().authorize(principal, action, resource)
+
+    async with Runtime.open("recover-handle", storage=storage, features=features,
+                            authorization=RecoveryAuthorization(), auto_recover=False) as runtime:
         recovered = await runtime.executions.recover(execution.execution_id, principal=actor, idempotency_key="recover")
         assert isinstance(recovered, Execution) and recovered.principal is actor
         assert recovered.execution_id == execution.execution_id

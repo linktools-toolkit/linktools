@@ -11,10 +11,10 @@ from datetime import datetime, timezone
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolReturnPart
 
-from ..model.attachments import read_attachment_payload, store_attachment_payload
+from ..model.attachments import read_attachment_payload
 from ..errors import AIError, ErrorCode
 from ..core import canonical_json_bytes
-from ..storage import ObjectRef, ObjectStore, StoredPayload, namespace_digest, read_object
+from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, decode_model_messages, encode_model_messages
 from ._archive import ArchiveRoot, ContentArchive, PreparedArchive
 from ._transcript_staging import MessageArchive
@@ -50,7 +50,6 @@ from ._history_index import (
 from ._payload import decode_payload_bytes
 from ._conversation_repositories import ConversationHistoryRepositoryImpl
 from ._plan import PersistenceDomain
-from ._storage_keys import runtime_object_key
 from .state import (
     FactQuery,
     RecordQuery,
@@ -1051,33 +1050,6 @@ class TranscriptRepository:
         else:
             root = await archive.prepare_append(root, encoded, prepared)
         return ContextProjection((ArchivedContextBlock(root, raw_digest, raw_size),))
-
-    async def prepare_projection(
-        self,
-        agent_run_id: str,
-        projection: ContextProjection,
-    ) -> ContextProjection:
-        require_no_run_history_lock("TranscriptRepository.prepare_projection")
-        if self._object_store is None:
-            return projection
-        async def write(data: bytes) -> ObjectRef:
-            digest = hashlib.sha256(data).hexdigest()
-            key = runtime_object_key(namespace_digest=namespace_digest(self._namespace),
-                tenant_digest=hashlib.sha256(self._tenant_id.encode("utf-8")).hexdigest(), stored_digest=digest)
-            async def chunks() -> AsyncIterator[bytes]:
-                yield data
-            await self._object_store.put(key, chunks(), expected_size=len(data), expected_digest=digest)
-            return ObjectRef("runtime", key, digest, len(data))
-        items = []
-        for item in projection.items:
-            if (isinstance(item, InlineContextBlock) and item.content.payload.kind == "inline"
-                    and item.content.payload.encoding != "json-attachments"):
-                raw = await self._read_payload(item.content.payload)
-                payload = await store_attachment_payload(raw, format="model-messages", write_object=write)
-                if payload is not None:
-                    item = InlineContextBlock(RuntimePayloadRef(payload, self._runtime_domain))
-            items.append(item)
-        return ContextProjection(tuple(items))
 
     def history_stream(self, history_id: str) -> bytes:
         return stream_digest(

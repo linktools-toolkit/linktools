@@ -21,6 +21,7 @@ from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.codec import encode_domain
 from linktools.ai.persistence.contracts import ArchivedContextBlock
 from linktools.ai.persistence.state import OperationQuery, StoredFact, StoredOperation, StoredRecord
+from linktools.ai.storage import SqlObjectStore
 
 from .test_step_content_cleanup import _snapshot
 
@@ -32,7 +33,8 @@ async def _shared(path: Path):
     state = SqlStateStore(engine)
     await state.initialize()
     group, archive_store = await state.storage_group.open_archive(create=True)
-    archive = ContentArchive(archive_store, group, namespace="steps", tenant_id="one")
+    objects = SqlObjectStore.from_context(state.storage_group.context)
+    archive = ContentArchive(archive_store, group, namespace="steps", tenant_id="one", object_store=objects)
     native = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
     native.bind_message_archive(archive)
     try:
@@ -89,6 +91,63 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
         assert await _count(engine, "ai_step_messages") == 1
         assert await _count(engine, "ai_step_sequences") == 1
         assert await native.latest_snapshot(run_id="run") == current
+
+
+@pytest.mark.asyncio
+async def test_native_binding_enables_retention_after_state_only_initialization(tmp_path: Path) -> None:
+    from linktools.ai.persistence._schema import build_runtime_sql_metadata
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.storage import provision_sql
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'late-native.db'}")
+    await provision_sql(engine, build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})))
+    state = SqlStateStore(engine)
+    await state.initialize()
+    native = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
+    try:
+        record = _record({})
+        await state.mutate(lambda tx: tx.insert_record(record))
+        await provision_database(engine)
+        await native.initialize()
+        group, archive_store = await state.storage_group.open_archive(create=True)
+        archive = ContentArchive(archive_store, group, namespace="steps", tenant_id="one",
+                                 object_store=SqlObjectStore.from_context(state.storage_group.context))
+        native.bind_message_archive(archive)
+        from linktools.ai.persistence._archive import PreparedArchive
+        prepared = PreparedArchive()
+        root = await native.prepare_archived_messages(_snapshot("retained", 1, "retained").messages, prepared)
+        retained = replace(record, storage_revision=1, data=encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
+        async def publish(tx):
+            assert await tx.replace_record(retained, expected_storage_revision=0)
+            await native.publish_archived_messages(tx, prepared)
+        await state.mutate(publish)
+        assert (await native.read_message_roots((root,)))[0]
+        assert await state.mutate(lambda tx: tx.delete_record(record.key_digest))
+        assert await _count(engine, "ai_step_messages") == 0
+    finally:
+        await native.close()
+        await state.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cold_state_owner_retains_and_releases_native_content(tmp_path: Path) -> None:
+    async with _shared(tmp_path / "cold-owner.db") as (engine, _state, native, root):
+        other_engine = create_async_engine(str(engine.url))
+        owner = SqlStateStore(other_engine)
+        await owner.initialize()
+        try:
+            record = _record(encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
+            await owner.mutate(lambda tx: tx.insert_record(record))
+            await native.save_snapshot(_snapshot("run", 2, "current"))
+            assert (await native.read_message_roots((root,)))[0]
+            assert await _count(engine, "ai_step_messages") == 2
+            assert await owner.mutate(lambda tx: tx.delete_record(record.key_digest))
+            await index.maintain_native_content(native.storage_context, store_digests=(native.store_digest,))
+            assert await _count(engine, "ai_step_messages") == 1
+        finally:
+            await owner.close()
+            await other_engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -220,6 +279,10 @@ async def test_pin_winning_against_collector_keeps_target_and_unknown_owner(tmp_
             pass
         monkeypatch.setattr(index, "maintain_native_content", defer)
         await native.save_snapshot(_snapshot("run", 2, "current"))
+        # WAL permits the independent writer to commit while the collector
+        # still holds its earlier read snapshot; rollback journal mode cannot.
+        async with engine.connect() as connection:
+            await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
         other_engine = create_async_engine(str(engine.url))
         other = SqlStateStore(other_engine)
         await other.initialize()

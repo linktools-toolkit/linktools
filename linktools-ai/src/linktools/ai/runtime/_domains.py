@@ -288,9 +288,13 @@ class RuntimeSessions(Generic[AppT]):
         )
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> "Session[AppT]":
-        self._ensure_open()
-        view = await self._service.create(agent_id, request)
+        view = await self.create_view(agent_id, request)
         return self._bind_session(view, request.principal)
+
+    async def create_view(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
+        """Return the authorized creation result without a separate session read."""
+        self._ensure_open()
+        return await self._service.create(agent_id, request)
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()

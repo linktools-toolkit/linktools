@@ -44,7 +44,7 @@ from ..core import PromptLimits
 from ..persistence import PersistenceDomain
 from ..persistence.contracts import ExecutionRepositories, TaskRepositories
 from ..persistence.captures import (
-    input_capture_key, input_capture_expiry_key, capture_record, capture_record_value,
+    input_capture_key, input_capture_expiry_key, capture_record, capture_record_value, capture_retention_value,
     read_capture_record, publish_capture_record, prepare_capture_value, restore_capture_value,
 )
 from ..persistence.codec import decode_domain, encode_domain, iter_runtime_object_refs
@@ -386,7 +386,7 @@ class InputCaptures:
                                           AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
                     expiry_key = input_capture_expiry_key(key)
                     if await self._get(expiry_key) is None:
-                        cleanup_objects = tuple(iter_runtime_object_refs(value, default_domain=PersistenceDomain.TASK))
+                        cleanup_objects = tuple(iter_runtime_object_refs(capture_retention_value(record), default_domain=PersistenceDomain.TASK))
                         expired = {"namespace": self._namespace, "tenant_id": principal.tenant_id,
                             "capture_key": key, "expired_at": expires_at.isoformat(),
                             "principal": principal_identity_payload(principal)}
