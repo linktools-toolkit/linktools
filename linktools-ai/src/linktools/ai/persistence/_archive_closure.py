@@ -518,7 +518,7 @@ class NativeMessageClosure(_SequenceClosure):
 
 
 def validate_native_message_content(
-    row: Mapping[str, object], *, group_id: str | None = None,
+    row: Mapping[str, object], *, group_id: str | None = None, verify_inline: bool = True,
 ) -> ContentRecord:
     """Verify native metadata and inline bytes without reinterpreting SDK JSON."""
     try:
@@ -528,7 +528,7 @@ def validate_native_message_content(
         if (group_id is not None and content.payload.ref is not None
                 and not content.payload.ref.key.startswith(f"v1/archive/{group_id}/")):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if content.payload.kind == "inline":
+        if verify_inline and content.payload.kind == "inline":
             encoded = content.payload.decode()
             if content.payload.encoding == "json":
                 encoded = canonical_json_bytes(encoded)

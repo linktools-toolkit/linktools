@@ -168,3 +168,27 @@ def test_backup_snapshot_decodes_retry_binding_without_store_or_database() -> No
     assert row == original
     with pytest.raises(ValueError, match="corrupt or misbound"):
         SqlStepStore.decode_backup_snapshot(dict(row, step_index=3), ())
+
+
+@pytest.mark.parametrize("count", (0, 1, 1024))
+def test_checkpoint_tail_validation_preserves_empty_and_nonempty_retry_binding(count: int) -> None:
+    import hashlib
+    from linktools.ai.core import canonical_json_bytes
+    from linktools.ai.model.messages import encode_model_messages
+
+    messages = [] if count == 0 else [ModelRequest(parts=[UserPromptPart("terminal")])]
+    snapshot = ContinuableSnapshot(run_id="run", step_index=2, messages=messages)
+    encoded = NativeCheckpoint.encode(snapshot, output_retries_used=3)
+    row = {"run_id": snapshot.run_id, "step_index": snapshot.step_index,
+           "timestamp": snapshot.timestamp.isoformat(), "state": snapshot.state,
+           "idempotency_key": snapshot.idempotency_key, "sequence_root": None if count == 0 else "1" * 64,
+           "messages": json.dumps({"stored_messages": count, "checkpoint": {
+               "output_retries_used": 3,
+               "message_sha256": hashlib.sha256(encode_model_messages(encoded.messages[-1:])).hexdigest(),
+           }})}
+    payload = None if count == 0 else canonical_json_bytes(json.loads(encode_model_messages(messages))[0])
+    SqlStepStore.validate_backup_snapshot_tail(row, payload)
+    with pytest.raises(ValueError, match="corrupt or misbound"):
+        SqlStepStore.validate_backup_snapshot_tail(dict(row, step_index=3), payload)
+    with pytest.raises(ValueError, match="does not match its count"):
+        SqlStepStore.validate_backup_snapshot_tail(row, b"{}" if count == 0 else None)

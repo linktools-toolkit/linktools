@@ -782,15 +782,21 @@ class SqlStepStore:
 
     async def capture_backup(
         self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
+        validate_messages: bool = True,
     ) -> NativeStepBackup:
         """Capture and strictly verify every owner row in the caller's read transaction.
 
         The caller begins a consistent read and captures the shared message
         closure in that same transaction. No connection or transaction is opened
-        here, and no corrupt snapshot is skipped.
+        here, and no corrupt snapshot is skipped. With validate_messages=False,
+        only owner rows are validated: the caller must capture and budget the
+        message closure, then call decode_backup_snapshot for every unpruned
+        row before publishing the backup. This defers hydration, not integrity.
         """
         from sqlalchemy import select
 
+        if type(validate_messages) is not bool:
+            raise TypeError("validate_messages must be a bool")
         if not self.backup_supported:
             raise ValueError("native backup cannot include an external effect ledger")
         batches = []
@@ -815,7 +821,8 @@ class SqlStepStore:
             batches.append(tuple(rows))
         backup = NativeStepBackup(self._store_digest, *batches)
         self.validate_backup(backup)
-        await self.validate_backup_messages(reader, backup)
+        if validate_messages:
+            await self.validate_backup_messages(reader, backup)
         return backup
 
     async def validate_backup_messages(self, reader: SqlStateRowReader, backup: NativeStepBackup) -> None:
@@ -1419,6 +1426,28 @@ class SqlStepStore:
         self, data: dict[str, object], payloads: tuple[bytes, ...],
     ) -> ContinuableSnapshot:
         return self.decode_backup_snapshot(data, payloads)
+
+    @classmethod
+    def validate_backup_snapshot_tail(
+        cls, data: Mapping[str, object], payload: bytes | None,
+    ) -> None:
+        """Verify checkpoint header/retry binding using only its last message.
+
+        The caller authenticates every unique message body and the complete
+        sequence closure separately. The checkpoint digest binds its terminal
+        message plus control header, so repeated prefixes need not be decoded.
+        """
+        sequence = cls.snapshot_message_sequence(data)
+        if (payload is None) != (sequence.count == 0):
+            raise ValueError("snapshot terminal message does not match its count")
+        descriptor = json.loads(data["messages"])
+        _raw, messages = decode_model_message_payloads(() if payload is None else (payload,))
+        if len(messages) != (0 if payload is None else 1):
+            raise ValueError("snapshot terminal message is invalid")
+        header = dict(data, messages=[])
+        header.pop("sequence_root")
+        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(header), messages=list(messages))
+        NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"])
 
     @classmethod
     def decode_backup_snapshot(
