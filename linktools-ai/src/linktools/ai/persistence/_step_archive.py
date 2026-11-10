@@ -1667,6 +1667,13 @@ class StateStepArchive(AgentRunStore):
             stored_interactions = {value.model_request_seq: value for value in existing}
         previous_projection = (baseline if baseline is not None
                                else await self._history.load_projection(run.agent_run_id))
+        if previous_projection is None:
+            context = self._context_baselines.get(run.agent_run_id)
+            if (context is not None and isinstance(context.archive_root, NativeMessageRoot)
+                    and context.archive_digest is not None):
+                previous_projection = ContextProjection((ArchivedContextBlock(
+                    context.archive_root, context.archive_digest, len(encode_model_messages(context.model_messages())),
+                ),))
 
         async def prepare_context(
             projection: StagedContextProjection, *, extend: bool,

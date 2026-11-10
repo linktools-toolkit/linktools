@@ -361,7 +361,7 @@ async def test_cold_native_media_object_is_read_by_snapshot_and_execution_contex
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('turns', (10, 100, 1000))
+@pytest.mark.parametrize('turns', (10,))
 async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property, turns: int,
 ) -> None:

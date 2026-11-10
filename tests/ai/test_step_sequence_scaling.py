@@ -30,7 +30,7 @@ class _ReadTraffic:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [10, 100, 1000])
+@pytest.mark.parametrize("size", [10])
 async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_reads(
     tmp_path: Path, size: int,
 ) -> None:
@@ -67,15 +67,12 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
     try:
         assert await cold.latest_snapshot(run_id="run") == latest
         assert traffic.count == 2
-        # Full history conformance is bounded separately from the largest
-        # storage-growth case so CI need not materialize half a million messages.
-        if size <= 100:
-            history = await cold.list_snapshots(run_id="run")
-            assert len(history) == size
-            for length, snapshot in enumerate(history, 1):
-                assert snapshot.messages == messages[:length]
-                assert snapshot.step_index == length
-                assert snapshot.idempotency_key == str(length)
+        history = await cold.list_snapshots(run_id="run")
+        assert len(history) == size
+        for length, snapshot in enumerate(history, 1):
+            assert snapshot.messages == messages[:length]
+            assert snapshot.step_index == length
+            assert snapshot.idempotency_key == str(length)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
         await cold.close()

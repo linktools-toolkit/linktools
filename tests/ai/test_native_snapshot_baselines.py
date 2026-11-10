@@ -55,6 +55,7 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
 ) -> None:
     path, namespace = tmp_path / "session.db", "snapshot-session-baseline"
     executions, run_ids, expected = set(), set(), {}
+    transcript: list[str] = []
     prepare_snapshot = SqlStepStore._prepare_snapshot
 
     async def capture_snapshot(store, snapshot):
@@ -84,7 +85,8 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
                         writes = _NativeWrites()
                         event.listen(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
                         try:
-                            execution = await session.start(f"question-{phase}-{turn}")
+                            question = f"question-{phase}-{turn}"
+                            execution = await session.start(question)
                             assert (await execution.wait(timeout_seconds=10)).result.status.value == "SUCCEEDED"
                         finally:
                             event.remove(native.storage_context.engine.sync_engine, "before_cursor_execute", writes.capture)
@@ -95,12 +97,16 @@ async def test_session_new_runs_reuse_history_beyond_cache_and_after_reopen(
                         assert len(added) == 1
                         run_id, = added
                         run_ids.add(run_id)
-                        for table in existing:
-                            assert not existing[table].intersection(writes.identities[table])
                         snapshot = await native.latest_snapshot(run_id=run_id)
                         assert snapshot is not None
                         restored = NativeCheckpoint.decode(snapshot)
                         assert encode_model_messages(restored.messages) == expected[run_id]
+                        transcript.extend((question, f"answer-{2 * len(run_ids) - 1}"))
+                        assert [part.content for message in restored.messages for part in message.parts
+                                if isinstance(part, (UserPromptPart, TextPart))] == transcript
+                        for table in existing:
+                            repeated = existing[table].intersection(writes.identities[table])
+                            assert not repeated, (phase, turn, table, repeated)
                         if len(run_ids) > 1:
                             assert len(restored.messages) > 2
                     assert len((await session.timeline()).items) == len(executions)
