@@ -10,6 +10,7 @@ import pytest
 from pydantic_ai.messages import BinaryContent, FilePart, ModelResponse, TextPart
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence._snapshot import validate_snapshot_native_rows, decode_native_message_row
 from linktools.ai.persistence._archive import ContentRecord
@@ -69,7 +70,11 @@ async def test_partial_trace_snapshot_restores_native_bodies_and_rekeys_group(
     async with Persistence.open("archive-boundaries", tenant_id="tenant",
                                 storage=PersistenceStorage.from_root(target), read_only=True) as restored:
         archive = restored.run_store.read_store(PersistenceDomain.TRACE)
-        assert [item async for item in archive.iter_messages(agent_run_id="run")] == [message]
+        recovered = [item async for item in archive.iter_messages(agent_run_id="run")]
+        assert encode_model_messages(recovered) == encode_model_messages([message])
+        assert recovered[0].parts[0] == message.parts[0]
+        if object_payload:
+            assert recovered[0].parts[1].content.data == b"portable image"
         resources = replace(restored.snapshot_resources(), durable_domains=frozenset({PersistenceDomain.TRACE}))
         second = await RuntimeSnapshotOperations(resources, require_ready=lambda: None).export_snapshot(
             object_store=objects, limits=_LIMITS)

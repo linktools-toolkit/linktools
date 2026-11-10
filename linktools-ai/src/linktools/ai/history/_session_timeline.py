@@ -311,7 +311,7 @@ async def capture_session_timeline(
             if (root.status is not SessionStatus.OPEN
                     or root.active_execution_id is not None
                     or pending_execution.session_id != root.session_id
-                    or pending_execution.principal_id != root.owner_principal_id
+                    or pending_execution.parent_execution_id is not None
                     or pending_execution.created_at < root.created_at
                     or pending_execution.execution_id in await executions.get_timeline_many((pending_execution.execution_id,), tenant_id=tenant_id)):
                 pending_execution = None
@@ -346,12 +346,13 @@ async def capture_session_timeline(
         if refresh_phase == "initial" and root.active_execution_id is not None and validate_active is not None:
             if validate_active(root, combined.get(root.active_execution_id)) is None:
                 raise _ActiveSessionAdmission(root)
+        # The session policy authorizes readers; the admitted actor need not own
+        # the session. Durable membership is established by session and turn IDs.
         for source, refs in blocks:
             for ref in refs:
                 execution = combined[ref.execution_id]
                 commit = commits.get((ref.session_id, ref.turn_seq))
                 if (execution.session_id != source.session_id or execution.parent_execution_id is not None
-                        or execution.principal_id != source.owner_principal_id
                         or commit is not None and execution.completed_at is None):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return combined

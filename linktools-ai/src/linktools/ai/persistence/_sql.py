@@ -1048,6 +1048,14 @@ class _SqlTransaction:
             from ._native_content_index import stage_owner
             stage_owner(self._session, kind, self._store_hex, identity, data, state=state, inserting=inserting)
 
+    def _stage_native_record_owner(self, record: StoredRecord, *, inserting: bool = False) -> None:
+        from .captures import CAPTURE_RECORD_KINDS, capture_retention_value
+
+        # Content rows own payload objects, never native message roots.
+        data = (None if record.kind == "archive_content" else
+                capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS else record.data)
+        self._stage_native_owner("record", (_hex(record.key_digest),), data, state=record.state, inserting=inserting)
+
     async def _retire_native_rows(self, kind: str, table: "Table", *conditions: "ColumnElement[bool]") -> None:
         if not self._native_content_index:
             return
@@ -1312,7 +1320,7 @@ class _SqlTransaction:
             )
         )
         for record in values:
-            self._stage_native_owner("record", (_hex(record.key_digest),), record.data, state=record.state, inserting=True)
+            self._stage_native_record_owner(record, inserting=True)
         self._log_batch("insert_records", len(values), 1)
         for record in values:
             self._guarded_record_revisions[record.key_digest] = record.storage_revision
@@ -1336,7 +1344,7 @@ class _SqlTransaction:
             self._abort_mutation(error)
             raise
         for record in values:
-            self._stage_native_owner("record", (_hex(record.key_digest),), record.data, state=record.state, inserting=True)
+            self._stage_native_record_owner(record, inserting=True)
             self._guarded_record_revisions[record.key_digest] = record.storage_revision
             self._record_cache[record.key_digest] = record
 
@@ -1483,7 +1491,7 @@ class _SqlTransaction:
                 raise error
         for replacement in ordered:
             record = replacement.record
-            self._stage_native_owner("record", (_hex(record.key_digest),), record.data, state=record.state)
+            self._stage_native_record_owner(record)
         self._log_batch("replace_records", len(ordered), statement_count)
         for replacement in ordered:
             self._guarded_record_revisions[replacement.record.key_digest] = replacement.record.storage_revision

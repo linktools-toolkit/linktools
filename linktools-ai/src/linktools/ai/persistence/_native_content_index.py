@@ -105,6 +105,9 @@ async def _enqueue_select(context: "SqlStorageContext", session: "AsyncSession",
     # an existing repeatable-read snapshot after a successful owner CAS.
     if context.dialect.name == "mysql":
         from sqlalchemy.dialects.mysql import insert
+        # The queue can select from this same table. Isolate that source so
+        # the duplicate-key expression unambiguously names the target row.
+        selection = selection.subquery("native_candidate_source").select()
         statement = insert(edges).from_select(("edge_kind", "source_id", "target_id", "revision"), selection)
         statement = statement.on_duplicate_key_update(revision=edges.c.revision + 1)
     else:

@@ -66,6 +66,8 @@ async def inspect_native_message_tables(
 
 async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeMessageRoot, ...]:
     """Scan all durable partitions under the caller's offline exclusion."""
+    from .captures import CAPTURE_RECORD_KINDS, capture_retention_value
+
     roots: list[NativeMessageRoot] = []
     for store in await group.scan_stores():
         if await store.read(has_capability_partition_marker):
@@ -74,8 +76,10 @@ async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeM
         while True:
             page = await store.read(lambda tx: tx.scan_records_page(after=cursor, limit=1000))
             for row in page:
-                require_known_retention(row.data, state=row.state)
-                roots.extend(iter_native_message_roots(row.data))
+                projected = (None if row.kind == "archive_content" else
+                             capture_retention_value(row) if row.kind in CAPTURE_RECORD_KINDS else row.data)
+                require_known_retention(projected, state=row.state)
+                roots.extend(iter_native_message_roots(projected))
             if len(page) < 1000:
                 break
             cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)

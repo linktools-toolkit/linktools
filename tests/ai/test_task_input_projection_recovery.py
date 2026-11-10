@@ -311,7 +311,7 @@ async def test_terminal_hold_cleanup_only_skips_an_already_settled_missing_produ
         elif case == "held":
             record = replace(record, dependency_hold_ids=(hold_id,))
         elif case == "nonterminal":
-            record = replace(record, status=ExecutionStatus.STARTED, result=None)
+            record = replace(record, status=ExecutionStatus.STARTED, result=None, completed_at=None)
         port = a.agent_execution
         assert port is not None
         ports = {} if case == "empty-ports-error" else {"another-execution": port}

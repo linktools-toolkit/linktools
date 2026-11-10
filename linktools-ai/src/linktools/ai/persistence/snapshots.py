@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from ._execution_binding import ExecutionBindingContent, expand_snapshot_binding, snapshot_binding_size
 
 from ..core import (
+    JsonValue,
     canonical_json_bytes,
     canonical_sha256,
     validate_persistence_namespace,
@@ -45,7 +46,7 @@ from ._archive_closure import (
 )
 from ._payload import decode_payload_bytes
 from .captures import (
-    CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
+    CAPTURE_RECORD_KINDS, capture_retention_value, map_capture_references, capture_state_closure,
     expand_snapshot_capture, snapshot_capture_size, restore_capture_value,
 )
 from ._capability_marker import has_capability_partition_marker
@@ -399,7 +400,9 @@ class RuntimeSnapshotOperations:
                     captured = await _capture_snapshot_reader(reader, budget=capture_budget)
                     readers[domain] = captured
                     for value in (*captured.records, *captured.facts, *captured.operations):
-                        roots.extend(iter_native_message_roots(value.data))
+                        projected = (capture_retention_value(value) if isinstance(value, StoredRecord)
+                                     and value.kind in CAPTURE_RECORD_KINDS else value.data)
+                        roots.extend(iter_native_message_roots(projected))
                 if PersistenceDomain.EXECUTION in {domain for domain, _ in members}:
                     from .contracts import ExecutionRecord
                     from ..agent import AgentBindingContract
@@ -678,7 +681,7 @@ async def _export_snapshot(
                             source.object_stores[PersistenceDomain.TASK], ref.key,
                             expected_digest=ref.digest, expected_size=ref.size))
                     if value.kind == "task_graph_binding_capture":
-                        _mark_archive_value(archive_closures, dict(value.data))
+                        _mark_archive_value(archive_closures, capture_retention_value(value))
                     await copy_references(capture_retention_value(semantic_value), domain, archive_owner=False)
                 elif value.kind != "evaluation_cleanup":
                     await copy_references(encoded, domain)
@@ -1028,10 +1031,10 @@ async def restore_snapshot(
             sequences=sequences,
         )
         for value in (*records, *facts, *operations):
-            if isinstance(value, StoredRecord) and value.kind == "input_capture":
-                continue
-            _mark_archive_value(archive_closures, dict(value.data))
-            for native_root in iter_native_message_roots(value.data):
+            projected = (capture_retention_value(value) if isinstance(value, StoredRecord)
+                         and value.kind in CAPTURE_RECORD_KINDS else dict(value.data))
+            _mark_archive_value(archive_closures, projected)
+            for native_root in iter_native_message_roots(projected):
                 _validate_native_partition(native_root.store_digest, namespace, tenant_id)
                 closure = native_closures.get(native_root.group_id)
                 if closure is None:
@@ -1262,11 +1265,13 @@ async def restore_snapshot(
         for domain, values in decoded_domains.items():
             records, aliases, facts, operations, sequences = values
             referenced_scopes = set()
-            for value in (*records, *facts, *operations):
-                referenced_scopes.update(root.scope_id for root in iter_archive_roots(value.data))
-                referenced_scopes.update(scope for scope, _, _ in iter_archive_content_refs(value.data))
-            domain_native_roots = tuple(root for value in (*records, *facts, *operations)
-                                        for root in iter_native_message_roots(value.data))
+            reference_values = tuple(capture_retention_value(value) if value.kind in CAPTURE_RECORD_KINDS else value.data
+                                     for value in records) + tuple(value.data for value in (*facts, *operations))
+            for value in reference_values:
+                referenced_scopes.update(root.scope_id for root in iter_archive_roots(value))
+                referenced_scopes.update(scope for scope, _, _ in iter_archive_content_refs(value))
+            domain_native_roots = tuple(root for value in reference_values
+                                        for root in iter_native_message_roots(value))
             domain_checkpoints = native_checkpoints if domain is PersistenceDomain.EXECUTION else {}
             domain_native_roots += tuple(root for group_id, backup in domain_checkpoints.items()
                                          for root in backup.message_roots(group_id))
@@ -1338,15 +1343,16 @@ async def restore_snapshot(
                 sequence_rows = [row for row in entry["sequences"]
                                  if (row["store_digest"], row["sha256"]) in domain_closure.retained_sequences]
                 native_rows.append((sequence_rows, message_rows))
-            def rekey(value: Mapping) -> dict:
+            def rekey(value: JsonValue) -> JsonValue:
                 return rekey_native_step_sources(
-                    rekey_native_message_roots(rekey_archive_roots(dict(value), scope_mapping),
+                    rekey_native_message_roots(rekey_archive_roots(dict(value) if isinstance(value, Mapping) else value, scope_mapping),
                                               native_mapping if native_groups else {}),
                     native_mapping if native_groups else {})
             if domain is PersistenceDomain.TRACE:
                 records = tuple(native_record_projections.get(value.key_digest, value) for value in records)
                 facts = tuple(native_fact_projections.get((value.stream_digest, value.sequence), value) for value in facts)
-            records = tuple(replace(value, data=rekey(value.data)) for value in records)
+            records = tuple(map_capture_references(value, rekey) if value.kind in CAPTURE_RECORD_KINDS
+                            else replace(value, data=rekey(value.data)) for value in records)
             facts = tuple(replace(value, data=rekey(value.data)) for value in facts)
             operations = tuple(replace(value, data=rekey(value.data)) for value in operations)
 
@@ -1510,7 +1516,9 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
             domain = PersistenceDomain(domain_name)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        for _, ref in iter_runtime_object_refs(values, default_domain=domain):
+        reference_values = {**values, "records": [capture_retention_value(decode_record(row))
+                            if row.get("kind") in CAPTURE_RECORD_KINDS else row for row in values["records"]]}
+        for _, ref in iter_runtime_object_refs(reference_values, default_domain=domain):
             nonnative_objects.add((ref.key, ref.digest, ref.size))
     for entry in archives:
         rows = entry.get("records")
@@ -1560,8 +1568,13 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
             "domain": "archive" if source["key"].startswith("v1/archive/") else raw.get("domain"),
             "source": source,
         })
-    normalized_domains = rekey_native_step_sources(
-        rekey_native_message_roots(rekey_archive_roots(dict(domains), groups), groups), groups)
+    def normalize(value: JsonValue) -> JsonValue:
+        return rekey_native_step_sources(rekey_native_message_roots(rekey_archive_roots(value, groups), groups), groups)
+
+    normalized_domains = {name: {**normalize({key: value for key, value in values.items() if key != "records"}),
+        "records": [encode_record(map_capture_references(decode_record(row), normalize))
+                    if row.get("kind") in CAPTURE_RECORD_KINDS else normalize(row) for row in values["records"]]}
+        for name, values in domains.items()}
     checkpoint_values = []
     for entry in manifest.get("native_checkpoints", []):
         if not isinstance(entry, Mapping) or entry.get("group_id") not in groups:

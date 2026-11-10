@@ -231,7 +231,7 @@ class SessionDisplayCache:
             # bounded session cache. Do not replace that newer whole snapshot
             # merely because the same resource's older revision is still hot.
             if any(value.session_id != record.session_id or value.parent_execution_id is not None
-                   or value.principal_id != record.owner_principal_id for value in records.values()):
+                   for value in records.values()):
                 return False
             if any(self._display_execution_identity(records[key]) != identity
                    for key, identity in identities.items()):

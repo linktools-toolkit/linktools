@@ -74,7 +74,8 @@ async def _capture_owners(partitions: Mapping[StateStore, PersistenceDomain]) ->
         while True:
             page = await store.read(lambda tx: tx.scan_records_page(after=cursor, limit=1000))
             for record in page:
-                require_known_retention(capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
+                require_known_retention(None if record.kind == "archive_content" else
+                                        capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
                                         else record.data, state=record.state)
                 records.append((store, record))
             if len(page) < 1000:
@@ -317,7 +318,8 @@ async def _purge_unreferenced_objects(
         while True:
             records = await store.read(lambda tx: tx.scan_records_page(after=record_cursor, limit=1000))
             for record in records:
-                require_known_retention(capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
+                require_known_retention(None if record.kind == "archive_content" else
+                                        capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
                                         else record.data, state=record.state)
                 if record.kind in CAPTURE_RECORD_KINDS:
                     if record.sort_key in retained_captures:
@@ -325,7 +327,7 @@ async def _purge_unreferenced_objects(
                         semantic = expand_snapshot_capture(record, binding_contents,
                             namespace=scope_namespace, tenant_id=scope_tenant)
                         if record.kind == "task_graph_binding_capture":
-                            await collect(dict(record.data), domain)
+                            await collect(capture_retention_value(record), domain)
                         await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
                 elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
                     await collect(dict(record.data), domain)

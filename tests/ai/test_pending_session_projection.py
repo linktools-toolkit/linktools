@@ -228,7 +228,7 @@ async def test_pending_session_projection_denial_precedes_observation(principal:
         await storage.close()
 
 
-@pytest.mark.parametrize("fault", ("owner", "session", "child", "terminal", "older_session"))
+@pytest.mark.parametrize("fault", ("session", "child", "terminal", "older_session"))
 async def test_pending_session_projection_rejects_unbound_observations(fault: str) -> None:
     storage = PersistenceStorage.in_memory()
     storage = Persistence(storage)
@@ -237,7 +237,7 @@ async def test_pending_session_projection_rejects_unbound_observations(fault: st
         record = await storage.conversation.sessions.create(_session())
         pending = _execution("pending", status=ExecutionStatus.STARTED, prompt="question")
         changes = {
-            "owner": {"principal_id": "other"}, "session": {"session_id": "other"},
+            "session": {"session_id": "other"},
             "child": {"parent_execution_id": "parent", "parent_invocation_id": "invocation",
                       "lineage_kind": ExecutionLineageKind.SUBAGENT},
             "terminal": {"status": ExecutionStatus.CANCELLED},

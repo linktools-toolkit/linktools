@@ -19,6 +19,10 @@ import pytest
 from linktools.ai.core import AuthorizationAction, JsonValue, Principal, ResourceRef, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.agent import AgentInputCaptureRef
+from linktools.ai.inputs import encode_user_content
+from linktools.ai.model import StoredUserInput
+from linktools.ai.model.attachments import read_attachment_payload, store_attachment_payload
+from pydantic_ai.messages import BinaryContent
 from linktools.ai.persistence.captures import input_capture_key, publish_capture_record
 from linktools.ai.persistence.contracts import ArtifactRecord
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, PersistencePlan
@@ -94,6 +98,18 @@ async def test_object_cleanup_scans_all_domains_and_independent_capture_closures
     try:
         shared = await put(objects, "shared-body", {"private": "referenced by another owner"})
         captured = await put(objects, "captured-body", {"private": "referenced only by capture"})
+        captured_bytes = canonical_json_bytes({"private": "referenced only by capture"})
+        raw_prompt = canonical_json_bytes(encode_user_content([
+            BinaryContent(captured_bytes, media_type="application/octet-stream"),
+        ]))
+
+        async def write_capture_attachment(data: bytes) -> ObjectRef:
+            assert data == captured_bytes
+            return captured
+
+        payload = await store_attachment_payload(raw_prompt, format="user-content",
+            write_object=write_capture_attachment)
+        assert payload is not None
         orphan = await put(objects, "orphan", {"private": "evaluation-owned expired body"})
         await storage.artifact.records.put_metadata(ArtifactRecord(
             "artifact", "execution", "producer", "application/json", shared, NOW))
@@ -101,7 +117,11 @@ async def test_object_cleanup_scans_all_domains_and_independent_capture_closures
             namespace="another-namespace", tenant_id="another-tenant",
             key=input_capture_key("another-namespace", "another-tenant", "agent", "independent"), value={
                 "kind": "agent", "version": 1, "namespace": "another-namespace", "tenant_id": "another-tenant",
-                "payload": encode_domain(captured),
+                "payload": {
+                    "prompt": {"kind": "stored-user-content-v1",
+                               "value": encode_domain(StoredUserInput("user-content-v1", payload))},
+                    "original_input": {},
+                },
             })
         candidates = tuple((PersistenceDomain.EVALUATION, ref) for ref in (shared, captured, orphan))
         result = await purge_unreferenced_objects(candidates,
@@ -112,6 +132,12 @@ async def test_object_cleanup_scans_all_domains_and_independent_capture_closures
         assert await objects.stat(orphan.key) is None
         assert await objects.stat(shared.key) is not None
         assert await objects.stat(captured.key) is not None
+
+        async def read_capture_attachment(ref: ObjectRef) -> bytes:
+            assert ref == captured
+            return b"".join([chunk async for chunk in objects.open(ref.key)])
+
+        assert await read_attachment_payload(payload, read_object=read_capture_attachment) == raw_prompt
         repeated = await purge_unreferenced_objects((candidates[-1],),
             namespace="evaluation-retention", tenant_id="tenant", stores=storage._stores,
             object_stores={domain: objects for domain in PersistenceDomain}, exclusive=guard)

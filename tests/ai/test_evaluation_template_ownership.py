@@ -139,7 +139,7 @@ async def test_graph_case_merges_preserve_captured_parameters_and_dependencies()
 @pytest.mark.parametrize("boundary", ["before", "after"])
 async def test_reserved_capture_is_owned_across_cancel_and_purge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str) -> None:
     from linktools.ai.inputs import InputCaptures
-    from linktools.ai.persistence.captures import input_capture_key
+    from linktools.ai.persistence.captures import input_capture_key, read_capture_record
 
     invocations = []
 
@@ -186,14 +186,21 @@ async def test_reserved_capture_is_owned_across_cancel_and_purge(tmp_path: Path,
             assert len(record.owned_input_captures) == 1
             owned = record.owned_input_captures[0]
             key = input_capture_key(owned.namespace, owned.tenant_id, "task", owned.capture_id)
-            assert (await persistence_134.object_store(PersistenceDomain.TASK).stat(key) is not None) == (boundary == "after")
+            assert (await read_capture_record(persistence_134.task.tasks.state_store,
+                namespace=owned.namespace, tenant_id=owned.tenant_id, key=key) is not None) == (boundary == "after")
+            if boundary == "after":
+                assert dict((await evaluations._captures.read_task(owned, principal=PRINCIPAL)).input) == {"secret": "retained"}
             assert (await run.cancel(idempotency_key="cancel")).completion == "cancelled"
             release.set()
             await asyncio.wait_for(evaluations._watchers[run.experiment_id], 5)
             result = await evaluations.purge_expired(principal=PRINCIPAL,
                 now=record.metadata_expires_at + timedelta(seconds=1), exclusive=Offline())
             assert result.evaluations == (run.experiment_id,)
-            assert await persistence_134.object_store(PersistenceDomain.TASK).stat(key) is None
+            assert await read_capture_record(persistence_134.task.tasks.state_store,
+                namespace=owned.namespace, tenant_id=owned.tenant_id, key=key) is None
+            with pytest.raises(AIError) as unavailable:
+                await evaluations._captures.read_task(owned, principal=PRINCIPAL)
+            assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
             assert invocations == [{"secret": "retained"}]
             assert await evaluations._captures.read_task(capture, principal=PRINCIPAL)
             with pytest.raises(AIError) as rejected:
@@ -204,7 +211,7 @@ async def test_reserved_capture_is_owned_across_cancel_and_purge(tmp_path: Path,
 @pytest.mark.asyncio
 async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.evaluation.engine._service import Evaluations
-    from linktools.ai.persistence.captures import input_capture_key
+    from linktools.ai.persistence.captures import input_capture_key, read_capture_record
     from linktools.ai.storage import InMemoryObjectStore
 
     async def target(context: TaskNodeContext[None]) -> JsonValue:
@@ -237,7 +244,8 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
             record = await persistence_194.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
             owned = record.owned_input_captures[0]
             key = input_capture_key(owned.namespace, owned.tenant_id, "task", owned.capture_id)
-            assert await persistence_194.object_store(PersistenceDomain.TASK).stat(key) is None
+            assert await read_capture_record(persistence_194.task.tasks.state_store,
+                namespace=owned.namespace, tenant_id=owned.tenant_id, key=key) is None
     snapshot = InMemoryObjectStore("snapshot-copy")
     limits = SnapshotLimits(max_entries=10000, max_bytes=20 * 1024 * 1024)
     readonly = PersistenceStorage.from_root(root, exclusive_writer=True)
@@ -260,7 +268,9 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         record = await persistence_226.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.owned_input_captures == (owned,)
-        assert await persistence_226.object_store(PersistenceDomain.TASK).stat(key) is not None
+        assert dict((await evaluations._captures.read_task(owned, principal=PRINCIPAL)).input) == {"kept": 1}
+        assert await read_capture_record(persistence_226.task.tasks.state_store,
+                namespace=owned.namespace, tenant_id=owned.tenant_id, key=key) is not None
 
 
 @pytest.mark.asyncio
@@ -311,7 +321,7 @@ async def test_content_purge_redacts_inline_template_and_keeps_admission_identit
 
 @pytest.mark.asyncio
 async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_path: Path) -> None:
-    from linktools.ai.persistence.captures import input_capture_key
+    from linktools.ai.persistence.captures import input_capture_key, read_capture_record
     from linktools.ai.storage import InMemoryObjectStore
 
     async def target(context: TaskNodeContext[None]) -> JsonValue:
@@ -343,9 +353,11 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
             owned = record.owned_input_captures[0]
             result = await evaluations.purge_expired(principal=PRINCIPAL,
                 now=record.content_expires_at + timedelta(seconds=1), exclusive=Offline())
-            assert result.objects_retained >= 1
+            assert result.evaluations == (run.experiment_id,)
             key = input_capture_key(owned.namespace, owned.tenant_id, "task", owned.capture_id)
-            assert await persistence_284.object_store(PersistenceDomain.TASK).stat(key) is not None
+            assert await read_capture_record(persistence_284.task.tasks.state_store,
+                namespace=owned.namespace, tenant_id=owned.tenant_id, key=key) is not None
+            assert dict((await evaluations._captures.read_task(owned, principal=PRINCIPAL)).input) == {"kept": 1}
             retained = await engine.inputs.capture_input(trial.subject.execution_id, CaptureInputRequest(PRINCIPAL, "retained"))
             assert dict((await evaluations._captures.read_task(retained, principal=PRINCIPAL)).input) == {"kept": 1}
     snapshot = InMemoryObjectStore("native-snapshot")

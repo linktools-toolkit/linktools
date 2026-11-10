@@ -3,6 +3,7 @@
 """Scoped state ownership and reference closure for immutable input captures."""
 
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 import json
 
@@ -89,7 +90,7 @@ def capture_record_digest(record: StoredRecord) -> str:
 
 def _map_capture_attachments(
     key: str, value: JsonValue, transform: Callable[[JsonValue, str, bool], JsonValue],
-    reference: Callable[[JsonValue], None] = lambda value: None,
+    reference: Callable[[JsonValue], JsonValue] = lambda value: value,
 ) -> JsonValue:
     def mapping(value: JsonValue, encoded: bool) -> dict[str, JsonValue] | None:
         if not isinstance(value, Mapping):
@@ -110,7 +111,13 @@ def _map_capture_attachments(
             return value
         if fields.get("kind") == "stored-user-content-v1":
             stored = decode_domain(fields["value"], object) if encoded else fields["value"]
-            reference(encode_domain(decode_domain(stored, StoredUserInput).payload))
+            user_input = decode_domain(stored, StoredUserInput)
+            original = encode_domain(user_input.payload)
+            rewritten = reference(original)
+            if rewritten != original:
+                payload = decode_domain(rewritten, StoredPayload)
+                stored = encode_domain(replace(user_input, payload=payload))
+                fields["value"] = encode_domain(stored) if encoded else stored
         elif fields.get("kind") == "pydantic-user-content-v1":
             fields["value"] = transform(fields["value"], "user-content", encoded)
         elif fields.get("kind") == "task-user-content-v1":
@@ -148,10 +155,11 @@ def _map_capture_attachments(
         fields = value.get("fields")
         if value.get("$dataclass") != "task_invocation_input_contract" or not isinstance(fields, Mapping):
             return value
-        reference(fields.get("dependencies"))
+        if "dependencies" in fields:
+            fields = {**fields, "dependencies": reference(fields["dependencies"])}
         binding = mapping(fields.get("binding"), True)
         if binding is None or binding.get("type") != "agent":
-            return value
+            return {**value, "fields": fields}
         return {**value, "fields": {**fields,
             "input": agent_input(fields["input"], encoded=True),
             "original_input": agent_input(fields["original_input"], encoded=True, fallback=True)}}
@@ -160,9 +168,10 @@ def _map_capture_attachments(
         if not isinstance(value, Mapping) or value.get("$dataclass") != "task_node":
             return value
         fields = value["fields"]
-        reference(fields.get("input_capture"))
+        if "input_capture" in fields:
+            fields = {**fields, "input_capture": reference(fields["input_capture"])}
         if fields.get("input_semantics") != "agent-task-input-v1":
-            return value
+            return {**value, "fields": fields}
         result = {**fields, "input": agent_input(fields["input"], encoded=True)}
         if result.get("original_input") is not None:
             result["original_input"] = agent_input(result["original_input"], encoded=True, fallback=True)
@@ -245,22 +254,34 @@ def capture_record_scope(record: StoredRecord) -> tuple[str, str]:
     return namespace, tenant_id
 
 
-def capture_retention_value(record: StoredRecord) -> JsonValue:
-    """Project references only from the capture owner's declared durable slots."""
+def map_capture_references(record: StoredRecord, transform: Callable[[JsonValue], JsonValue]) -> StoredRecord:
+    """Transform only reference-bearing slots owned by the capture contract."""
     value = capture_record_value(record)
-    references: list[JsonValue] = []
 
     def attachment(content: JsonValue, format: str, encoded: bool) -> JsonValue:
         if isinstance(content, Mapping) and content.get("$dataclass") == "stored_payload":
             payload = decode_domain(content, StoredPayload)
             if payload.encoding != "json-attachments" or payload.value["format"] != format:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            references.append(content)
+            return transform(content)
         return content
 
-    _map_capture_attachments(record.sort_key, value, attachment, references.append)
-    if record.kind == "task_graph_binding_capture" and isinstance(value, Mapping):
-        references.append(value.get("declarations"))
+    value = _map_capture_attachments(record.sort_key, value, attachment, transform)
+    if record.kind == "task_graph_binding_capture" and isinstance(value, Mapping) and "declarations" in value:
+        value = {**value, "declarations": transform(value["declarations"])}
+    envelope = decode_envelope(record.data).value
+    return replace(record, data=encode_envelope({**envelope, "payload": {**envelope["payload"], "value": value}}))
+
+
+def capture_retention_value(record: StoredRecord) -> JsonValue:
+    """Project references only from the capture owner's declared durable slots."""
+    references: list[JsonValue] = []
+
+    def collect(value: JsonValue) -> JsonValue:
+        references.append(value)
+        return value
+
+    map_capture_references(record, collect)
     return references
 
 
@@ -290,7 +311,7 @@ def capture_state_closure(records: Sequence[StoredRecord], *,
             pending.append((key, None))
     owners: list[JsonValue] = list(values)
     for record in records:
-        if record.kind in CAPTURE_RECORD_KINDS or record.kind == "evaluation_cleanup":
+        if record.kind in CAPTURE_RECORD_KINDS or record.kind in {"evaluation_cleanup", "archive_content"}:
             continue
         owners.append(dict(record.data))
         if record.kind == "execution":
@@ -542,4 +563,4 @@ from ._task_graph_binding_capture import (
     task_expander_declaration_identity,
 )
 
-__all__ = ['CAPTURE_RECORD_KINDS', 'TASK_BINDING_CODEC', 'capture_record', 'capture_record_value', 'capture_record_digest', 'prepare_capture_value', 'restore_capture_value', 'capture_record_scope', 'capture_retention_value', 'capture_state_closure', 'read_capture_record', 'publish_capture_record', 'task_binding_content_reference', 'prepare_task_binding_value', 'read_task_binding_value', 'expand_snapshot_capture', 'snapshot_capture_size', 'validate_capture_record', 'validate_task_binding_payload', 'TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION', 'TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS', 'input_capture_expiry_key', 'input_capture_key', 'input_capture_state_dependency', 'iter_input_capture_dependencies', 'read_task_graph_binding_capture_declarations', 'task_declaration_identity', 'task_expander_declaration_identity', 'task_graph_binding_capture_key', 'validate_input_capture_payload']
+__all__ = ['CAPTURE_RECORD_KINDS', 'TASK_BINDING_CODEC', 'capture_record', 'capture_record_value', 'capture_record_digest', 'prepare_capture_value', 'restore_capture_value', 'capture_record_scope', 'capture_retention_value', 'map_capture_references', 'capture_state_closure', 'read_capture_record', 'publish_capture_record', 'task_binding_content_reference', 'prepare_task_binding_value', 'read_task_binding_value', 'expand_snapshot_capture', 'snapshot_capture_size', 'validate_capture_record', 'validate_task_binding_payload', 'TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION', 'TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS', 'input_capture_expiry_key', 'input_capture_key', 'input_capture_state_dependency', 'iter_input_capture_dependencies', 'read_task_graph_binding_capture_declarations', 'task_declaration_identity', 'task_expander_declaration_identity', 'task_graph_binding_capture_key', 'validate_input_capture_payload']

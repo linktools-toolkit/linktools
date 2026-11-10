@@ -355,8 +355,7 @@ def validate_snapshot_references(
         execution = executions.get(turn.execution_id)
         session = sessions.get(turn.session_id)
         if (execution is None or session is None or execution.completed_at is None
-                or execution.session_id != turn.session_id or execution.parent_execution_id is not None
-                or execution.principal_id != session.owner_principal_id):
+                or execution.session_id != turn.session_id or execution.parent_execution_id is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     transcript_heads: dict[tuple[PersistenceDomain, str], TranscriptHeadRecord] = {}
