@@ -20,7 +20,8 @@ from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
-    from ..storage import SqlStorageContext
+    from sqlalchemy.sql import Select
+    from ..storage import SqlStorageContext, SqlValue
 
 ValueT = TypeVar("ValueT")
 
@@ -117,6 +118,16 @@ def _active_transaction(
 def active_state_scope() -> _ActiveStateScope | None:
     """Return the current scope for synchronization-order checks."""
     return _active_state_scope.get()
+
+
+def is_active_state_transaction(transaction: "StateTransaction") -> bool:
+    """Recognize the underlying transaction without exposing read-only wrappers."""
+    active = _active_state_scope.get()
+    return active is not None and active.task is asyncio.current_task() and any(
+        value is transaction
+        or isinstance(value, _ReadOnlyStateTransaction) and value._transaction is transaction
+        for value in active.transactions.values()
+    )
 
 
 def bind_state_scope(
@@ -612,6 +623,12 @@ class StateTransaction(Protocol):
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]: ...
     async def insert_record(self, record: StoredRecord) -> None: ...
     async def insert_records(self, records: Sequence[StoredRecord]) -> None: ...
+    async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        """Insert or confirm byte-exact immutable records without a preceding read.
+
+        Any failure poisons the enclosing mutation, even if the callback catches it.
+        """
+        ...
     async def guard_record(
         self, key: bytes, *, expected_storage_revision: int,
     ) -> StoredRecord | None:
@@ -760,6 +777,47 @@ class FactReader(Protocol):
 
 
 @runtime_checkable
+class SqlStateRowReader(Protocol):
+    """Read immutable native rows in the active state transaction's snapshot."""
+
+    async def read_sql_rows(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[Mapping[str, object], ...]: ...
+
+
+@runtime_checkable
+class SqlStateRecordReader(Protocol):
+    """Join immutable sources to scoped records within the current read boundary.
+
+    Results retain the physical record separately from joined columns. Raw
+    scans and transaction caches continue to expose the persisted record.
+    """
+
+    def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]: ...
+
+    async def read_joined_records(
+        self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+    ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]: ...
+
+
+@runtime_checkable
+class SqlStateFactReader(Protocol):
+    """Join immutable sources to physical facts in the current read boundary.
+
+    Select all physical fact columns under their original names and give
+    joined columns distinct labels. The caller owns store/stream predicates,
+    ordering and pagination. Results keep the persisted fact separate from
+    joined source columns; projections never replace physical fact data.
+    Each call executes only the supplied read-only Select, without follow-up
+    reads or writes.
+    """
+
+    async def read_joined_facts(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[tuple[StoredFact, Mapping[str, "SqlValue"]], ...]: ...
+
+
+@runtime_checkable
 class SqlStateTransaction(Protocol):
     """Execute prepared SQL inside the current writable storage callback.
 
@@ -774,6 +832,13 @@ class SqlStateTransaction(Protocol):
     ) -> ValueT: ...
 
 
+@runtime_checkable
+class SqlMutationObserver(Protocol):
+    """Observe the real enclosing SQL commit, never a nested callback return."""
+
+    def observe_mutation(self, callback: Callable[[bool], None]) -> None: ...
+
+
 class _ReadOnlyStateTransaction(StateTransaction):
     def __init__(self, transaction: StateTransaction) -> None:
         self._transaction = transaction
@@ -786,6 +851,32 @@ class _ReadOnlyStateTransaction(StateTransaction):
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         return await self._transaction.get_records(keys)
+
+    def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]:
+        if not isinstance(self._transaction, SqlStateRecordReader):
+            raise StateTransactionNestingError("joined record reads require SQL storage")
+        return self._transaction.cached_records(keys)
+
+    async def read_sql_rows(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[Mapping[str, object], ...]:
+        if not isinstance(self._transaction, SqlStateRowReader):
+            raise StateTransactionNestingError("native row reads require SQL storage")
+        return await self._transaction.read_sql_rows(context, statement)
+
+    async def read_joined_records(
+        self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+    ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]:
+        if not isinstance(self._transaction, SqlStateRecordReader):
+            raise StateTransactionNestingError("joined record reads require SQL storage")
+        return await self._transaction.read_joined_records(context, statement, keys=keys)
+
+    async def read_joined_facts(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> tuple[tuple[StoredFact, Mapping[str, "SqlValue"]], ...]:
+        if not isinstance(self._transaction, SqlStateFactReader):
+            raise StateTransactionNestingError("joined fact reads require SQL storage")
+        return await self._transaction.read_joined_facts(context, statement)
 
     async def read_record_subjects(
         self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
@@ -914,6 +1005,10 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def insert_records(self, records: Sequence[StoredRecord]) -> None:
         del records
         self._reject("insert_records")
+
+    async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        del records
+        self._reject("insert_immutable_records")
 
     async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool:
         del record, expected_storage_revision
@@ -1065,6 +1160,15 @@ class StateStorageGroup(Protocol):
         Keys are opaque 32-byte storage identities. Open outside transaction
         callbacks; opening never changes record keys or transaction boundaries.
         Read-only opens do not create partitions. The group owns their lifetime.
+        """
+        ...
+
+    @property
+    def opened_archive(self) -> tuple[str, "StateStore"] | None:
+        """Return an already opened archive handle without I/O or enlistment.
+
+        Callbacks must still verify that its store belongs to their active
+        transaction. An absent handle never authorizes opening storage there.
         """
         ...
 
@@ -1293,4 +1397,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_id', 'sortable_identity', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

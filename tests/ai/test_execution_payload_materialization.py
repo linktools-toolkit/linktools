@@ -81,6 +81,25 @@ async def test_instruction_placement_uses_frozen_bytes_without_mutating_capture(
 
 
 @pytest.mark.asyncio
+async def test_captured_context_owns_instruction_bytes_without_separate_object_write() -> None:
+    objects = _Objects()
+    instructions = RepositoryInstructions((
+        RepositoryInstructionDocument("agents:AGENTS.md", ".", "rule" * 100),
+    ))
+    context = ExecutionInputContext.from_messages((), repository_instructions=instructions.to_payload())
+    captured = replace(_record(ExecutionStatus.PENDING_START, 0),
+        repository_instructions=RuntimePayloadRef(StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.EXECUTION),
+        input_context=RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION))
+    placed = await _materialize_execution_payloads(
+        captured, input_materializer=None, objects=objects, keys=ObjectKeyFactory("capture"),
+        policy=PayloadPolicy(inline_limit_bytes=128), tenant_id="tenant",
+    )
+    assert objects.writes == []
+    assert placed.input_context == captured.input_context
+    assert placed.repository_instructions == captured.repository_instructions
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ("sync", "terminal", "promotion"))
 async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_path: Path, mode: str) -> None:
     entered = asyncio.Event()

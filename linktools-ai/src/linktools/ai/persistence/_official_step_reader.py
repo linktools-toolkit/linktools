@@ -13,6 +13,7 @@ from ..model.messages import native_checkpoint_messages
 from ..errors import AIError, ErrorCode
 from ._native_checkpoint import NativeCheckpoint
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, StepEventType
+from ..steps import NativeLifecycleEvent
 from .contracts import LoadedContextMessage, LoadedModelContext
 
 
@@ -177,7 +178,7 @@ class OfficialStepReader:
 
     async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:
         return [StepEvent(
-            agent_run_id=event.run_id, event_type=_EVENT_TYPES[event.kind],
+            agent_run_id=event.run_id, event_type=event.event_type if isinstance(event, NativeLifecycleEvent) else _EVENT_TYPES[event.kind],
             step_index=event.step_index, timestamp=event.timestamp,
             agent_conversation_id=event.conversation_id, parent_agent_run_id=event.parent_run_id,
             agent_id=event.agent_name, tool_call_id=event.tool_call_id, tool_name=event.tool_name,

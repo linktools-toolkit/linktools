@@ -149,6 +149,12 @@ def _stored_bytes(root: Path) -> bytes:
         elif isinstance(value, list):
             for child in value:
                 walk(child)
+        elif isinstance(value, str):
+            blobs.append(value.encode())
+            try:
+                walk(json.loads(value))
+            except (UnicodeError, ValueError):
+                pass
 
     for raw in tuple(blobs):
         try:
@@ -158,8 +164,12 @@ def _stored_bytes(root: Path) -> bytes:
     database = root / "runtime.db"
     if database.exists():
         with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            for table in ("ai_state_records", "ai_state_facts"):
-                for (payload,) in connection.execute(f"SELECT payload_json FROM {table}"):
+            for table, column in (
+                ("ai_state_records", "payload_json"),
+                ("ai_state_facts", "payload_json"),
+                ("ai_step_messages", "message"),
+            ):
+                for (payload,) in connection.execute(f"SELECT {column} FROM {table}"):
                     walk(json.loads(payload))
     return b"\n".join(blobs)
 

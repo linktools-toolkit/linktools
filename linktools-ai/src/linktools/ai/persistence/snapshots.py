@@ -4,24 +4,40 @@
 
 import hashlib
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+from bisect import bisect_left, bisect_right
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from ._execution_binding import ExecutionBindingContent, expand_snapshot_binding, snapshot_binding_size
 
 from ..core import (
     canonical_json_bytes,
+    canonical_sha256,
     validate_persistence_namespace,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
+from ..steps import NativeStepSource, rekey_native_step_sources
+from ._step_backup import NativeStepBackup
+from ._native_backup_projection import NativeBackupProjections
 from ..storage import ObjectRef, ObjectStore, ObjectStoreInspection, StoredPayload, read_object
 from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
+from ._native_run_reference import NativeRunReferences
+from ._native_event_reference import NativeEventReferences
+from ._sql import SqlStateStore
 from ._archive import ContentRecord
+from ._message_root import NativeMessageRoot
+from ..model.messages import decode_model_message_payloads
 from ._archive_closure import (
     ArchiveClosure,
+    NativeMessageClosure,
+    iter_native_message_roots,
+    rekey_native_message_roots,
+    validate_native_message_content,
     iter_archive_content_refs,
     iter_archive_roots,
     rekey_archive_roots,
@@ -42,6 +58,8 @@ from .state import (
     StateStorageGroup,
     StateStore,
     StateTransaction,
+    SqlStateRowReader,
+    SqlStateTransaction,
     StoredAlias,
     StoredFact,
     StoredOperation,
@@ -50,6 +68,7 @@ from .state import (
 from ._snapshot import (
     SnapshotLimits,
     SnapshotExclusiveGuard,
+    validate_snapshot_native_rows,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
@@ -75,6 +94,11 @@ from .codec import (
 )
 
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from ._step_store import SqlStepStore
+
+
 class _SnapshotReader(Protocol):
     async def get_operation(self, key: bytes) -> StoredOperation | None: ...
 
@@ -92,8 +116,12 @@ class _SnapshotReader(Protocol):
 
 
 class _StateSnapshotReader:
-    def __init__(self, store: StateStore) -> None:
+    def __init__(self, store: StateStore, *, native_run_scope: tuple[str, str] | None = None) -> None:
         self._store = store
+        self._native_runs = (NativeRunReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
+                             if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
+        self._native_events = (NativeEventReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
+                               if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return await self._store.read(lambda tx: tx.get_operation(key))
@@ -101,17 +129,108 @@ class _StateSnapshotReader:
     async def scan_records_page(
         self, *, after: RecordScanCursor | None, limit: int,
     ) -> tuple[StoredRecord, ...]:
+        if self._native_runs is not None:
+            return await self._store.read(lambda tx: self._native_runs.read(tx, scan=(after, limit)))
         return await self._store.read(lambda tx: tx.scan_records_page(after=after, limit=limit))
 
     async def scan_facts_page(
         self, *, after: FactScanCursor | None, limit: int,
     ) -> tuple[StoredFact, ...]:
+        if self._native_events is not None:
+            return await self._store.read(lambda tx: self._native_events.read(tx, scan=(after, limit)))
         return await self._store.read(lambda tx: tx.scan_facts_page(after=after, limit=limit))
 
     async def scan_operations_page(
         self, *, after: OperationScanCursor | None, limit: int,
     ) -> tuple[StoredOperation, ...]:
         return await self._store.read(lambda tx: tx.scan_operations_page(after=after, limit=limit))
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedSnapshotReader:
+    records: tuple[StoredRecord, ...]
+    facts: tuple[StoredFact, ...]
+    operations: tuple[StoredOperation, ...]
+
+    async def get_operation(self, key: bytes) -> StoredOperation | None:
+        index = bisect_left(self.operations, key, key=lambda value: value.key_digest)
+        return (self.operations[index] if index < len(self.operations)
+                and self.operations[index].key_digest == key else None)
+
+    async def scan_records_page(self, *, after: RecordScanCursor | None, limit: int) -> tuple[StoredRecord, ...]:
+        start = 0 if after is None else bisect_right(self.records, (after.kind, after.key_digest),
+                                                    key=lambda value: (value.kind, value.key_digest))
+        return self.records[start:start + limit]
+
+    async def scan_facts_page(self, *, after: FactScanCursor | None, limit: int) -> tuple[StoredFact, ...]:
+        start = 0 if after is None else bisect_right(self.facts, (after.stream_digest, after.sequence),
+                                                    key=lambda value: (value.stream_digest, value.sequence))
+        return self.facts[start:start + limit]
+
+    async def scan_operations_page(self, *, after: OperationScanCursor | None, limit: int) -> tuple[StoredOperation, ...]:
+        start = 0 if after is None else bisect_right(self.operations, after.key_digest, key=lambda value: value.key_digest)
+        return self.operations[start:start + limit]
+
+
+@dataclass(slots=True)
+class _SnapshotCaptureBudget:
+    """Bound the detached source inventory separately from final wire accounting."""
+
+    limits: SnapshotLimits
+    entries: int = 0
+    byte_size: int = 0
+
+    def page_size(self, requested: int) -> int:
+        return min(requested, max(1, self.limits.max_entries - self.entries))
+
+    def reserve_bytes(self, size: int) -> None:
+        if self.byte_size + size > self.limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        self.byte_size += size
+
+    def accept(self, value: object) -> None:
+        size = len(canonical_json_bytes(value))
+        if self.entries + 1 > self.limits.max_entries or self.byte_size + size > self.limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        self.entries += 1
+        self.byte_size += size
+
+
+async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _SnapshotCaptureBudget, page_size: int = 128, records_only: bool = False) -> _CapturedSnapshotReader:
+    records, facts, operations = [], [], []
+    cursor = None
+    while True:
+        limit = budget.page_size(page_size)
+        page = await reader.scan_records_page(after=cursor, limit=limit)
+        for value in page:
+            budget.accept(encode_record(value))
+            records.append(value)
+        if len(page) < limit:
+            break
+        cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
+    if records_only:
+        return _CapturedSnapshotReader(tuple(records), (), ())
+    cursor = None
+    while True:
+        limit = budget.page_size(page_size)
+        page = await reader.scan_facts_page(after=cursor, limit=limit)
+        for value in page:
+            budget.accept(encode_fact(value))
+            facts.append(value)
+        if len(page) < limit:
+            break
+        cursor = FactScanCursor(page[-1].stream_digest, page[-1].sequence)
+    cursor = None
+    while True:
+        limit = budget.page_size(page_size)
+        page = await reader.scan_operations_page(after=cursor, limit=limit)
+        for value in page:
+            budget.accept(encode_operation(value))
+            operations.append(value)
+        if len(page) < limit:
+            break
+        cursor = OperationScanCursor(page[-1].key_digest)
+    return _CapturedSnapshotReader(tuple(records), tuple(facts), tuple(operations))
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +248,10 @@ class _SnapshotExportSource:
     archives: AsyncIterator[_SnapshotArchive]
     object_stores: Mapping[PersistenceDomain, ObjectStore]
     archive_object_stores: Mapping[PersistenceDomain, ObjectStore]
+    native_rows: Mapping[str, tuple[PersistenceDomain, list[dict[str, object]], list[dict[str, object]]]] | None = None
+    native_checkpoints: Mapping[str, NativeStepBackup] | None = None
+    native_projections: Mapping[str, _CapturedSnapshotReader] | None = None
+    native_payloads: Mapping[str, Mapping[tuple[str, str], bytes]] | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return self.archive_object_stores[domain]
@@ -148,6 +271,7 @@ class SnapshotResources:
     archive_object_stores: Mapping[PersistenceDomain, ObjectStore] | None = None
     # Borrow the live mapping so cached maintenance sees later capability bindings.
     capability_stores: Mapping[str, StateStore] | None = None
+    checkpoint_backup_source: Callable[[NativeStepSource], Awaitable["SqlStepStore"]] | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return (self.archive_object_stores if self.archive_object_stores is not None else self.object_stores)[domain]
@@ -204,23 +328,145 @@ class RuntimeSnapshotOperations:
         if not self._resources.durable_domains:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
-        async def archives() -> AsyncIterator[_SnapshotArchive]:
-            groups = {}
-            for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
-                groups.setdefault(self._resources.stores[domain].storage_group, domain)
-            for group, domain in groups.items():
-                if not isinstance(group, StateStorageGroup):
-                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                opened = await group.open_archive()
+        capture_budget = _SnapshotCaptureBudget(limits)
+        archive_sources = []
+        native_rows = {}
+        native_checkpoints = {}
+        native_projections = {}
+        native_payloads = {}
+        readers = {}
+        groups = {}
+        for domain in sorted(self._resources.durable_domains, key=lambda value: value.value):
+            store = self._resources.stores[domain]
+            groups.setdefault(store.storage_group, []).append((domain, store))
+        for group, members in groups.items():
+            if not isinstance(group, StateStorageGroup):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            opened = await group.open_archive()
+            native = None
+            resolver = self._resources.checkpoint_backup_source
+            if (opened is not None and resolver is not None
+                    and any(domain is PersistenceDomain.EXECUTION and isinstance(store, SqlStateStore)
+                            for domain, store in members)):
+                from ._step_store import SqlStepStore
+                native = await resolver(NativeStepSource(opened[0], SqlStepStore.scope_digest(
+                    namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)))
+
+            execution_bindings = None
+            if PersistenceDomain.EXECUTION in {domain for domain, _ in members}:
+                execution_bindings = ExecutionBindingContent(self._resources.stores[PersistenceDomain.EXECUTION],
+                    namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
+                await execution_bindings.initialize(create=False)
+
+            async def capture_group(transaction: object) -> None:
+                roots = []
+                for domain, store in members:
+                    reader = _StateSnapshotReader(store,
+                        native_run_scope=((self._resources.namespace, self._resources.tenant_id)
+                                          if domain is PersistenceDomain.TRACE else None))
+                    captured = await _capture_snapshot_reader(reader, budget=capture_budget)
+                    readers[domain] = captured
+                    for value in (*captured.records, *captured.facts, *captured.operations):
+                        roots.extend(iter_native_message_roots(value.data))
+                if PersistenceDomain.EXECUTION in {domain for domain, _ in members}:
+                    from .contracts import ExecutionRecord
+                    from ..agent import AgentBindingContract
+
+                    execution_records = tuple(record for record in readers[PersistenceDomain.EXECUTION].records
+                                              if record.kind == "execution")
+                    for offset in range(0, len(execution_records), 1000):
+                        for semantic_record in await execution_bindings.expand_many(
+                                execution_records[offset:offset + 1000], reserve=capture_budget.reserve_bytes):
+                            execution = _decode_enveloped_domain(semantic_record.data, ExecutionRecord)
+                            if not isinstance(execution.binding, AgentBindingContract) or not execution.restart_checkpoints:
+                                continue
+                            source = execution.native_step_source
+                            resolver = self._resources.checkpoint_backup_source
+                            if source is None or resolver is None:
+                                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
+                                              "Native StepStore backup requires an admitted portable producer source")
+                            if opened is None or source.group_id != opened[0]:
+                                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                            if source.group_id in native_checkpoints:
+                                if native_checkpoints[source.group_id].store_digest != source.store_digest:
+                                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                                continue
+                            if native is None:
+                                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                            execution_store = self._resources.stores[PersistenceDomain.EXECUTION]
+                            if (not isinstance(execution_store, SqlStateStore)
+                                    or native.storage_context.engine is not execution_store.context.engine
+                                    or native.store_digest != source.store_digest or not native.backup_supported):
+                                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                            async def capture_native(tx: StateTransaction) -> NativeStepBackup:
+                                if not isinstance(tx, SqlStateRowReader):
+                                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                                return await native.capture_backup(tx, accept=capture_budget.accept, validate_messages=False)
+                            backup = await execution_store.read(capture_native)
+                            native_checkpoints[source.group_id] = backup
+                            roots.extend(backup.message_roots(source.group_id))
+                if (opened is not None and opened[0] in native_checkpoints
+                        and PersistenceDomain.TRACE in {domain for domain, _ in members}):
+                    trace = self._resources.stores[PersistenceDomain.TRACE]
+                    physical = await _capture_snapshot_reader(_StateSnapshotReader(trace), budget=_SnapshotCaptureBudget(limits))
+                    projected = readers[PersistenceDomain.TRACE]
+                    records = {value.key_digest: value for value in projected.records}
+                    facts = {(value.stream_digest, value.sequence): value for value in projected.facts}
+                    validator = NativeBackupProjections(native_checkpoints[opened[0]],
+                        namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
+                    raw_records, raw_facts = [], []
+                    for value in physical.records:
+                        visible = records.get(value.key_digest)
+                        if visible is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if value.data != visible.data:
+                            if validator.validate(visible, value.data) != value:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            capture_budget.accept(encode_record(value))
+                            raw_records.append(value)
+                    for value in physical.facts:
+                        visible = facts.get((value.stream_digest, value.sequence))
+                        if visible is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if value.data != visible.data:
+                            if validator.validate(visible, value.data) != value:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            capture_budget.accept(encode_fact(value))
+                            raw_facts.append(value)
+                    if raw_records or raw_facts:
+                        native_projections[opened[0]] = _CapturedSnapshotReader(tuple(raw_records), tuple(raw_facts), ())
                 if opened is not None:
                     scope, archive = opened
-                    yield _SnapshotArchive(scope, domain, _StateSnapshotReader(archive))
+                    domain, store = members[0]
+                    archive_sources.append(_SnapshotArchive(scope, domain,
+                        await _capture_snapshot_reader(_StateSnapshotReader(archive), budget=capture_budget, page_size=1000, records_only=True)))
+                    if roots or scope in native_checkpoints:
+                        if not isinstance(store, SqlStateStore) or any(root.group_id != scope for root in roots):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        for root in roots:
+                            _validate_native_partition(root.store_digest, self._resources.namespace, self._resources.tenant_id)
+                        sequences, messages = await _read_native_messages(store, roots, budget=capture_budget)
+                        native_domain = PersistenceDomain.EXECUTION if scope in native_checkpoints else domain
+                        native_payloads[scope] = await _capture_native_payloads(
+                            scope, sequences, messages, budget=capture_budget,
+                            objects=self._resources.archive_object_store(native_domain),
+                            backup=native_checkpoints.get(scope))
+                        native_rows[scope] = native_domain, sequences, messages
+                elif roots:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            # Capture each physical group's roots and sources in the same read
+            # view. Independent groups cannot share a database transaction.
+            await group.read_many(tuple(store for _, store in members), capture_group)
+
+        async def archives() -> AsyncIterator[_SnapshotArchive]:
+            for archive in archive_sources:
+                yield archive
 
         source = _SnapshotExportSource(
             namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
-            readers={domain: _StateSnapshotReader(self._resources.stores[domain])
-                     for domain in self._resources.durable_domains},
-            archives=archives(), object_stores=self._resources.object_stores,
+            readers=readers, archives=archives(), object_stores=self._resources.object_stores,
+            native_rows=native_rows, native_checkpoints=native_checkpoints, native_projections=native_projections, native_payloads=native_payloads,
             archive_object_stores=(self._resources.archive_object_stores
                                   if self._resources.archive_object_stores is not None
                                   else self._resources.object_stores),
@@ -241,6 +487,7 @@ async def _export_snapshot(
 
     archive_closures: dict[str, ArchiveClosure] = {}
     archive_domains: dict[str, PersistenceDomain] = {}
+    native_roots: dict[str, list[object]] = {}
     async for archive in source.archives:
         if archive.scope_id in archive_closures:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -259,6 +506,7 @@ async def _export_snapshot(
     snapshot_records: dict[PersistenceDomain, tuple[StoredRecord, ...]] = {}
     snapshot_facts: dict[PersistenceDomain, tuple[StoredFact, ...]] = {}
     objects: list[dict[str, object]] = []
+    binding_budget = _SnapshotCaptureBudget(limits)
     copied_objects: set[tuple[str, str, str, int]] = set()
     entry_count = 0
     object_bytes = 0
@@ -273,6 +521,7 @@ async def _export_snapshot(
     async def copy_reference(
         source_domain: PersistenceDomain,
         reference: ObjectRef,
+        *, encoded: bytes | None = None,
     ) -> None:
         nonlocal entry_count, object_bytes
         identity = (
@@ -298,7 +547,7 @@ async def _export_snapshot(
         )
         await object_store.put(
             key,
-            source_store.open(reference.key),
+            source_store.open(reference.key) if encoded is None else _snapshot_chunk(encoded),
             expected_size=reference.size,
             expected_digest=reference.digest,
         )
@@ -347,6 +596,9 @@ async def _export_snapshot(
     async def copy_references(encoded: object, domain: PersistenceDomain, *, archive_owner: bool = True) -> None:
         if archive_owner:
             _mark_archive_value(archive_closures, encoded)
+            for root in iter_native_message_roots(encoded):
+                _validate_native_partition(root.store_digest, source.namespace, source.tenant_id)
+                native_roots.setdefault(root.group_id, []).append(root)
         for key, digest in iter_input_capture_dependencies(encoded, namespace=source.namespace, tenant_id=source.tenant_id):
             capture_source = source.object_stores[PersistenceDomain.TASK]
             marker = await capture_source.stat(input_capture_expiry_key(key))
@@ -388,6 +640,8 @@ async def _export_snapshot(
             "sequences": [],
         }
         domain_records: list[StoredRecord] = []
+        binding_contents = {key: content for closure in archive_closures.values()
+                            for key, content in closure.binding_contents().items()}
         domain_facts: list[StoredFact] = []
         domain_operations: list[StoredOperation] = []
 
@@ -397,17 +651,23 @@ async def _export_snapshot(
             if not page:
                 break
             for value in page:
+                semantic_value = expand_snapshot_binding(value, binding_contents,
+                    namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
                 if domain is PersistenceDomain.EXECUTION and value.kind == "execution":
                     from .contracts import ExecutionRecord
-                    execution = _decode_enveloped_domain(value.data, ExecutionRecord)
+                    execution = _decode_enveloped_domain(semantic_value.data, ExecutionRecord)
                     from ..agent import AgentBindingContract
-                    if isinstance(execution.binding, AgentBindingContract) and execution.restart_checkpoints:
+                    if (isinstance(execution.binding, AgentBindingContract) and execution.restart_checkpoints
+                            and (execution.native_step_source is None
+                                 or execution.native_step_source.group_id not in (source.native_checkpoints or {})
+                                 or source.native_checkpoints[execution.native_step_source.group_id].store_digest
+                                 != execution.native_step_source.store_digest)):
                         raise AIError(
                             ErrorCode.SNAPSHOT_UNSUPPORTED,
                             "Native StepPersistence executions require a consistent database and StepStore backup; "
                             "portable snapshots do not include the external StepStore.",
                         )
-                domain_records.append(value)
+                domain_records.append(semantic_value)
                 encoded = encode_record(value)
                 raw_domain["records"].append(accept(encoded))
                 if value.kind != "evaluation_cleanup":
@@ -415,7 +675,7 @@ async def _export_snapshot(
                 if value.kind in {"execution", "task_admission"}:
                     if value.kind == "execution":
                         from .contracts import ExecutionRecord
-                        identity = _decode_enveloped_domain(value.data, ExecutionRecord).execution_id
+                        identity = _decode_enveloped_domain(semantic_value.data, ExecutionRecord).execution_id
                         capture_kind = "invocation"
                     else:
                         identity = _decode_enveloped_domain(value.data, TaskGraphAdmission).graph_id
@@ -529,6 +789,38 @@ async def _export_snapshot(
                 _validate_archive_content(content, encoded)
         archives.append({"scope_id": scope, "domain": domain.value,
                          "records": [accept(encode_record(record)) for record in retained]})
+    native_checkpoints = []
+    for group_id, backup in (source.native_checkpoints or {}).items():
+        native_roots.setdefault(group_id, []).extend(backup.message_roots(group_id))
+        raw = backup.to_json()
+        for name in ("runs", "events", "snapshots"):
+            for row in raw[name]:
+                accept(row)
+        native_checkpoints.append({"group_id": group_id, **raw})
+    native_messages = []
+    for group_id, roots in native_roots.items():
+        owner = (source.native_rows or {}).get(group_id)
+        if owner is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        domain, sequences, messages = owner
+        closure = NativeMessageClosure(sequences)
+        for root in roots:
+            closure.mark(root.store_digest, root.slices)
+        retained_sequences = [row for row in sequences if (row["store_digest"], row["sha256"]) in closure.retained_sequences]
+        retained_messages = [row for row in messages if (row["store_digest"], row["sha256"]) in closure.retained_messages]
+        if {(row["store_digest"], row["sha256"]) for row in retained_messages} != closure.retained_messages:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for row in retained_messages:
+            captured = (source.native_payloads or {}).get(group_id)
+            if captured is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            encoded = captured[(row["store_digest"], row["sha256"])]
+            content = ContentRecord.from_json(json.loads(row["message"]))
+            if content.payload.ref is not None:
+                await copy_reference(domain, content.payload.ref, encoded=encoded)
+        native_messages.append({"group_id": group_id, "domain": domain.value,
+                                "sequences": [accept(row) for row in retained_sequences],
+                                "messages": [accept(row) for row in retained_messages]})
     manifest = {
         "kind": "runtime-storage-snapshot",
         "format_version": 1,
@@ -536,10 +828,20 @@ async def _export_snapshot(
         "tenant_id": source.tenant_id,
         "domains": domains,
         "archives": archives,
+        "native_messages": native_messages,
+        "native_checkpoints": native_checkpoints,
+        "native_projections": [{"group_id": group_id,
+            "records": [accept(encode_record(value)) for value in projected.records],
+            "facts": [accept(encode_fact(value)) for value in projected.facts]}
+            for group_id, projected in (source.native_projections or {}).items()],
         "objects": objects,
     }
+    for optional in ("native_messages", "native_checkpoints", "native_projections"):
+        if not manifest[optional]:
+            del manifest[optional]
     payload = canonical_json_bytes(manifest)
-    if len(payload) + object_bytes > limits.max_bytes:
+    budget_entries, budget_bytes = snapshot_manifest_usage(manifest)
+    if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     digest = hashlib.sha256(payload).hexdigest()
     key = f"v1/runtime-storage-snapshot/{digest}"
@@ -593,6 +895,10 @@ async def restore_snapshot(
     namespace = validate_persistence_namespace(namespace)
     tenant_id = validate_tenant_id(tenant_id)
 
+    budget_entries, budget_bytes = snapshot_manifest_usage(manifest)
+    if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
     raw_domains = manifest["domains"]
     raw_objects = manifest.get("objects", [])
     if not isinstance(raw_objects, list):
@@ -618,11 +924,58 @@ async def restore_snapshot(
         entry_count += len(records)
     if entry_count > limits.max_entries:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    raw_native = manifest.get("native_messages", [])
+    if not isinstance(raw_native, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    native_closures = {}
+    native_entries = {}
+    for entry in raw_native:
+        if (not isinstance(entry, dict) or set(entry) != {"group_id", "domain", "sequences", "messages"}
+                or not isinstance(entry["group_id"], str) or not entry["group_id"]
+                or entry["group_id"] in native_entries
+                or not isinstance(entry["sequences"], list) or not isinstance(entry["messages"], list)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            PersistenceDomain(entry["domain"])
+        except (ValueError, TypeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        entry_count += len(entry["sequences"]) + len(entry["messages"])
+        if entry_count > limits.max_entries:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        validate_snapshot_native_rows(entry["sequences"], entry["messages"])
+        native_closures[entry["group_id"]] = NativeMessageClosure(entry["sequences"])
+        native_entries[entry["group_id"]] = entry
+    raw_checkpoints = manifest.get("native_checkpoints", [])
+    if not isinstance(raw_checkpoints, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    native_checkpoints = {}
+    for entry in raw_checkpoints:
+        if not isinstance(entry, dict) or not isinstance(entry.get("group_id"), str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        group_id = entry["group_id"]
+        if group_id in native_checkpoints or group_id not in native_entries:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if native_entries[group_id]["domain"] != PersistenceDomain.EXECUTION.value:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        from ._step_store import SqlStepStore
+        try:
+            backup = NativeStepBackup.from_json({key: value for key, value in entry.items() if key != "group_id"})
+            SqlStepStore.validate_backup(backup)
+        except (TypeError, ValueError, KeyError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        _validate_native_partition(backup.store_digest, namespace, tenant_id)
+        native_checkpoints[group_id] = backup
+        entry_count += len(backup.runs) + len(backup.events) + len(backup.snapshots)
+        if entry_count > limits.max_entries:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        for message_root in backup.message_roots(group_id):
+            native_closures[group_id].mark(message_root.store_digest, message_root.slices)
     object_bytes = 0
     expected_objects: set[tuple[str, str, str, int]] = set()
     expected_task_object_keys: set[str] = set()
     capture_dependencies: set[tuple[str, str]] = set()
     optional_capture_keys: set[str] = set()
+    required_checkpoint_groups: set[str] = set()
     decoded_domains: dict[
         PersistenceDomain,
         tuple[
@@ -634,6 +987,9 @@ async def restore_snapshot(
         ],
     ] = {}
 
+    semantic_domains = {}
+    binding_contents = {key: content for closure in archive_closures.values()
+                        for key, content in closure.binding_contents().items()}
     for domain_name, raw_domain in raw_domains.items():
         try:
             domain = PersistenceDomain(domain_name)
@@ -681,6 +1037,9 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
         records = tuple(decode_record(value) for value in raw_records)
+        semantic_records = tuple(expand_snapshot_binding(record, binding_contents,
+            namespace=namespace, tenant_id=tenant_id) for record in records)
+        semantic_domains[domain] = semantic_records
         aliases = _decode_snapshot_aliases(raw_aliases)
         facts = tuple(decode_fact(value) for value in raw_facts)
         operations = tuple(decode_operation(value) for value in raw_operations)
@@ -689,7 +1048,7 @@ async def restore_snapshot(
             namespace=namespace,
             tenant_id=tenant_id,
             domain=domain,
-            records=records,
+            records=semantic_records,
             aliases=aliases,
             facts=facts,
             operations=operations,
@@ -697,6 +1056,12 @@ async def restore_snapshot(
         )
         for value in (*records, *facts, *operations):
             _mark_archive_value(archive_closures, dict(value.data))
+            for native_root in iter_native_message_roots(value.data):
+                _validate_native_partition(native_root.store_digest, namespace, tenant_id)
+                closure = native_closures.get(native_root.group_id)
+                if closure is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                closure.mark(native_root.store_digest, native_root.slices)
         decoded_domains[domain] = (
             records,
             aliases,
@@ -721,10 +1086,18 @@ async def restore_snapshot(
                         admission.initial_request_digest,
                     )
                 )
-        for record in records:
+        for record in semantic_records:
             if record.kind == "execution":
                 from .contracts import ExecutionRecord
-                identity = _decode_enveloped_domain(record.data, ExecutionRecord).execution_id
+                execution = _decode_enveloped_domain(record.data, ExecutionRecord)
+                from ..agent import AgentBindingContract
+                if isinstance(execution.binding, AgentBindingContract) and execution.restart_checkpoints:
+                    source = execution.native_step_source
+                    if (source is None or source.group_id not in native_checkpoints
+                            or source.store_digest != native_checkpoints[source.group_id].store_digest):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    required_checkpoint_groups.add(source.group_id)
+                identity = execution.execution_id
                 optional_capture_keys.add(input_capture_key(namespace, tenant_id, "invocation", identity))
             elif record.kind == "task_admission":
                 identity = _decode_enveloped_domain(record.data, TaskGraphAdmission).graph_id
@@ -746,9 +1119,44 @@ async def restore_snapshot(
                 )
 
     validate_snapshot_references(
-        {domain: values[0] for domain, values in decoded_domains.items()},
+        semantic_domains,
         {domain: values[2] for domain, values in decoded_domains.items()},
     )
+    if required_checkpoint_groups != set(native_checkpoints):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    raw_projections = manifest.get("native_projections", [])
+    if not isinstance(raw_projections, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    native_record_projections, native_fact_projections = {}, {}
+    seen_projection_groups = set()
+    trace_values = decoded_domains.get(PersistenceDomain.TRACE, ((), (), (), (), {}))
+    trace_records = {value.key_digest: value for value in trace_values[0]}
+    trace_facts = {(value.stream_digest, value.sequence): value for value in trace_values[2]}
+    for entry in raw_projections:
+        if (not isinstance(entry, dict) or set(entry) != {"group_id", "records", "facts"}
+                or entry["group_id"] not in native_checkpoints or entry["group_id"] in seen_projection_groups
+                or not isinstance(entry["records"], list) or not isinstance(entry["facts"], list)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        seen_projection_groups.add(entry["group_id"])
+        validator = NativeBackupProjections(native_checkpoints[entry["group_id"]], namespace=namespace, tenant_id=tenant_id)
+        entry_count += len(entry["records"]) + len(entry["facts"])
+        if entry_count > limits.max_entries:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        for encoded in entry["records"]:
+            raw = decode_record(encoded)
+            visible = trace_records.get(raw.key_digest)
+            if (visible is None or raw.key_digest in native_record_projections
+                    or validator.validate(visible, raw.data) != raw):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            native_record_projections[raw.key_digest] = raw
+        for encoded in entry["facts"]:
+            raw = decode_fact(encoded)
+            key = raw.stream_digest, raw.sequence
+            visible = trace_facts.get(key)
+            if (visible is None or key in native_fact_projections
+                    or validator.validate(visible, raw.data) != raw):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            native_fact_projections[key] = raw
     actual_objects: set[tuple[str, str, str, int]] = set()
     decoded_objects: list[tuple[PersistenceDomain, ObjectRef, ObjectRef]] = []
     decoded_by_identity: dict[
@@ -881,6 +1289,38 @@ async def restore_snapshot(
                 encoded = await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
             _validate_archive_content(content, encoded)
 
+    for group_id, entry in native_entries.items():
+        checkpoint_payloads = {}
+        closure = native_closures[group_id]
+        sequence_keys = [(row["store_digest"], row["sha256"]) for row in entry["sequences"]]
+        message_keys = []
+        for row in entry["messages"]:
+            content = validate_native_message_content(row, group_id=group_id)
+            message_keys.append((row["store_digest"], row["sha256"]))
+            reference = content.payload.ref
+            if reference is not None:
+                identity = entry["domain"], reference.key, reference.digest, reference.size
+                expected_objects.add(identity)
+                decoded = decoded_by_identity.get(identity)
+                if decoded is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                content_ref = decoded[2]
+                encoded = await read_object(object_store, content_ref.key,
+                                            expected_digest=content_ref.digest, expected_size=content_ref.size)
+                _validate_archive_content(content, encoded)
+            else:
+                encoded = content.payload.decode()
+            if group_id in native_checkpoints:
+                raw = decode_payload_bytes(encoded, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
+                decode_model_message_payloads((raw,))
+                checkpoint_payloads[(row["store_digest"], row["sha256"])] = raw
+        if (len(sequence_keys) != len(set(sequence_keys)) or len(message_keys) != len(set(message_keys))
+                or set(sequence_keys) != closure.retained_sequences or set(message_keys) != closure.retained_messages):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if group_id in native_checkpoints:
+            _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
+
     if actual_objects != expected_objects:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -910,14 +1350,21 @@ async def restore_snapshot(
             for value in (*records, *facts, *operations):
                 referenced_scopes.update(root.scope_id for root in iter_archive_roots(value.data))
                 referenced_scopes.update(scope for scope, _, _ in iter_archive_content_refs(value.data))
+            domain_native_roots = tuple(root for value in (*records, *facts, *operations)
+                                        for root in iter_native_message_roots(value.data))
+            domain_checkpoints = native_checkpoints if domain is PersistenceDomain.EXECUTION else {}
+            domain_native_roots += tuple(root for group_id, backup in domain_checkpoints.items()
+                                         for root in backup.message_roots(group_id))
+            native_groups = {root.group_id for root in domain_native_roots} | set(domain_checkpoints)
             scope_mapping = {}
             archive_records: dict[bytes, StoredRecord] = {}
             archive_store = None
-            if referenced_scopes:
+            if referenced_scopes or native_groups:
                 group = resources.stores[domain].storage_group
                 if not isinstance(group, StateStorageGroup):
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 target_scope, archive_store = await group.open_archive(create=True)
+                native_mapping = {source_group: target_scope for source_group in native_groups}
                 for source_scope in referenced_scopes:
                     scope_mapping[source_scope] = target_scope
                     for record in archive_closures[source_scope].retained_records:
@@ -946,9 +1393,53 @@ async def restore_snapshot(
                         if previous is not None and previous != imported:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         archive_records[imported.key_digest] = imported
-            records = tuple(replace(value, data=rekey_archive_roots(dict(value.data), scope_mapping)) for value in records)
-            facts = tuple(replace(value, data=rekey_archive_roots(dict(value.data), scope_mapping)) for value in facts)
-            operations = tuple(replace(value, data=rekey_archive_roots(dict(value.data), scope_mapping)) for value in operations)
+            native_rows = []
+            for source_group in native_groups:
+                entry = native_entries[source_group]
+                domain_closure = NativeMessageClosure(entry["sequences"])
+                for native_root in domain_native_roots:
+                    if native_root.group_id == source_group:
+                        domain_closure.mark(native_root.store_digest, native_root.slices)
+                message_rows = []
+                for row in entry["messages"]:
+                    if (row["store_digest"], row["sha256"]) not in domain_closure.retained_messages:
+                        continue
+                    content = validate_native_message_content(row, group_id=source_group)
+                    reference = content.payload.ref
+                    if reference is not None and reference.key.startswith("v1/archive/"):
+                        prefix = f"v1/archive/{source_group}/"
+                        if not reference.key.startswith(prefix):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        key = f"v1/archive/{target_scope}/" + reference.key[len(prefix):]
+                        content_ref = decoded_by_identity[(entry["domain"], reference.key, reference.digest, reference.size)][2]
+                        destination = resources.archive_object_store(domain)
+                        await destination.put(key, object_store.open(content_ref.key),
+                                              expected_size=reference.size, expected_digest=reference.digest)
+                        content = replace(content, payload=StoredPayload.object(
+                            ObjectRef(reference.store_id, key, reference.digest, reference.size)))
+                    message_rows.append({**row, "message": canonical_json_bytes(content.to_json()).decode("utf-8")})
+                sequence_rows = [row for row in entry["sequences"]
+                                 if (row["store_digest"], row["sha256"]) in domain_closure.retained_sequences]
+                native_rows.append((sequence_rows, message_rows))
+            def rekey(value: Mapping) -> dict:
+                return rekey_native_step_sources(
+                    rekey_native_message_roots(rekey_archive_roots(dict(value), scope_mapping),
+                                              native_mapping if native_groups else {}),
+                    native_mapping if native_groups else {})
+            if domain is PersistenceDomain.TRACE:
+                records = tuple(native_record_projections.get(value.key_digest, value) for value in records)
+                facts = tuple(native_fact_projections.get((value.stream_digest, value.sequence), value) for value in facts)
+            records = tuple(replace(value, data=rekey(value.data)) for value in records)
+            facts = tuple(replace(value, data=rekey(value.data)) for value in facts)
+            operations = tuple(replace(value, data=rekey(value.data)) for value in operations)
+
+            native_restore = None
+            if domain_checkpoints:
+                resolver = resources.checkpoint_backup_source
+                if resolver is None:
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                backup = next(iter(domain_checkpoints.values()))
+                native_restore = await resolver(NativeStepSource(target_scope, backup.store_digest))
 
             async def publish(transaction: StateTransaction) -> None:
                 if archive_store is not None:
@@ -963,9 +1454,352 @@ async def restore_snapshot(
                         if missing:
                             await archive_tx.insert_records(missing)
                     await archive_store.mutate(retain)
+                if native_rows:
+                    store = resources.stores[domain]
+                    if not isinstance(store, SqlStateStore) or not isinstance(transaction, SqlStateTransaction):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                    await _insert_native_messages(transaction, store, native_rows)
+                if domain_checkpoints:
+                    from ._step_store import SqlStepStore
+                    store = resources.stores[domain]
+                    if not isinstance(store, SqlStateStore) or not isinstance(transaction, SqlStateTransaction):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                    for backup in domain_checkpoints.values():
+                        await transaction.run_sql(store.context, lambda session: native_restore.restore_backup(session, backup))
                 await _insert_snapshot_values(transaction, records, aliases, facts, operations, sequences)
 
-            await resources.stores[domain].mutate(publish)
+            try:
+                await resources.stores[domain].mutate(publish)
+            finally:
+                if native_rows and isinstance(resources.stores[domain], SqlStateStore):
+                    from ._step_store import SqlStepStore
+                    SqlStepStore.invalidate_context(resources.stores[domain].context)
+
+
+def snapshot_manifest_usage(
+    manifest: Mapping[str, object],
+) -> tuple[int, int]:
+    """Return entry count and bytes outside the serialized storage manifest.
+
+    Native and per-execution binding decoded bytes supplement encoded bytes so
+    exporters and restorers enforce the same hydration allowance.
+    """
+    domains = manifest.get("domains")
+    objects = manifest.get("objects")
+    if not isinstance(domains, Mapping) or not isinstance(objects, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    entries = len(objects)
+    object_bytes = 0
+    for raw_domain in domains.values():
+        if not isinstance(raw_domain, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for name in ("records", "aliases", "facts", "operations", "sequences"):
+            values = raw_domain.get(name)
+            if not isinstance(values, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            entries += len(values)
+    for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages")),
+                         ("native_checkpoints", ("runs", "events", "snapshots")),
+                         ("native_projections", ("records", "facts"))):
+        groups = manifest.get(name, [])
+        if not isinstance(groups, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for group in groups:
+            if not isinstance(group, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for field in fields:
+                rows = group.get(field)
+                if not isinstance(rows, list):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                entries += len(rows)
+    for raw_object in objects:
+        if not isinstance(raw_object, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = _object_ref_from_payload(raw_object.get("source"))
+        content = _object_ref_from_payload(raw_object.get("content"))
+        if source.digest != content.digest or source.size != content.size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        object_bytes += content.size
+    for group in manifest.get("native_messages", []):
+        for row in group["messages"]:
+            try:
+                content = ContentRecord.from_json(json.loads(row["message"]))
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            object_bytes += content.raw_size
+    binding_contents = {}
+    for group in manifest.get("archives", []):
+        records = tuple(decode_record(row) for row in group["records"]
+                        if isinstance(row, Mapping) and row.get("kind") == "archive_content"
+                        and isinstance(row.get("data"), Mapping)
+                        and row["data"].get("codec") == "execution-binding")
+        if records:
+            scope = group.get("scope_id")
+            if not isinstance(scope, str) or not scope:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            binding_contents.update(ArchiveClosure(scope, records).binding_contents())
+    for raw_domain in domains.values():
+        for row in raw_domain["records"]:
+            if isinstance(row, Mapping) and row.get("kind") == "execution":
+                object_bytes += snapshot_binding_size(decode_record(row), binding_contents)
+    return entries, object_bytes
+
+
+def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
+    """Compare portable state independently of relocated group/object addresses."""
+    archives = manifest.get("archives", [])
+    native = manifest.get("native_messages", [])
+    domains = manifest.get("domains")
+    objects = manifest.get("objects")
+    if (not isinstance(archives, list) or not isinstance(native, list)
+            or not isinstance(domains, Mapping) or not isinstance(objects, list)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    neutral = "0" * 32
+    groups = {}
+    for entry in archives:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("scope_id"), str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        groups[entry["scope_id"]] = neutral
+    for entry in native:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("group_id"), str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        groups[entry["group_id"]] = neutral
+
+    def reference(value: object) -> dict[str, object]:
+        ref = _object_ref_from_payload(value)
+        key = ref.key
+        if key.startswith("v1/archive/"):
+            parts = key.split("/", 3)
+            if len(parts) != 4 or parts[2] not in groups:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            key = f"v1/archive/{neutral}/{parts[3]}"
+        return dict(_object_ref_payload(replace(ref, key=key)))
+
+    def content(value: object) -> dict[str, object]:
+        parsed = ContentRecord.from_json(value)
+        if parsed.payload.ref is not None:
+            parsed = replace(parsed, payload=StoredPayload.object(_object_ref_from_payload(
+                reference(_object_ref_payload(parsed.payload.ref)))))
+        return parsed.to_json()
+
+    def ordered_unique(values: list[object]) -> list[object]:
+        unique = {canonical_json_bytes(value): value for value in values}
+        return [unique[key] for key in sorted(unique)]
+
+    archive_records = []
+    nonnative_objects = set()
+    for domain_name, values in domains.items():
+        try:
+            domain = PersistenceDomain(domain_name)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        for _, ref in iter_runtime_object_refs(values, default_domain=domain):
+            nonnative_objects.add((ref.key, ref.digest, ref.size))
+    for entry in archives:
+        rows = entry.get("records")
+        if not isinstance(rows, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for row in rows:
+            record = decode_record(row)
+            if record.kind == "archive_content":
+                parsed = ContentRecord.from_json(record.data)
+                if parsed.payload.ref is not None:
+                    ref = parsed.payload.ref
+                    nonnative_objects.add((ref.key, ref.digest, ref.size))
+                record = replace(record, data=content(record.data))
+            archive_records.append(encode_record(record))
+    native_sequences = []
+    native_messages = {}
+    native_objects = set()
+    for entry in native:
+        validate_snapshot_native_rows(entry.get("sequences"), entry.get("messages"))
+        native_sequences.extend(entry["sequences"])
+        for row in entry["messages"]:
+            parsed = validate_native_message_content(row, group_id=entry["group_id"])
+            # Raw bytes, not compression or transport location, define message
+            # identity. Export/restore verify object bytes before this comparison;
+            # the shared validator also verifies inline bytes here.
+            body = {"codec": parsed.codec, "raw_digest": parsed.raw_digest, "raw_size": parsed.raw_size}
+            key = row["store_digest"], row["sha256"]
+            message = {"store_digest": key[0], "sha256": key[1], "message": body}
+            if key in native_messages and native_messages[key] != message:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            native_messages[key] = message
+            if parsed.payload.ref is not None:
+                ref = parsed.payload.ref
+                native_objects.add((ref.key, ref.digest, ref.size))
+    normalized_objects = []
+    for raw in objects:
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = reference(raw.get("source"))
+        target = _object_ref_from_payload(raw.get("content"))
+        if (source["digest"], source["size"]) != (target.digest, target.size):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        original = _object_ref_from_payload(raw.get("source"))
+        identity = original.key, original.digest, original.size
+        if identity in native_objects and identity not in nonnative_objects:
+            continue
+        normalized_objects.append({
+            "domain": "archive" if source["key"].startswith("v1/archive/") else raw.get("domain"),
+            "source": source,
+        })
+    normalized_domains = rekey_native_step_sources(
+        rekey_native_message_roots(rekey_archive_roots(dict(domains), groups), groups), groups)
+    checkpoint_values = []
+    for entry in manifest.get("native_checkpoints", []):
+        if not isinstance(entry, Mapping) or entry.get("group_id") not in groups:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        backup = NativeStepBackup.from_json({key: value for key, value in entry.items() if key != "group_id"})
+        checkpoint_values.append(backup.to_json())
+    return canonical_sha256({
+        "kind": manifest.get("kind"), "format_version": manifest.get("format_version"),
+        "namespace": manifest.get("namespace"), "tenant_id": manifest.get("tenant_id"),
+        "domains": normalized_domains,
+        "archives": ordered_unique(archive_records),
+        "native_checkpoints": ordered_unique(checkpoint_values),
+        "native_projections": ordered_unique([
+            {"records": entry["records"], "facts": entry["facts"]}
+            for entry in manifest.get("native_projections", [])]),
+        "native_sequences": ordered_unique(native_sequences),
+        "native_messages": ordered_unique(list(native_messages.values())),
+        "objects": ordered_unique(normalized_objects),
+    })
+
+
+def _validate_native_partition(store_digest: str, namespace: str, tenant_id: str) -> None:
+    from ._step_store import SqlStepStore
+
+    if store_digest != SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _validate_native_checkpoint_payloads(
+    backup: NativeStepBackup, closure: NativeMessageClosure,
+    payloads: Mapping[tuple[str, str], bytes],
+) -> None:
+    from ._step_store import SqlStepStore
+
+    try:
+        SqlStepStore.validate_backup_payloads(backup, closure, payloads)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+async def _capture_native_payloads(
+    group_id: str, sequences: list[dict[str, object]], messages: list[dict[str, object]],
+    *, budget: _SnapshotCaptureBudget, objects: ObjectStore, backup: NativeStepBackup | None,
+) -> dict[tuple[str, str], bytes]:
+    # Reserve the entire reachable encoded and decoded inventory before opening
+    # an object or decompressing an inline body. Row metadata was already charged.
+    contents = []
+    required_bytes = required_entries = 0
+    for row in messages:
+        content = ContentRecord.from_json(json.loads(row["message"]))
+        required_bytes += content.raw_size
+        if content.payload.ref is not None:
+            required_bytes += content.payload.size
+            required_entries += 1
+        contents.append(content)
+    if (budget.entries + required_entries > budget.limits.max_entries
+            or budget.byte_size + required_bytes > budget.limits.max_bytes):
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    budget.entries += required_entries
+    budget.byte_size += required_bytes
+    encoded_payloads, raw_payloads = {}, {}
+    for row, content in zip(messages, contents, strict=True):
+        validate_native_message_content(row, group_id=group_id, verify_inline=False)
+        reference = content.payload.ref
+        encoded = (content.payload.decode() if reference is None else await read_object(
+            objects, reference.key, expected_digest=reference.digest, expected_size=reference.size))
+        if reference is None:
+            if content.payload.encoding == "json":
+                encoded = canonical_json_bytes(encoded)
+            elif isinstance(encoded, str):
+                encoded = encoded.encode("utf-8")
+        if (not isinstance(encoded, bytes) or len(encoded) != content.payload.size
+                or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raw = decode_payload_bytes(encoded, codec=content.compression,
+                                   raw_digest=content.raw_digest, raw_size=content.raw_size)
+        decode_model_message_payloads((raw,))
+        identity = row["store_digest"], row["sha256"]
+        encoded_payloads[identity] = encoded
+        raw_payloads[identity] = raw
+    if backup is not None:
+        _validate_native_checkpoint_payloads(backup, NativeMessageClosure(sequences), raw_payloads)
+    return encoded_payloads
+
+
+async def _read_native_messages(
+    store: SqlStateStore, roots: list[NativeMessageRoot], *, budget: _SnapshotCaptureBudget,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    from sqlalchemy import and_, or_, select
+    from ._step_schema import build_step_sql_metadata
+
+    metadata = build_step_sql_metadata()
+    async def read(transaction: StateTransaction) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        if not isinstance(transaction, SqlStateRowReader):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        nodes = metadata.tables["ai_step_sequences"]
+        columns = ("store_digest", "sha256", "message_sha256", "tree_count",
+                   "left_sha256", "right_sha256", "next_sha256")
+        sequences = []
+        after = None
+        partitions = sorted({root.store_digest for root in roots})
+        while True:
+            limit = budget.page_size(128)
+            statement = select(*(nodes.c[name] for name in columns)).where(nodes.c.store_digest.in_(partitions))
+            if after is not None:
+                statement = statement.where(or_(nodes.c.store_digest > after[0],
+                    and_(nodes.c.store_digest == after[0], nodes.c.sha256 > after[1])))
+            rows = await transaction.read_sql_rows(store.context,
+                statement.order_by(nodes.c.store_digest, nodes.c.sha256).limit(limit))
+            for row in rows:
+                budget.accept(row)
+                sequences.append(dict(row))
+            if len(rows) < limit:
+                break
+            after = rows[-1]["store_digest"], rows[-1]["sha256"]
+        closure = NativeMessageClosure(sequences)
+        for root in roots:
+            closure.mark(root.store_digest, root.slices)
+        sequences = [row for row in sequences if (row["store_digest"], row["sha256"]) in closure.retained_sequences]
+        messages = []
+        table = metadata.tables["ai_step_messages"]
+        for partition in partitions:
+            identities = sorted(identity for scope, identity in closure.retained_messages if scope == partition)
+            offset = 0
+            while offset < len(identities):
+                batch = identities[offset:offset + budget.page_size(128)]
+                rows = await transaction.read_sql_rows(store.context, select(
+                    table.c.store_digest, table.c.sha256, table.c.message).where(
+                    table.c.store_digest == partition, table.c.sha256.in_(batch)).order_by(table.c.sha256))
+                if len(rows) != len(batch):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for row in rows:
+                    budget.accept(row)
+                    messages.append(dict(row))
+                offset += len(batch)
+        return sequences, messages
+    return await store.read(read)
+
+
+async def _insert_native_messages(
+    transaction: SqlStateTransaction, store: SqlStateStore,
+    entries: list[tuple[list[dict[str, object]], list[dict[str, object]]]],
+) -> None:
+    from ._step_schema import build_step_sql_metadata
+
+    metadata = build_step_sql_metadata()
+    async def insert(session: "AsyncSession") -> None:
+        for sequences, messages in entries:
+            for name, rows in (("ai_step_messages", messages), ("ai_step_sequences", sequences)):
+                table = metadata.tables[name]
+                for start in range(0, len(rows), 128):
+                    await store.context.run_statement(store.context.dialect.insert_ignore_conflict_many(
+                        session, table=table, rows=rows[start:start + 128], index_elements=("store_digest", "sha256")))
+    await transaction.run_sql(store.context, insert)
 
 
 def _capture_contains_archived_context(value: object) -> bool:
@@ -1100,4 +1934,4 @@ async def _put_snapshot_object(
 from ._capability_marker import ensure_capability_partition_marker
 from ._snapshot import snapshot_object_ref_from_payload, snapshot_object_ref_payload
 
-__all__ = ['RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
+__all__ = ['snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']

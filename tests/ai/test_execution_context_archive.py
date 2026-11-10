@@ -6,13 +6,13 @@ import hashlib
 from dataclasses import replace
 
 import pytest
+from sqlalchemy import event
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.inputs import ExecutionContextArchive
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import PersistenceDomain, Persistence
-from linktools.ai.persistence._archive import ArchiveRoot
+from linktools.ai.persistence import NativeMessageRoot, PersistenceDomain, Persistence
 from linktools.ai.persistence._archive_closure import iter_archive_content_refs, rekey_archive_roots
 from linktools.ai.persistence.codec import encode_domain
 from linktools.ai.storage import StoredPayload
@@ -68,7 +68,7 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
         ))
         first = await service.prepare(context)
         await first.archive.store.mutate(lambda tx: first.archive.publish(tx, first.records))
-        root = ArchiveRoot.from_json(first.reference.payload.decode()["history"])
+        root = NativeMessageRoot.from_json(first.reference.payload.decode()["history"])
         reads = []
         original = first.archive.store.read_records
 
@@ -77,10 +77,22 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
             return await original(keys)
 
         monkeypatch.setattr(first.archive.store, "read_records", capture)
-        reused = await service.prepare(context, history_root=root,
-                                       history_digest=hashlib.sha256(context.history).hexdigest())
+        sql_reads = []
+        engine = state.execution.executions.state_store.context.engine.sync_engine
+
+        def capture_sql(connection, cursor, statement, parameters, execution_context, many):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                sql_reads.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture_sql)
+        try:
+            reused = await service.prepare(context, history_root=root,
+                                           history_digest=hashlib.sha256(context.history).hexdigest())
+        finally:
+            event.remove(engine, "before_cursor_execute", capture_sql)
+        assert not sql_reads, "verified native prefix reuse must not issue SQL reads"
         assert not reads
-        assert not reused.records.records
+        assert not reused.records.records and not reused.records.native_messages
         assert reused.reference == first.reference
         assert await service.load(reused.reference) == context
         changed_messages = list(context.model_messages())
@@ -88,7 +100,7 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
         changed = ExecutionInputContext.from_messages(changed_messages)
         retained = await service.prepare(changed, history_root=root,
                                          history_digest=hashlib.sha256(context.history).hexdigest())
-        assert retained.records.records
+        assert retained.records.native_messages
         assert retained.reference != first.reference
     finally:
         await state.close()
@@ -130,5 +142,79 @@ async def test_context_archive_handle_is_bound_and_failed_open_is_retryable(tmp_
             await other.load(prepared.reference)
     finally:
         await state.close()
-    with pytest.raises(AIError):
+    with pytest.raises(AIError) as closed:
         await service.load(prepared.reference)
+    assert closed.value.code is ErrorCode.STORAGE_CLOSED
+    with pytest.raises(AIError) as closed:
+        await service.prepare(context)
+    assert closed.value.code is ErrorCode.STORAGE_CLOSED
+
+
+@pytest.mark.parametrize("has_instructions", (False, True))
+async def test_instruction_read_does_not_materialize_history_or_other_components(tmp_path, monkeypatch, has_instructions):
+    from linktools.ai.persistence import SqlStepStore
+    from linktools.ai.persistence.runs import ContentArchive
+    from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
+
+    state = Persistence(_storage("sqlite", tmp_path))
+    await state.initialize(namespace="context-instructions", tenant_id="tenant")
+    try:
+        service = ExecutionContextArchive(
+            state.execution.executions.state_store,
+            state.archive_object_store(PersistenceDomain.EXECUTION),
+            namespace="context-instructions", tenant_id="tenant",
+        )
+        instructions = (RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "accepted rule"),)).to_payload()
+                        if has_instructions else None)
+        context = ExecutionInputContext.from_messages(
+            tuple(ModelRequest(parts=[UserPromptPart("history" * 1000)]) for _ in range(100)),
+            repository_instructions=instructions, session_metadata={"large": "metadata" * 10000},
+            memory={"large": {"content": "memory" * 10000}}, preload_skills=({"large": "skill" * 10000},),
+        )
+        prepared = await service.prepare(context)
+        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        cold = ExecutionContextArchive(
+            state.execution.executions.state_store,
+            state.archive_object_store(PersistenceDomain.EXECUTION),
+            namespace="context-instructions", tenant_id="tenant",
+        )
+        reads = []
+        original = ContentArchive.read_contents
+
+        async def read_contents(self, identities, *, codec, reserve=None):
+            reads.extend(identities)
+            return await original(self, identities, codec=codec, reserve=reserve)
+
+        async def reject_history(*args, **kwargs):
+            raise AssertionError("instruction-only reads must not read history")
+
+        monkeypatch.setattr(ContentArchive, "read_contents", read_contents)
+        monkeypatch.setattr(ContentArchive, "read_ranges", reject_history)
+        monkeypatch.setattr(SqlStepStore, "read_message_roots", reject_history)
+        assert await cold.load_repository_instructions(prepared.reference) == instructions
+        component = prepared.reference.payload.decode()["repository_instructions"]
+        assert reads == ([] if component is None else [component["content_id"]])
+        if component is not None:
+            for name, invalid in (("archive_scope", "other"), ("content_scope", "other"), ("content_id", "0" * 64)):
+                manifest = prepared.reference.payload.decode()
+                manifest["repository_instructions"][name] = invalid
+                malformed = replace(prepared.reference, payload=StoredPayload.inline_json(manifest))
+                with pytest.raises(AIError) as failure:
+                    await cold.load_repository_instructions(malformed)
+                assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("has_instructions", (False, True))
+async def test_pending_inline_context_instructions_need_no_archive(has_instructions):
+    from linktools.ai.execution import RuntimePayloadRef
+    from linktools.ai.runtime._local import LocalExecutionBackend
+    from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
+
+    instructions = (RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "pending rule"),))
+                    if has_instructions else None)
+    context = ExecutionInputContext.from_messages((), repository_instructions=(
+        None if instructions is None else instructions.to_payload()))
+    reference = RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION)
+    assert await LocalExecutionBackend.load_input_repository_instructions(object(), reference) == instructions

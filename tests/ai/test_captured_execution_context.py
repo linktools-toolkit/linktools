@@ -140,7 +140,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_captured_repository_instructions_never_refresh_from_workspace(tmp_path: Path) -> None:
+async def test_captured_repository_instructions_never_refresh_from_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.workspace import Workspace
 
     work = tmp_path / "workspace"
@@ -157,12 +157,44 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
         await source.wait()
         capture = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "instructions-capture"))
         value = await runtime_engine.inputs.read_agent(capture, principal=principal)
+        assert value.repository_instructions == value.input_context.repository_instructions
+        from linktools.ai.inputs import ExecutionContextArchive
+        async def reject_full_context(*args, **kwargs):
+            raise AssertionError("clean capture must not load model history")
+        with monkeypatch.context() as patch:
+            patch.setattr(ExecutionContextArchive, "load", reject_full_context)
+            clean_capture = await runtime_engine.inputs.capture_input(
+                source.execution_id, CaptureInputRequest(principal, "instructions-clean", context_policy="clean"))
+        clean = await runtime_engine.inputs.read_agent(clean_capture, principal=principal)
+        assert clean.input_context is None
+        assert clean.repository_instructions == value.repository_instructions
+        expected_instructions = dict(value.input_context.repository_instructions)
+        assert expected_instructions["documents"][0]["content"] == "Historical repository instruction"
+        for reference, policy, key in ((capture, "captured", "instructions-capture"),
+                                       (clean_capture, "clean", "instructions-clean")):
+            detached = await runtime_engine.inputs.read_agent(reference, principal=principal)
+            detached.repository_instructions["documents"][0]["content"] = "Consumer annotation"
+            with monkeypatch.context() as patch:
+                if policy == "clean":
+                    patch.setattr(ExecutionContextArchive, "load", reject_full_context)
+                repeated = await runtime_engine.inputs.capture_input(
+                    source.execution_id, CaptureInputRequest(principal, key, context_policy=policy))
+            assert repeated == reference
+            restored = await runtime_engine.inputs.read_agent(repeated, principal=principal)
+            assert restored.repository_instructions == expected_instructions
+        assert dict(value.input_context.repository_instructions) == expected_instructions
         instructions.write_text("Changed live repository instruction", encoding="utf-8")
         rerun = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED
         interactions = await rerun.model_interactions(include_content=True)
         assert "Historical repository instruction" in str(interactions.items[0].request)
         assert "Changed live repository instruction" not in str(interactions.items[0].request)
+        for handle in (source, rerun):
+            record = await persistence_149.execution.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
+            assert record is not None and record.repository_instructions is None
+            context = await runtime._execution_service.runtime_backend().load_input_context(record.input_context)
+            assert context is not None
+            assert context.repository_instructions == value.input_context.repository_instructions
 
 
 @pytest.mark.asyncio

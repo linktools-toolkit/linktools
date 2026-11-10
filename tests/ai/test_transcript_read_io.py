@@ -16,9 +16,11 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence import _archive, _history
+from linktools.ai.persistence import _archive, _history, _step_message_content
+from linktools.ai.persistence import NativeMessageRoot
 from linktools.ai.persistence.state import FactQuery, active_state_scope
 
+from .test_history_projection_conformance import _message_content_records
 from .test_incremental_projection_boundaries import _storage
 from .test_runtime_storage_io_session import _listen_sql, _record_selects
 from .test_session_history_projection import _materialize, _session
@@ -43,15 +45,18 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
         contents = await repository.content_archive()
         domain_partition = archive.state_store.store_digest.hex()
         archive_partition = contents.store.store_digest.hex()
+        latest = await repository.latest_chunk(session.history_id)
+        assert latest is not None and isinstance(latest.content, NativeMessageRoot)
+        native_partition = latest.content.store_digest
         body_ids: list[str] = []
-        read_content = contents._read_content
+        decode_body = _step_message_content.decode_payload_bytes
 
-        async def read_body(content):
+        def read_body(encoded, *, codec, raw_digest, raw_size):
             assert active_state_scope() is None
-            body_ids.append(content.identity)
-            return await read_content(content)
+            body_ids.append(raw_digest)
+            return decode_body(encoded, codec=codec, raw_digest=raw_digest, raw_size=raw_size)
 
-        monkeypatch.setattr(contents, "_read_content", read_body)
+        monkeypatch.setattr(_step_message_content, "decode_payload_bytes", read_body)
         statements: list[tuple[str, object]] = []
         listener = _listen_sql(engine, statements)
         begins: list[object] = []
@@ -89,24 +94,27 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
                                if archive_partition in item[1]]
             assert len(domain_records) == 1
             assert sum("FROM ai_state_facts" in statement for statement, _ in statements) == 1
-            scopes: dict[str, set[int]] = {domain_partition: set(), archive_partition: set()}
+            scopes: dict[str, set[int]] = {domain_partition: set(), native_partition: set()}
             scope_index = 0
             for statement, parameters in statements:
                 if statement == "BEGIN":
                     scope_index += 1
-                if statement.lstrip().upper().startswith("SELECT"):
+                if statement.lstrip().upper().startswith(("SELECT", "WITH")):
                     for partition in scopes:
                         if partition in parameters:
                             scopes[partition].add(scope_index)
-            assert len(scopes[domain_partition]) == len(scopes[archive_partition]) == 1
-            assert scopes[domain_partition].isdisjoint(scopes[archive_partition])
-            # Exact canonical content uses two bounded fixed-slot index levels.
-            assert len(archive_records) == 2
-            assert all("LEFT OUTER JOIN" in statement and "KEY_DIGEST" in statement
-                       for statement, _ in archive_records)
+            assert len(scopes[domain_partition]) == len(scopes[native_partition]) == 1
+            assert scopes[domain_partition].isdisjoint(scopes[native_partition])
+            # Native bodies use one bounded range query, not generic archive rows.
+            native_reads = [statement for statement, _ in statements
+                            if "AI_STEP_MESSAGES" in statement.upper()
+                            and statement.lstrip().upper().startswith(("SELECT", "WITH"))]
+            assert archive_records == []
+            assert len(native_reads) == 1
+            assert "JOIN" in native_reads[0].upper()
             assert len(body_ids) == len(set(body_ids)) == 4
             # Keep the aggregate cost visible alongside the domain-only budget.
-            assert len(_record_selects(statements)) == 3
+            assert len(_record_selects(statements)) + len(native_reads) == 2
             assert len(begins) == 2
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", listener)
@@ -220,8 +228,7 @@ async def test_transcript_payload_and_yield_release_state_scope(
         latest = await repository.latest_chunk(session.history_id)
         assert latest is not None
         contents = await repository.content_archive()
-        identities = await contents.content_ids(latest.content)
-        records = await contents.content_records(identities)
+        records = await _message_content_records(contents, (latest.content,))
         assert all(record.payload.kind == "object" for record in records)
         objects = contents._objects
         assert objects is not None

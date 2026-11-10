@@ -5,6 +5,7 @@
 import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -16,6 +17,7 @@ from ._storage_keys import runtime_object_key
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, decode_model_messages, encode_model_messages
 from ._archive import ArchiveRoot, ContentArchive, PreparedArchive
 from ._transcript_staging import MessageArchive
+from ._message_root import NativeMessageRoot
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -63,6 +65,10 @@ from .state import (
     sortable_identity,
     stream_digest,
 )
+
+if TYPE_CHECKING:
+    from ._step_store import SqlStepStore
+
 
 _logger = environ.get_logger("ai.runtime.state.history")
 _CHUNK_TARGET = 256 * 1024
@@ -168,6 +174,8 @@ class TranscriptRepository:
         self._history_repository = history_repository
         self._pending_cache: dict[str, _PendingCache] = {}
         self._content_archive: ContentArchive | None = None
+        self._native_messages: SqlStepStore | None = None
+
 
     async def content_archive(self, *, create: bool = False) -> ContentArchive:
         if self._content_archive is None:
@@ -180,13 +188,35 @@ class TranscriptRepository:
             self._content_archive = ContentArchive(store, scope, namespace=self._namespace,
                 tenant_id=self._tenant_id, object_store=self._archive_object_store,
                 object_reader=self._archive_object_reader)
+        if self._native_messages is not None:
+            self._native_messages.bind_message_archive(self._content_archive)
         return self._content_archive
+
+    def bind_native_message_store(self, store: "SqlStepStore") -> None:
+        """Use only the producer bound to this exact physical SQL group."""
+        from ._sql import SqlStateStore
+        from ._step_store import SqlStepStore
+
+        if (type(store) is not SqlStepStore or not isinstance(self._store, SqlStateStore)
+                or store.storage_context.engine is not self._store.context.engine
+                or store.store_digest != SqlStepStore.scope_digest(namespace=self._namespace, tenant_id=self._tenant_id)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        self._native_messages = store
+        if self._content_archive is not None:
+            store.bind_message_archive(self._content_archive)
+
+    async def publish_native_archive(
+        self, transaction: StateTransaction, prepared: PreparedArchive, *, owner_written: bool,
+    ) -> None:
+        if prepared.native_messages and owner_written:
+            archive = await self.content_archive()
+            await archive.publish_native(transaction, prepared)
 
     async def publish_archive(self, prepared: PreparedArchive) -> None:
         if not prepared.records:
             return
         archive = await self.content_archive()
-        await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
+        await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared, native=False))
 
     @property
     def runtime_domain(self) -> PersistenceDomain:
@@ -567,6 +597,7 @@ class TranscriptRepository:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         if prepared.new_pending_parts:
             await transaction.insert_facts(prepared.new_pending_parts)
+        await self.publish_native_archive(transaction, prepared.archive, owner_written=True)
 
     async def verify_observation(self, prepared: PreparedTranscriptObservation) -> bool:
         head = await self.get_head(prepared.owner_id)
@@ -655,19 +686,26 @@ class TranscriptRepository:
         origin: TranscriptOrigin,
         prepared: PreparedArchive,
     ) -> TranscriptChunk:
-        raw = encode_model_messages(messages)
+        snapshot = MessageArchive().snapshot(messages)
+        digest, size = snapshot.encoded_digest()
         archive = await self.content_archive(create=True)
-        root = await archive.prepare_append(archive.empty_root(), tuple(
-            ("model-message", encode_model_messages((message,))) for message in messages
-        ), prepared)
+        if self._native_messages is not None:
+            native = await self._native_messages.prepare_message_content(snapshot, archive=prepared)
+            prepared.native_messages[native.root] = native
+            prepared.native_publishers[native.root] = self._native_messages.publish_archived_messages
+            root = self._native_messages.message_root(native.root)
+        else:
+            root = await archive.prepare_append(archive.empty_root(), tuple(
+                ("model-message", raw) for raw in snapshot.encoded_payloads()
+            ), prepared)
         return TranscriptChunk(
             owner_id,
             first_message_index,
             len(messages),
             origin,
             "raw",
-            hashlib.sha256(raw).hexdigest(),
-            len(raw),
+            digest,
+            size,
             root,
         )
 
@@ -977,12 +1015,27 @@ class TranscriptRepository:
         archive = await self.content_archive(create=True)
         snapshot = MessageArchive().snapshot(messages)
         raw_digest, raw_size = snapshot.encoded_digest()
+        if self._native_messages is not None:
+            previous = None
+            if baseline is not None and len(baseline.items) == 1:
+                block = baseline.items[0]
+                if (isinstance(block, ArchivedContextBlock) and isinstance(block.root, NativeMessageRoot)
+                        and self._native_messages.can_reuse_message_root(
+                            block.root, raw_digest=block.raw_digest, raw_size=block.raw_size,
+                        )):
+                    previous = (block.root, block.raw_digest, block.raw_size)
+            native = await self._native_messages.prepare_message_content(snapshot, baseline=previous, archive=prepared)
+            prepared.native_messages[native.root] = native
+            prepared.native_publishers[native.root] = self._native_messages.publish_archived_messages
+            return ContextProjection((ArchivedContextBlock(
+                self._native_messages.message_root(native.root), raw_digest, raw_size,
+            ),))
         root = archive.empty_root()
         start = 0
         previous_root = None
         if baseline is not None and len(baseline.items) == 1:
             block = baseline.items[0]
-            if (isinstance(block, ArchivedContextBlock)
+            if (isinstance(block, ArchivedContextBlock) and isinstance(block.root, ArchiveRoot)
                     and block.root.scope_id == archive.scope_id
                     and block.root.content_scope == archive.content_scope):
                 previous_root = block.root
@@ -1156,6 +1209,31 @@ class TranscriptRepository:
                 for message in messages:
                     yield message
 
+    async def _read_message_roots(
+        self, roots: Sequence[ArchiveRoot | NativeMessageRoot], *,
+        append_frontiers: dict[ArchiveRoot, tuple[StoredRecord, ...]] | None = None,
+    ) -> tuple[tuple[bytes, ...], ...]:
+        if not roots:
+            return ()
+        archive = await self.content_archive()
+        native = tuple(root for root in roots if isinstance(root, NativeMessageRoot))
+        generic = tuple(root for root in roots if isinstance(root, ArchiveRoot))
+        if len(native) + len(generic) != len(roots):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if native and self._native_messages is None:
+            from ._step_store import SqlStepStore
+
+            reader = SqlStepStore.for_state_store(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+            if reader is None:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            reader.bind_message_archive(archive)
+            self._native_messages = reader
+        native_values = iter(await self._native_messages.read_message_roots(native) if native else ())
+        generic_values = iter(await archive.read_ranges(generic, codec="model-message",
+            append_frontiers=append_frontiers) if generic else ())
+        return tuple(next(native_values) if isinstance(root, NativeMessageRoot)
+                     else next(generic_values) for root in roots)
+
     async def _decode_chunk_messages(self, chunk: TranscriptChunk) -> tuple[ModelMessage, ...]:
         return (await self._decode_chunks_messages((chunk,)))[0]
 
@@ -1173,7 +1251,7 @@ class TranscriptRepository:
             if chunk.content.count != chunk.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             roots.append(chunk.content.slice(start, end))
-        raw_groups = await archive.read_ranges(tuple(roots), codec="model-message")
+        raw_groups = await self._read_message_roots(tuple(roots))
         results = []
         for (chunk, start, end), group in zip(ranges, raw_groups, strict=True):
             whole_chunk = start == 0 and end == chunk.message_count
@@ -1627,8 +1705,8 @@ class TranscriptRepository:
         append_frontiers: dict[ArchiveRoot, tuple[StoredRecord, ...]] = {}
         if archive_blocks:
             archive = await self.content_archive()
-            groups = await archive.read_ranges(tuple(block.root for block in archive_blocks), codec="model-message",
-                                               append_frontiers=append_frontiers)
+            groups = await self._read_message_roots(tuple(block.root for block in archive_blocks),
+                                                    append_frontiers=append_frontiers)
             for block, group in zip(archive_blocks, groups, strict=True):
                 raw, messages = decode_model_message_payloads(group)
                 if len(messages) != block.root.count or len(raw) != block.raw_size or hashlib.sha256(raw).hexdigest() != block.raw_digest:
@@ -1657,10 +1735,21 @@ class TranscriptRepository:
                 first = items[0][0]
                 if len(items) == 1:
                     root, digest = first.root, first.raw_digest
-                else:
-                    if any(item.root.scope_id != first.root.scope_id or item.root.content_scope != first.root.content_scope for item, _refs in items):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    root = ArchiveRoot(first.root.scope_id, first.root.content_scope, tuple(span for item, _refs in items for span in item.root.slices))
+                elif all(type(item.root) is type(first.root) for item, _refs in items):
+                    if isinstance(first.root, NativeMessageRoot):
+                        if any(not isinstance(item.root, NativeMessageRoot)
+                               or (item.root.group_id, item.root.store_digest) != (first.root.group_id, first.root.store_digest)
+                               for item, _refs in items):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        root = NativeMessageRoot(first.root.group_id, first.root.store_digest,
+                            tuple(span for item, _refs in items for span in item.root.slices))
+                    else:
+                        if any(not isinstance(item.root, ArchiveRoot)
+                               or (item.root.scope_id, item.root.content_scope) != (first.root.scope_id, first.root.content_scope)
+                               for item, _refs in items):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        root = ArchiveRoot(first.root.scope_id, first.root.content_scope,
+                            tuple(span for item, _refs in items for span in item.root.slices))
                     raw = combine_model_message_payloads(body for item, _refs in items for body in archived_payloads[item.root])
                     digest = hashlib.sha256(raw).hexdigest()
             frontier = append_frontiers.get(root, ()) if len(items) == 1 else ()
@@ -2151,8 +2240,17 @@ class TranscriptRepository:
             expected_size=payload.size,
         )
 
-    async def read_payload(self, payload: StoredPayload) -> bytes:
-        return await self._read_payload(payload)
+    async def read_payload(
+        self, payload: StoredPayload, *, source_domain: PersistenceDomain | None = None,
+    ) -> bytes:
+        if source_domain is not None and not isinstance(source_domain, PersistenceDomain):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if source_domain is None or source_domain is self._runtime_domain or payload.kind == "inline":
+            return await self._read_payload(payload)
+        require_no_run_history_lock("TranscriptRepository.read_payload")
+        if self._object_reader is None or payload.ref is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        return await self._object_reader(source_domain, payload.ref)
 
     def decode_chunk(self, fact: StoredFact) -> TranscriptChunk:
         try:

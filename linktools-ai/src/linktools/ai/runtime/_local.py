@@ -14,6 +14,7 @@ from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
+from ..steps import NativeStepSource
 from pydantic import ValidationError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -102,6 +103,7 @@ from ..model.messages import encode_model_messages
 from ..execution import ExecutionInputContext
 from pydantic_ai_harness.memory import MemoryStore
 from ..memory import PersistentMemoryStore
+from ..steps import NativeLifecycleEvent
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import (
     RuntimeToolOperationBridge,
@@ -160,7 +162,7 @@ from ..persistence.commands import RuntimeRecoveryCommands
 from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
 from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction
-from ..persistence import SqlStepStore
+from ..persistence import SqlStepStore, StepWriteReceipt
 from ..storage import SqlStorageContext
 
 
@@ -303,6 +305,7 @@ class LocalExecutionBackend:
         archive_objects: ObjectStore | None = None,
         archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
         restore_binding: "Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None" = None,
+        native_step_source: Callable[[AgentBinding], Awaitable[NativeStepSource | None]] | None = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
         execution_cwd: "str | None",
@@ -354,6 +357,7 @@ class LocalExecutionBackend:
         self._executor = executor
         self._catalog = catalog
         self._restore_binding = restore_binding
+        self._native_step_source = native_step_source
         self._workspace = workspace
         self._limits = limits
         self._execution_cwd = execution_cwd
@@ -443,6 +447,10 @@ class LocalExecutionBackend:
             )
         if binding.binding_digest != execution.binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.native_step_source is not None:
+            source = (None if self._native_step_source is None else await self._native_step_source(binding))
+            if source != execution.native_step_source:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return binding
 
     async def validate_binding(self, execution: ExecutionRecord, *, binding: AgentBinding | None = None) -> AgentBinding:
@@ -4102,6 +4110,19 @@ class LocalExecutionBackend:
             return await self._context_archive.load(reference)
         return ExecutionInputContext.from_payload(value)
 
+    async def load_input_repository_instructions(
+        self, reference: RuntimePayloadRef,
+    ) -> RepositoryInstructions | None:
+        if reference.source_domain is not PersistenceDomain.EXECUTION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload = reference.payload
+        value = payload.decode() if payload.kind == "inline" else json.loads(await read_runtime_object(self._execution_objects, payload.ref))
+        if isinstance(value, Mapping) and value.get("kind") == "execution-context":
+            instructions = await self._context_archive.load_repository_instructions(reference)
+        else:
+            instructions = ExecutionInputContext.from_payload(value).repository_instructions
+        return None if instructions is None else RepositoryInstructions.from_payload(instructions)
+
     async def _prepare_input_context(self, context: ExecutionInputContext) -> RuntimePayloadRef:
         # A pending owner retains this view only in-process. Coordination publishes
         # control facts; promotion/terminal publication retains canonical content.
@@ -4123,7 +4144,8 @@ class LocalExecutionBackend:
                     await prepared.publish()
                     return await self._execution.executions.compare_and_swap(current.execution_id, tenant_id=self._tenant_id,
                         expected_revision=current.revision,
-                        next_record=replace(current, input_context=reference, revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
+                        next_record=replace(current, input_context=reference, repository_instructions=None,
+                                            revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
                 committed = await self._execution.executions.state_store.mutate(publish_context)
                 return committed, context
             except AIError as error:
@@ -4248,8 +4270,13 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             binding = await self._execution_binding(current, request.resolved_binding)
             compiled_agent = binding.compiled_agent
-            initial_repository_instructions = await self.load_repository_instructions(
-                current.repository_instructions
+            accepted_context = await self.load_input_context(current.input_context)
+            initial_repository_instructions = (
+                await self.load_repository_instructions(current.repository_instructions)
+                if accepted_context is None else (
+                    None if accepted_context.repository_instructions is None
+                    else RepositoryInstructions.from_payload(accepted_context.repository_instructions)
+                )
             )
             repository_overlay = await self.load_repository_instructions(
                 checkpoint.recovery.repository_instruction_overlay
@@ -4375,7 +4402,6 @@ class LocalExecutionBackend:
                                 metric_status = recovered.status.value
                                 metric_error_code = recovered.error_code
                                 return
-            accepted_context = await self.load_input_context(current.input_context)
             loaded_context = LoadedModelContext(())
             session_history_source = (
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
@@ -4657,6 +4683,12 @@ class LocalExecutionBackend:
                     if not isinstance(memory, PersistentMemoryStore):
                         raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "memory_store_has_no_isolated_capture"})
                     await memory.seed_capture(accepted_context.memory or {})
+            original_input = current.stored_user_input
+            if original_input.codec == "text" and original_input.payload.kind == "object":
+                prompt = await self.restore_user_input(current)
+                if not isinstance(prompt, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                original_input = replace(original_input, payload=StoredPayload.inline_text(prompt))
             public_context = AgentContext(
                 app=self._app,
                 principal=request.principal,
@@ -4672,7 +4704,7 @@ class LocalExecutionBackend:
                 agent_id=binding.compiled_agent.spec.id,
                 agent_run_seq=current.agent_run_seq,
                 input_context=accepted_context,
-                original_input=stored_user_input_view(current.stored_user_input),
+                original_input=stored_user_input_view(original_input),
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store
@@ -4839,6 +4871,9 @@ class LocalExecutionBackend:
                                 execution_id,
                             )
                         raise _secondary_execution_error(commit_error, error) from error
+                if (isinstance(self._run_store, RuntimeAgentRunStore)
+                        and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
+                    self._run_store.release_step_event_receipt(agent_run_id)
                 metric_status = current.status.value
                 metric_error_code = current.error_code
                 if current.status is ExecutionStatus.RECOVERY_REQUIRED:
@@ -4895,6 +4930,8 @@ class LocalExecutionBackend:
                         deferred, agent_run_id=agent_run_id, producer_generation=producer_generation,
                     )
                     await self._publish_persisted_terminal_event(deferred)
+                if isinstance(self._run_store, RuntimeAgentRunStore):
+                    self._run_store.release_step_event_receipt(agent_run_id)
                 metric_status = deferred.status.value
                 metric_error_code = deferred.error_code
                 return
@@ -5206,7 +5243,8 @@ class LocalExecutionBackend:
                 if previous is not None:
                     capture_execution = replace(
                         capture_execution, stored_user_input=previous.execution.stored_user_input,
-                        repository_instructions=previous.execution.repository_instructions,
+                        repository_instructions=(None if previous.execution.input_context is not None
+                            or capture_execution.input_context is not None else previous.execution.repository_instructions),
                         input_context=previous.execution.input_context or capture_execution.input_context,
                     )
                     reservation = previous.reservation
@@ -5277,7 +5315,8 @@ class LocalExecutionBackend:
         if previous is not None:
             logical_execution = replace(
                 logical_execution, stored_user_input=previous.execution.stored_user_input,
-                repository_instructions=previous.execution.repository_instructions,
+                repository_instructions=(None if previous.execution.input_context is not None
+                    or logical_execution.input_context is not None else previous.execution.repository_instructions),
                 input_context=previous.execution.input_context or logical_execution.input_context,
             )
         logical_commit = replace(commit, execution=logical_execution)
@@ -5525,12 +5564,18 @@ class LocalExecutionBackend:
         if generation is None or claim_id is None:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
-        async def verify_native(*, run, events, snapshot) -> bool:
-            if run is not None and await native.get_run(run_id=run.run_id) != run:
-                return False
+        async def verify_native(*, run, events, snapshot, receipt: StepWriteReceipt) -> bool:
+            if run is not None:
+                source = native.run_from_receipt(receipt)
+                if source is None or await native.get_run(run_id=run.run_id) != source:
+                    return False
             if events:
-                actual_events = await native.list_events(run_id=events[0].run_id)
-                if any(event not in actual_events for event in events):
+                proven = native.events_from_receipt(receipt)
+                actual_events = (await native.list_events(run_id=events[0].run_id) if not proven else
+                                 await native.list_events(run_id=events[0].run_id, started_receipt=receipt))
+                expected_events = tuple(next((source for source in proven if source.idempotency_key == event.idempotency_key), event)
+                                        for event in events)
+                if any(event not in actual_events for event in expected_events):
                     return False
             if snapshot is not None:
                 actual_snapshot = await native.latest_snapshot(run_id=snapshot.run_id, include_interrupted=True)
@@ -5538,12 +5583,26 @@ class LocalExecutionBackend:
                     return False
             return True
 
-        async def commit_boundary(*, run=None, events=(), snapshot=None) -> None:
+        async def commit_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
+            async with self._run_store.native_event_publication(agent_run_id):
+                return await publish_boundary(run=run, events=events, snapshot=snapshot)
+
+        async def publish_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
             if run is None and not events and snapshot is None:
                 return
-            prepared = await native.prepare_step(run=run, events=events, snapshot=snapshot)
+            terminal = any(isinstance(event, NativeLifecycleEvent) for event in events)
+
+            def require_publication() -> None:
+                if not terminal:
+                    self._require_turn_dispatch(owner)
+                elif self._turn_owners.get(execution.execution_id) is not owner:
+                    raise asyncio.CancelledError
+
+            managed = run is not None and self._run_store.has_pending_native_start(run.run_id)
+            prepared = (await native.prepare_step(run=run, events=events, snapshot=snapshot, managed_start=True)
+                        if managed else await native.prepare_step(run=run, events=events, snapshot=snapshot))
             async with owner.boundary:
-                self._require_turn_dispatch(owner)
+                require_publication()
                 if owner.observed is None or owner.attempt is None:
                     observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
                     if (observed is None or observed.value.producer_generation != generation
@@ -5562,8 +5621,12 @@ class LocalExecutionBackend:
                     receipt = await repository.commit_boundary_in_transaction(
                         transaction, observed, next_record=next_record,
                         expected_producer_generation=generation, expected_producer_claim_id=claim_id,
+                        allow_cancelling=terminal,
                     )
-                    written = await native.write_prepared_step(transaction, prepared)
+                    source_receipt = (self._run_store.step_event_receipt(agent_run_id)
+                                      if managed or terminal else None)
+                    written = (await native.write_prepared_step(transaction, prepared, confirmed=source_receipt)
+                               if source_receipt is not None else await native.write_prepared_step(transaction, prepared))
                     return receipt
 
                 async def persist():
@@ -5580,14 +5643,18 @@ class LocalExecutionBackend:
                                 if (actual is not None and actual.value == next_record
                                         and actual.storage_revision == observed.storage_revision + 1
                                         and written is not None
-                                        and await verify_native(run=run, events=events, snapshot=snapshot)):
+                                        and await verify_native(run=run, events=events, snapshot=snapshot, receipt=written)):
                                     return actual
                             elif (error.code is ErrorCode.STORAGE_CONFLICT and written is None
-                                    and actual is not None and actual.value == observed.value
-                                    and actual.storage_revision > observed.storage_revision):
-                                # A concurrent Trace fact guarded the same unchanged
-                                # execution. No native write from this attempt committed.
-                                self._require_turn_dispatch(owner)
+                                    and actual is not None
+                                    and actual.storage_revision > observed.storage_revision
+                                    and (actual.value == observed.value or terminal
+                                         and actual.value.status is ExecutionStatus.CANCELLING
+                                         and actual.value.producer_generation == generation
+                                         and actual.value.producer_claim_id == claim_id)):
+                                # Cancellation stops new dispatch but must retain this
+                                # producer's terminal source and interrupted checkpoint.
+                                require_publication()
                                 observed = actual
                                 next_record = actual.value
                                 owner.observed = actual
@@ -5607,8 +5674,12 @@ class LocalExecutionBackend:
                 if written is None:
                     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
                 native.confirm_prepared_step(written)
+                source = native.run_from_receipt(written)
+                if source is not None:
+                    self._run_store.confirm_step_run(source, receipt=written)
                 if cancelled is not None:
                     raise cancelled
+                return written
 
         initial_observed = owner.observed
 

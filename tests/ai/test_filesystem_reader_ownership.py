@@ -10,10 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import FilesystemSnapshotReader
 from linktools.ai.snapshot import SnapshotLimits
-from linktools.ai.storage import FilesystemWriterLock, InMemoryObjectStore
+from linktools.ai.storage import FilesystemWriterLock, InMemoryObjectStore, read_object
 
 from ._filesystem_legacy_fixture_helpers import install_legacy_overlay, load_legacy_source
 
@@ -216,7 +217,12 @@ async def test_offline_reader_preserves_legal_in_root_archive_alias(tmp_path: Pa
     reader = FilesystemSnapshotReader(root, namespace="legacy-reader", tenant_id="tenant")
     try:
         reference = await reader.export_snapshot(object_store=objects, limits=LIMITS)
+        manifest = json.loads(await read_object(objects, reference.key, expected_digest=reference.digest,
+                                                expected_size=reference.size))
+        for field in ("native_messages", "native_checkpoints", "native_projections"):
+            assert field not in manifest
         assert reference.digest == provenance["snapshot_digest"]
+        assert hashlib.sha256(canonical_json_bytes(manifest)).hexdigest() == provenance["snapshot_digest"]
     finally:
         await reader.close()
     assert _hashes(root) == before

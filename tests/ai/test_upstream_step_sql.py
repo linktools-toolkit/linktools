@@ -18,7 +18,6 @@ from pydantic_ai.messages import (
     TextPart, ToolCallPart, ToolReturnPart, UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
-from pydantic_ai_harness.media import DiskMediaStore
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot, InMemoryStepStore, RunRecord, SqliteStepStore,
     StepEvent, StepPersistence, StepStore, ToolEffectRecord, continue_run,
@@ -168,7 +167,7 @@ async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_rep
                                     messages=[ModelRequest(parts=[UserPromptPart("message")])])
 
     def fail_reference(connection, cursor, statement, parameters, context, many):
-        if statement.startswith("INSERT INTO ai_step_message_refs"):
+        if statement.startswith("INSERT INTO ai_step_sequences"):
             raise RuntimeError("reference publication interrupted")
 
     try:
@@ -178,7 +177,7 @@ async def test_sql_failed_reference_publication_rolls_back_snapshot_body_and_rep
         event.remove(engine.sync_engine, "before_cursor_execute", fail_reference)
         assert await store.latest_snapshot(run_id="run") is None
         async with engine.connect() as connection:
-            for table in ("snapshots", "messages", "message_refs"):
+            for table in ("snapshots", "messages", "sequences"):
                 assert await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}")) == 0
         await store.save_snapshot(snapshot)
         assert await store.latest_snapshot(run_id="run") == snapshot
@@ -242,8 +241,7 @@ async def test_sql_concurrent_boundary_retries_publish_once(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
-    media = DiskMediaStore(directory=tmp_path / "media")
-    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore(), media_store=media)
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
     try:
         await store.initialize(local=True)
         messages = [ModelRequest(parts=[UserPromptPart("x" * 81920)])]
@@ -255,7 +253,7 @@ async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: P
         assert await store.latest_snapshot(run_id="run") == second
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == len(messages)
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_message_refs")) == len(messages) * 2
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == len(messages)
     finally:
         await store.close()
         await engine.dispose()
@@ -275,7 +273,7 @@ async def test_sql_corrupt_or_missing_message_reference_fails_closed(tmp_path: P
             await store.latest_snapshot(run_id="run")
         assert await store.list_snapshots(run_id="run") == []
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_message_refs"))
+            await connection.execute(text("DELETE FROM ai_step_sequences"))
         with pytest.raises(ValueError, match="incomplete"):
             await store.latest_snapshot(run_id="run")
         assert await store.list_snapshots(run_id="run") == []
@@ -398,6 +396,9 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
     metadata = build_step_sql_metadata()
     dialect = mysql.dialect()
     dialect.server_version_info = (5, 7, 44)
+    assert metadata.tables["ai_step_snapshots"].c.messages.type.compile(dialect=dialect) == (
+        "VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+    )
     for table in metadata.tables.values():
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert table.name.startswith("ai_") and table.comment

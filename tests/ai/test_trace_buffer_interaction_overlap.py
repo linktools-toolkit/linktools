@@ -13,7 +13,7 @@ from pydantic_ai.messages import (
 )
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import NativeMessageRoot, PersistenceDomain
 from linktools.ai.persistence._archive import PreparedArchive
 from linktools.ai.persistence._model_interaction import (
     StagedContextProjection, StagedContextSpan, StagedModelInteraction,
@@ -113,15 +113,18 @@ async def test_trace_buffer_overlap_preserves_completed_requests_and_progress(
         before_contexts = await archive.resolve_model_interactions(before[:2])
         if overlap:
             captured = captures[-1]
-            # Preparing the identical terminal input from the latest request's
-            # baseline alone produces a different reference, despite equal bytes.
+            # Archive ranges can differ for identical bytes. Native content
+            # addressing converges to the same ordered message root instead.
             regenerated = await prepare(
                 captured.run, captured.interactions[:2], dict(captured.payloads).__getitem__,
                 local_message_count=len(captured.local_messages), local_messages=captured.local_messages,
                 prepared=PreparedArchive(), baseline=before[1].request_context,
             )
             old, new = before[0].request_context.items[0], regenerated[0].request_context.items[0]
-            assert old.root != new.root
+            if isinstance(old.root, NativeMessageRoot):
+                assert old.root == new.root
+            else:
+                assert old.root != new.root
             assert (old.raw_digest, old.raw_size) == (new.raw_digest, new.raw_size)
         await owner._automatic_flush(buffer)
         assert buffer.error is None

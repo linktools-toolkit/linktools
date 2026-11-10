@@ -17,6 +17,7 @@ from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionL
 from ..session import SessionContext, normalize_session_context
 from ..errors import ErrorDiagnostics
 from ..storage import StoredPayload
+from ..steps import NativeStepSource
 from ..spec import CapabilityRef
 from ..model import StoredUserInput
 from ..task import TaskBindingContract
@@ -83,6 +84,7 @@ class ExecutionRecord:
     tool_response_ref: AssetVersionRef | None = None
     tool_effects: ToolEffects = "live"
     session_context: SessionContext = "all"
+    native_step_source: NativeStepSource | None = None
     restart_checkpoints: bool = False
     durable_trace: bool = False
     # Whether this execution retains conversation and fork context.
@@ -91,6 +93,9 @@ class ExecutionRecord:
     history_seal_digest: str | None = None
 
     def __post_init__(self) -> None:
+        if self.native_step_source is not None and (
+                not isinstance(self.native_step_source, NativeStepSource) or not self.restart_checkpoints):
+            raise ValueError("native checkpoint source requires checkpoint retention")
         normalize_tool_effects(self.tool_effects)
         normalize_session_context(self.session_context)
         if (isinstance(self.producer_generation, bool)
@@ -141,6 +146,8 @@ class ExecutionRecord:
             object.__setattr__(self, "mode", mode)
             object.__setattr__(self, "thinking", thinking)
         else:
+            if self.native_step_source is not None:
+                raise ValueError("task execution cannot carry a native checkpoint source")
             if self.mode is not None or self.planning is not None or self.thinking is not None:
                 raise ValueError("task execution cannot carry agent execution policy")
             if (

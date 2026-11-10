@@ -3,6 +3,7 @@
 """History indexes preserve captured cuts and reject incomplete coverage."""
 
 from linktools.ai.persistence import Persistence
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,10 +13,9 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence._step_contracts import StepEvent
-from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence.state import FactQuery, RecordQuery
 
-from .test_incremental_history_read_cost import _seed_trace
+from .test_incremental_history_read_cost import _capture_fact_batches, _seed_trace
 
 
 async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> None:
@@ -222,25 +222,16 @@ async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(
                 expected.append((index + 1, event))
         await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
         expected.sort(key=lambda item: (item[1].timestamp, item[0]))
-        batches: list[tuple[int, ...]] = []
-        for name in ("list_facts", "get_facts"):
-            original = getattr(_SqlTransaction, name)
-
-            async def capture(transaction, *args, _original=original):
-                facts = await _original(transaction, *args)
-                batches.append(tuple(fact.sequence for fact in facts))
-                return facts
-
-            monkeypatch.setattr(_SqlTransaction, name, capture)
+        engine = None if backend == "memory" else archive.state_store.storage_group.context.engine.sync_engine
         for page_size in (1, 33, 65):
             result = []
             after_timestamp, after_sequence = None, 0
             while True:
-                batches.clear()
-                page = await archive.list_trace_events(
-                    agent_run_id=run_id, event_high_water=73,
-                    after_timestamp=after_timestamp, after_sequence=after_sequence, limit=page_size,
-                )
+                with (_capture_fact_batches(engine, monkeypatch) if engine is not None else nullcontext([])) as batches:
+                    page = await archive.list_trace_events(
+                        agent_run_id=run_id, event_high_water=73,
+                        after_timestamp=after_timestamp, after_sequence=after_sequence, limit=page_size,
+                    )
                 if backend == "sqlite":
                     selected = [sequence for sequence, _ in page]
                     assert sorted(sequence for batch in batches for sequence in batch) == sorted(selected)

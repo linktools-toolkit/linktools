@@ -58,8 +58,8 @@ async def test_long_history_message_cache_traffic_and_cpu(tmp_path: Path) -> Non
             assert await store.latest_snapshot(run_id="long-history") == replace(snapshot, step_index=23, idempotency_key="23")
             async with engine.connect() as connection:
                 rows = {table: await connection.scalar(text(f"SELECT count(*) FROM ai_step_{table}"))
-                        for table in ("snapshots", "messages", "message_refs")}
-            assert rows == {"snapshots": 24, "messages": 1024, "message_refs": 24576}
+                        for table in ("snapshots", "messages", "sequences")}
+            assert rows == {"snapshots": 24, "messages": 1024, "sequences": 1024}
             assert commits == 24 and traffic.statements["SELECT"] == 0
             assert traffic.message_rows == (1024 if name == "cached" else 24576)
             samples.append({"mode": name, "round": round_number, "cpu_seconds": cpu, "wall_seconds": wall,

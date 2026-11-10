@@ -155,6 +155,42 @@ continue to include development dependencies; pip still enforces the original
 version constraints and resolves external dependencies. The existing pip cache
 and open dependency-update policy are unchanged.
 
+## Synthetic native storage cost observations
+
+The normal pytest terminal summary includes `Synthetic native storage costs`
+when native event lifecycle, cold registration replay or START cost cases run.
+Search the natural `Python checks` job log for `native_event_lifecycle_cost`
+or `native_registration_replay_cost`, or the START labels below, for exact JSON observations,
+including SELECT/DML counts, counted bytes and process CPU. This works with
+quiet output and xdist; no JUnit export, artifact or separate runner is required.
+Only named synthetic fixtures and their numeric/boolean allowlists are reported.
+Other properties, SQL text, bound values, source data and arbitrary test parameter strings
+are not exported. Missing or malformed observations have an explicit status.
+
+`storage_cost_context` identifies Python, the SQLite/aiosqlite backend, the
+underlying SQLite library version and the Actions checkout SHA (`GITHUB_SHA`,
+which can be the PR merge ref; use the CI run context for the PR head).
+Event baselines share the current Run lifecycle:
+`json_inline` is the current inline JSON policy, while `text_inline` restores
+only the former event TEXT codec, not an entire old release. The replay baseline
+counts only the original registration ID payload, not a measured old-release
+SQL/CPU run. Byte counts are field/parameter/result sizes, not database-file or
+network-wire sizes. CPU seconds/nanoseconds are observations from that run,
+not strictly comparable across machines; replay also enables tracemalloc, whose
+peak is traced Python allocation rather than total process memory.
+
+The START cases emit `native_start_lifecycle_cost` for exactly metadata sizes
+0/65537 and success/shortcircuit, `native_start_read_cost` for the two actual SQL
+text/binary response sizes, and `native_start_proof_cost` for encoding counters.
+The lifecycle compares owned sharing with an unchanged subclass using the same
+current algorithm, not a historical-version benchmark. Its signed logical byte
+delta includes the added 128-byte proof, which can offset savings for a short
+start. Lifecycle SQL counters cover the runtime listener window; wall/CPU
+nanoseconds cover the whole scenario, including setup and readback/teardown.
+The two inherited-session flags identify when tracemalloc peaks are session-wide,
+not isolated allocation increments. Missing START fields produce `unavailable`;
+extra, duplicated or wrongly typed fields produce `invalid`, without raw values.
+
 ## Coverage responsibilities
 
 | Family | Daily | Merge additions | Explicit manual additions |

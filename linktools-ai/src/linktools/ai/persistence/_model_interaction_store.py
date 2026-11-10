@@ -275,7 +275,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             run_key = self._agent_run_key(agent_run_id) if include_run else None
             if not keys and run_key is None:
                 return None, []
-            records = await transaction.get_records(keys + ((run_key,) if run_key is not None else ()))
+            records = (await transaction.get_records(keys) if run_key is None
+                       else await self.read_run_records(transaction, (*keys, run_key)))
             stored_run = records.get(run_key) if run_key is not None else None
             run = None if stored_run is None else _decode_step(stored_run.data)
             if run is not None and not isinstance(run, AgentRunRecord):
@@ -340,7 +341,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             await self.guard_execution_producer(
                 transaction, execution_id=execution_id, producer_generation=producer_generation,
             )
-            owner = await transaction.get_record(self._agent_run_key(agent_run_id))
+            owner_key = self._agent_run_key(agent_run_id)
+            owner = (await self.read_run_records(transaction, (owner_key,))).get(owner_key)
             if owner is None:
                 return
             run = _decode_step(owner.data)

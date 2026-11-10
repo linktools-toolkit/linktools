@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic_ai_harness.memory import MemoryOperation
 
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence._filesystem_layout import _FilesystemCache
@@ -76,12 +77,15 @@ async def test_legacy_reader_preserves_source_and_rejects_retired_context(
         reference = await reader.export_snapshot(object_store=objects, limits=LIMITS)
     finally:
         await reader.close()
-    assert reference.digest == provenance["snapshot_digest"]
     if source_objects is not None:
         assert len([item async for item in source_objects.list_objects()]) == 2
     assert _contents(root) == before
     manifest = json.loads(await read_object(objects, reference.key, expected_digest=reference.digest,
                                             expected_size=reference.size))
+    for field in ("native_messages", "native_checkpoints", "native_projections"):
+        assert field not in manifest
+    assert reference.digest == provenance["snapshot_digest"]
+    assert hashlib.sha256(canonical_json_bytes(manifest)).hexdigest() == provenance["snapshot_digest"]
     assert manifest["archives"] and manifest["domains"]["checkpoint"]["facts"]
     assert any(item["domain"] == "memory" for item in manifest["objects"])
     assert any(item["source"]["key"].startswith("v1/archive/") for item in manifest["objects"])

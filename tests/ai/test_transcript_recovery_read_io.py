@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Full transcript recovery batches immutable reads without changing streaming."""
 
+import json
 from pathlib import Path
 from time import perf_counter
 
@@ -69,7 +70,16 @@ async def test_transcript_recovery_keeps_payloads_and_message_ranges(tmp_path: P
         await _seed_messages(archive, run, messages)
         content = await archive.transcript_repository.content_archive()
         records = await content.store.read(lambda transaction: transaction.list_records(RecordQuery(kind="archive_content")))
-        assert {ContentRecord.from_json(record.data).payload.kind for record in records} == {"inline", "object"}
+        payload_kinds = {ContentRecord.from_json(record.data).payload.kind for record in records}
+        if backend == "sqlite":
+            from sqlalchemy import select
+            from linktools.ai.persistence._step_schema import build_step_sql_metadata
+
+            table = build_step_sql_metadata().tables["ai_step_messages"]
+            async with archive.state_store.context.engine.connect() as connection:
+                bodies = (await connection.execute(select(table.c.message))).scalars().all()
+            payload_kinds.update(ContentRecord.from_json(json.loads(body)).payload.kind for body in bodies)
+        assert payload_kinds == {"inline", "object"}
         await state.run_store.register_agent_run(run, execution_id="execution")
         assert state.run_store.staged_transcript("run") == StagedTranscript(messages)
         assert tuple([value async for value in archive.iter_message_range(agent_run_id="run", start=1, end=2)]) == messages[1:2]
@@ -155,3 +165,60 @@ async def test_transcript_recovery_keeps_custom_archive_stream(
         state.run_store._archives[PersistenceDomain.TRACE] = custom
         await state.run_store.register_agent_run(run, execution_id="execution")
         assert state.run_store.staged_transcript("run") == StagedTranscript(messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_combined_projection_publishes_messages_with_its_owner(tmp_path: Path, backend: str) -> None:
+    from dataclasses import replace
+    from linktools.ai.persistence._archive import PreparedArchive
+    from linktools.ai.persistence._runtime_commands import _copy_archive_union
+
+    async with _archive(tmp_path, backend) as (_state, archive, run):
+        messages = (ModelResponse(parts=[TextPart("retained projection")]),)
+        observation = await archive.transcript_repository.prepare_observation(
+            "run", messages, first_message_index=0, pending=None, pending_keys=(),
+        )
+        source = observation.archive
+        combined = _copy_archive_union((source, source))
+        assert combined.native_messages == source.native_messages
+        assert combined.native_publishers == source.native_publishers
+        observation = replace(observation, archive=PreparedArchive())
+
+        async def publish(transaction):
+            await archive.sync_projection_in_transaction(
+                transaction, run, events=(), checkpoints=(), observation=observation,
+                execution_id="execution", producer_generation=1, archive=combined,
+            )
+
+        await archive.state_store.storage_group.mutate(
+            archive.transaction_stores, lambda group: publish(group.transaction(archive.state_store)),
+        )
+        assert tuple([value async for value in archive.iter_messages(agent_run_id="run")]) == messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("foreign_scope", ("group_id", "store_digest"))
+async def test_foreign_projection_baseline_rebuilds_captured_messages(tmp_path: Path, foreign_scope: str) -> None:
+    from dataclasses import replace
+    from linktools.ai.persistence._archive import PreparedArchive
+
+    async with _archive(tmp_path, "sqlite") as (_state, archive, run):
+        repository = archive.transcript_repository
+        messages = (ModelResponse(parts=[TextPart("captured across stores")]),)
+        source = await repository.prepare_model_projection(messages, PreparedArchive())
+        block = source.items[0]
+        foreign = replace(block.root, **{foreign_scope: "f" * 64})
+        baseline = replace(source, items=(replace(block, root=foreign),))
+        prepared = PreparedArchive()
+        projection = await repository.prepare_model_projection(messages, prepared, baseline=baseline)
+        assert projection.items[0].root.group_id == block.root.group_id
+        assert projection.items[0].root.store_digest == block.root.store_digest
+        assert prepared.native_messages
+
+        async def publish(transaction):
+            await repository.store_projection(transaction, "run", projection)
+            await repository.publish_native_archive(transaction, prepared, owner_written=True)
+
+        await archive.state_store.mutate(publish)
+        assert (await repository.load_projected_context("run", projection)).model_messages() == messages

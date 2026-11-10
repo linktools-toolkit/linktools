@@ -16,6 +16,7 @@ from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler, CompiledAgent
+from ..steps import NativeStepSource
 from ..capability import (
     ToolResponsesCapability,
     SessionCapability,
@@ -674,6 +675,10 @@ async def _build_local_components(
             compiler,
             current_compiler=current_compiler,
         )
+        async def native_step_source(binding: AgentBinding) -> NativeStepSource | None:
+            await prepare_runtime_capabilities(binding.compiled_agent)
+            return run_store.native_step_source
+
         execution = DefaultExecutionService(
             state.execution,
             state.object_store(PersistenceDomain.EXECUTION),
@@ -683,6 +688,7 @@ async def _build_local_components(
             catalog=catalog,
             compiler=compiler,
             restore_binding=binding_resolver.restore,
+            native_step_source=native_step_source,
             runtime_bridge=runtime_bridge,
             live_broker=live_broker,
             history_reader=history_reader,
@@ -771,6 +777,7 @@ async def _build_local_components(
             archive_objects=state.archive_object_store(PersistenceDomain.EXECUTION),
             archive_object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
             restore_binding=binding_resolver.restore,
+            native_step_source=native_step_source,
             tenant_id=tenant_id,
             workspace=workspace,
             limits=limits,
