@@ -147,6 +147,16 @@ class MessageArchive:
         self._leaves: WeakValueDictionary[bytes, _MessageTree] = WeakValueDictionary()
         self._branches: WeakValueDictionary[tuple[_MessageTree, _MessageTree], _MessageTree] = WeakValueDictionary()
 
+    def append(self, prefix: MessageSnapshot, delta: Sequence[ModelMessage]) -> MessageSnapshot:
+        """Append an explicit delta to owned immutable history, freezing only the delta.
+
+        Mutable full-history inputs must use snapshot instead; a length or object
+        identity cannot establish that their historical contents stayed unchanged.
+        """
+        if not isinstance(prefix, MessageSnapshot):
+            raise TypeError("message append requires an immutable prefix")
+        return self.concatenate(prefix, delta)
+
     def concatenate(self, *groups: Sequence[ModelMessage]) -> MessageSnapshot:
         """Join frozen sequences without decoding or copying their message bodies."""
         frozen = tuple(self.snapshot(group) for group in groups if len(group))

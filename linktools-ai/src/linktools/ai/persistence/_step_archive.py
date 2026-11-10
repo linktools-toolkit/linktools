@@ -426,7 +426,8 @@ class _CheckpointSnapshot(Sequence[AgentRunCheckpoint]):
     def __getitem__(self, index: int | slice) -> "AgentRunCheckpoint | _CheckpointSnapshot":
         if isinstance(index, slice):
             return _CheckpointSnapshot(self._values[index])
-        return self._values[index].materialize()
+        # Internal publication retains frozen contents; public reads materialize SDK lists.
+        return replace(self._values[index].value)
 
 
 class StagingAgentRunStore(AgentRunStore):
@@ -1150,6 +1151,7 @@ class StateStepArchive(AgentRunStore):
         history_repository: "ConversationHistoryRepository | None" = None,
         execution_repository: "ExecutionRepository | None" = None,
         object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
+        retained_object_reuse: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bool]] | None" = None,
         cache: CacheBackend | None = None,
     ) -> None:
         self._store = store
@@ -1167,6 +1169,7 @@ class StateStepArchive(AgentRunStore):
             context_sources=context_sources,
             history_repository=history_repository,
             object_reader=object_reader,
+            retained_object_reuse=retained_object_reuse,
         )
         self._execution_repository = execution_repository
         self._context_baselines: dict[str, LoadedModelContext] = {}
@@ -3864,6 +3867,9 @@ async def _sync_projection(
     *,
     execution_id: str | None = None,
 ) -> None:
+    if type(target) is not StateStepArchive:
+        checkpoints = tuple(replace(value, messages=list(value.messages), context_messages=(
+            None if value.context_messages is None else list(value.context_messages))) for value in checkpoints)
     if isinstance(target, _StepArchiveBatch):
         await target.sync_projection(
             run,
@@ -3903,6 +3909,9 @@ async def _materialize_checkpoint(
     *,
     execution_id: str | None = None,
 ) -> None:
+    if type(target) is not StateStepArchive:
+        checkpoint = replace(checkpoint, messages=list(checkpoint.messages), context_messages=(
+            None if checkpoint.context_messages is None else list(checkpoint.context_messages)))
     if isinstance(target, _StepArchiveBatch):
         await target.materialize_checkpoint(
             run,

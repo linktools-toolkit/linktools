@@ -118,7 +118,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),
         )
         sql_unique(snapshots, "key_digest")
-        sql_query_index(snapshots, "store_digest", "run_digest")
+        sql_query_index(snapshots, "store_digest", "run_digest", "pruned")
 
     if "ai_step_messages" not in metadata.tables:
         messages = table(

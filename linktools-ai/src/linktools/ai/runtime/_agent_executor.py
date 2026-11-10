@@ -1140,6 +1140,7 @@ async def _materialize_agent(
         initial_attachments=scope.initial_attachments,
         history_boundary=commit_history_boundary,
         checkpoint_sink=save_checkpoint,
+        checkpoint_sink_accepts_frozen=type(scope.run_store) is RuntimeAgentRunStore,
     )
     if tool_metrics is not None:
         capabilities.append(ToolMetricsCapability(tool_metrics))

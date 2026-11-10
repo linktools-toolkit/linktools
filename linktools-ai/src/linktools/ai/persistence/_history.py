@@ -159,11 +159,13 @@ class TranscriptRepository:
         context_sources: Mapping[PersistenceDomain, "TranscriptRepository"] | None = None,
         history_repository: "ConversationHistoryRepository | None" = None,
         object_reader: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bytes]] | None" = None,
+        retained_object_reuse: "Callable[[PersistenceDomain, ObjectRef], Awaitable[bool]] | None" = None,
     ) -> None:
         self._store = store
         self._object_store = object_store
         self._archive_object_store = object_store if archive_object_store is None else archive_object_store
         self._object_reader = object_reader
+        self._retained_object_reuse = retained_object_reuse
         self._archive_object_reader = archive_object_reader
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -754,6 +756,10 @@ class TranscriptRepository:
             tenant_digest=self._tenant_digest,
             stored_digest=payload.digest,
         )
+
+        if (payload.ref.key == key and self._retained_object_reuse is not None
+                and await self._retained_object_reuse(source_domain, payload.ref)):
+            return StoredPayload.object(ObjectRef("runtime", key, payload.digest, payload.size))
 
         async def chunks() -> AsyncIterator[bytes]:
             yield value

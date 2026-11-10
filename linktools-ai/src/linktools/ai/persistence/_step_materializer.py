@@ -57,6 +57,7 @@ def build_runtime_agent_run_store(
             archive_object_store=objects.archive_object_store(domain),
             archive_object_reader=partial(objects.read_archive_object, domain),
             object_reader=objects.read_object,
+            retained_object_reuse=partial(objects.can_reuse_retained_object, domain),
             namespace=namespace,
             tenant_id=tenant_id,
             runtime_domain=domain,

@@ -1426,24 +1426,34 @@ class SqlStepStore:
         return self._tool_effect_store
 
     async def _prune_snapshots(self, session: "AsyncSession", run_id: str) -> None:
-        from sqlalchemy import select
+        from sqlalchemy import false, or_, select
 
         if self._max_snapshots_per_run is None:
             return
         table = self._table("snapshots")
-        rows = (await session.execute(select(table.c.id, table.c.state).where(
-            *self._run_predicates(table, run_id), table.c.pruned.is_(False),
-        ).order_by(table.c.id))).all()
-        retained = {row.id for row in rows[-self._max_snapshots_per_run:]}
-        complete = [row.id for row in rows if row.state == "complete"]
-        if complete:
-            retained.add(complete[-1])
-        removed = [row.id for row in rows if row.id not in retained]
-        for offset in range(0, len(removed), _BATCH_SIZE):
-            ids = removed[offset:offset + _BATCH_SIZE]
-            await session.execute(table.update().where(
-                table.c.store_digest == self._store_digest, table.c.id.in_(ids),
-            ).values(pruned=True, messages="{}", sequence_root=None))
+        active = (*self._run_predicates(table, run_id), table.c.pruned == false())
+        # Return only the retention boundary and the complete recovery point,
+        # even when a new adapter reduces an existing run's retention limit.
+        boundary = select(table.c.id).where(*active).order_by(table.c.id.desc()).offset(
+            self._max_snapshots_per_run,
+        ).limit(1).scalar_subquery()
+        complete = select(table.c.id).where(*active, table.c.state == "complete").order_by(
+            table.c.id.desc(),
+        ).limit(1).scalar_subquery()
+        cutoff, last_complete = (await session.execute(select(boundary, complete))).one()
+        if cutoff is None:
+            return
+        conditions = (*active, table.c.id <= cutoff)
+        # A current-read UPDATE can see a lower-ID complete row that committed
+        # after the retention read. Only retire complete points older than the
+        # one actually observed; a concurrent new recovery point stays retained.
+        complete_safe = table.c.state != "complete"
+        if last_complete is not None:
+            complete_safe = or_(complete_safe, table.c.id < last_complete)
+        conditions += (complete_safe,)
+        await session.execute(table.update().where(*conditions).values(
+            pruned=True, messages="{}", sequence_root=None,
+        ))
 
     @classmethod
     def snapshot_message_sequence(cls, snapshot: Mapping[str, object]) -> NativeMessageSequence:
@@ -1462,11 +1472,11 @@ class SqlStepStore:
     async def _load_snapshots(
         self, run_id: str, *, include_interrupted: bool, latest: bool,
     ) -> list[ContinuableSnapshot]:
-        from sqlalchemy import select
+        from sqlalchemy import false, select
 
         await self.initialize()
         table = self._table("snapshots")
-        query = select(table).where(*self._run_predicates(table, run_id), table.c.pruned.is_(False))
+        query = select(table).where(*self._run_predicates(table, run_id), table.c.pruned == false())
         if not include_interrupted:
             query = query.where(table.c.state == "complete")
         query = query.order_by(table.c.id.desc() if latest else table.c.id)

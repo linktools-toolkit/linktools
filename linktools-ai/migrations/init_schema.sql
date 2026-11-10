@@ -286,7 +286,7 @@ CREATE TABLE ai_step_snapshots (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_run_digest (store_digest, run_digest),
+	KEY ix_store_digest_run_digest_pruned (store_digest, run_digest, pruned),
 	UNIQUE KEY uk_key_digest (key_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream complete or interrupted message-history snapshots.' COLLATE utf8mb4_bin;

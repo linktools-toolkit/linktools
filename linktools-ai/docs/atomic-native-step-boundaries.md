@@ -123,6 +123,13 @@ envelope changes only the terminal message and shares the immutable prefix.
 These are content operations, not claims about total SQL, model input, or turn
 latency.
 
+Runtime's accepted transcript has an explicit immutable-prefix/append contract.
+Its recorder freezes only the new message and carries that snapshot through
+pending observations and owned checkpoint staging. This avoids rescanning the
+accepted transcript at each append. It is separate from the mutable SDK model
+context: a transcript append is not evidence that a hook left that context
+unchanged. Public/custom storage boundaries still receive their declared lists.
+
 The SDK exposes mutable history and nested message content to application hooks.
 Capturing that arbitrary history still requires O(B) work per boundary to notice
 earlier edits. Runtime freezes the logical checkpoint before asynchronous
@@ -147,6 +154,14 @@ Keeping all keys and all user-visible history cannot provide constant space.
 Configured snapshot pruning retires roots while preserving replay tombstones
 and the latest complete recovery point. It does not authorize dropping history
 owned by Conversation, Trace, a task handoff, or another retained snapshot.
+Active snapshots use the `(store_digest, run_digest, pruned)` index and equality
+on the non-null boolean, including on MySQL 5.7. Tombstones therefore do not
+expand the active scan. Pruning reads only one row containing the retention
+cutoff and latest complete ID, then retires the older range without loading a
+client-side list. With a fixed retention limit K, active metadata work is O(K),
+independent of historical tombstones. Reducing an unlimited existing history
+can still require a larger one-time scan and update. The update also preserves
+complete points that become visible after the retention read.
 
 Native content collection remains an explicitly exclusive, offline operation.
 It discovers candidate messages using hashes only, then reads retained bodies
@@ -187,6 +202,13 @@ independent evidence and observations. Those semantics are not removable copies
 of StepStore. Large execution bindings already share content-addressed storage;
 small bindings stay with their execution row to avoid another read. Their
 physical placement does not create a second mutable source of truth.
+
+Retaining an execution payload in Conversation still validates every byte. When
+both routes are explicitly durable, resolve to the same ObjectStore instance,
+and use the same canonical key, a fresh membership check permits reusing that
+object without another put. Different backends, retention policies, keys or
+missing objects follow the original copy path. Logical store IDs and cached
+bytes alone are not proof of physical ownership or retained availability.
 
 ## Verification
 
