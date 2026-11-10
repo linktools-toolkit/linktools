@@ -79,14 +79,40 @@ def _fixed_display_clock(monkeypatch):
     _clock(monkeypatch)
 
 
-async def _prepare(state, *, body=False, namespace="display"):
+async def _materialize_attachment_conversation(state, history_id):
+    from datetime import datetime, timezone
+    from pydantic_ai.messages import BinaryContent, FilePart, ModelResponse, TextPart
+    from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+
+    now = datetime.now(timezone.utc)
+    run_id, conversation_id = "attachment-run", "attachment-conversation"
+    await state.run_store.register_agent_run(AgentRunRecord(
+        agent_run_id=run_id, agent_conversation_id=conversation_id,
+        parent_agent_run_id=None, agent_id="agent",
+        metadata={"agent_id": "agent", "history_id": history_id}, started_at=now,
+    ))
+    messages = [ModelResponse(parts=[
+        TextPart("visible attachment"),
+        FilePart(BinaryContent(b"attachment bytes" * 4096, media_type="image/png")),
+    ], conversation_id=conversation_id)]
+    await state.run_store.save_checkpoint(AgentRunCheckpoint(
+        agent_run_id=run_id, step_index=1, messages=messages,
+        agent_conversation_id=conversation_id, parent_agent_run_id=None, agent_id="agent",
+        timestamp=now, state="complete", transcript_message_count_before=0,
+    ))
+    await state.run_store.materialize_conversation(agent_run_id=run_id)
+    return run_id, len(messages)
+
+
+async def _prepare(state, *, body=False, attachment=False, namespace="display"):
     await state.initialize(
         namespace=namespace, tenant_id="tenant",
     )
     record = await state.conversation.sessions.create(replace(_session(), metadata={"nested": {"value": "old"}}))
     await _admit(state, status=ExecutionStatus.SUCCEEDED if body else ExecutionStatus.PENDING_START)
     if body:
-        run_id, count = await _materialize_conversation(state, record.history_id)
+        materialize = _materialize_attachment_conversation if attachment else _materialize_conversation
+        run_id, count = await materialize(state, record.history_id)
         sessions = state.conversation.sessions
         execution = await state.execution.executions.get("active", tenant_id="tenant")
 
@@ -159,7 +185,7 @@ async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp
     statements = []
 
     def capture(_connection, _cursor, statement, *_args):
-        if statement.lstrip().upper().startswith("SELECT"):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
             statements.append(statement)
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
@@ -167,9 +193,14 @@ async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp
         service = _service(state, cache)
         cold = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         cold_count = len(statements)
+        if body:
+            assert any("ai_step_messages" in statement for statement in statements)
         statements.clear()
         assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == cold
-        assert len(statements) == (4 if body else 3)
+        # Warm reads retain authorization, execution and committed-turn checks,
+        # but never hydrate transcript message bytes.
+        assert len(statements) <= (5 if body else 3)
+        assert not any("ai_step_messages" in statement for statement in statements)
         assert cold_count > len(statements)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -279,7 +310,7 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
         await _change_execution_display(state, "new", "second")
         if phase in {"get", "dependency"}:
             owner = cache if phase == "get" else state.execution.executions
-            name = "get" if phase == "get" else "get_many"
+            name = "get" if phase == "get" else "get_timeline_many"
             read = getattr(owner, name)
 
             async def slow(*args, **kwargs):
@@ -465,6 +496,7 @@ async def test_display_cache_terminal_active_refreshes_complete_page(status, rel
             "active", tenant_id="tenant", expected_revision=record.revision,
             next_record=replace(record, revision=record.revision + 1, status=status,
                 result=_execution("active", status=status, prompt="active").result,
+                completed_at=record.updated_at,
                 safe_error_details={"finished": True}),
         )
         if status is ExecutionStatus.SUCCEEDED:
@@ -568,7 +600,7 @@ async def test_display_cache_idle_completion_observes_continuation_revision():
         await state.close()
 
 
-@pytest.mark.parametrize("kind,code", (("execution", None), ("conversation_history", ErrorCode.SESSION_HISTORY_UNAVAILABLE)))
+@pytest.mark.parametrize("kind,code", (("execution", ErrorCode.STORAGE_INTEGRITY_ERROR), ("conversation_history", ErrorCode.SESSION_HISTORY_UNAVAILABLE)))
 async def test_display_cache_rechecks_dependency_existence(kind, code):
     state, cache = PersistenceStorage.in_memory(), _Cache()
     state = Persistence(state)
@@ -582,12 +614,10 @@ async def test_display_cache_rechecks_dependency_existence(kind, code):
             records = await transaction.scan_records()
             await transaction.delete_records(tuple(record.key_digest for record in records if record.kind == kind))
         await store.mutate(remove)
-        if kind == "execution":
-            assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == before
-            assert await service.refresh("session", principal=_PRINCIPAL) == before
-        else:
+        assert before.timeline.items
+        for max_age in (3, 0):
             with pytest.raises(AIError) as error:
-                await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+                await service.refresh("session", principal=_PRINCIPAL, max_age=max_age)
             assert error.value.code is code
     finally:
         await state.close()
@@ -1050,18 +1080,16 @@ async def test_display_cache_is_shared_across_readers_without_renewing_capture(
 @pytest.mark.parametrize("warm_page", (False, True))
 async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkeypatch, warm_page):
     from linktools.ai.persistence import PersistenceDomain
-    from linktools.ai.persistence import _archive
     from linktools.ai.persistence.state import FactQuery
     from linktools.ai.storage import _write_cache
     from .test_history_projection_conformance import _message_content_records
 
     clock = _clock(monkeypatch)
     monkeypatch.setattr(_write_cache, "time", lambda: clock.now)
-    monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
     cache = _Cache()
     state = PersistenceStorage.sqlite(tmp_path / "display.db", cache=cache)
     state = Persistence(state)
-    session = await _prepare(state, body=True)
+    session = await _prepare(state, body=True, attachment=True)
     try:
         service = _service(state, cache)
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
@@ -1071,7 +1099,7 @@ async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkey
         contents = await transcript.content_archive()
         roots = tuple(transcript.decode_chunk(fact).content for fact in facts)
         records = await _message_content_records(contents, roots)
-        references = [record.payload.ref for record in records]
+        references = [reference for record in records for reference in record.object_refs()]
         assert references and all(reference is not None for reference in references)
         if warm_page:
             detail = await service.refresh("session", principal=_PRINCIPAL, max_age=3)

@@ -142,7 +142,10 @@ async def test_pending_session_projection_paging_and_completion(
         finally:
             finish.set()
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
-        assert len(mutations) == 1
+        # Native content collection is maintenance after the atomic owner commit.
+        business_commits = [domain for domain in mutations if domain != "native.content_cleanup"]
+        assert len(business_commits) == 1
+        completed_mutations = tuple(mutations)
         for reader, _ in runtimes:
             detail = await reader.sessions.refresh("session", principal=reader.default_principal, limit=10, max_age=max_age)
             assert detail.session.active_execution_id is None
@@ -154,7 +157,7 @@ async def test_pending_session_projection_paging_and_completion(
             older = await reader.sessions.timeline("session", principal=reader.default_principal, cursor=cursor, limit=10)
             assert [turn.execution_id for turn in older.items] == completed[:2]
             assert older.next_cursor is None
-        assert len(mutations) == 1
+        assert tuple(mutations) == completed_mutations
 
 
 @pytest.mark.parametrize("transition", ("complete", "cancel", "promote"))
@@ -337,9 +340,9 @@ async def test_pending_session_projection_older_page_cannot_fill_missing_source_
         pending = _execution("missing", status=ExecutionStatus.STARTED, prompt="cache observation")
         for execution_id in ("missing", "newer"):
             if execution_id == "newer":
-                await storage.execution.executions.create(replace(
-                    _execution(execution_id, status=ExecutionStatus.FAILED, prompt="canonical"), result=None,
-                ))
+                await storage.execution.executions.create(
+                    _execution(execution_id, status=ExecutionStatus.FAILED, prompt="canonical"),
+                )
             await sessions.admit_execution("session", tenant_id="tenant", execution_id=execution_id, expected=None)
             if execution_id == "newer":
                 await _commit_empty_turn(
@@ -396,7 +399,7 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
             await sessions.create(replace(_session(), owner_principal_id="other", metadata={"secret": "other owner"}))
             await storage.execution.executions.create(replace(
                 _execution("other-execution", status=ExecutionStatus.FAILED, prompt="OTHER OWNER INPUT"),
-                principal_id="other", result=None,
+                principal_id="other",
             ))
             await sessions.admit_execution("session", tenant_id="tenant", execution_id="other-execution", expected=None)
             if not keep_active:

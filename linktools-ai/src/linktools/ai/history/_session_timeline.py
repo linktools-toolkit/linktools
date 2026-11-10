@@ -289,6 +289,8 @@ async def capture_session_timeline(
         is executions.state_store.storage_group
     )
 
+    admitted_records: dict[str, ExecutionRecord | ExecutionTimelineRecord] = {}
+
     async def read_blocks() -> tuple[SessionRecord, _TimelineBlocks, tuple[str, int] | None]:
         nonlocal pending_execution
         root = await conversation.sessions.get(session_id, tenant_id=tenant_id)
@@ -303,6 +305,15 @@ async def capture_session_timeline(
         if refresh_phase == "initial" and root.active_execution_id is not None:
             if not shared_native_scope or validate_active is None:
                 raise _ActiveSessionAdmission(root)
+            # Admission cleanup precedes page validation and history access.
+            # Reuse the live record within this same metadata snapshot.
+            active_records = await executions.get_timeline_many(
+                (root.active_execution_id,), tenant_id=tenant_id,
+            )
+            active = validate_active(root, active_records.get(root.active_execution_id))
+            if active is None:
+                raise _ActiveSessionAdmission(root)
+            admitted_records[active.execution_id] = active
         if refresh_phase is not None and transcript_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if pending_execution is not None:
@@ -338,14 +349,11 @@ async def capture_session_timeline(
         # Only the synthetic newest turn may omit canonical membership.
         # A continuation consists entirely of persisted references.
         pending = {} if pending_execution is None or cursor is not None else {pending_execution.execution_id: pending_execution}
-        ids = tuple(value for value in ids if value not in pending)
+        ids = tuple(value for value in ids if value not in pending and value not in admitted_records)
         records = await executions.get_timeline_many(ids, tenant_id=tenant_id) if ids else {}
         if len(records) != len(ids):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        combined = {**pending, **records}
-        if refresh_phase == "initial" and root.active_execution_id is not None and validate_active is not None:
-            if validate_active(root, combined.get(root.active_execution_id)) is None:
-                raise _ActiveSessionAdmission(root)
+        combined = {**pending, **admitted_records, **records}
         # The session policy authorizes readers; the admitted actor need not own
         # the session. Durable membership is established by session and turn IDs.
         for source, refs in blocks:
@@ -421,6 +429,7 @@ async def capture_session_timeline(
                         requests = {session_store: tuple(dict.fromkeys(keys))}
                         requests[execution_store] = tuple(dict.fromkeys((*requests.get(execution_store, ()), *(
                             executions.execution_record_key(identity) for identity in execution_ids
+                            if identity not in admitted_records
                         ))))
                         await _group.get_records(requests)
                     else:
