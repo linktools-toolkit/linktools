@@ -91,6 +91,9 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
                     replace(batch[0], archive=PreparedArchive()),
                     execution_id="execution" if owner is trace else None,
                 )
+            await conversation.transcript_repository.publish_native_archive(
+                transaction.transaction(conversation.state_store), bundle, owner_written=True,
+            )
 
         await group.mutate((state.execution.executions.state_store, conversation.state_store, trace.state_store), commit)
         for owner in (conversation, trace):

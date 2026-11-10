@@ -89,9 +89,11 @@ async def test_session_page_keeps_captured_prefix_but_reads_current_facts(
                 first_message_index=2, prepared=prepared,
             )
             await transcript.publish_archive(prepared)
-            await persistence.archive.state_store.mutate(
-                lambda transaction: transcript.append_chunks(transaction, history_id, chunks)
-            )
+            async def publish(transaction):
+                await transcript.append_chunks(transaction, history_id, chunks)
+                await transcript.publish_native_archive(transaction, prepared, owner_written=True)
+
+            await persistence.archive.state_store.mutate(publish)
         else:
             await persistence.archive.state_store.mutate(
                 lambda transaction: transaction.delete_fact_streams(transcript.head_key(history_id))

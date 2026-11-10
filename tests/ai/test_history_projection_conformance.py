@@ -5,8 +5,9 @@
 from linktools.ai.persistence import Persistence
 import asyncio
 import hashlib
+import json
 import zlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.history import History
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import NativeMessageRoot, PersistenceStorage
 from linktools.ai.history._projection import StepExecutionHistoryReader
 from linktools.ai.history._service import DefaultExecutionHistoryService
 from linktools.ai.runtime._local import LocalExecutionBackend
@@ -59,6 +60,40 @@ from linktools.ai.persistence._step_contracts import (
     StepEvent,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
+from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, ContentRecord
+from linktools.ai.persistence._archive_closure import validate_native_message_content
+from linktools.ai.persistence._step_message_content import NativeMessageContent
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
+from linktools.ai.persistence._sql import SqlStateStore
+from linktools.ai.persistence._payload import decode_payload_bytes
+
+
+async def _message_content_records(
+    contents: ContentArchive, roots: Sequence[ArchiveRoot | NativeMessageRoot],
+) -> tuple[ContentRecord, ...]:
+    """Inspect selected stored bodies without warming the payload read path."""
+    records = []
+    for root in roots:
+        if isinstance(root, NativeMessageRoot):
+            assert isinstance(contents.store, SqlStateStore)
+            assert root.group_id == contents.scope_id
+            context = contents.store.context
+            observer = NativeMessageContent(
+                context, store_digest=root.store_digest, group_id=root.group_id,
+            )
+            query = observer.range_query((root,))
+            if query is None:
+                continue
+            async with context.sessions() as session, session.begin():
+                rows = (await session.execute(query.statement)).mappings().all()
+            records.extend(validate_native_message_content(
+                {"sha256": row["message_sha256"], "message": row["message"]},
+                group_id=root.group_id,
+            ) for row in rows if row["message"] is not None)
+        else:
+            identities = await contents.content_ids(root)
+            records.extend(await contents.content_records(identities))
+    return tuple(records)
 
 
 def _binding() -> AgentBindingContract:
@@ -796,6 +831,7 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize(
     "storage_kind, corruption",
     tuple(
@@ -805,13 +841,16 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
     ) + (("inline", "non-binary"), ("inline", "unknown-codec")),
 )
 async def test_public_transcript_rejects_corrupt_chunk_content(
+    backend: str,
     storage_kind: str,
     corruption: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     objects = FilesystemObjectStore(tmp_path / "objects")
-    state = Persistence(PersistenceStorage(PersistenceStorage.from_root(tmp_path / "state",exclusive_writer=True).plan, object_store=objects))
+    plan = (PersistenceStorage.in_memory().plan if backend == "memory" else
+            PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True).plan)
+    state = Persistence(PersistenceStorage(plan, object_store=objects))
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
@@ -824,9 +863,12 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
         chunk = await repository.latest_chunk(owner_id)
         assert chunk is not None
         contents = await repository.content_archive()
-        identity = (await contents.content_ids(chunk.content))[0]
-        content = (await contents.content_records((identity,)))[0]
-        raw = (await contents.read_contents((identity,), codec="model-message"))[0]
+        content = (await _message_content_records(contents, (chunk.content,)))[0]
+        identity = content.identity
+        encoded = (await contents.read_payload_object(content.payload.ref)
+                   if content.payload.ref is not None else content.payload.decode())
+        raw = decode_payload_bytes(encoded, codec=content.compression,
+                                   raw_digest=content.raw_digest, raw_size=content.raw_size)
         compressed = raw if corruption == "unknown-codec" else zlib.compress(raw)
         if corruption == "zlib":
             compressed = b"not a zlib stream"
@@ -862,7 +904,16 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
                 expected_storage_revision=stored.storage_revision,
             )
 
-        await contents.store.mutate(corrupt_content)
+        if isinstance(chunk.content, NativeMessageRoot):
+            table = build_step_sql_metadata().tables["ai_step_messages"]
+            async with contents.store.context.sessions() as sql, sql.begin():
+                result = await sql.execute(table.update().where(
+                    table.c.store_digest == chunk.content.store_digest,
+                    table.c.sha256 == content.raw_digest,
+                ).values(message=json.dumps(changed.to_json())))
+                assert result.rowcount == 1
+        else:
+            await contents.store.mutate(corrupt_content)
         history = History(
             DefaultExecutionHistoryService(
                 state.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(state),

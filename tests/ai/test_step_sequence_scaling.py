@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
+from linktools.ai.persistence._step_message_content import NativeMessageContent
 
 
 class _ReadTraffic:
@@ -186,6 +187,7 @@ def test_sequence_read_compiles_for_supported_dialects_without_unbounded_mysql_e
     store._context = SimpleNamespace(engine=SimpleNamespace(dialect=dialect))
     store._metadata = build_step_sql_metadata()
     store._store_digest = "a" * 64
+    store._message_content = NativeMessageContent(store._context, store_digest=store._store_digest)
     query = store._sequence_query([{
         "id": 1, "sequence_root": "b" * 64,
         "messages": json.dumps({"stored_messages": count, "checkpoint": None}),

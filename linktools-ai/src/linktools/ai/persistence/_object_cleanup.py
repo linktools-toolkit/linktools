@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from ..core import JsonValue, validate_page_limit
 from ..errors import AIError, ErrorCode
@@ -42,6 +42,10 @@ from .state import (
     StateStorageGroup,
     StateStore,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
 
 ObjectCandidate = tuple[PersistenceDomain, ObjectRef]
 _MANIFEST_PREFIXES = ("v1/input-capture/", "v1/asset-snapshot/", "v1/task-graph-binding-capture/")
@@ -167,7 +171,8 @@ async def _purge_unreferenced_objects(
             closure.mark_snapshot(snapshot)
         bodies = {(row["store_digest"], row["sha256"]): row for row in messages}
         opened = await group.open_archive()
-        native_groups[group] = closure, bodies, domain, None if opened is None else opened[0]
+        sequence_ids = {(row["store_digest"], row["sha256"]) for row in sequences}
+        native_groups[group] = closure, bodies, domain, None if opened is None else opened[0], sequence_ids
         if opened is not None:
             if opened[0] in native_closures:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -288,7 +293,7 @@ async def _purge_unreferenced_objects(
                 await visit(ObjectRef(source.store_id, stat.key, stat.digest, stat.size), domain, root=False)
 
     # Verify the entire retained native closure before any destructive work.
-    for closure, bodies, domain, group_id in native_groups.values():
+    for closure, bodies, domain, group_id, sequence_ids in native_groups.values():
         if not closure.retained_messages.issubset(bodies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for identity in closure.retained_messages:
@@ -324,6 +329,36 @@ async def _purge_unreferenced_objects(
         for offset in range(0, len(unreachable), 1000):
             keys = tuple(record.key_digest for record in unreachable[offset:offset + 1000])
             await archive.mutate(lambda tx, keys=keys: tx.delete_records(keys))
+
+    # Metadata must stop referring to reclaimed bodies before external object
+    # deletion. An unknown commit or cancellation leaves objects intact; the
+    # outer guard invalidates cached content proofs before admitting writers.
+    for group, (closure, bodies, domain, group_id, sequence_ids) in native_groups.items():
+        from sqlalchemy import delete
+
+        native_metadata = build_step_sql_metadata()
+        unused = (
+            (native_metadata.tables["ai_step_sequences"], sequence_ids - closure.retained_sequences),
+            (native_metadata.tables["ai_step_messages"], bodies.keys() - closure.retained_messages),
+        )
+        if not any(identities for _, identities in unused):
+            continue
+
+        async def remove_native_content(session: "AsyncSession") -> None:
+            for table, identities in unused:
+                by_store: dict[str, list[str]] = {}
+                for store_digest, identity in sorted(identities):
+                    by_store.setdefault(store_digest, []).append(identity)
+                for store_digest, scoped_ids in by_store.items():
+                    for offset in range(0, len(scoped_ids), 128):
+                        batch = scoped_ids[offset:offset + 128]
+                        removed = await session.execute(delete(table).where(
+                            table.c.store_digest == store_digest, table.c.sha256.in_(batch),
+                        ))
+                        if removed.rowcount != len(batch):
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        await group.context.run_mutation(remove_native_content, domain="steps.content_cleanup")
 
     deleted, missing, retained, blocked = [], [], [], []
     for candidate in selected:

@@ -6,13 +6,13 @@ import hashlib
 from dataclasses import replace
 
 import pytest
+from sqlalchemy import event
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.inputs import ExecutionContextArchive
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import PersistenceDomain, Persistence
-from linktools.ai.persistence._archive import ArchiveRoot
+from linktools.ai.persistence import NativeMessageRoot, PersistenceDomain, Persistence
 from linktools.ai.persistence._archive_closure import iter_archive_content_refs, rekey_archive_roots
 from linktools.ai.persistence.codec import encode_domain
 from linktools.ai.storage import StoredPayload
@@ -68,7 +68,7 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
         ))
         first = await service.prepare(context)
         await first.archive.store.mutate(lambda tx: first.archive.publish(tx, first.records))
-        root = ArchiveRoot.from_json(first.reference.payload.decode()["history"])
+        root = NativeMessageRoot.from_json(first.reference.payload.decode()["history"])
         reads = []
         original = first.archive.store.read_records
 
@@ -77,10 +77,22 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
             return await original(keys)
 
         monkeypatch.setattr(first.archive.store, "read_records", capture)
-        reused = await service.prepare(context, history_root=root,
-                                       history_digest=hashlib.sha256(context.history).hexdigest())
+        sql_reads = []
+        engine = state.execution.executions.state_store.context.engine.sync_engine
+
+        def capture_sql(connection, cursor, statement, parameters, execution_context, many):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                sql_reads.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture_sql)
+        try:
+            reused = await service.prepare(context, history_root=root,
+                                           history_digest=hashlib.sha256(context.history).hexdigest())
+        finally:
+            event.remove(engine, "before_cursor_execute", capture_sql)
+        assert not sql_reads, "verified native prefix reuse must not issue SQL reads"
         assert not reads
-        assert not reused.records.records
+        assert not reused.records.records and not reused.records.native_messages
         assert reused.reference == first.reference
         assert await service.load(reused.reference) == context
         changed_messages = list(context.model_messages())
@@ -88,7 +100,7 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
         changed = ExecutionInputContext.from_messages(changed_messages)
         retained = await service.prepare(changed, history_root=root,
                                          history_digest=hashlib.sha256(context.history).hexdigest())
-        assert retained.records.records
+        assert retained.records.native_messages
         assert retained.reference != first.reference
     finally:
         await state.close()

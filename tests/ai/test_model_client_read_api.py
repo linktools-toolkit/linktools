@@ -28,14 +28,14 @@ from linktools.ai.history._transient import TransientExecutionHistoryStore
 from linktools.ai.execution import UsageReadCutoff
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._archive import PreparedArchive
-from linktools.ai.persistence._archive_closure import iter_archive_roots
+from linktools.ai.persistence._archive_closure import iter_archive_roots, iter_native_message_roots
 from linktools.ai.persistence.codec import _encode_persisted_domain, iter_runtime_object_refs
 from linktools.ai.persistence.contracts import ContextProjection, RuntimePayloadRef
 from linktools.ai.persistence._model_interaction_store import ModelInteractionInMemoryStepArchive
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
-from .test_history_projection_conformance import _reader, _record
+from .test_history_projection_conformance import _message_content_records, _reader, _record
 from .test_model_client_interaction_storage import _requests, _staged, _storage
 from .test_runtime_history_public import _Executions
 
@@ -108,11 +108,10 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
             keys = {ref.key for _, ref in iter_runtime_object_refs(
                 encoded, default_domain=PersistenceDomain.TRACE,
             )}
-            roots = tuple(iter_archive_roots(encoded))
+            roots = (*iter_archive_roots(encoded), *iter_native_message_roots(encoded))
             if roots:
                 contents = await archive.transcript_repository.content_archive()
-                ids = await contents.content_ids_many(roots)
-                values = await contents.content_records(tuple(identity for group in ids for identity in group))
+                values = await _message_content_records(contents, roots)
                 keys.update(content.payload.ref.key for content in values if content.payload.ref is not None)
             return keys
 

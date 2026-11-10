@@ -226,8 +226,16 @@ async def test_loaded_projection_reuse_digest_describes_original_root_bytes(tmp_
             namespace="message-defaults-reuse", tenant_id="tenant",
         )
         prepared = await service.prepare(context, history_root=loaded.archive_root, history_digest=loaded.archive_digest)
-        assert prepared.archive.scope_id == loaded.archive_root.scope_id
-        assert prepared.archive.content_scope == loaded.archive_root.content_scope
+        if backend == "sqlite":
+            from linktools.ai.persistence import SqlStepStore
+
+            assert prepared.archive.scope_id == loaded.archive_root.group_id
+            assert loaded.archive_root.store_digest == SqlStepStore.scope_digest(
+                namespace="message-defaults-reuse", tenant_id="tenant",
+            )
+        else:
+            assert prepared.archive.scope_id == loaded.archive_root.scope_id
+            assert prepared.archive.content_scope == loaded.archive_root.content_scope
         await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
         assert await service.load(prepared.reference) == context
         assert prepared.reference.payload.decode()["history"] != loaded.archive_root.to_json()
