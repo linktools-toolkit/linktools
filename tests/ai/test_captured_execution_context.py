@@ -168,6 +168,21 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
         clean = await runtime_engine.inputs.read_agent(clean_capture, principal=principal)
         assert clean.input_context is None
         assert clean.repository_instructions == value.repository_instructions
+        expected_instructions = dict(value.input_context.repository_instructions)
+        assert expected_instructions["documents"][0]["content"] == "Historical repository instruction"
+        for reference, policy, key in ((capture, "captured", "instructions-capture"),
+                                       (clean_capture, "clean", "instructions-clean")):
+            detached = await runtime_engine.inputs.read_agent(reference, principal=principal)
+            detached.repository_instructions["documents"][0]["content"] = "Consumer annotation"
+            with monkeypatch.context() as patch:
+                if policy == "clean":
+                    patch.setattr(ExecutionContextArchive, "load", reject_full_context)
+                repeated = await runtime_engine.inputs.capture_input(
+                    source.execution_id, CaptureInputRequest(principal, key, context_policy=policy))
+            assert repeated == reference
+            restored = await runtime_engine.inputs.read_agent(repeated, principal=principal)
+            assert restored.repository_instructions == expected_instructions
+        assert dict(value.input_context.repository_instructions) == expected_instructions
         instructions.write_text("Changed live repository instruction", encoding="utf-8")
         rerun = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED

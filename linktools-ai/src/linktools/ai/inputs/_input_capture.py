@@ -590,7 +590,7 @@ class InputCaptures:
             payload = {"prompt": task_prompt_draft(prompt), "input_view": None if input_view is None else dict(input_view), "binding": record.binding.to_payload(),
                        "original_input": dict(record.stored_user_input.view or {"prompt": task_prompt_draft(prompt)}) if task_input is None else dict(task_input.original_input),
                        "source_execution_id": execution_id, "source_invocation_id": record.parent_invocation_id,
-                       "repository_instructions": instructions,
+                       "repository_instructions": dict(instructions) if isinstance(instructions, Mapping) else instructions,
                        "input_context": None if context is None else context.to_payload(),
                        **({"tool_response_ref": record.tool_response_ref.to_payload()} if record.tool_response_ref is not None else {}),
                        "source_principal": {"principal_id": record.principal_id, "tenant_id": principal.tenant_id, "kind": record.principal_kind},
