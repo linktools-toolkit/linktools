@@ -11,7 +11,8 @@ from pydantic_ai_harness.memory import MemoryConflictError, MemoryOperation, Mem
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
-from linktools.ai.runtime._memory import RuntimeMemoryStore, _MutationReceipt
+from linktools.ai.memory import PersistentMemoryStore
+from linktools.ai.memory._store import _MutationReceipt
 
 
 @pytest.mark.parametrize("kind,existed,status", [
@@ -63,7 +64,7 @@ async def test_memory_receipt_real_repository_replay_and_conflicts(tmp_path: Pat
     state = Persistence(storage)
     await state.initialize(namespace="receipt-test", tenant_id="tenant")
     try:
-        store = RuntimeMemoryStore(state.memory, object_store=state.object_store(PersistenceDomain.MEMORY),
+        store = PersistentMemoryStore(state.memory, object_store=state.object_store(PersistenceDomain.MEMORY),
                                    namespace="receipt-test", tenant_id="tenant", execution_id="execution", memory_scope="scope")
         operation = MemoryOperation("create", canonical_sha256({"content": "first"}))
         created = await store.write("memory/a.md", "first", expected_version=None, operation=operation)
@@ -108,3 +109,34 @@ async def test_memory_receipt_real_repository_replay_and_conflicts(tmp_path: Pat
         assert await store.read("memory/a.md", max_chars=100) == after_recreate
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transient", [False, True])
+async def test_memory_scope_shares_or_isolates_execution_receipts(transient: bool) -> None:
+    async with Persistence.open("memory-owner", storage=PersistenceStorage.in_memory()) as state:
+        def store(execution_id: str) -> PersistentMemoryStore:
+            return PersistentMemoryStore(
+                state.memory, object_store=state.object_store(PersistenceDomain.MEMORY),
+                namespace=state.namespace, tenant_id=state.tenant_id,
+                execution_id=execution_id, memory_scope="notes", transient=transient,
+            )
+
+        first, second = store("first"), store("second")
+        operation = MemoryOperation("write", "a" * 64)
+        written = await first.write("memory/note.md", "note", expected_version=None, operation=operation)
+        captured = await first.capture()
+        if transient:
+            assert await second.read("memory/note.md", max_chars=100) is None
+            assert await second.get_operation(operation) is None
+            await second.seed_capture(captured)
+            restored = await second.read("memory/note.md", max_chars=100)
+            assert restored is not None and restored.version == written.version
+            await second.delete("memory/note.md", expected_version=restored.version)
+            await second.seed_capture(captured)
+            assert await second.read("memory/note.md", max_chars=100) is None
+            assert await first.read("memory/note.md", max_chars=100) is not None
+        else:
+            assert await second.capture() == captured
+            replay = await second.get_operation(operation)
+            assert replay is not None and replay.replayed and replay.version == written.version

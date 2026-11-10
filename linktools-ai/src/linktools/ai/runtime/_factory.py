@@ -81,7 +81,8 @@ from ..inputs.recovery import TaskRecoveryGuard
 from ..inputs import ExecutionContextArchive
 from ._local import LocalExecutionBackend
 from ..persistence.coordination import PendingTurnCoordination
-from ._memory import MemoryStore, RuntimeMemoryStore
+from pydantic_ai_harness.memory import MemoryStore
+from ..memory import PersistentMemoryStore
 from ..persistence.objects import ObjectKeyFactory
 from ._capabilities import runtime_feature_leaves
 from ..persistence.capabilities import CapabilityPersistence
@@ -541,7 +542,7 @@ def _memory_store_factory(
         object_store: ObjectStore,
         transient: bool,
     ) -> MemoryStore:
-        return RuntimeMemoryStore(
+        return PersistentMemoryStore(
             state.memory,
             object_store=object_store,
             namespace=namespace,

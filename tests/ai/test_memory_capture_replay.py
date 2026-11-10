@@ -21,7 +21,8 @@ from linktools.ai.execution import ExecutionInputContext, ExternalCallSucceeded,
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence.contracts import MemoryRecord
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.runtime._memory import RuntimeMemoryStore, _memory_id
+from linktools.ai.memory import PersistentMemoryStore
+from linktools.ai.memory._store import _memory_id
 from linktools.ai.core import ExecutionStatus
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -30,8 +31,8 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 _PATH = "memory/MEMORY.md"
 
 
-def _store(state: Persistence, scope: str) -> RuntimeMemoryStore:
-    return RuntimeMemoryStore(
+def _store(state: Persistence, scope: str) -> PersistentMemoryStore:
+    return PersistentMemoryStore(
         state.memory, object_store=state.object_store(PersistenceDomain.MEMORY),
         namespace=state.namespace, tenant_id=state.tenant_id,
         execution_id="execution", memory_scope=scope,

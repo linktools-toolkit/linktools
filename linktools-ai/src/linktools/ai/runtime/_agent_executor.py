@@ -125,7 +125,7 @@ from ..execution import PendingDeferredCall
 from ._compaction import CompactionPolicy
 from ..inputs import CanonicalUserInput
 from ..observe.journal import ModelRequestJournal
-from ._memory import MemoryStore
+from pydantic_ai_harness.memory import MemoryStore
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._harness import (

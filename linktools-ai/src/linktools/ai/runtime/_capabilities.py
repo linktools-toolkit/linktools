@@ -26,7 +26,7 @@ from ._compaction import ExternalModelRequestRecorder, CompactionCapability, Com
 from ..capability import ExecutionCapability, MemoryCapability, tool_effect_policy_from_metadata
 from ._harness import HarnessPlanStoreAdapter
 from ..capability.planning import HarnessPlanning
-from ._memory import MemoryStore
+from pydantic_ai_harness.memory import MemoryStore
 from ._tool_boundary import require_tool_effects
 from ..capability import TraceCapability
 from ._plan import RuntimePlanStore

@@ -100,7 +100,8 @@ from ..observe.service import (
 )
 from ..model.messages import encode_model_messages
 from ..execution import ExecutionInputContext
-from ._memory import MemoryStore, RuntimeMemoryStore
+from pydantic_ai_harness.memory import MemoryStore
+from ..memory import PersistentMemoryStore
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import (
     RuntimeToolOperationBridge,
@@ -4462,7 +4463,7 @@ class LocalExecutionBackend:
                 memory_capture = None
                 reason = None
                 if memory is not None:
-                    if isinstance(memory, RuntimeMemoryStore):
+                    if isinstance(memory, PersistentMemoryStore):
                         memory_capture = await memory.capture()
                     else:
                         reason = "memory_store_has_no_consistent_capture"
@@ -4653,7 +4654,7 @@ class LocalExecutionBackend:
             if current.context_imported:
                 session_metadata = accepted_context.session_metadata
                 if memory is not None:
-                    if not isinstance(memory, RuntimeMemoryStore):
+                    if not isinstance(memory, PersistentMemoryStore):
                         raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "memory_store_has_no_isolated_capture"})
                     await memory.seed_capture(accepted_context.memory or {})
             public_context = AgentContext(

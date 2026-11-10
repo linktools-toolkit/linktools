@@ -62,7 +62,7 @@ existing owners and the boundary to retain, rather than prescribing file moves.
 | --- | --- | --- | --- | --- |
 | Asset / Skill | `capability/_asset.py`, `_declaration.py`, `_skill_source.py` resolve current declarations and selected Asset versions; `agent/_compiler.py` owns selectors | `capability/_skill.py` discovers current allowed Skills and reads each selected version; Workspace mounts are prepared at run start | Runtime initializes and closes the store declared by `AssetCapability(store)`; a borrowed live source keeps its store under the external owner | Keep current reads separate from retained tool observations; do not add a second frozen-resource lifecycle or expand sandbox access during discovery |
 | FileSystem / Shell | `capability/_filesystem.py`, `_shell.py` supply tool declarations; Runtime captures Workspace and selected names | Capabilities own tool arguments/results and retry feedback; `runtime/_agent_executor.py` binds the shared Boundary and backend | Workspace owns logical paths, physical deployment, process trees and quiescent close; execution owns authorization and effect facts | Audit contribution/binding adapters together; do not move OS isolation or effect authority into a tool capability |
-| Memory | `capability/_memory.py` declares native tools; Runtime captures the host scope | Capability owns model tools and SDK adaptation; `runtime/_memory.py` adapts admitted scope, versions, capture/seed and mutation receipts | Persistence owns record/object transactions; the execution retains its admitted Memory scope; current declarations determine available tools | Keep admitted scope separate from current tool discovery; do not resurrect removed tools from historical defaults |
+| Memory | `capability/_memory.py` declares native tools; Runtime captures the host scope | Capability owns model tools and SDK adaptation; `memory.PersistentMemoryStore` owns admitted-scope storage operations, versions, capture/seed and mutation receipts | Persistence owns record/object transactions; the execution retains its admitted Memory scope; current declarations determine available tools | Keep admitted scope separate from current tool discovery; do not resurrect removed tools from historical defaults |
 | Planning | Agent/invocation `planning` enables the tool separately from `allow_tools` | `capability/planning.py` owns the supported `write_plan` surface; `runtime/_harness.py` translates the native store contract | `runtime/_plan.py` owns the session/execution plan and optimistic transaction; `_local.py` selects its owner | Co-locate capability-specific projection only after defining its public store boundary; do not confuse model plans, execution plan mode and Task DAGs |
 | MCP | `MCPServerSpec` resolves from the current source under admitted Agent selectors; Asset owns referenced resources | `capability/mcp.py` owns discovery, schema feedback, protocol errors and client cleanup; `runtime/_mcp.py` owns model names, original-name routing, selectors, fixture and Boundary wiring | Native protocol client owns connection cleanup; Workspace owns transport processes; execution owns budget, authorization and effect records | Keep this division; moving model names alone does not justify another public API or registry |
 | Subagent | Agent compilation pins selected child contracts | `capability/_subagent.py` exposes tools through the existing delegate; `runtime/_subagent.py` owns child start/wait/cancel and inheritance | The execution producer owns parent/child identity, recovery, budgets and drain | Preserve the narrow delegate; capability must not become another execution engine |
@@ -148,3 +148,63 @@ No new port names, parameters, default values, constructor shape or lifecycle
 are adopted by this document. Ordinary `Task.from_agent` and Runtime composition
 remain unchanged in either design. Runtime's current execution/turn authority
 and Persistence contracts are not part of this API decision.
+
+## Memory persistence composition
+
+`MemoryCapability(scope="default")` remains the ordinary declaration. Runtime
+selects the admitted execution scope and persistence route, then borrows a
+`memory.PersistentMemoryStore`; applications do not need an additional manager
+or context manager. The adapter borrows `MemoryRepositories` and `ObjectStore`,
+with explicit namespace, tenant, execution, memory scope and retention inputs.
+It does not own or close those resources.
+
+`capture()` reads a consistent scope and preserves content versions.
+`seed_capture(capture)` restores those versions into the selected scope once per
+path. Each seed and its receipt commit atomically; retrying a partial seed uses
+the original receipts and does not undo later writes or deletions. Imported
+executions use isolated scopes; recovery retains the admitted principal and
+scope. Ordinary custom Harness stores still bind through `MemoryCapability.bind`;
+they do not gain consistent capture support by implementing only read/write.
+
+Persistence owns record CAS, transaction boundaries and the operation ledger.
+The memory adapter owns the SDK mutation projection of that ledger, not a second
+receipt store. Unknown outcomes remain unknown until the original operation can
+be read back or replayed. Capability does not import this adapter: persistence
+contracts already depend on Agent and execution values that use capability.
+
+For a host that already owns Persistence, the adapter can also be used directly:
+
+```python
+from linktools.ai.memory import PersistentMemoryStore
+from linktools.ai.persistence import PersistenceDomain
+
+memory = PersistentMemoryStore(
+    persistence.memory,
+    object_store=persistence.object_store(PersistenceDomain.MEMORY),
+    namespace=persistence.namespace,
+    tenant_id=persistence.tenant_id,
+    execution_id="execution-1",
+    memory_scope="notes",
+)
+captured = await memory.capture()
+restored = PersistentMemoryStore(
+    persistence.memory,
+    object_store=persistence.object_store(PersistenceDomain.MEMORY),
+    namespace=persistence.namespace,
+    tenant_id=persistence.tenant_id,
+    execution_id="execution-2",
+    memory_scope="capture:execution-2",
+)
+await restored.seed_capture(captured)
+```
+
+The caller chooses an isolated destination scope for imported input. With
+`transient=True`, the adapter additionally isolates scope identity by execution;
+the host must supply the corresponding working object store. The optional
+`payload_policy` controls ordinary write inlining. Capture preserves source
+versions, while subsequent writes derive destination versions. A changed
+capture for an already-seeded path conflicts rather than overwriting the prior
+receipt. Malformed records or receipts fail integrity checks; storage errors
+and cancellation propagate. A caller retrying an uncertain mutation must retain
+its original operation identity. This adapter does not add automatic rollback
+or a whole-capture transaction.
