@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
+from pydantic_ai_harness.step_persistence import RunRecord as NativeRunRecord, StepEvent as NativeStepEvent
 from pydantic_ai.usage import RequestUsage, RunUsage
 from pydantic_ai.messages import (
     SYNTHESIZED_TOOL_RETURN_METADATA_KEY,
@@ -240,6 +241,19 @@ class AgentRunRecorder:
         if event.agent_run_id != self._agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._store.append_event(event, execution_id=self._execution_id)
+
+    async def record_native_event(self, run: NativeRunRecord, source: NativeStepEvent) -> None:
+        """Keep the original Trace position while staging the canonical native lifecycle."""
+        if not isinstance(self._store, RuntimeAgentRunStore) or self._run is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        event_index = self._next_event_index
+        event = self._store.project_native_event(source, event_index=event_index)
+        if (run.run_id != self._agent_run_id or source.run_id != run.run_id
+                or event.agent_run_id != self._run.agent_run_id):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._store.stage_native_event(run, source, event)
+        self._next_event_index += 1
+        await self.append_event(event)
 
     async def record_event(
         self,

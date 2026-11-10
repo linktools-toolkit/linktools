@@ -26,7 +26,7 @@ from linktools.ai.storage import (
     FilesystemObjectStore,
     InMemoryObjectStore,
     ObjectStat,
-    ObjectStoreMaintenance,
+    ObjectStoreDeletion,
     SqlObjectStore,
     StoredPayload,
 )
@@ -88,7 +88,7 @@ async def test_cleanup_shared_source_io_does_not_scale_with_domain_aliases(
         candidates = tuple((PersistenceDomain.EVALUATION, ref) for ref in (shared, captured, orphan))
         result = await storage.purge_unreferenced_objects(candidates, exclusive=Offline(), limit=1)
         assert result.retained == candidates[:2]
-        if isinstance(objects, ObjectStoreMaintenance):
+        if isinstance(objects, ObjectStoreDeletion):
             assert result.deleted == candidates[2:]
         else:
             assert result.blocked == candidates[2:]
@@ -265,3 +265,25 @@ async def test_cleanup_expiry_metadata_does_not_cross_object_instances() -> None
     result = await purge_unreferenced_objects(candidate, namespace="cleanup", tenant_id="tenant", stores={},
                                               object_stores=sources, exclusive=Offline())
     assert result.retained == candidate
+
+
+@pytest.mark.asyncio
+async def test_cleanup_without_deletion_capability_stays_blocked() -> None:
+    objects = InMemoryObjectStore()
+    orphan = await put(objects, "orphan", "unreferenced")
+
+    class ReadOnlyObjects:
+        store_id = objects.store_id
+        put = objects.put
+        stat = objects.stat
+        open = objects.open
+        validate_integrity = objects.validate_integrity
+        list_objects = objects.list_objects
+
+    sources = {domain: ReadOnlyObjects() for domain in PersistenceDomain}
+    candidate = ((PersistenceDomain.EVALUATION, orphan),)
+    result = await purge_unreferenced_objects(candidate, namespace="cleanup", tenant_id="tenant",
+        stores={}, object_stores=sources, exclusive=Offline())
+    assert result.blocked == candidate
+    assert result.deleted == result.missing == result.retained == ()
+    assert await objects.stat(orphan.key) is not None

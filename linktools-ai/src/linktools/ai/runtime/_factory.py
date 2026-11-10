@@ -16,6 +16,7 @@ from pydantic_ai.workspaces import WorkspaceBackend
 
 from ..asset import AssetStoreReader
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, AgentCompiler, CompiledAgent
+from ..steps import NativeStepSource
 from ..capability import (
     ToolResponsesCapability,
     SessionCapability,
@@ -81,7 +82,8 @@ from ..inputs.recovery import TaskRecoveryGuard
 from ..inputs import ExecutionContextArchive
 from ._local import LocalExecutionBackend
 from ..persistence.coordination import PendingTurnCoordination
-from ._memory import MemoryStore, RuntimeMemoryStore
+from pydantic_ai_harness.memory import MemoryStore
+from ..memory import PersistentMemoryStore
 from ..persistence.objects import ObjectKeyFactory
 from ._capabilities import runtime_feature_leaves
 from ..persistence.capabilities import CapabilityPersistence
@@ -541,7 +543,7 @@ def _memory_store_factory(
         object_store: ObjectStore,
         transient: bool,
     ) -> MemoryStore:
-        return RuntimeMemoryStore(
+        return PersistentMemoryStore(
             state.memory,
             object_store=object_store,
             namespace=namespace,
@@ -673,6 +675,10 @@ async def _build_local_components(
             compiler,
             current_compiler=current_compiler,
         )
+        async def native_step_source(binding: AgentBinding) -> NativeStepSource | None:
+            await prepare_runtime_capabilities(binding.compiled_agent)
+            return run_store.native_step_source
+
         execution = DefaultExecutionService(
             state.execution,
             state.object_store(PersistenceDomain.EXECUTION),
@@ -682,6 +688,7 @@ async def _build_local_components(
             catalog=catalog,
             compiler=compiler,
             restore_binding=binding_resolver.restore,
+            native_step_source=native_step_source,
             runtime_bridge=runtime_bridge,
             live_broker=live_broker,
             history_reader=history_reader,
@@ -770,6 +777,7 @@ async def _build_local_components(
             archive_objects=state.archive_object_store(PersistenceDomain.EXECUTION),
             archive_object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
             restore_binding=binding_resolver.restore,
+            native_step_source=native_step_source,
             tenant_id=tenant_id,
             workspace=workspace,
             limits=limits,

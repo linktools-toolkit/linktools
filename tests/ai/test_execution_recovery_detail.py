@@ -141,6 +141,21 @@ async def test_observed_boundary_is_select_free_and_rejects_stale_cancellation(t
             ))
         assert stale.value.code is ErrorCode.STORAGE_CONFLICT
         assert (await repository.get("execution", tenant_id="tenant")).status is ExecutionStatus.CANCELLING
+        cancelling = await repository.get_observed("execution", tenant_id="tenant")
+        terminal = await repository.state_store.mutate(lambda tx: repository.commit_boundary_in_transaction(
+            tx, cancelling, next_record=cancelling.value, expected_producer_generation=1,
+            expected_producer_claim_id="worker", allow_cancelling=True,
+        ))
+        assert terminal.value == cancelling.value
+        assert terminal.storage_revision == cancelling.storage_revision + 1
+        for candidate, claim in ((replace(terminal.value, revision=3), "worker"),
+                                 (terminal.value, "another-worker")):
+            with pytest.raises(AIError) as forbidden:
+                await repository.state_store.mutate(lambda tx: repository.commit_boundary_in_transaction(
+                    tx, terminal, next_record=candidate, expected_producer_generation=1,
+                    expected_producer_claim_id=claim, allow_cancelling=True,
+                ))
+            assert forbidden.value.code is ErrorCode.STORAGE_CONFLICT
 
 
 def test_deferred_argument_objects_keep_checkpoint_source_after_control_merge() -> None:

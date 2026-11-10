@@ -29,7 +29,11 @@ async def _history(state: Persistence, count: int):
             first_message_index=index, prepared=prepared,
         ))
     await repository.publish_archive(prepared)
-    await repository._store.mutate(lambda tx: repository.append_chunks(tx, "history", chunks))
+    async def publish(transaction):
+        await repository.append_chunks(transaction, "history", chunks)
+        await repository.publish_native_archive(transaction, prepared, owner_written=True)
+
+    await repository._store.mutate(publish)
     return repository
 
 

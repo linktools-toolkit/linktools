@@ -3,6 +3,7 @@
 """History content reads share Runtime caching without changing domain ownership."""
 
 import hashlib
+import json
 import zlib
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -25,7 +26,9 @@ from linktools.ai.runtime._factory import _borrowed_runtime_history
 from linktools.ai.persistence import PersistenceDomain, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence._step_archive import StateStepArchive
-from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._archive import ContentRecord, PreparedArchive
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
+from sqlalchemy import select
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StoredPayload, StorageReadCache
 
 from .test_runtime_history_public import _ResultExecutions, _TaskResults
@@ -144,11 +147,15 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
         async def publish(transaction):
             await repository.publish_archive(prepared)
             await repository.append_chunks(transaction, "run", chunks)
+            await repository.publish_native_archive(transaction, prepared, owner_written=True)
 
         await archive.state_store.mutate(publish)
-        contents = await repository.content_archive()
-        identities = await contents.content_ids(chunk.content)
-        records = await contents.content_records(identities)
+        table = build_step_sql_metadata().tables["ai_step_messages"]
+        async with archive.state_store.context.engine.connect() as connection:
+            rows = (await connection.execute(select(table.c.message).where(
+                table.c.store_digest == chunk.content.store_digest,
+            ))).scalars().all()
+        records = tuple(ContentRecord.from_json(json.loads(row)) for row in rows)
         assert len(records) == 1
         content = records[0]
         assert content.compression == "zlib" and content.payload.kind == "object"

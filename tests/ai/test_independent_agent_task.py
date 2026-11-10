@@ -225,3 +225,25 @@ async def test_two_agent_producers_share_task_persistence_without_sharing_lifecy
                     assert (await second_graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
                     assert await second_graph.result("answer") == {"text": "second"}
                     assert persistence.ready
+
+
+@pytest.mark.asyncio
+async def test_agent_task_rejects_closed_producer_with_live_shared_persistence() -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    async def model(messages, info):
+        return ModelResponse(parts=[TextPart("answer")])
+
+    features = RuntimeFeatures("closed-agent-task")
+    features.agent("default", model="default", allow_tools=())
+    async with Persistence.open("closed-agent-task", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(
+            persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
+        ) as runtime:
+            task = Task.from_agent("answer", runtime.agents.get())
+        assert persistence.ready
+        with pytest.raises(AIError) as closed:
+            async with TaskEngine.open(task, persistence=persistence):
+                pass
+        assert closed.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+        assert persistence.ready

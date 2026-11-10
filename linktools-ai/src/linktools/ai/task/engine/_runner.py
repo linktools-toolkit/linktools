@@ -569,31 +569,49 @@ class TaskNodeExecutor(Generic[AppT]):
         activation: object,
         *,
         admitted: bool,
+        failure: BaseException | None = None,
     ) -> None:
-        persisted = admitted
-        if not persisted:
-            persisted = (
-                await self._task_admissions.get(
-                    graph_id,
-                    tenant_id=tenant_id,
-                )
-            ) is not None
-        async with self._definition_lock:
-            pending = self._pending_definition_activations.get(graph_id)
-            if pending is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if pending == 1:
-                del self._pending_definition_activations[graph_id]
-            else:
-                self._pending_definition_activations[graph_id] = pending - 1
-            if (
-                not persisted
-                and pending == 1
-                and self._active_definitions.get(graph_id) is activation
-            ):
-                self._active_definitions.pop(graph_id, None)
-                self._admitted_binding_captures.pop(graph_id, None)
-                self._budget_scopes.pop(graph_id, None)
+        # Unknown admission and failed readback must retain execution resources.
+        persisted = True
+        try:
+            if not admitted:
+                persisted = (
+                    await self._task_admissions.get(
+                        graph_id,
+                        tenant_id=tenant_id,
+                    )
+                ) is not None
+        except (Exception, asyncio.CancelledError) as cleanup_error:
+            if failure is None:
+                raise
+            caller = asyncio.current_task()
+            if isinstance(cleanup_error, asyncio.CancelledError) and caller is not None and caller.cancelling():
+                raise
+            failure.add_note(
+                "Task activation readback failed; execution resources retained "
+                f"({type(cleanup_error).__name__})."
+            )
+            _logger.warning(
+                "Task activation readback failed; resources retained: graph=%s error=%s",
+                graph_id, type(cleanup_error).__name__,
+            )
+        finally:
+            async with self._definition_lock:
+                pending = self._pending_definition_activations.get(graph_id)
+                if pending is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if pending == 1:
+                    del self._pending_definition_activations[graph_id]
+                else:
+                    self._pending_definition_activations[graph_id] = pending - 1
+                if (
+                    not persisted
+                    and pending == 1
+                    and self._active_definitions.get(graph_id) is activation
+                ):
+                    self._active_definitions.pop(graph_id, None)
+                    self._admitted_binding_captures.pop(graph_id, None)
+                    self._budget_scopes.pop(graph_id, None)
 
     def _definitions_for(
         self,

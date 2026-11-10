@@ -54,6 +54,8 @@ from .contracts import (
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
+from ._step_message_content import NativeMessageRoot
+from ._step_store import SqlStepStore
 from ._task_summary import _TaskSummary
 from ._plan import PersistenceDomain
 from ._repository_common import (
@@ -1074,8 +1076,12 @@ def _fact_stream(
     relation, value = _fact_storage_identity(domain, fact, owner)
     if isinstance(owner, TranscriptHeadRecord):
         chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
-        if (chunk.content.content_scope != canonical_sha256([namespace, tenant_id])
-                or chunk.content.count != chunk.message_count):
+        scope_matches = (
+            chunk.content.store_digest == SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
+            if isinstance(chunk.content, NativeMessageRoot)
+            else chunk.content.content_scope == canonical_sha256([namespace, tenant_id])
+        )
+        if not scope_matches or chunk.content.count != chunk.message_count:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return stream_digest(
         namespace,

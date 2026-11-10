@@ -30,7 +30,7 @@ _MEMORY_TOOLS: dict[str, Mapping[str, object]] = {
 class MemoryCapability(AbstractCapability[AgentContext[object]]):
     """Expose memory tools using the scope captured by the owning Runtime.
 
-    Runtime owns storage; admitted executions retain their original scope.
+    The host selects storage; admitted executions retain their original scope.
     Imported input contexts use isolated captured memory. Omitting this
     declaration disables memory for ordinary new executions.
     """

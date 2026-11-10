@@ -1720,8 +1720,44 @@ same native envelope when reading, checking the original envelope-message digest
 to reject changed retry usage or snapshot bindings. Message JSON uses UTF-8
 without ASCII escaping. This changes only the SQL storage representation, not
 the native store's returned snapshots, conversation retention, or recovery budget.
+The snapshot descriptor uses `VARCHAR(1024)` and is limited to 1024 serialized
+UTF-8 bytes. Oversized descriptors fail before snapshot persistence rather than
+being truncated by non-strict MySQL. This bound does not limit message bodies.
 Provision new data with the current writer and reader; no older development-data
-migration is performed.
+migration is performed. Snapshots retain a content-addressed sequence root rather
+than a complete set of message-reference rows. The immutable balanced forest
+shares existing prefixes across snapshots and runs while preserving repeated
+messages, shortened histories, and branches. Stored sequence nodes and message
+bodies remain until explicitly coordinated cleanup; pruning only releases roots
+and keeps snapshot replay identities.
+
+`await steps.purge_unreferenced_content(exclusive=guard)` reclaims only sequence
+nodes and message bodies no longer reachable from any retained snapshot in that
+namespace and tenant. It preserves complete and interrupted snapshots, shared
+branches, run records, and pruned replay tombstones. The guard is the caller-owned
+`SnapshotExclusiveGuard`: stop and drain every user of these native tables and
+close every other adapter before entering maintenance. Do not resume an old
+adapter whose confirmed-content cache predates cleanup. The maintenance adapter
+clears its own caches even if cancellation or commit acknowledgement fails.
+
+Cleanup validates each live sequence and the presence of its bodies before
+performing atomic deletion. It uses three namespace-scoped metadata SELECTs per
+attempt and batches deletes; it does not download message bodies or reclaim
+external media. This is a full offline metadata scan, not bounded online GC, and
+its reads are separate from the normal save/recovery budget. The returned
+`StepContentCleanupResult` reports confirmed deleted and retained row counts.
+An unknown or cancelled result does not confirm reclamation. Reconcile by
+inspecting or repeating cleanup under another exclusive window; never reuse
+pre-cleanup adapter caches. Repeating successful cleanup is harmless.
+This operation does not retire snapshots, choose terminal executions, replace
+an execution's retained evidence, or publish a cold execution archive.
+
+Snapshot publication adds no existence reads. A nonempty latest snapshot uses
+one header read and one bounded sequence/body query. MySQL 5.7 uses a finite
+union of tree frontiers; SQLite and PostgreSQL use a bounded recursive query.
+This reduces retained prefix references, not the cost of returning a full history:
+every save still encodes its supplied messages, and full recovery still returns
+the requested message bodies with their integrity metadata.
 
 The adapter uses Persistence's namespace and tenant and borrows the exact
 Execution SQL context, including a local SQLite writer owner when configured.

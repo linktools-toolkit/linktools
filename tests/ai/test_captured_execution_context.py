@@ -21,7 +21,7 @@ from linktools.ai.capability import TraceCapability
 from linktools.ai.inputs import AgentTaskInputContext, CaptureInputRequest
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.runtime._memory import RuntimeMemoryStore
+from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.persistence import PersistenceDomain
 from .test_task_mixed_node_reliability import _TaskTestModelBinding
 
@@ -82,7 +82,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('captured-memory', storage=storage) as persistence_78, Runtime.attach(persistence=persistence_78, features=model_features(_NoToolsModels(), group)) as runtime, TaskEngine.open(persistence=persistence_78, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
-        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
+        memory = PersistentMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
                                     namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("facts.txt", "old content", expected_version=None)
         source = await runtime.agents.get().start("question", principal=principal)
@@ -94,7 +94,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
-        isolated = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
+        isolated = PersistentMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=replay.execution_id, memory_scope=record.memory_scope)
         frozen = await isolated.read("facts.txt", max_chars=1000)
         assert frozen.content == "old content" and frozen.version == original.version
@@ -140,7 +140,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_captured_repository_instructions_never_refresh_from_workspace(tmp_path: Path) -> None:
+async def test_captured_repository_instructions_never_refresh_from_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.workspace import Workspace
 
     work = tmp_path / "workspace"
@@ -157,12 +157,44 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
         await source.wait()
         capture = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "instructions-capture"))
         value = await runtime_engine.inputs.read_agent(capture, principal=principal)
+        assert value.repository_instructions == value.input_context.repository_instructions
+        from linktools.ai.inputs import ExecutionContextArchive
+        async def reject_full_context(*args, **kwargs):
+            raise AssertionError("clean capture must not load model history")
+        with monkeypatch.context() as patch:
+            patch.setattr(ExecutionContextArchive, "load", reject_full_context)
+            clean_capture = await runtime_engine.inputs.capture_input(
+                source.execution_id, CaptureInputRequest(principal, "instructions-clean", context_policy="clean"))
+        clean = await runtime_engine.inputs.read_agent(clean_capture, principal=principal)
+        assert clean.input_context is None
+        assert clean.repository_instructions == value.repository_instructions
+        expected_instructions = dict(value.input_context.repository_instructions)
+        assert expected_instructions["documents"][0]["content"] == "Historical repository instruction"
+        for reference, policy, key in ((capture, "captured", "instructions-capture"),
+                                       (clean_capture, "clean", "instructions-clean")):
+            detached = await runtime_engine.inputs.read_agent(reference, principal=principal)
+            detached.repository_instructions["documents"][0]["content"] = "Consumer annotation"
+            with monkeypatch.context() as patch:
+                if policy == "clean":
+                    patch.setattr(ExecutionContextArchive, "load", reject_full_context)
+                repeated = await runtime_engine.inputs.capture_input(
+                    source.execution_id, CaptureInputRequest(principal, key, context_policy=policy))
+            assert repeated == reference
+            restored = await runtime_engine.inputs.read_agent(repeated, principal=principal)
+            assert restored.repository_instructions == expected_instructions
+        assert dict(value.input_context.repository_instructions) == expected_instructions
         instructions.write_text("Changed live repository instruction", encoding="utf-8")
         rerun = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED
         interactions = await rerun.model_interactions(include_content=True)
         assert "Historical repository instruction" in str(interactions.items[0].request)
         assert "Changed live repository instruction" not in str(interactions.items[0].request)
+        for handle in (source, rerun):
+            record = await persistence_149.execution.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
+            assert record is not None and record.repository_instructions is None
+            context = await runtime._execution_service.runtime_backend().load_input_context(record.input_context)
+            assert context is not None
+            assert context.repository_instructions == value.input_context.repository_instructions
 
 
 @pytest.mark.asyncio
@@ -357,7 +389,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('model-memory-context', storage=storage) as persistence_343, Runtime.attach(persistence=persistence_343, features=model_features(Models(), group)) as runtime, TaskEngine.open(persistence=persistence_343, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         principal = Principal("owner", runtime.tenant_id)
-        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
+        memory = PersistentMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("memory/facts.md", "frozen memory value", expected_version=None)
         source = await runtime.agents.get().start("read memory", principal=principal)

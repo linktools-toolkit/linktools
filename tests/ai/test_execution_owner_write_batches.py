@@ -94,6 +94,8 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
             source = state.execution.executions
             repository = (_ScalarExecution(source.state_store, namespace="owner-final", tenant_id="tenant")
                           if scalar else source)
+            if scalar:
+                await repository.initialize_content(create=False)
             commands = StateCommands(repository, namespace="owner-final", events=state.execution.events, background_tasks=set())
             calls = Counter()
             def capture(_connection, _cursor, statement, _parameters, _context, _many):
@@ -137,6 +139,8 @@ async def test_single_execution_cas_preserves_generation_and_subclass_guard(tmp_
             source = state.execution.executions
             repository = (_ScalarExecution(source.state_store, namespace="owner-admit", tenant_id="tenant")
                           if scalar else source)
+            if scalar:
+                await repository.initialize_content(create=False)
             await repository.create_execution(current)
             updated = await repository.compare_and_swap(
                 current.execution_id, tenant_id="tenant", expected_revision=current.revision,

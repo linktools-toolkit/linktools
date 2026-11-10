@@ -62,8 +62,8 @@ existing owners and the boundary to retain, rather than prescribing file moves.
 | --- | --- | --- | --- | --- |
 | Asset / Skill | `capability/_asset.py`, `_declaration.py`, `_skill_source.py` resolve current declarations and selected Asset versions; `agent/_compiler.py` owns selectors | `capability/_skill.py` discovers current allowed Skills and reads each selected version; Workspace mounts are prepared at run start | Runtime initializes and closes the store declared by `AssetCapability(store)`; a borrowed live source keeps its store under the external owner | Keep current reads separate from retained tool observations; do not add a second frozen-resource lifecycle or expand sandbox access during discovery |
 | FileSystem / Shell | `capability/_filesystem.py`, `_shell.py` supply tool declarations; Runtime captures Workspace and selected names | Capabilities own tool arguments/results and retry feedback; `runtime/_agent_executor.py` binds the shared Boundary and backend | Workspace owns logical paths, physical deployment, process trees and quiescent close; execution owns authorization and effect facts | Audit contribution/binding adapters together; do not move OS isolation or effect authority into a tool capability |
-| Memory | `capability/_memory.py` declares native tools; Runtime captures the host scope | Capability owns model tools and SDK adaptation; `runtime/_memory.py` adapts admitted scope, versions, capture/seed and mutation receipts | Persistence owns record/object transactions; the execution retains its admitted Memory scope; current declarations determine available tools | Keep admitted scope separate from current tool discovery; do not resurrect removed tools from historical defaults |
-| Planning | Agent/invocation `planning` enables the tool separately from `allow_tools` | `capability/planning.py` owns the supported `write_plan` surface; `runtime/_harness.py` translates the native store contract | `runtime/_plan.py` owns the session/execution plan and optimistic transaction; `_local.py` selects its owner | Co-locate capability-specific projection only after defining its public store boundary; do not confuse model plans, execution plan mode and Task DAGs |
+| Memory | `capability/_memory.py` declares native tools; Runtime captures the host scope | Capability owns model tools and SDK adaptation; `memory.PersistentMemoryStore` owns admitted-scope storage operations, versions, capture/seed and mutation receipts | Persistence owns record/object transactions; the execution retains its admitted Memory scope; current declarations determine available tools | Keep admitted scope separate from current tool discovery; do not resurrect removed tools from historical defaults |
+| Planning | Agent/invocation `planning` enables the tool separately from `allow_tools` | `capability/planning.py` owns the supported `write_plan` surface; `capability.planning.PlanningStore` owns the native store contract and plan projection | `persistence.planning.PlanStateStore` owns plan state and optimistic transactions; `_local.py` selects the session/execution owner for each run | Runtime injects one run-resolved store; capability owns conversion and mutations, Persistence owns transactions; model plans, execution plan mode and Task DAGs remain separate |
 | MCP | `MCPServerSpec` resolves from the current source under admitted Agent selectors; Asset owns referenced resources | `capability/mcp.py` owns discovery, schema feedback, protocol errors and client cleanup; `runtime/_mcp.py` owns model names, original-name routing, selectors, fixture and Boundary wiring | Native protocol client owns connection cleanup; Workspace owns transport processes; execution owns budget, authorization and effect records | Keep this division; moving model names alone does not justify another public API or registry |
 | Subagent | Agent compilation pins selected child contracts | `capability/_subagent.py` exposes tools through the existing delegate; `runtime/_subagent.py` owns child start/wait/cancel and inheritance | The execution producer owns parent/child identity, recovery, budgets and drain | Preserve the narrow delegate; capability must not become another execution engine |
 | Execution / Checkpoint / Trace | `capability/_execution.py` and `_persistence.py` declare Conversation and Trace guarantees; `StepPersistenceCapability` selects the native StepStore, while official `StepPersistence` supplies capture and recovery hooks | Runtime binds run-local Conversation and Trace services and adapts the built-in StepPersistence to short atomic node boundaries, with a fresh native run ID per attempt; `AgentRunCapture` supplies shared recorder context | Conversation and Trace persistence own their records and commits; Runtime creates and closes the default StepStore adapter over Persistence's Execution SQL context, while an explicitly supplied StepStore remains caller-owned. StepStore persists native snapshots; execution owns fencing, tool effects, checkpoint references and terminal confirmation | Capability hooks may be grouped; do not add a second checkpoint writer or recovery authority |
@@ -117,11 +117,11 @@ methods are a public surface. Task currently consumes the following paths:
 | Consumer path | Current operation / result | Contract that a narrower boundary must preserve |
 | --- | --- | --- |
 | `Task.from_agent`; `AgentTaskRunner` construction | Read `binding_contract.agent_spec` and `binding_contract` | Capture declaration identity, planning/thinking defaults and the full binding once; do not recapture per operation |
-| `TaskEngine` and runner binding | Exact `persistence` identity; `operations.ensure_open()` | A matching database URL does not replace shared ownership; reject a closed producer before work |
+| `TaskEngine` and runner binding | `validate_persistence(persistence)` → None | A matching database URL does not replace shared ownership; reject a closed producer before work |
 | Admission input | `canonicalize_files(files)` → tuple; `materialize_input(prompt, files=())` → canonical input | Canonical Workspace-relative paths, original tenant and the existing captured content boundary |
 | Durable binding validation | `resolve_contract(contract)` → `AgentBindingContract` | Preserve the admitted Agent, hooks and child contracts; new business/MCP calls and Skill reads use current candidates within the recorded selectors |
 | Start and get | Overridable `start(...)` / `get(execution_id, principal)` → `Execution` | Original principal, output contract, correlation, graph budget scope, invocation-capture requirement and dependency hold |
-| Invocation capture | Optional `captures.record_invocation(execution_id, invocation)` | Persist Task-to-execution capture before releasing the handoff obligation |
+| Invocation capture | `record_invocation(execution_id, invocation)` → None | The producer selects its optional capture owner; persist Task-to-execution capture before releasing the handoff obligation |
 | Authorized reads | `service.inspect`, `result`, `result_payload_size`, `wait`, `list_children`, `budget_usage` | Existing authorization and exact producer service. Service `wait` returns `ExecutionResult`, not the observer's `WaitResult` |
 | History and live observation | `operations.history` cutoff/read/subscribe operations; `watch_tree` | Root/child producer routing, cursors, readiness, stream cleanup and observation lifetime |
 | Task execution handle | `operations`, `watch_tree` plus Task-owned cancel callback | Node cancellation must also settle the graph. Returning ordinary `port.get()` alone loses that callback |
@@ -135,7 +135,25 @@ allows `port.service` and `port.operations.service` to differ. Start/get overrid
 also remain independent from service dispatch. A blanket equality requirement,
 replacement with a handle, or use of `acquire_hold` would change this contract.
 
-### Decision required before changing the public port
+Borrowing compatibility is validated by the existing port before Task engine
+initialization and before Agent-node binding. `validate_persistence(persistence)`
+requires the exact Persistence object used by the producer, then checks producer
+availability through its existing execution operations. A different owner raises
+`RUNTIME_SERVICE_MISMATCH` before any availability check; a matching owner retains
+the producer's existing closed-state error. Validation neither binds a new
+resource nor transfers ownership. An equivalent database or an open Persistence
+alone does not make a closed Agent producer usable.
+
+Invocation capture is selected inside the existing port. It passes the original
+execution ID and `TaskNodeInvocation` to the producer's `InputCaptures` when
+configured, and is a no-op otherwise. It neither re-resolves admission nor
+changes the invocation principal. Failure or cancellation propagates to the
+existing Task handoff logic; returning from this operation is not permission to
+release the hold early. The public `captures` constructor field remains
+available for producer composition. Ordinary application calls do not change.
+This operation does not complete the remaining read/history/handle boundary.
+
+### Remaining public port design
 
 The next boundary design must specify whether it retains existing public
 collaborators with narrower protocol types, or replaces direct access with
@@ -144,7 +162,90 @@ It must cover the whole table, including history, graph-aware cancellation and
 tenant-level retention. Merely adding wrappers for start/get/inspect leaves the
 rest unchanged and adds another maintenance surface.
 
-No new port names, parameters, default values, constructor shape or lifecycle
-are adopted by this document. Ordinary `Task.from_agent` and Runtime composition
-remain unchanged in either design. Runtime's current execution/turn authority
+Beyond the borrowing-validation and invocation-capture operations above, no replacement port names,
+parameters, default values, constructor shape or lifecycle are adopted here.
+Ordinary `Task.from_agent` and Runtime composition remain unchanged.
+Runtime's current execution/turn authority
 and Persistence contracts are not part of this API decision.
+
+
+## Planning store ownership
+
+`from linktools.ai.capability.planning import PlanningStore` is the durable native
+PlanStore adapter. Construct it with a `persistence.planning.PlanStateStore`, which receives an
+existing `StateStore`, namespace, tenant, `owner_kind="session"` or `"execution"`,
+and owner ID. It supports the native
+get/set/add/update/remove operations and `get_plan()` for the committed plain
+items and revision. The state store is borrowed; no additional close or context
+manager is introduced. The caller keeps Persistence alive while using the store.
+
+Ordinary applications continue to use `agent.run(..., planning=True)` or the
+existing Session methods. Runtime selects the admitted session/execution owner
+for each run and injects the resulting PlanningStore. Capability code owns native
+item conversion and model-correctable feedback; Persistence owns durable plan
+projection and transactions. The shared `core.planning.PlanItem` is a vendor-neutral
+value, and Persistence never imports the SDK. Storage
+errors are not converted into model retries. The existing plan key, payload and
+optimistic transaction/readback semantics are retained, so same-version reopen
+uses the original plan rather than creating another authority. This does not
+move execution plan-mode permissions or Task scheduling into Planning.
+
+## Memory persistence composition
+
+`MemoryCapability(scope="default")` remains the ordinary declaration. Runtime
+selects the admitted execution scope and persistence route, then borrows a
+`memory.PersistentMemoryStore`; applications do not need an additional manager
+or context manager. The adapter borrows `MemoryRepositories` and `ObjectStore`,
+with explicit namespace, tenant, execution, memory scope and retention inputs.
+It does not own or close those resources.
+
+`capture()` reads a consistent scope and preserves content versions.
+`seed_capture(capture)` restores those versions into the selected scope once per
+path. Each seed and its receipt commit atomically; retrying a partial seed uses
+the original receipts and does not undo later writes or deletions. Imported
+executions use isolated scopes; recovery retains the admitted principal and
+scope. Ordinary custom Harness stores still bind through `MemoryCapability.bind`;
+they do not gain consistent capture support by implementing only read/write.
+
+Persistence owns record CAS, transaction boundaries and the operation ledger.
+The memory adapter owns the SDK mutation projection of that ledger, not a second
+receipt store. Unknown outcomes remain unknown until the original operation can
+be read back or replayed. Capability does not import this adapter: persistence
+contracts already depend on Agent and execution values that use capability.
+
+For a host that already owns Persistence, the adapter can also be used directly:
+
+```python
+from linktools.ai.memory import PersistentMemoryStore
+from linktools.ai.persistence import PersistenceDomain
+
+memory = PersistentMemoryStore(
+    persistence.memory,
+    object_store=persistence.object_store(PersistenceDomain.MEMORY),
+    namespace=persistence.namespace,
+    tenant_id=persistence.tenant_id,
+    execution_id="execution-1",
+    memory_scope="notes",
+)
+captured = await memory.capture()
+restored = PersistentMemoryStore(
+    persistence.memory,
+    object_store=persistence.object_store(PersistenceDomain.MEMORY),
+    namespace=persistence.namespace,
+    tenant_id=persistence.tenant_id,
+    execution_id="execution-2",
+    memory_scope="capture:execution-2",
+)
+await restored.seed_capture(captured)
+```
+
+The caller chooses an isolated destination scope for imported input. With
+`transient=True`, the adapter additionally isolates scope identity by execution;
+the host must supply the corresponding working object store. The optional
+`payload_policy` controls ordinary write inlining. Capture preserves source
+versions, while subsequent writes derive destination versions. A changed
+capture for an already-seeded path conflicts rather than overwriting the prior
+receipt. Malformed records or receipts fail integrity checks; storage errors
+and cancellation propagate. A caller retrying an uncertain mutation must retain
+its original operation identity. This adapter does not add automatic rollback
+or a whole-capture transaction.

@@ -94,6 +94,46 @@ again. A bound or uncertain consumer execution follows the existing execution
 recovery rules; it does not authorize another projection. Cancellation and lease
 fences continue to govern recovery and publication.
 
+## Prepared submission outcomes
+
+Keep the original `TaskGraphSubmission` and its `ref` until admission and any
+requested cancellation have been resolved. `start_prepared(submission)` can
+admit and arm a graph before reading the result to return. Failure to obtain
+that response is not proof that execution did not start.
+
+After confirmed admission, service errors carry
+`AIError.safe_details["durable_admitted"] = True` and the `graph_id`. Classified
+`AIError` values keep their code, category, retryability, operation ID, safe
+metadata, and diagnostics. Unclassified post-admission failures, including
+storage read errors, use `STORAGE_RECOVERY_REQUIRED`. Diagnostic `phase` values
+are not admission predicates. This error does not change the durable graph to
+`RECOVERY_REQUIRED` or claim an unknown commit when admission was confirmed.
+
+The marker is not added to failures before admission. A cancelled preparation
+can return without ever admitting, so a failed lookup after a `CANCELLED` view
+cannot prove admission either. Absence of the marker is not proof of rollback;
+in particular, `STORAGE_COMMIT_UNKNOWN` retains its existing unknown-outcome
+meaning. Caller cancellation still propagates as `CancelledError` and does not
+cancel the durable graph or pending scheduler arm.
+
+TaskEngine also preserves the original preparation/start error, including its
+cause and caller cancellation, if activation cleanup cannot read admission.
+It retains the execution resources, settles the pending activation, and adds
+an exception note and warning identifying the failed read by exception type.
+This does not establish admission. Once admission can be read, normal cleanup
+still releases resources for a confirmed unadmitted graph.
+
+After the dependency recovers, retry `start_prepared` with the original
+submission, or inspect/recover the same graph through the Task API. Admission
+identity, execution principal, node fences, and existing execution bindings are
+retained; retry does not authorize a new graph or replay an uncertain external
+effect. To stop it, call `cancel_submission` with the original `ref` and an
+idempotency key, then resolve that cancellation's outcome. Do not release graph
+resources or create a replacement submission based only on a failed start
+response. A successful cancellation-before-admission result remains
+`admitted=False`; a confirmed admitted result remains `admitted=True` even if
+the graph has already reached a terminal state.
+
 ## Custom Task persistence and request identity
 
 Custom `TaskPersistence.admissions` implementations must provide

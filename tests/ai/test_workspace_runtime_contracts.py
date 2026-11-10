@@ -22,7 +22,7 @@ from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.core import ExecutionContext
 from linktools.ai.capability import MemoryCapability
-from linktools.ai.runtime._memory import RuntimeMemoryStore
+from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import Workspace
 from pydantic_ai_harness.memory import Memory
@@ -33,7 +33,7 @@ async def test_runtime_memory_store_implements_harness_path_storage() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
-        store = RuntimeMemoryStore(
+        store = PersistentMemoryStore(
             state.memory,
             object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-regression",
@@ -62,7 +62,7 @@ async def test_memory_capability_is_harness_owned_over_runtime_storage() -> None
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-capability", tenant_id="tenant")
     try:
-        store = RuntimeMemoryStore(
+        store = PersistentMemoryStore(
             state.memory,
             object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-capability",
@@ -93,7 +93,7 @@ async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-missing-delete", tenant_id="tenant")
     try:
-        store = RuntimeMemoryStore(
+        store = PersistentMemoryStore(
             state.memory,
             object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-missing-delete",
@@ -123,7 +123,7 @@ async def test_memory_store_remains_writable_across_missing_delete_receipts() ->
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="memory-sequence-gap", tenant_id="tenant")
     try:
-        store = RuntimeMemoryStore(
+        store = PersistentMemoryStore(
             state.memory,
             object_store=state.object_store(PersistenceDomain.MEMORY),
             namespace="memory-sequence-gap",

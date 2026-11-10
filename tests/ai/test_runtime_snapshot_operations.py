@@ -63,6 +63,7 @@ async def test_snapshot_preserves_every_durable_domain_and_closes_restore_scope(
     manifest = json.loads(await read_object(archive, ref.key, expected_digest=ref.digest, expected_size=ref.size))
     assert set(manifest["domains"]) == {"execution", "trace"}
     assert manifest["format_version"] == 1
+    assert not {"native_messages", "native_checkpoints", "native_projections"}.intersection(manifest)
     restored = resources(read_only=False)
     for store in restored.stores.values():
         await store.initialize()

@@ -12,8 +12,8 @@ from linktools.ai.core import ApprovalStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence
-from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
-from linktools.ai.runtime._plan import RuntimePlanStore
+from linktools.ai.capability.planning import PlanningStore
+from linktools.ai.persistence.planning import PlanStateStore
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.contracts import (
@@ -269,15 +269,10 @@ async def test_plan_add_uses_one_record_read_and_insert_sql(tmp_path: Path) -> N
     await provision_database(engine)
     store = SqlStateStore(engine)
     await store.initialize()
-    adapter = HarnessPlanStoreAdapter(
-        RuntimePlanStore(
-            store,
-            namespace="io-plan",
-            tenant_id="tenant",
-            owner_kind="execution",
-            owner_id="execution",
-        )
-    )
+    adapter = PlanningStore(PlanStateStore(
+        store, namespace="io-plan", tenant_id="tenant",
+        owner_kind="execution", owner_id="execution",
+    ))
     statements: list[str] = []
 
     def capture_sql(

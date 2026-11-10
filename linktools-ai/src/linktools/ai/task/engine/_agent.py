@@ -139,9 +139,7 @@ class AgentTaskRunner(Generic[AppT]):
             elif task.contract.get("type") == "agent":
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             return task
-        if port.persistence is not persistence:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        port.operations.ensure_open()
+        port.validate_persistence(persistence)
         runner = cls(
             task, port=port, persistence=persistence, materializer=materializer,
             task_admissions=task_admissions, budgets=budgets,
@@ -231,10 +229,6 @@ class AgentTaskRunner(Generic[AppT]):
         )
         self._execution_ports[execution.execution_id] = self.execution_port
         return execution
-
-    async def _record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
-        if self.execution_port.captures is not None:
-            await self.execution_port.captures.record_invocation(execution_id, invocation)
 
     async def _get_execution(
         self, execution_id: str,
@@ -711,7 +705,7 @@ class AgentTaskRunner(Generic[AppT]):
         self, execution: object, execution_id: str, invocation: TaskNodeInvocation,
     ) -> None:
         try:
-            await self._record_invocation(execution_id, invocation)
+            await self.execution_port.record_invocation(execution_id, invocation)
         except BaseException:
             cleanup = asyncio.create_task(execution.cancel())
             interrupted = False

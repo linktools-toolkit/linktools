@@ -635,3 +635,75 @@ async def test_concurrent_runtime_initial_scope_discovery_preserves_same_request
         assert len(requests) == 1
         stored = await persistence.conversation.sessions.get("session", tenant_id=runtimes[0].tenant_id)
         assert stored is not None and stored.repository_instruction_scopes == (".",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", (False, True))
+@pytest.mark.parametrize("imported", (False, True))
+async def test_accepted_context_owns_instruction_pin_before_model_dispatch(
+    tmp_path: Path, terminal: bool, imported: bool,
+) -> None:
+    from linktools.ai.execution import ExecutionInputContext, ExecutionRecord
+    from linktools.ai.persistence.codec import (
+        _decode_enveloped_domain, _encode_persisted_domain, encode_envelope,
+    )
+
+    (tmp_path / "AGENTS.md").write_text("LIVE-INSTRUCTION", encoding="utf-8")
+    expected = "CAPTURED-INSTRUCTION" if imported else "LIVE-INSTRUCTION"
+    context = ExecutionInputContext.from_messages((), repository_instructions=RepositoryInstructions((
+        RepositoryInstructionDocument("agents:AGENTS.md", ".", "CAPTURED-INSTRUCTION"),
+    )).to_payload()) if imported else None
+    ready = asyncio.Event()
+    execution_id = ""
+    observed = []
+
+    async def model(messages, info):
+        await ready.wait()
+        assert expected in (info.instructions or "")
+        if imported:
+            assert "LIVE-INSTRUCTION" not in (info.instructions or "")
+        backend = runtime._execution_service.runtime_backend()
+        record = await backend.load_execution(execution_id, tenant_id=runtime.tenant_id)
+        assert record is not None and record.input_context is not None
+        assert record.repository_instructions is None
+        accepted = await backend.load_input_context(record.input_context)
+        assert accepted is not None and accepted.repository_instructions is not None
+        assert tuple(document.content for document in RepositoryInstructions.from_payload(
+            accepted.repository_instructions,
+        ).documents) == (expected,)
+        restored = _decode_enveloped_domain(encode_envelope({
+            "type": "execution_record", "payload": _encode_persisted_domain(record),
+        }), ExecutionRecord)
+        assert restored == record
+        observed.append(record)
+        return ModelResponse(parts=[TextPart("done")])
+
+    features = workspace_features("instruction-owner", workspace=Workspace.load(tmp_path))
+    features.capability(ExecutionCapability(
+        retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(),
+    ), scope="runtime")
+    features.agent("reader", model="default", allow_tools=())
+    storage = PersistenceStorage.in_memory(
+        coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if terminal else None,
+    )
+    async with Persistence.open("instruction-owner", storage=storage) as persistence:
+        async with Runtime.attach(
+            persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
+        ) as runtime:
+            agent = runtime.agents.get("reader")
+            if imported:
+                handle = await agent.start("question", input_context=context)
+            else:
+                session = await agent.create_session("session")
+                handle = await session.start("question")
+            execution_id = handle.execution_id
+            ready.set()
+            assert (await handle.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+            assert len(observed) == 1
+            stored = await persistence.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
+            assert stored is not None and stored.repository_instructions is None
+            accepted = await runtime._execution_service.runtime_backend().load_input_context(stored.input_context)
+            assert accepted is not None and accepted.repository_instructions is not None
+            assert tuple(document.content for document in RepositoryInstructions.from_payload(
+                accepted.repository_instructions,
+            ).documents) == (expected,)

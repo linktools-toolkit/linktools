@@ -21,7 +21,8 @@ from ..errors import AIError, ErrorCode
 from ..spec import CapabilityRef
 from ._agent_run_recorder import AgentRunRecorder
 from ._run_context import RunContextCapture
-from ..persistence.runs import AgentRunRecord
+from ..capability.steps import StepRunRegistration
+from ..persistence.runs import AgentRunRecord, OfficialStepReader
 
 
 @dataclass(kw_only=True, eq=False)
@@ -49,6 +50,7 @@ class AgentRunCapture(AbstractCapability[None]):
         compare=False,
     )
     deferred_capability_refs: dict[str, CapabilityRef] = field(default_factory=dict, repr=False, compare=False)
+    native_registration: StepRunRegistration | None = field(default=None, repr=False, compare=False)
     _registered: bool = field(default=False, init=False)
     _finished: bool = field(default=False, init=False)
     _captured_request: ModelMessage | None = field(default=None, init=False)
@@ -97,8 +99,19 @@ class AgentRunCapture(AbstractCapability[None]):
         if self._registered:
             return
         self._live_messages = ctx.messages
+        if self.native_registration is not None and self.native_registration.share_started:
+            try:
+                await self.native_registration.prepare_started(conversation_id=ctx.conversation_id, step_index=ctx.run_step)
+            except BaseException:
+                await self.recorder.register_agent_run(OfficialStepReader.project_run(
+                    self.native_registration.prepare(conversation_id=ctx.conversation_id),
+                ))
+                self.context.start()
+                self._registered = True
+                raise
         await self.recorder.register_agent_run(
-            AgentRunRecord(
+            OfficialStepReader.project_run(self.native_registration.prepare(conversation_id=ctx.conversation_id))
+            if self.native_registration is not None else AgentRunRecord(
                 agent_run_id=self.agent_run_id,
                 agent_conversation_id=ctx.conversation_id,
                 parent_agent_run_id=self.parent_agent_run_id,

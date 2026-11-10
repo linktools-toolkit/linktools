@@ -14,6 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._native_run_reference import NativeRunReferences
 from linktools.ai.persistence._step_archive import PreparedAgentRunCheckpointBatch, StateStepArchive
 from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
@@ -60,6 +61,15 @@ async def _assert_prepared_values_equal(
 
     assert facts(left) == facts(right)
     content = await archive.transcript_repository.content_archive()
+    for first, second in zip(left.checkpoints, right.checkpoints, strict=True):
+        for value in (first.archive, second.archive):
+            assert value.owner in (None, (content.scope_id, content._namespace, content._tenant_id))
+        assert first.archive.native_messages.keys() == second.archive.native_messages.keys()
+        for root, value in first.archive.native_messages.items():
+            other = second.archive.native_messages[root]
+            assert (value.root, value.frontier, value.messages, value.nodes) == (
+                other.root, other.frontier, other.messages, other.nodes,
+            )
     pending = [
         {key: record for checkpoint in batch.checkpoints
          for key, record in checkpoint.archive.records.items()}
@@ -112,9 +122,10 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
             counts.append(statements.count("SELECT"))
             domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
         await _assert_prepared_values_equal(archive, results[0], results[1])
-        # Three domain metadata keys plus one content lookup, batched to two reads.
+        # Native message preparation needs no body existence lookup. The three
+        # domain metadata keys still collapse to one grouped read.
         assert domain_counts == [3, 1]
-        assert counts == [4, 2]
+        assert counts == [3, 1]
 
     finally:
         await state.close()
@@ -137,6 +148,12 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
         statements = []
         get_records = _SqlTransaction.get_records
         projection_key = archive.transcript_repository.projection_key("run")
+        read_physical = NativeRunReferences.read_physical
+
+        async def without_native_projection_prefetch(references, transaction, keys):
+            if archive._agent_run_key("run") in keys:
+                keys = tuple(key for key in keys if key != projection_key)
+            return await read_physical(references, transaction, keys)
 
         async def without_projection_prefetch(transaction, keys):
             if archive._agent_run_key("run") in keys:
@@ -165,6 +182,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             with monkeypatch.context() as patch:
                 if baseline:
                     patch.setattr(_SqlTransaction, "get_records", without_projection_prefetch)
+                    patch.setattr(NativeRunReferences, "read_physical", without_native_projection_prefetch)
                 event.listen(engine, "before_cursor_execute", capture)
                 try:
                     await commit()
