@@ -1019,7 +1019,10 @@ class TranscriptRepository:
             previous = None
             if baseline is not None and len(baseline.items) == 1:
                 block = baseline.items[0]
-                if isinstance(block, ArchivedContextBlock) and isinstance(block.root, NativeMessageRoot):
+                if (isinstance(block, ArchivedContextBlock) and isinstance(block.root, NativeMessageRoot)
+                        and self._native_messages.can_reuse_message_root(
+                            block.root, raw_digest=block.raw_digest, raw_size=block.raw_size,
+                        )):
                     previous = (block.root, block.raw_digest, block.raw_size)
             native = await self._native_messages.prepare_message_content(snapshot, baseline=previous)
             prepared.native_messages[native.root] = native

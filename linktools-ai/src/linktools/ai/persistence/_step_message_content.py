@@ -544,10 +544,16 @@ class NativeMessageContent:
             depth = max(depth, height)
             path_units += visits
             index = len(seeds)
+            root_id = bindparam(f"native_root_{index}", item.first, type_=nodes.c.sha256.type)
+            if dialect.name == "mysql":
+                from sqlalchemy.dialects.mysql import CHAR
+
+                root_id = cast(root_id, CHAR(64, charset="utf8mb4")).collate("utf8mb4_bin")
+            else:
+                root_id = cast(root_id, nodes.c.sha256.type)
             seeds.append(select(
                 integer(request).label("request"), integer(span).label("span"),
-                cast(bindparam(f"native_root_{index}", item.first, type_=nodes.c.sha256.type),
-                     nodes.c.sha256.type).label("sha256"),
+                root_id.label("sha256"),
                 integer(item.count).label("remaining"), integer(0).label("position"),
                 integer(item.count - item.end).label("lo"), integer(item.count - item.start).label("hi"),
                 integer(0).label("depth"), integer(1).label("forest"),

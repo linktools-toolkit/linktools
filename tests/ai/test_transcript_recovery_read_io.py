@@ -191,5 +191,34 @@ async def test_combined_projection_publishes_messages_with_its_owner(tmp_path: P
                 execution_id="execution", producer_generation=1, archive=combined,
             )
 
-        await archive.state_store.mutate(publish)
+        await archive.state_store.storage_group.mutate(
+            archive.transaction_stores, lambda group: publish(group.transaction(archive.state_store)),
+        )
         assert tuple([value async for value in archive.iter_messages(agent_run_id="run")]) == messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("foreign_scope", ("group_id", "store_digest"))
+async def test_foreign_projection_baseline_rebuilds_captured_messages(tmp_path: Path, foreign_scope: str) -> None:
+    from dataclasses import replace
+    from linktools.ai.persistence._archive import PreparedArchive
+
+    async with _archive(tmp_path, "sqlite") as (_state, archive, run):
+        repository = archive.transcript_repository
+        messages = (ModelResponse(parts=[TextPart("captured across stores")]),)
+        source = await repository.prepare_model_projection(messages, PreparedArchive())
+        block = source.items[0]
+        foreign = replace(block.root, **{foreign_scope: "f" * 64})
+        baseline = replace(source, items=(replace(block, root=foreign),))
+        prepared = PreparedArchive()
+        projection = await repository.prepare_model_projection(messages, prepared, baseline=baseline)
+        assert projection.items[0].root.group_id == block.root.group_id
+        assert projection.items[0].root.store_digest == block.root.store_digest
+        assert prepared.native_messages
+
+        async def publish(transaction):
+            await repository.store_projection(transaction, "run", projection)
+            await repository.publish_native_archive(transaction, prepared, owner_written=True)
+
+        await archive.state_store.mutate(publish)
+        assert (await repository.load_projected_context("run", projection)).model_messages() == messages

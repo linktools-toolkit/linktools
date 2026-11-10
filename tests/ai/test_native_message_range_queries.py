@@ -314,3 +314,19 @@ async def test_actual_readback_resumes_frozen_append_without_another_select(tmp_
     finally:
         await native.close()
         await engine.dispose()
+
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect(), mysql.dialect()])
+def test_range_seed_cast_keeps_binary_scope_comparison_in_legal_sql(dialect) -> None:
+    content = _owner(dialect)
+    root = NativeMessageRoot("execution", "a" * 64, (NativeMessageSlice("b" * 64, 4, 0, 4),))
+    query = content.range_query((root,))
+    compiled = query.statement.compile(dialect=dialect)
+    sql = str(compiled).upper()
+    assert compiled.params["native_root_0"] == "b" * 64
+    assert compiled.params["native_store_digest"] == "a" * 64
+    if dialect.name == "mysql":
+        assert "AS CHAR(64) CHARACTER SET UTF8MB4) COLLATE UTF8MB4_BIN" in sql
+        assert "COLLATE UTF8MB4_BIN)" not in sql
+    else:
+        assert "AS CHAR(64))" in sql
