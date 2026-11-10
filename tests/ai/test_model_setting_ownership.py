@@ -174,7 +174,7 @@ async def test_raw_cannot_replace_model_request_owned_fields(
 @pytest.mark.parametrize("protocol,model_name,wire_field", [
     ("openai", "gpt-4o", "response_format"),
     ("openai-responses", "gpt-5", "text"),
-    ("anthropic", "claude-sonnet-4-5", "output_config"),
+    ("anthropic", "claude-opus-4-5", "output_config"),
 ])
 async def test_raw_cannot_replace_native_output_contract(
     monkeypatch: pytest.MonkeyPatch, protocol: str, model_name: str, wire_field: str, streaming: bool,
@@ -553,7 +553,11 @@ async def test_responses_native_logprobs_preserves_encrypted_reasoning_include(
     binding = create_model(api="openai-responses", model="gpt-5", api_key="mock-only", max_retries=0,
                            model_settings={"openai_logprobs": True, "extra_body": {"vendor_flag": False}})
     async with binding.materialize() as model:
-        await _request(model, None, streaming)
+        with pytest.warns(UserWarning, match=(
+            r"Sampling parameters \['openai_logprobs'\] are not supported when reasoning is enabled\. "
+            r"These settings will be ignored\."
+        )):
+            await _request(model, None, streaming)
     assert set(sent[-1]["include"]) >= {"reasoning.encrypted_content", "message.output_text.logprobs"}
     assert sent[-1]["vendor_flag"] is False
 

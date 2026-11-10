@@ -49,7 +49,8 @@ from ..inputs import (
     stored_input_attachment_views,
     stored_user_input_view,
 )
-from ._plan import RuntimePlanStore
+from ..capability.planning import PlanningStore
+from ..persistence.planning import PlanStateStore
 from ._execution_payload import _materialize_execution_json, _materialize_execution_payloads
 from ._execution_buffer import _ExecutionPayloadBuffer, _ExecutionPayloadCapture
 from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
@@ -101,7 +102,8 @@ from ..observe.service import (
 )
 from ..model.messages import encode_model_messages
 from ..execution import ExecutionInputContext
-from ._memory import MemoryStore, RuntimeMemoryStore
+from pydantic_ai_harness.memory import MemoryStore
+from ..memory import PersistentMemoryStore
 from ..steps import NativeLifecycleEvent
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import (
@@ -4488,7 +4490,7 @@ class LocalExecutionBackend:
                 memory_capture = None
                 reason = None
                 if memory is not None:
-                    if isinstance(memory, RuntimeMemoryStore):
+                    if isinstance(memory, PersistentMemoryStore):
                         memory_capture = await memory.capture()
                     else:
                         reason = "memory_store_has_no_consistent_capture"
@@ -4679,7 +4681,7 @@ class LocalExecutionBackend:
             if current.context_imported:
                 session_metadata = accepted_context.session_metadata
                 if memory is not None:
-                    if not isinstance(memory, RuntimeMemoryStore):
+                    if not isinstance(memory, PersistentMemoryStore):
                         raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "memory_store_has_no_isolated_capture"})
                     await memory.seed_capture(accepted_context.memory or {})
             original_input = current.stored_user_input
@@ -4705,7 +4707,7 @@ class LocalExecutionBackend:
                 input_context=accepted_context,
                 original_input=stored_user_input_view(original_input),
             )
-            plan_store = RuntimePlanStore(
+            plan_store = PlanningStore(PlanStateStore(
                 self._session_state_store
                 if current.session_id is not None
                 else self._execution_state_store,
@@ -4713,7 +4715,7 @@ class LocalExecutionBackend:
                 tenant_id=self._tenant_id,
                 owner_kind="session" if current.session_id is not None else "execution",
                 owner_id=current.session_id or current.execution_id,
-            )
+            ))
             deferred_capability_refs: dict[str, CapabilityRef] = {}
             try:
                 result = await self._executor.execute(

@@ -112,9 +112,7 @@ class TaskEngine(Generic[AppT]):
         for definition in self._declarations.values():
             port = definition.agent_execution
             if port is not None:
-                if port.persistence is not persistence:
-                    raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-                port.operations.ensure_open()
+                port.validate_persistence(persistence)
         self._owner = self
         self._closed = False
         self._notifying_closed = False

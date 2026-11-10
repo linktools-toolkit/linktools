@@ -19,7 +19,7 @@ from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, Pers
 from linktools.ai.persistence._filesystem_layout import _FilesystemCache
 from linktools.ai.snapshot import SnapshotLimits
 from linktools.ai.storage import FilesystemObjectStore, FilesystemWriterLock, InMemoryObjectStore, PayloadPolicy, read_object
-from linktools.ai.runtime._memory import RuntimeMemoryStore
+from linktools.ai.memory import PersistentMemoryStore
 
 from ._filesystem_legacy_fixture_helpers import (
     install_legacy_overlay, legacy_group_root, legacy_provenance, load_legacy_source,
@@ -35,8 +35,8 @@ def _contents(root: Path) -> dict[str, bytes]:
             if path.is_file() and path.name not in {"state.lock", "publication.lock"}}
 
 
-def _memory(state: Persistence) -> RuntimeMemoryStore:
-    return RuntimeMemoryStore(
+def _memory(state: Persistence) -> PersistentMemoryStore:
+    return PersistentMemoryStore(
         state.memory, object_store=state.object_store(PersistenceDomain.MEMORY), namespace=NAMESPACE,
         tenant_id=TENANT, execution_id="execution", memory_scope="retained",
         payload_policy=PayloadPolicy(inline_limit_bytes=64),

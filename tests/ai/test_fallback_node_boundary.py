@@ -7,7 +7,7 @@ from __future__ import annotations
 from linktools.ai.persistence import Persistence
 
 import pytest
-from pydantic_ai import Agent, messages as sdk_messages
+from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, AgentNode, NodeResult
 from pydantic_ai.exceptions import FallbackExceptionGroup
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
@@ -23,12 +23,6 @@ from linktools.ai.persistence import PersistenceStorage
 
 from .test_runtime_fallback_failures import _Binding
 from .test_runtime_fallback_partial_usage import _PartialThenFailure
-
-
-pytestmark = pytest.mark.skipif(
-    not hasattr(sdk_messages, "ModelRequestAttempt"),
-    reason="installed SDK does not expose fallback attempt observations",
-)
 
 
 class _NestedRecoveryCapability(AbstractCapability[AgentContext[None]]):

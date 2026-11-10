@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent-node binding keeps producer dispatch and captured contracts together."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -9,6 +10,7 @@ import pytest
 
 from linktools.ai.agent import AgentBindingContract, bind_output
 from linktools.ai.core import Principal
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import AgentTaskInput
 from linktools.ai.runtime.agent_execution import AgentExecutionPort
 from linktools.ai.spec import AgentSpec
@@ -98,7 +100,60 @@ async def test_agent_task_binding_preserves_snapshot_and_distinct_port_surfaces(
         "execution", tenant_id="tenant", hold_id="hold",
     )
     assert await runner._inspect_execution("execution", principal) == "view"
-    await runner._record_invocation("execution", invocation)
+    await runner._capture_invocation(execution, "execution", invocation)
     captures.record_invocation.assert_awaited_once_with("execution", invocation)
     executor = SimpleNamespace(restore_prepared_agent_prompt=AsyncMock(return_value="late"))
     assert runner._node_executor() is executor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture", ("disabled", "failure", "cancelled"))
+async def test_invocation_capture_preserves_optional_owner_and_failure(capture: str) -> None:
+    principal = Principal("caller", "tenant", "service")
+    invocation = TaskNodeInvocation(
+        TaskNode("node", input=AgentTaskInput("prompt")), "graph", principal, {}, {},
+    )
+    error = asyncio.CancelledError() if capture == "cancelled" else AIError(ErrorCode.STORAGE_UNAVAILABLE)
+    captures = None if capture == "disabled" else SimpleNamespace(record_invocation=AsyncMock(side_effect=error))
+    port = AgentExecutionPort(
+        persistence=None, compiled=None, _binding_contract=None, compiler=None,
+        service=None, sessions=None, operations=None, watch_tree=None, resolve_binding=None,
+        default_principal=principal, correlation={}, captures=captures,
+    )
+    if capture == "disabled":
+        assert await port.record_invocation("execution", invocation) is None
+    else:
+        with pytest.raises(type(error)) as raised:
+            await port.record_invocation("execution", invocation)
+        assert raised.value is error
+        captures.record_invocation.assert_awaited_once_with("execution", invocation)
+
+
+@pytest.mark.parametrize("same_owner", (False, True))
+@pytest.mark.parametrize("closed", (False, True))
+def test_producer_binding_checks_identity_before_open_state(same_owner: bool, closed: bool) -> None:
+    class Owner:
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError("producer binding requires identity, not equality")
+
+    owner = Owner()
+    failure = AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    ensure_open = Mock(side_effect=failure if closed else None)
+    port = AgentExecutionPort(
+        persistence=owner, compiled=None, _binding_contract=None, compiler=None,
+        service=object(), sessions=None,
+        operations=SimpleNamespace(service=object(), ensure_open=ensure_open),
+        watch_tree=None, resolve_binding=None, default_principal=None,
+        correlation={}, captures=None,
+    )
+    candidate = owner if same_owner else Owner()
+    if not same_owner or closed:
+        with pytest.raises(AIError) as raised:
+            port.validate_persistence(candidate)
+        if not same_owner:
+            assert raised.value.code is ErrorCode.RUNTIME_SERVICE_MISMATCH
+        else:
+            assert raised.value is failure
+    else:
+        assert port.validate_persistence(candidate) is None
+    assert ensure_open.call_count == int(same_owner)

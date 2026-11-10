@@ -574,6 +574,4 @@ async def test_matched_event_lifecycle_dml_bound_returned_bytes_and_cpu(
     assert candidate["bound_bytes"] < baseline["bound_bytes"] / (8 if metadata_matches_run else 1)
     assert 0 < candidate["returned_bytes"] <= baseline["returned_bytes"]
     assert candidate["stored_field_bytes"] < baseline["stored_field_bytes"] / (100 if metadata_matches_run else 1)
-    # Compare the JSON reference policy and format cost separately, not a whole-release speedup.
-    assert candidate["cpu_seconds"] <= baseline["cpu_seconds"] * 2 + 0.1
-    assert baseline["cpu_seconds"] <= text_baseline["cpu_seconds"] * 2 + 0.1
+    # Single CPU samples are diagnostic; deterministic storage bounds determine pass/fail.

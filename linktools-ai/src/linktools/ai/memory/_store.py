@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime persistence adapter for Harness memory."""
+"""Persistent memory operations and captured-input restoration."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from pydantic_ai_harness.memory import (
     MemoryMutation,
     MemoryOperation,
     MemoryOperationConflictError,
-    MemoryStore,
 )
 
 from ..core import (
@@ -38,7 +37,7 @@ from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_run
 from ..persistence import PersistenceDomain
 from ..persistence.contracts import MemoryRecord, MemoryRepositories
 
-_logger = environ.get_logger("ai.runtime.memory")
+_logger = environ.get_logger("ai.memory")
 _MAX_CONTENT_CHARS = 65_536
 _MEMORY_VERSION = re.compile(r"m1:[0-9a-f]{64}")
 _STORE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
@@ -131,8 +130,8 @@ class _MutationReceipt:
         return MemoryMutation(self.version, replayed, self.existed)
 
 
-class RuntimeMemoryStore:
-    """Persist Harness memory files inside one Runtime memory scope."""
+class PersistentMemoryStore:
+    """Borrow persistence resources for one admitted memory scope."""
 
     def __init__(
         self,
@@ -166,6 +165,7 @@ class RuntimeMemoryStore:
         )
 
     async def capture(self) -> Mapping[str, JsonValue]:
+        """Read a consistent scope view, preserving each file's version."""
         records = await self._state.records.capture_scope(tenant_id=self._tenant_id, memory_scope_digest=self._memory_scope_digest)
         result: dict[str, JsonValue] = {}
         for record in records:
@@ -175,6 +175,12 @@ class RuntimeMemoryStore:
         return result
 
     async def seed_capture(self, snapshot: Mapping[str, JsonValue]) -> None:
+        """Seed captured versions once per path without reverting later mutations.
+
+        Each file and its receipt commit together. A partially completed seed
+        can be retried with the same capture after cancellation or an unknown
+        outcome; the original receipts remain authoritative.
+        """
         for path, value in snapshot.items():
             _normalize_path(path)
             if not isinstance(value, Mapping):
@@ -674,9 +680,5 @@ def _validate_expected_version(value: str | None) -> None:
 
 
 __all__ = [
-    "MemoryFile",
-    "MemoryMutation",
-    "MemoryOperation",
-    "MemoryStore",
-    "RuntimeMemoryStore",
+    "PersistentMemoryStore",
 ]

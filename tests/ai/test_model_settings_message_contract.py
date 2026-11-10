@@ -5,8 +5,7 @@
 import json
 
 import pytest
-from pydantic_ai import messages
-from pydantic_ai.messages import ModelRequest
+from pydantic_ai.messages import ModelRequest, ModelSettingsDeltaPart
 
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
@@ -16,13 +15,10 @@ from linktools.ai.model.messages import decode_model_messages, encode_model_mess
 @pytest.mark.parametrize("settings", [{}, {"thinking": "medium"}, {"thinking": None}, {"future": {"values": [1, None, False]}}])
 @pytest.mark.parametrize("top_level", [False, True])
 def test_model_settings_delta_round_trips_exact_window(settings, top_level):
-    part_type = getattr(messages, "ModelSettingsDeltaPart", None)
-    if part_type is None:
-        pytest.skip("SDK does not emit recorded settings before 2.62")
-    request = ModelRequest(parts=[part_type(settings=settings, top_level=top_level)])
+    request = ModelRequest(parts=[ModelSettingsDeltaPart(settings=settings, top_level=top_level)])
     wire = encode_model_messages((request,))
     restored = decode_model_messages(wire)[0]
-    assert isinstance(restored.parts[0], part_type)
+    assert isinstance(restored.parts[0], ModelSettingsDeltaPart)
     assert restored.parts[0].settings == settings
     assert restored.parts[0].top_level is top_level
     assert encode_model_messages((restored,)) == wire
@@ -59,8 +55,6 @@ def test_model_settings_delta_rejects_invalid_known_settings(settings):
 def test_compaction_metadata_round_trips_without_changing_speaker(request_side):
     from pydantic_ai.messages import CompactionPart, ModelResponse
 
-    if not hasattr(CompactionPart, "metadata"):
-        pytest.skip("SDK does not carry summary metadata before 2.62")
     part = CompactionPart(content="summary", metadata={"summary": True, "created_at": "2026-10-27"})
     message_type = ModelRequest if request_side else ModelResponse
     message = message_type(parts=[part])

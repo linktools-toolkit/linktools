@@ -19,7 +19,7 @@ from linktools.ai.inputs import CaptureInputRequest
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.runtime._memory import RuntimeMemoryStore
+from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._archive import ContentArchive
 
@@ -129,7 +129,7 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
         source = await agent.start("question", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
         source_record = await runtime._state.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
-        source_memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
+        source_memory = PersistentMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=source.execution_id, memory_scope=source_record.memory_scope)
         baseline = await source_memory.read("facts.txt", max_chars=1000)
         await source_memory.write("facts.txt", "source execution edit", expected_version=baseline.version)
@@ -137,7 +137,7 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
         assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
         retry_record = await runtime._state.execution.executions.get(retry.execution_id, tenant_id=principal.tenant_id)
         assert retry_record.memory_scope != source_record.memory_scope
-        retry_memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
+        retry_memory = PersistentMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=retry.execution_id, memory_scope=retry_record.memory_scope)
         retained = await retry_memory.read("facts.txt", max_chars=1000)
         assert retained.content == baseline.content

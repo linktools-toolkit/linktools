@@ -12,7 +12,7 @@ from pydantic_ai_harness.memory import MemoryOperation
 
 from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._memory import RuntimeMemoryStore
+from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.snapshot import SnapshotLimits
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 
@@ -73,8 +73,8 @@ async def test_current_memory_snapshot_preserves_content_and_operation_receipt(t
     objects = InMemoryObjectStore("snapshots")
     limits = SnapshotLimits(max_entries=1000, max_bytes=2_000_000)
 
-    def memory(state: Persistence) -> RuntimeMemoryStore:
-        return RuntimeMemoryStore(
+    def memory(state: Persistence) -> PersistentMemoryStore:
+        return PersistentMemoryStore(
             state.memory, object_store=state.object_store(PersistenceDomain.MEMORY), namespace=namespace,
             tenant_id=tenant, execution_id="execution", memory_scope="retained",
             payload_policy=PayloadPolicy(inline_limit_bytes=64),

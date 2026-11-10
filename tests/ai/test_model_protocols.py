@@ -29,7 +29,7 @@ from linktools.ai.model.messages import decode_model_messages, encode_model_mess
 
 PROTOCOLS = [('openai', 'openai', 'gpt-4o'),
              ('openai_responses', 'openai-responses', 'gpt-5'),
-             ('anthropic', 'anthropic', 'claude-sonnet-4-5')]
+             ('anthropic', 'anthropic', 'claude-opus-4-5')]
 
 
 def model_binding(monkeypatch: pytest.MonkeyPatch, kind: str, model: str, handler: Callable,
@@ -80,7 +80,7 @@ def response(api: str, *, tool: bool = False) -> dict:
     content = [{'type': 'thinking', 'thinking': 'returned thinking', 'signature': 'signed'},
                {'type': 'redacted_thinking', 'data': 'opaque'},
                {'type': 'tool_use', 'id': 'call-1', 'name': 'lookup', 'input': {'key': 1}}] if tool else [{'type': 'text', 'text': 'answer'}]
-    return {'id': 'msg-1', 'type': 'message', 'role': 'assistant', 'model': 'claude-sonnet-4-5',
+    return {'id': 'msg-1', 'type': 'message', 'role': 'assistant', 'model': 'claude-opus-4-5',
             'content': content, 'stop_reason': 'tool_use' if tool else 'end_turn', 'stop_sequence': None,
             'usage': {'input_tokens': 5, 'output_tokens': 3}}
 

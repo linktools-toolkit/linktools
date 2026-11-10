@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.planning import InMemoryPlanStore, PlanItem
@@ -72,7 +72,8 @@ async def test_invalid_plan_retries_before_changing_store() -> None:
         if calls == 2:
             assert [item.content for item in await store.get_items()] == ["original plan"]
             assert any(
-                isinstance(part, (RetryPromptPart, ToolReturnPart))
+                isinstance(part, ToolReturnPart)
+                and part.outcome == "retried"
                 and part.tool_call_id == "invalid-plan"
                 and "ids must be unique" in str(part.content)
                 for message in messages for part in message.parts
@@ -88,3 +89,32 @@ async def test_invalid_plan_retries_before_changing_store() -> None:
     ])
     await agent.run("plan the work")
     assert [item.content for item in await store.get_items()] == ["corrected plan"]
+
+
+async def test_planning_store_reopens_owner_state_without_owning_persistence(tmp_path) -> None:
+    from linktools.ai.capability.planning import PlanningStore
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.persistence.planning import PlanStateStore
+
+    storage = PersistenceStorage.from_root(tmp_path)
+    async with Persistence.open("plan-owner", storage=storage) as persistence:
+        store = persistence.execution.executions.state_store
+        execution = PlanningStore(PlanStateStore(store, namespace="plan-owner", tenant_id="default",
+                                  owner_kind="execution", owner_id="same-id"))
+        session = PlanningStore(PlanStateStore(store, namespace="plan-owner", tenant_id="default",
+                                owner_kind="session", owner_id="same-id"))
+        await execution.set_items([PlanItem(content="execution step")])
+        await session.set_items([PlanItem(content="session step")])
+        assert [item.content for item in await execution.get_items()] == ["execution step"]
+        assert (await session.get_plan())["items"] == [{"content": "session step", "status": "pending"}]
+        assert persistence.ready
+    async with Persistence.open("plan-owner", storage=storage) as persistence:
+        restored = PlanningStore(PlanStateStore(persistence.execution.executions.state_store,
+                                 namespace="plan-owner", tenant_id="default",
+                                 owner_kind="execution", owner_id="same-id"))
+        assert (await restored.get_plan())["revision"] == 1
+        assert (await restored.get_item("item-1")).content == "execution step"
+        await restored.update_item("item-1", content="continued")
+        assert (await restored.get_plan())["revision"] == 2
+        assert await restored.remove_item("item-1")
+        assert await restored.get_items() == []

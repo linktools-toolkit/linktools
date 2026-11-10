@@ -57,7 +57,7 @@ def test_cli_protocol_configuration_round_trip(monkeypatch, tmp_path, command, a
 @pytest.mark.asyncio
 @pytest.mark.parametrize("empty_override", [False, True])
 @pytest.mark.parametrize("api,model_name", [("openai", "gpt-4o"), ("openai-responses", "gpt-5"),
-                                            ("anthropic", "claude-sonnet-4-5")])
+                                            ("anthropic", "claude-opus-4-5")])
 async def test_cli_configuration_invokes_native_protocol_offline(monkeypatch, tmp_path, api, model_name, empty_override):
     from linktools.ai.model import _anthropic, _openai
     module = _anthropic if api == "anthropic" else _openai

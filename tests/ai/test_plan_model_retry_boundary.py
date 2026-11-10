@@ -13,7 +13,7 @@ from pydantic_ai_harness.planning import (
 
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
+from linktools.ai.capability.planning import PlanningStore
 from linktools.ai.capability.planning import HarnessPlanning
 
 pytestmark = pytest.mark.asyncio
@@ -31,8 +31,8 @@ class _Store:
             raise self.error
 
 
-def _adapter(store: _Store) -> HarnessPlanStoreAdapter:
-    adapter = object.__new__(HarnessPlanStoreAdapter)
+def _adapter(store: _Store) -> PlanningStore:
+    adapter = object.__new__(PlanningStore)
     adapter._store = store  # type: ignore[attr-defined]
     return adapter
 

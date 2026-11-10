@@ -11,7 +11,8 @@ from typing import Any
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._memory import RuntimeMemoryStore, _MutationReceipt
+from linktools.ai.memory import PersistentMemoryStore
+from linktools.ai.memory._store import _MutationReceipt
 from linktools.ai.persistence.contracts import MemoryRecord
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.persistence.repositories import MemoryRepositoryImpl
@@ -37,8 +38,8 @@ class _RecordingMemoryRepository:
         )
 
 
-def _runtime_store(records: _RecordingMemoryRepository) -> RuntimeMemoryStore:
-    store = object.__new__(RuntimeMemoryStore)
+def _runtime_store(records: _RecordingMemoryRepository) -> PersistentMemoryStore:
+    store = object.__new__(PersistentMemoryStore)
     store._state = SimpleNamespace(records=records)
     store._tenant_id = "tenant"
     store._memory_scope_digest = "scope-digest"
