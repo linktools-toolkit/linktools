@@ -41,6 +41,7 @@ from ..observe.stream import await_stream_cleanup
 from ..history import History
 from ..persistence.snapshots import (
     snapshot_manifest_identity,
+    snapshot_manifest_usage,
     SnapshotExclusiveGuard,
     SnapshotLimits,
     snapshot_object_ref_payload as _object_ref_payload,
@@ -1061,46 +1062,8 @@ def _storage_manifest_identity(
     return snapshot_manifest_identity(manifest)
 
 
-def _storage_snapshot_usage(
-    manifest: Mapping[str, object],
-) -> tuple[int, int]:
-    domains = manifest.get("domains")
-    objects = manifest.get("objects")
-    if not isinstance(domains, Mapping) or not isinstance(objects, list):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    entries = len(objects)
-    object_bytes = 0
-    for raw_domain in domains.values():
-        if not isinstance(raw_domain, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for name in ("records", "aliases", "facts", "operations", "sequences"):
-            values = raw_domain.get(name)
-            if not isinstance(values, list):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            entries += len(values)
-    for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages")),
-                         ("native_checkpoints", ("runs", "events", "snapshots")),
-                         ("native_projections", ("records", "facts"))):
-        groups = manifest.get(name, [])
-        if not isinstance(groups, list):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for group in groups:
-            if not isinstance(group, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for field in fields:
-                rows = group.get(field)
-                if not isinstance(rows, list):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                entries += len(rows)
-    for raw_object in objects:
-        if not isinstance(raw_object, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        source = _object_ref_from_payload(raw_object.get("source"))
-        content = _object_ref_from_payload(raw_object.get("content"))
-        if source.digest != content.digest or source.size != content.size:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        object_bytes += content.size
-    return entries, object_bytes
+def _storage_snapshot_usage(manifest: Mapping[str, object]) -> tuple[int, int]:
+    return snapshot_manifest_usage(manifest)
 
 
 def _workspace_snapshot_usage(

@@ -56,3 +56,33 @@ async def test_native_capture_retains_authenticated_encoded_payload_for_publicat
         budget=_SnapshotCaptureBudget(SnapshotLimits(100, 10000)), objects=InMemoryObjectStore(), backup=None)
     assert result == {("c" * 64, digest): raw}
     assert reads == ["v1/archive/group/body"]
+
+
+@pytest.mark.parametrize("external", (False, True))
+def test_storage_and_outer_snapshot_share_exact_decoded_byte_boundary(external: bool) -> None:
+    from linktools.ai.core import canonical_json_bytes
+    from linktools.ai.persistence.snapshots import snapshot_manifest_usage, snapshot_object_ref_payload
+    from linktools.ai.snapshot._snapshot import _storage_snapshot_usage
+
+    raw = b'[{"kind":"request","parts":[]}]'
+    digest = hashlib.sha256(raw).hexdigest()
+    reference = ObjectRef("objects", "v1/archive/group/body", digest, len(raw))
+    payload = StoredPayload.object(reference) if external else StoredPayload.inline_bytes(raw)
+    content = ContentRecord("model-message", digest, len(raw), "raw", payload)
+    manifest = {"kind": "runtime-storage-snapshot", "format_version": 1,
+        "namespace": "budget", "tenant_id": "tenant", "domains": {}, "archives": [],
+        "native_checkpoints": [], "native_projections": [],
+        "native_messages": [{"group_id": "group", "domain": "execution", "sequences": [],
+            "messages": [{"store_digest": "c" * 64, "sha256": digest,
+                          "message": json.dumps(content.to_json())}]}],
+        "objects": ([{"domain": "execution", "source": snapshot_object_ref_payload(reference),
+                      "content": snapshot_object_ref_payload(reference)}] if external else [])}
+    entries, extra = snapshot_manifest_usage(manifest)
+    assert (entries, extra) == _storage_snapshot_usage(manifest)
+    assert entries == 1 + int(external)
+    assert extra == len(raw) * (2 if external else 1)
+    total = len(canonical_json_bytes(manifest)) + extra
+    exact = SnapshotLimits(entries, total)
+    below = SnapshotLimits(entries, total - 1)
+    assert len(canonical_json_bytes(manifest)) + _storage_snapshot_usage(manifest)[1] == exact.max_bytes
+    assert len(canonical_json_bytes(manifest)) + snapshot_manifest_usage(manifest)[1] > below.max_bytes

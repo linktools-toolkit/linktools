@@ -817,7 +817,8 @@ async def _export_snapshot(
         "objects": objects,
     }
     payload = canonical_json_bytes(manifest)
-    if len(payload) + object_bytes > limits.max_bytes:
+    budget_entries, budget_bytes = snapshot_manifest_usage(manifest)
+    if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     digest = hashlib.sha256(payload).hexdigest()
     key = f"v1/runtime-storage-snapshot/{digest}"
@@ -871,6 +872,10 @@ async def restore_snapshot(
     namespace = validate_persistence_namespace(namespace)
     tenant_id = validate_tenant_id(tenant_id)
 
+    budget_entries, budget_bytes = snapshot_manifest_usage(manifest)
+    if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
     raw_domains = manifest["domains"]
     raw_objects = manifest.get("objects", [])
     if not isinstance(raw_objects, list):
@@ -901,7 +906,6 @@ async def restore_snapshot(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     native_closures = {}
     native_entries = {}
-    native_decoded_bytes = len(payload)
     for entry in raw_native:
         if (not isinstance(entry, dict) or set(entry) != {"group_id", "domain", "sequences", "messages"}
                 or not isinstance(entry["group_id"], str) or not entry["group_id"]
@@ -916,13 +920,6 @@ async def restore_snapshot(
         if entry_count > limits.max_entries:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         validate_snapshot_native_rows(entry["sequences"], entry["messages"])
-        for row in entry["messages"]:
-            content = ContentRecord.from_json(json.loads(row["message"]))
-            native_decoded_bytes += content.raw_size
-            if content.payload.ref is not None:
-                native_decoded_bytes += content.payload.size
-            if native_decoded_bytes > limits.max_bytes:
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         native_closures[entry["group_id"]] = NativeMessageClosure(entry["sequences"])
         native_entries[entry["group_id"]] = entry
     raw_checkpoints = manifest.get("native_checkpoints", [])
@@ -1450,6 +1447,60 @@ async def restore_snapshot(
                     SqlStepStore.invalidate_context(resources.stores[domain].context)
 
 
+def snapshot_manifest_usage(
+    manifest: Mapping[str, object],
+) -> tuple[int, int]:
+    """Return entry count and bytes outside the serialized storage manifest.
+
+    Native decoded bytes are reserved in addition to encoded object bytes so
+    exporters and restorers enforce the same hydration allowance.
+    """
+    domains = manifest.get("domains")
+    objects = manifest.get("objects")
+    if not isinstance(domains, Mapping) or not isinstance(objects, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    entries = len(objects)
+    object_bytes = 0
+    for raw_domain in domains.values():
+        if not isinstance(raw_domain, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for name in ("records", "aliases", "facts", "operations", "sequences"):
+            values = raw_domain.get(name)
+            if not isinstance(values, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            entries += len(values)
+    for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages")),
+                         ("native_checkpoints", ("runs", "events", "snapshots")),
+                         ("native_projections", ("records", "facts"))):
+        groups = manifest.get(name, [])
+        if not isinstance(groups, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for group in groups:
+            if not isinstance(group, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for field in fields:
+                rows = group.get(field)
+                if not isinstance(rows, list):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                entries += len(rows)
+    for raw_object in objects:
+        if not isinstance(raw_object, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = _object_ref_from_payload(raw_object.get("source"))
+        content = _object_ref_from_payload(raw_object.get("content"))
+        if source.digest != content.digest or source.size != content.size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        object_bytes += content.size
+    for group in manifest.get("native_messages", []):
+        for row in group["messages"]:
+            try:
+                content = ContentRecord.from_json(json.loads(row["message"]))
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            object_bytes += content.raw_size
+    return entries, object_bytes
+
+
 def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
     """Compare portable state independently of relocated group/object addresses."""
     archives = manifest.get("archives", [])
@@ -1849,4 +1900,4 @@ async def _put_snapshot_object(
 from ._capability_marker import ensure_capability_partition_marker
 from ._snapshot import snapshot_object_ref_from_payload, snapshot_object_ref_payload
 
-__all__ = ['snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
+__all__ = ['snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
