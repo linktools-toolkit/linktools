@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import BinaryImage, FilePart, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, UsageMetrics, agent_conversation_id, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
@@ -66,7 +66,10 @@ def _staged(*, large: bool = False):
 
     request = (ModelRequest(parts=[UserPromptPart("synthetic request")]),)
     winner = (ModelResponse(parts=[TextPart("complete winner")]),)
-    partial = (ModelResponse(parts=[TextPart("failed partial " + ("\n".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(8000)) if large else ""))], state="incomplete"),)
+    partial_parts = [TextPart("failed partial " + ("\n".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(8000)) if large else ""))]
+    if large:
+        partial_parts.append(FilePart(BinaryImage(data=b"partial attachment", media_type="image/png")))
+    partial = (ModelResponse(parts=partial_parts, state="incomplete"),)
     failed = StagedStreamAttemptRecord(
         stream_attempt_seq=1, status="FAILED", started_at=_NOW, finished_at=_NOW,
         duration_ns=13, client_request_start=0, client_request_end=2,

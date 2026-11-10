@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.persistence import Persistence
-from pydantic_ai.messages import BinaryContent, FilePart, ModelResponse, TextPart
+from pydantic_ai.messages import BinaryImage, FilePart, ModelResponse, TextPart
 
 from linktools.ai.core import Principal, TenantAuthorizationPolicy, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
@@ -135,7 +135,7 @@ async def test_composed_transcript_archives_cache_verified_attachment_bytes(
         repository = archive.transcript_repository
         attachment = b"\x00\xffimage" * 4096
         messages = (ModelResponse(parts=[TextPart("compressed body " * 2048),
-                                       FilePart(BinaryContent(attachment, media_type="image/png"))]),)
+                                       FilePart(BinaryImage(attachment, media_type="image/png"))]),)
         await repository.create_head("run")
         prepared = PreparedArchive()
         chunks = await repository.prepare_chunks(
@@ -334,7 +334,7 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
         archive = storage.run_store.read_store(domain)
         run = AgentRunRecord("run")
         messages = [ModelResponse(parts=[TextPart("retained checkpoint " * 2048),
-                                         FilePart(BinaryContent(b"checkpoint image", media_type="image/png"))])]
+                                         FilePart(BinaryImage(b"checkpoint image", media_type="image/png"))])]
         checkpoint = AgentRunCheckpoint("run", 1, messages, state="interrupted", context_messages=messages,
                                         transcript_message_count_before=0)
         await archive.materialize_checkpoint(run, checkpoint)

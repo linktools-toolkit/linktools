@@ -957,16 +957,16 @@ class ContentArchive:
             return resolved
 
         groups, records = await self.store.read(capture) if roots else ((), {})
-        if append_frontiers is not None and frontiers is not None:
-            append_frontiers.update(frontiers)
-
         async def load() -> tuple[tuple[bytes, ...], ...]:
             decoded: dict[str, bytes] = {}
             for identity, content in records.items():
                 if content.codec != codec:
                     raise _integrity()
                 decoded[identity] = await self._read_content(content)
-            return tuple(tuple(decoded[identity] for identity in group) for group in groups)
+            result = tuple(tuple(decoded[identity] for identity in group) for group in groups)
+            if append_frontiers is not None and frontiers is not None:
+                append_frontiers.update(frontiers)
+            return result
 
         return load
 

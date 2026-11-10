@@ -60,6 +60,9 @@ async def test_session_context_reuses_one_metadata_query(
         async def uncaptured(_history_id, *, tenant_id):
             return None
 
+        # Compare query batching with the same opened physical archive owner.
+        # Cold scope discovery is covered by test_context_metadata_read_io.
+        assert await archive.state_store.storage_group.open_archive() is not None
         results, metadata_counts, select_counts = [], [], []
         engine = archive.state_store.storage_group.context.engine.sync_engine
         for use_capture in (False, True):

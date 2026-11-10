@@ -124,7 +124,7 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
             messages = build_step_sql_metadata().tables["ai_step_messages"]
             body = (await connection.execute(select(messages))).mappings().one()
         content = validate_native_message_content(body, group_id=group_id)
-        reference = next(iter(content.payload.object_refs()), None)
+        reference = next(iter(content.object_refs()), None)
         assert (reference is not None) is object_backed
         root = NativeMessageRoot(group_id, native.store_digest, (NativeMessageSlice(first, 1, 0, 1),))
         value = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))

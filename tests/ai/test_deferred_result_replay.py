@@ -4,7 +4,6 @@
 
 import asyncio
 import hashlib
-import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -478,17 +477,18 @@ async def test_external_legacy_result_retry_uses_stored_projection_without_rewri
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('inline', [True, False], ids=['inline', 'object'])
 @pytest.mark.parametrize('field,value', [('value', {'count': 2}), ('tag', 'changed'),
                                         ('description', 'changed'), ('metadata', {'changed': True})])
 async def test_external_pending_first_supply_uses_current_structured_identity(
-    inline: bool, field: str, value: object,
+    field: str, value: object,
 ) -> None:
-    service, calls, objects, factory, request = _structured_external_service(inline=inline)
+    service, calls, objects, factory, request = _structured_external_service()
     first = await service.supply('execution', request)
     original = calls.record
     payload = original.result_payload
-    raw = payload.decode() if inline else json.loads(await read_runtime_object(objects, payload.ref))
+    assert payload.kind == "inline"
+    assert not payload.object_refs()
+    raw = payload.decode()
     assert raw['version'] == 2
     assert (await service.supply('execution', request)) == first
     changed = replace(request.resolution.value, **{field: value})

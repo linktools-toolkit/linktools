@@ -429,19 +429,32 @@ def test_step_development_ddl_and_complete_metadata_match_canonical_schema() -> 
     complete = build_sql_schema_metadata()
     migration = (Path(__file__).resolve().parents[2] / "linktools-ai" / "migrations" / "init_schema.sql").read_text()
     compact = " ".join(migration.split())
+
+    def normalize_nullable_columns(sql: str) -> str:
+        # MySQL's implicit nullable default and explicit NULL are equivalent.
+        # Preserve NOT NULL, defaults, and the complete quoted comment text.
+        chunks = re.split(r"('(?:[^']|'')*')", sql)
+        return " ".join("".join(
+            re.sub(r"(?<!NOT )(?<!DEFAULT )\bNULL\s+(?=COMMENT\s*$)", "", chunk) if index % 2 == 0 else chunk
+            for index, chunk in enumerate(chunks)
+        ).split())
+    column = "value TEXT COMMENT 'literal NULL COMMENT ''nested''; data'"
+    assert normalize_nullable_columns(column.replace("TEXT COMMENT", "TEXT NULL COMMENT")) == column
+    for declaration in ("NOT NULL", "DEFAULT NULL"):
+        assert normalize_nullable_columns(column.replace("TEXT COMMENT", f"TEXT {declaration} COMMENT")) != column
     dialect = mysql.dialect()
     for name, table in metadata.tables.items():
         assert list(complete.tables[name].c.keys()) == list(table.c.keys())
         ddl = str(CreateTable(table).compile(dialect=dialect))
         # MySQL's independent table options may be emitted in any order.
         columns = ddl.rsplit(")", 1)[0]
-        statement = re.search(rf"CREATE TABLE {re.escape(name)} \(.*?;", compact)
+        statement = re.search(rf"CREATE TABLE {re.escape(name)} \((?:[^;']|'(?:[^']|'')*')*;", compact)
         assert statement is not None
         actual_columns = re.sub(
             r", (?:UNIQUE )?(?:KEY|INDEX) \w+ \((?:[^()]|\([^()]*\))+\)",
             "",
             statement.group(),
         ).rsplit(")", 1)[0]
-        assert " ".join(columns.split()) == " ".join(actual_columns.split())
+        assert normalize_nullable_columns(columns) == normalize_nullable_columns(actual_columns)
         assert f"COMMENT='{table.comment}'" in compact
     assert all(line == line.rstrip() for line in migration.splitlines())

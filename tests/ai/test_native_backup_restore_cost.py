@@ -34,6 +34,7 @@ class _BodyRows:
     def __init__(self, session):
         self.session = session
         self.count = 0
+        self.info = session.info
 
     async def execute(self, *args, **kwargs):
         result = await self.session.execute(*args, **kwargs)
@@ -47,6 +48,21 @@ class _Result:
 
     def mappings(self):
         return _Mappings(self.result.mappings(), self.observer)
+
+    def all(self):
+        rows = self.result.all()
+        self.observer.count += sum(
+            "message" in row._mapping and row._mapping["message"] is not None for row in rows
+        )
+        return rows
+
+    @property
+    def rowcount(self):
+        return self.result.rowcount
+
+    @property
+    def inserted_primary_key(self):
+        return self.result.inserted_primary_key
 
     def first(self):
         return self.result.first()
@@ -132,7 +148,7 @@ async def test_restore_rejects_corrupt_prefix_content_nodes_and_checkpoint_heade
                 rows = (await session.execute(select(nodes))).mappings().all()
                 closure = NativeMessageClosure(rows)
                 first = closure.message_identities(store.store_digest, backup.message_sequences[0].slices)[0]
-                await session.execute(update(bodies).where(bodies.c.sha256 == first).values(message="{}"))
+                await session.execute(update(bodies).where(bodies.c.sha256 == first).values(message=b"{}"))
             elif damage == "missing_node":
                 await session.execute(delete(nodes).where(nodes.c.sha256 == backup.snapshots[0]["sequence_root"]))
             else:

@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 """Thin conversation receipts and snapshots preserve canonical Execution ownership."""
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,7 +21,7 @@ from linktools.ai.persistence.codec import (
     iter_runtime_object_refs,
 )
 from linktools.ai.persistence.contracts import SessionTurnCommit
-from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes
+from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from linktools.ai.storage import InMemoryObjectStore, read_object
 
 from ._runtime_test_helpers import model_features
@@ -81,14 +80,20 @@ async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
         repository = storage.conversation.sessions
         await repository.create(_session())
         row = repository._stored_timeline_commit(_commit())
+        source_records = (*await repository.state_store.read(lambda tx: tx.scan_records()), row)
+        aliases, sequences = canonical_snapshot_indexes(
+            namespace="turn-codec", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
+            records=source_records, facts=(), operations=(),
+        )
         row = replace(row, data={**row.data, field: value})
         with pytest.raises(AIError) as raised:
             repository._decode_timeline_commit("session", 1, row)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         records = (*await repository.state_store.read(lambda tx: tx.scan_records()), row)
         with pytest.raises(AIError) as raised:
-            canonical_snapshot_indexes(namespace="turn-codec", tenant_id="tenant",
-                domain=PersistenceDomain.CONVERSATION, records=records, facts=(), operations=())
+            validate_snapshot_domain(namespace="turn-codec", tenant_id="tenant",
+                domain=PersistenceDomain.CONVERSATION, records=records, facts=(), operations=(),
+                aliases=aliases, sequences=sequences)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()
@@ -136,10 +141,12 @@ async def test_snapshot_roundtrips_turn_references_and_execution_payload_owners(
         owner = await restored.execution.executions.get(commit.execution_id, tenant_id=principal.tenant_id)
         assert owner is not None
         refs = tuple(iter_runtime_object_refs(_encode_persisted_domain(owner), default_domain=PersistenceDomain.EXECUTION))
-        assert len(refs) >= 2 and all(domain is PersistenceDomain.EXECUTION for domain, _ in refs)
+        assert len(refs) == 1 and refs[0][0] is PersistenceDomain.EXECUTION
         objects = restored.object_store(PersistenceDomain.EXECUTION)
-        ref = owner.result.output.ref
-        assert json.loads(await read_object(objects, ref.key, expected_digest=ref.digest, expected_size=ref.size)) == output
+        assert owner.result.output.kind == "inline"
+        assert owner.result.output.decode() == output
+        ref = refs[0][1]
+        assert await read_object(objects, ref.key, expected_digest=ref.digest, expected_size=ref.size) == attachment
         prompt = await ExecutionInputMaterializer(None, PromptLimits(), object_store=objects).restore(owner.stored_user_input)
         assert [part.data for part in prompt if isinstance(part, BinaryContent)] == [attachment]
     finally:

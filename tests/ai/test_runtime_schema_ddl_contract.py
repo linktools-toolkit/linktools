@@ -25,7 +25,8 @@ def test_mysql_ddl_declares_all_indexes_in_each_create_table_and_matches_metadat
     migration = re.sub(r"^--[^\n]*", "", migration, flags=re.MULTILINE)
     index_pattern = r"(UNIQUE )?(?:KEY|INDEX) (\w+) \(((?:[^()]|\([^()]*\))+)\)"
     table_indexes: dict[str, list[str]] = {}
-    for raw_statement in migration.split(";"):
+    # Semicolons inside SQL comment literals are column data, not delimiters.
+    for raw_statement in re.split(r";(?=(?:[^']*'[^']*')*[^']*$)", migration):
         statement = " ".join(raw_statement.split())
         if not statement:
             continue

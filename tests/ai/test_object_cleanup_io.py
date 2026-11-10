@@ -6,6 +6,9 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import TypeVar
+import hashlib
+
+from pydantic_ai.messages import BinaryContent
 
 import pytest
 
@@ -14,12 +17,17 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.agent import AgentInputCaptureRef
+from linktools.ai.core import canonical_sha256
+from linktools.ai.model.messages import decode_user_content_item, encode_user_content_item
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import ArtifactRecord
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.captures import capture_record_digest, input_capture_key, publish_capture_record
+from linktools.ai.persistence.captures import (
+    capture_record_digest, input_capture_key, prepare_capture_value,
+    publish_capture_record, restore_capture_value,
+)
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence.state import StateCallback
 from linktools.ai.persistence.codec import encode_domain
@@ -32,12 +40,62 @@ from linktools.ai.storage import (
     ObjectStoreDeletion,
     SqlObjectStore,
     StoredPayload,
+    ObjectRef,
+    read_object,
 )
 
 from .test_evaluation_retention import NOW, Offline, put
 
 
 ValueT = TypeVar("ValueT")
+
+
+async def _put_attachment(objects, key: str) -> ObjectRef:
+    data = b"captured binary attachment\x00\xff"
+
+    async def chunks():
+        yield data
+
+    stat = await objects.put(key, chunks(), expected_size=len(data),
+                             expected_digest=hashlib.sha256(data).hexdigest())
+    return ObjectRef(objects.store_id, stat.key, stat.digest, stat.size)
+
+
+async def _publish_attachment_capture(state, objects, reference: ObjectRef, *,
+                                      namespace: str, tenant_id: str, key: str):
+    data = await read_object(objects, reference.key, expected_digest=reference.digest,
+                             expected_size=reference.size)
+    content = {"items": [encode_user_content_item(
+        BinaryContent(data=data, media_type="application/octet-stream"),
+    )]}
+    semantic = {"kind": "agent", "version": 1, "namespace": namespace, "tenant_id": tenant_id,
+                "payload": {"prompt": {"kind": "pydantic-user-content-v1", "value": content},
+                            "original_input": {}}}
+
+    async def existing(body: bytes) -> ObjectRef:
+        assert body == data
+        return reference
+
+    stored = await prepare_capture_value(key, semantic, write_object=existing)
+    assert stored != semantic
+    digest = canonical_sha256(semantic)
+    record = await publish_capture_record(state, namespace=namespace, tenant_id=tenant_id,
+        key=key, value=stored, source_digest=digest)
+
+    async def read_attachment(ref: ObjectRef) -> bytes:
+        assert ref == reference
+        body = await read_object(objects, ref.key, expected_digest=ref.digest, expected_size=ref.size)
+        assert body == data
+        return body
+
+    # Validate real recovery before installing the cleanup I/O observers.
+    restored = await restore_capture_value(record, read_object=read_attachment)
+    assert restored == semantic
+    binary = decode_user_content_item(restored["payload"]["prompt"]["value"]["items"][0])
+    assert isinstance(binary, BinaryContent)
+    assert binary.data == data
+    assert capture_record_digest(record) == canonical_sha256(restored) == digest
+    return record
 
 
 @pytest.mark.asyncio
@@ -53,15 +111,13 @@ async def test_cleanup_shared_source_io_does_not_scale_with_domain_aliases(
     await storage.initialize(namespace="evaluation-retention", tenant_id="tenant")
     try:
         shared = await put(objects, "shared", {"content": "another owner"})
-        captured = await put(objects, "captured", {"content": "independent capture"})
+        captured = await _put_attachment(objects, "captured")
         orphan = await put(objects, "orphan", {"content": "unreferenced"})
         await storage.artifact.records.put_metadata(ArtifactRecord(
             "artifact", "execution", "producer", "application/json", shared, NOW))
-        await publish_capture_record(storage.task.tasks.state_store, namespace="other", tenant_id="other",
-            key=input_capture_key("other", "other", "agent", "independent"), value={
-                "kind": "agent", "version": 1, "namespace": "other", "tenant_id": "other",
-                "payload": encode_domain(captured),
-            })
+        await _publish_attachment_capture(storage.task.tasks.state_store, objects, captured,
+            namespace="other", tenant_id="other",
+            key=input_capture_key("other", "other", "agent", "independent"))
         reads: list[str] = []
         listings: list[None] = []
         statements: list[str] = []
@@ -149,11 +205,12 @@ async def test_cleanup_preserves_implicit_and_explicit_domain_dependencies() -> 
     state = InMemoryStateStore()
     await state.initialize()
     try:
-        await publish_capture_record(state, namespace="cleanup", tenant_id="tenant",
-            key=input_capture_key("cleanup", "tenant", "agent", "root"), value={
-                "kind": "agent", "version": 1, "namespace": "cleanup", "tenant_id": "tenant",
+        from .test_state_group_record_batch import _record
+        await state.mutate(lambda transaction: transaction.insert_record(replace(
+            _record("explicit-domain-owner"), data={
                 "payload": encode_domain(RuntimePayloadRef(StoredPayload.object(explicit), PersistenceDomain.EXECUTION)),
-            })
+            },
+        )))
         sources = {domain: primary for domain in PersistenceDomain}
         sources.update({PersistenceDomain.TASK: task, PersistenceDomain.EXECUTION: execution})
         candidates = ((PersistenceDomain.ARTIFACT, implicit), (PersistenceDomain.EXECUTION, explicit))
@@ -207,13 +264,11 @@ async def test_cleanup_reuses_capture_metadata_only_within_exclusive_operation(
     storage = Persistence(PersistenceStorage.sql(engine, object_store=objects))
     await storage.initialize(namespace="cleanup", tenant_id="tenant")
     try:
-        target = await put(objects, "target", {"content": "retained"})
+        target = await _put_attachment(objects, "target")
         state = storage.task.tasks.state_store
         capture_key = input_capture_key("cleanup", "tenant", "agent", "captured")
-        capture = await publish_capture_record(state, namespace="cleanup", tenant_id="tenant", key=capture_key, value={
-            "kind": "agent", "version": 1, "namespace": "cleanup", "tenant_id": "tenant",
-            "payload": encode_domain(target),
-        })
+        capture = await _publish_attachment_capture(state, objects, target,
+            namespace="cleanup", tenant_id="tenant", key=capture_key)
         ref = AgentInputCaptureRef("cleanup", "tenant", "captured", capture_record_digest(capture), None)
         await storage.artifact.records.state_store.mutate(lambda tx: tx.insert_record(
             replace(_record(1), data={"captures": [encode_domain(ref)] * 16})))
@@ -272,13 +327,12 @@ async def test_cleanup_expiry_metadata_does_not_cross_state_instances() -> None:
     await first.initialize()
     await second.initialize()
     objects = InMemoryObjectStore()
-    target = await put(objects, "target", {"content": "retained"})
+    target = await _put_attachment(objects, "target")
     key = input_capture_key("cleanup", "tenant", "agent", "capture")
-    payload = {"kind": "agent", "version": 1, "namespace": "cleanup", "tenant_id": "tenant",
-               "payload": encode_domain(RuntimePayloadRef(StoredPayload.object(target), PersistenceDomain.ARTIFACT))}
     try:
         for state in (first, second):
-            await publish_capture_record(state, namespace="cleanup", tenant_id="tenant", key=key, value=payload)
+            await _publish_attachment_capture(state, objects, target,
+                namespace="cleanup", tenant_id="tenant", key=key)
         await publish_capture_record(first, namespace="cleanup", tenant_id="tenant",
             key=input_capture_expiry_key(key), value={
                 "namespace": "cleanup", "tenant_id": "tenant", "capture_key": key, "expired_at": NOW.isoformat(),

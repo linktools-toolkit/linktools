@@ -1641,7 +1641,10 @@ class TranscriptRepository:
         owner_id: str,
         projections: Sequence[ContextProjection],
     ) -> tuple[LoadedModelContext, ...]:
-        load = await self.read_content(lambda: self.capture_projected_contexts(owner_id, projections))
+        if all(not projection.items for projection in projections):
+            load = await self.capture_projected_contexts(owner_id, projections)
+        else:
+            load = await self.read_content(lambda: self.capture_projected_contexts(owner_id, projections))
         return await load()
 
     async def capture_projected_contexts(

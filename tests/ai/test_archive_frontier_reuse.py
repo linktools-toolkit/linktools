@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Loaded append frontiers are bounded, exact, and never replace fresh publication checks."""
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -132,8 +133,9 @@ async def test_reused_frontier_is_rechecked_against_fresh_publication_records(tm
         await state.close()
 
 
+@pytest.mark.parametrize("failure", (AIError(ErrorCode.STORAGE_INTEGRITY_ERROR), asyncio.CancelledError()))
 async def test_frontier_capture_does_not_load_excluded_bodies_or_escape_failed_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException,
 ) -> None:
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
@@ -161,11 +163,11 @@ async def test_frontier_capture_does_not_load_excluded_bodies_or_escape_failed_r
         assert frontiers == {}
 
         async def corrupt_body(content):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise failure
 
         await archive.store.mutate(lambda transaction: transaction.insert_records((missing,)))
         monkeypatch.setattr(archive, "_read_content", corrupt_body)
-        with pytest.raises(AIError):
+        with pytest.raises(type(failure)):
             await archive.read_ranges((root,), codec="bytes", append_frontiers=frontiers)
         assert frontiers == {}
     finally:

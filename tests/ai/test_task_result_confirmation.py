@@ -11,7 +11,7 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.task import Task, TaskBindingContract, TaskGraph, TaskNode, TaskNodeRunResult
 from linktools.ai.task.engine import TaskEngine
 
@@ -24,41 +24,28 @@ CONTRACT = {"version": 1, "type": "runner", "effect_policy": "none", "output_con
 
 
 class _OutputFault:
-    def __init__(self, store, patch, *, code=ErrorCode.STORAGE_UNAVAILABLE, precommit=False):
+    def __init__(self, repository, service, patch, *, code=ErrorCode.STORAGE_UNAVAILABLE, precommit=False):
         self.armed = False
         self.injected = False
-        self.key = None
         self.error = AIError(code, safe_details={"reader": "output"})
-        put, read = store.put, store.open
+        commit, read = repository.commit_terminal, service._port.result_record
 
-        async def write(key, chunks, *, expected_size, expected_digest):
-            if self.armed and expected_size >= 80000 and precommit:
+        async def commit_once(terminal):
+            if self.armed and precommit and terminal.execution.status is ExecutionStatus.SUCCEEDED:
                 self.armed = False
                 self.injected = True
                 raise self.error
-            result = await put(key, chunks, expected_size=expected_size, expected_digest=expected_digest)
-            if self.armed and expected_size >= 80000:
+            return await commit(terminal)
+
+        async def read_once(execution, *, tenant_id):
+            if self.armed and not precommit and execution.status is ExecutionStatus.SUCCEEDED:
                 self.armed = False
-                self.key = key
-            return result
-
-        async def open_once(key):
-            if self.key == key:
-                self.key = None
                 self.injected = True
-                if code is ErrorCode.STORAGE_NOT_FOUND:
-                    async for chunk in read(key + ".missing"):
-                        yield chunk
-                    return
-                if code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    yield b"corrupted output bytes"
-                    return
                 raise self.error
-            async for chunk in read(key):
-                yield chunk
+            return await read(execution, tenant_id=tenant_id)
 
-        patch.setattr(store, "put", write)
-        patch.setattr(store, "open", open_once)
+        patch.setattr(repository, "commit_terminal", commit_once)
+        patch.setattr(service._port, "result_record", read_once)
 
 
 class _CompletingRunner:
@@ -113,7 +100,7 @@ class _CompletingRunner:
 async def test_task_committed_output_read_recovers_same_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, kind: str) -> None:
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.sqlite")
     async with Persistence.open("confirmation", storage=storage) as state, TaskEngine.open(persistence=state) as engine:
-        fault = _OutputFault(state.object_store(PersistenceDomain.EXECUTION), monkeypatch)
+        fault = _OutputFault(state.execution.executions, engine._execution_service, monkeypatch)
         calls = 0
 
         async def body():
@@ -137,7 +124,8 @@ async def test_task_committed_output_read_recovers_same_result(tmp_path: Path, m
         assert bound.safe_error_details["cause_details"] == fault.error.safe_details
         original = await state.execution.executions.get(bound.execution_id, tenant_id=state.tenant_id)
         assert original.status is ExecutionStatus.SUCCEEDED
-        assert original.result.output.kind == "object"
+        assert original.result.output.kind == "inline"
+        assert original.result.output.decode() == OUTPUT
         await run.recover(idempotency_key="recover")
         completed = (await run.wait(timeout_seconds=5)).result
         assert completed.status is TaskStatus.SUCCEEDED
@@ -156,7 +144,7 @@ async def test_task_committed_output_read_recovers_same_result(tmp_path: Path, m
 @pytest.mark.parametrize("phase", ("body", "precommit"))
 async def test_task_unavailable_before_terminal_confirmation_is_not_reclassified(monkeypatch: pytest.MonkeyPatch, kind: str, phase: str) -> None:
     async with Persistence.open("negative", storage=PersistenceStorage.in_memory()) as state, TaskEngine.open(persistence=state) as engine:
-        fault = _OutputFault(state.object_store(PersistenceDomain.EXECUTION), monkeypatch, precommit=True)
+        fault = _OutputFault(state.execution.executions, engine._execution_service, monkeypatch, precommit=True)
 
         async def body():
             if phase == "body":
@@ -220,7 +208,7 @@ async def test_failed_execution_confirmation_recovers_to_original_business_failu
 @pytest.mark.parametrize("code", (ErrorCode.STORAGE_NOT_FOUND, ErrorCode.STORAGE_INTEGRITY_ERROR))
 async def test_task_determinate_result_fault_does_not_become_recovery(monkeypatch: pytest.MonkeyPatch, code: ErrorCode) -> None:
     async with Persistence.open("determinate", storage=PersistenceStorage.in_memory()) as state, TaskEngine.open(persistence=state) as engine:
-        fault = _OutputFault(state.object_store(PersistenceDomain.EXECUTION), monkeypatch, code=code)
+        fault = _OutputFault(state.execution.executions, engine._execution_service, monkeypatch, code=code)
 
         async def body():
             fault.armed = True
@@ -325,22 +313,21 @@ async def test_agent_result_wait_recovers_without_repeating_model(monkeypatch: p
     features.model("default", Binding())
     features.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Persistence.open("agent-confirmation", storage=PersistenceStorage.in_memory()) as state:
-        store = state.object_store(PersistenceDomain.EXECUTION)
-        read = store.open
         captured = []
-        async def read_once(key):
-            if not captured:
-                graph = await state.task.tasks.graph_state("graph", tenant_id=state.tenant_id)
-                node = None if graph is None else graph.node_states[0]
-                if node is not None and node.execution_id is not None:
-                    producer = await state.execution.executions.get(node.execution_id, tenant_id=state.tenant_id)
-                    if producer is not None and producer.status is ExecutionStatus.SUCCEEDED and producer.result.output.kind == "object" and producer.result.output.ref.key == key:
+        async with Runtime.attach(persistence=state, features=features) as runtime:
+            port = runtime._execution_service._port
+            read = port.result_record
+
+            async def read_once(producer, *, tenant_id):
+                if not captured and producer.status is ExecutionStatus.SUCCEEDED:
+                    graph = await state.task.tasks.graph_state("graph", tenant_id=state.tenant_id)
+                    node = None if graph is None else graph.node_states[0]
+                    if node is not None and node.execution_id == producer.execution_id:
                         captured.append(producer)
                         raise AIError(ErrorCode.STORAGE_UNAVAILABLE, safe_details={"reader": "agent_output"})
-            async for chunk in read(key):
-                yield chunk
-        monkeypatch.setattr(store, "open", read_once)
-        async with Runtime.attach(persistence=state, features=features) as runtime:
+                return await read(producer, tenant_id=tenant_id)
+
+            monkeypatch.setattr(port, "result_record", read_once)
             task = Task.from_agent("producer", runtime.agents.get("default"))
             async with TaskEngine.open(task, persistence=state) as engine:
                 run = await engine.start(TaskGraph("graph", (TaskNode("node", task=task, input=AgentTaskInput("respond")),)), principal=runtime.default_principal, idempotency_key="start")

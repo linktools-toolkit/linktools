@@ -205,10 +205,10 @@ async def resolve_targets(
 async def index_nodes(
     context: "SqlStorageContext", session: "AsyncSession", store: str, rows: Sequence[Mapping[str, object]], *,
     partial_restore: bool = False,
-) -> None:
+) -> dict[str, int]:
     from sqlalchemy import update
     if not rows:
-        return
+        return {}
     edges, node_table, message_table = _tables()
     sequences = await resolve_targets(session, "sequence", store, tuple(
         identity for row in rows for identity in (row["sha256"], row["left_sha256"], row["right_sha256"], row["next_sha256"])
@@ -240,11 +240,18 @@ async def index_nodes(
     for offset in range(0, len(values), 128):
         await context.dialect.insert_ignore_conflict_many(session, table=edges, rows=values[offset:offset + 128],
             index_elements=("edge_kind", "source_id", "target_id"))
+    return sequences
 
 
-async def note_publication(session: "AsyncSession", store: str, roots: Sequence[str]) -> None:
-    targets = await resolve_targets(session, "sequence", store, roots)
+async def note_publication(
+    session: "AsyncSession", store: str, roots: Sequence[str], *, resolved: Mapping[str, int] | None = None,
+) -> dict[str, int]:
+    # Reuse only IDs read while indexing this publication's same-store nodes.
+    known = {} if resolved is None else resolved
+    targets = {root: known[root] for root in sorted(set(roots)) if root in known}
+    targets.update(await resolve_targets(session, "sequence", store, tuple(root for root in roots if root not in targets)))
     session.info.setdefault(_PUBLISHED, set()).update(targets.values())
+    return targets
 
 
 async def finish_publications(context: "SqlStorageContext", session: "AsyncSession") -> None:

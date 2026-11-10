@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import BinaryImage, FilePart, ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -328,7 +328,8 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
     from .test_evaluation_retention import Offline
 
     response = ModelResponse(
-        parts=[TextPart("identical response " * 4000)],
+        parts=[TextPart("identical response " * 4000),
+               FilePart(BinaryImage(data=b"identical image", media_type="image/png"))],
         timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     async with _storage(backend, tmp_path) as storage:

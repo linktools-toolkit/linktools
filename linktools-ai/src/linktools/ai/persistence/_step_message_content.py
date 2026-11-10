@@ -29,7 +29,7 @@ from .state import SqlStateTransaction, StateTransaction
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
     from sqlalchemy.sql import Select
 
 
@@ -107,6 +107,20 @@ class NativeMessageReceipt:
     """
 
     prepared: PreparedNativeMessages | None
+    _transaction: "AsyncSessionTransaction | None" = None
+    _store_digest: str | None = None
+    _root_targets: tuple[tuple[str, int], ...] = ()
+
+    def publication_targets(
+        self, session: "AsyncSession", *, store_digest: str, roots: Sequence[str],
+    ) -> tuple[int, ...]:
+        """Reuse physical IDs only inside this exact live publication transaction."""
+        if (self.prepared is None or self._transaction is None
+                or (session.get_nested_transaction() or session.get_transaction()) is not self._transaction or not self._transaction.is_active
+                or store_digest != self._store_digest
+                or tuple(sorted(set(roots))) != tuple(root for root, _ in self._root_targets)):
+            raise ValueError("native publication targets require their active transaction, store, and roots")
+        return tuple(target for _, target in self._root_targets)
 
     @property
     def root(self) -> NativeMessageSequence | None:
@@ -428,13 +442,18 @@ class NativeMessageContent:
                      "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
                     for identity, node in prepared.nodes if prepared.cold or identity not in self._known_nodes
                 ])
-            await index_nodes(self._context, session, self._store_digest, [
+            resolved = await index_nodes(self._context, session, self._store_digest, [
                 {"sha256": identity, "message_sha256": node.content_id,
                  "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
                 for identity, node in prepared.nodes
             ])
-            await note_publication(session, self._store_digest, tuple(span.first for span in prepared.root.slices))
-            receipt = NativeMessageReceipt(prepared)
+            targets = await note_publication(
+                session, self._store_digest, tuple(span.first for span in prepared.root.slices), resolved=resolved,
+            )
+            receipt = NativeMessageReceipt(
+                prepared, session.get_nested_transaction() or session.get_transaction(),
+                self._store_digest, tuple(sorted(targets.items())),
+            )
         self._receipts.add(receipt)
         return receipt
 
