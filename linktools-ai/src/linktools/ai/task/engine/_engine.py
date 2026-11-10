@@ -513,14 +513,18 @@ class TaskEngine(Generic[AppT]):
             track_pre_admission=True,
         )
         assert activation is not None
+        failure: BaseException | None = None
         try:
             if describe:
                 return await self._graph_service.describe_submission(request)
             return await self._graph_service.prepare_submission(request)
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             await task_runtime.finish_graph_activation(
                 graph.graph_id, request.principal.tenant_id, activation,
-                admitted=False,
+                admitted=False, failure=failure,
             )
 
     async def prepare_described_submission(
@@ -534,13 +538,17 @@ class TaskEngine(Generic[AppT]):
             tuple(self._expanders.values()), track_pre_admission=True,
         )
         assert activation is not None
+        failure: BaseException | None = None
         try:
             _, created = await self._graph_service.prepare_described_with_disposition(submission)
             return created
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             await task_runtime.finish_graph_activation(
                 submission.graph.graph_id, submission.ref.tenant_id,
-                activation, admitted=False,
+                activation, admitted=False, failure=failure,
             )
 
     async def start_prepared(
@@ -555,15 +563,23 @@ class TaskEngine(Generic[AppT]):
         )
         assert activation is not None
         admitted = False
+        failure: BaseException | None = None
         try:
             submission = await self._graph_service.prepare_described(submission)
-            result = await self._graph_service.start_prepared(submission)
+            try:
+                result = await self._graph_service.start_prepared(submission)
+            except AIError as error:
+                admitted = error.safe_details.get("durable_admitted") is True
+                raise
             admitted = result.admitted
             return result
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             await task_runtime.finish_graph_activation(
                 submission.graph.graph_id, submission.ref.tenant_id,
-                activation, admitted=admitted,
+                activation, admitted=admitted, failure=failure,
             )
 
     async def cancel_submission(

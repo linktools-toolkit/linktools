@@ -497,41 +497,55 @@ class DefaultTaskGraphService(TaskGraphService):
         if submission.namespace != self._persistence.admissions.namespace:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         view = await self._persistence.admissions.admit_prepared(submission)
-        durable_admission = await self._persistence.admissions.get(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if durable_admission is None:
-            if view.status is not TaskStatus.CANCELLED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            durable_ref = await self._persistence.admissions.get_submission_ref(graph_id, tenant_id=tenant_id)
-            if durable_ref is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return TaskSubmissionResult(
-                durable_ref, False, TaskGraphResult(graph_id, TaskStatus.CANCELLED),
+        # CANCELLED can be a pre-admission fence or an admitted terminal graph.
+        durable_admitted = view.status is not TaskStatus.CANCELLED
+        try:
+            durable_admission = await self._persistence.admissions.get(
+                graph_id,
+                tenant_id=tenant_id,
             )
-        if self._preflight is not None:
-            await self._preflight.load_admission(durable_admission)
-        state = await self._persistence.tasks.scheduler_state(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if self._preflight is not None:
-            self._preflight.validate_recovery(state)
-        if _terminal(view.status):
-            await self._observe_metric_history(state, tenant_id=tenant_id)
-        else:
-            if self._preflight is not None:
-                await self._preflight.prepare_graph(
-                    state,
-                    principal=admission.principal,
+            if durable_admission is None:
+                if view.status is not TaskStatus.CANCELLED:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                durable_ref = await self._persistence.admissions.get_submission_ref(graph_id, tenant_id=tenant_id)
+                if durable_ref is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return TaskSubmissionResult(
+                    durable_ref, False, TaskGraphResult(graph_id, TaskStatus.CANCELLED),
                 )
-            if view.status is not TaskStatus.RECOVERY_REQUIRED:
-                await self._arm_graph(durable_admission.launch())
-        return TaskSubmissionResult(
-            TaskSubmissionRef.from_admission(submission.namespace, durable_admission),
-            True, await self._result(view, tenant_id),
-        )
+            durable_admitted = True
+            if self._preflight is not None:
+                await self._preflight.load_admission(durable_admission)
+            state = await self._persistence.tasks.scheduler_state(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if self._preflight is not None:
+                self._preflight.validate_recovery(state)
+            if _terminal(view.status):
+                await self._observe_metric_history(state, tenant_id=tenant_id)
+            else:
+                if self._preflight is not None:
+                    await self._preflight.prepare_graph(
+                        state,
+                        principal=admission.principal,
+                    )
+                if view.status is not TaskStatus.RECOVERY_REQUIRED:
+                    await self._arm_graph(durable_admission.launch())
+            return TaskSubmissionResult(
+                TaskSubmissionRef.from_admission(submission.namespace, durable_admission),
+                True, await self._result(view, tenant_id),
+            )
+        except (Exception, asyncio.CancelledError) as error:
+            caller = asyncio.current_task()
+            if isinstance(error, asyncio.CancelledError) and caller is not None and caller.cancelling():
+                raise
+            raise _task_service_failure(
+                error,
+                phase="task_submission_start",
+                graph_id=graph_id,
+                durable_admitted=durable_admitted,
+            ) from error
 
     async def cancel_submission(
         self,
@@ -2809,7 +2823,7 @@ def _task_service_failure(
     details.setdefault("phase", phase)
     details.setdefault("graph_id", graph_id)
     if durable_admitted:
-        details.setdefault("durable_admitted", True)
+        details["durable_admitted"] = True
     if isinstance(error, AIError):
         return AIError(
             error.code,
