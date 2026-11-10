@@ -11,6 +11,7 @@ from ..model.messages import encode_model_messages
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 
+from ._transcript_staging import MessageArchive, MessageSnapshot
 from ..errors import AIError, ErrorCode
 
 
@@ -54,11 +55,11 @@ class NativeCheckpoint(ContinuableSnapshot):
     def encode(cls, snapshot: ContinuableSnapshot, *, output_retries_used: int) -> ContinuableSnapshot:
         if type(output_retries_used) is not int or output_retries_used < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        messages = list(snapshot.messages) or [ModelRequest(parts=[])]
-        last = messages[-1]
+        messages = snapshot.messages
+        last = messages[-1] if messages else ModelRequest(parts=[])
         # The native snapshot has no extension field. Message metadata is the
         # SDK's non-provider wire channel; wrap rather than overwrite app keys.
-        messages[-1] = replace(last, metadata={_STATE_KEY: {
+        encoded_last = replace(last, metadata={_STATE_KEY: {
             "protocol": _STATE_PROTOCOL,
             "version": 1,
             "empty_messages": not snapshot.messages,
@@ -70,6 +71,8 @@ class NativeCheckpoint(ContinuableSnapshot):
             "output_retries_used": output_retries_used,
             "metadata": last.metadata,
         }})
+        messages = (MessageArchive().concatenate(messages[:-1], (encoded_last,))
+                    if isinstance(messages, MessageSnapshot) else [*messages[:-1], encoded_last])
         return ContinuableSnapshot(**{
             field.name: messages if field.name == "messages" else getattr(snapshot, field.name)
             for field in fields(ContinuableSnapshot)
@@ -81,7 +84,7 @@ class NativeCheckpoint(ContinuableSnapshot):
         # same protocol key. Reader adapters may compose without decoding twice.
         if isinstance(snapshot, cls):
             return snapshot
-        messages = list(snapshot.messages)
+        messages = snapshot.messages
         outer = None if not messages else messages[-1].metadata
         if outer is not None and not isinstance(outer, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -111,9 +114,11 @@ class NativeCheckpoint(ContinuableSnapshot):
             if (len(messages) != 1 or not isinstance(last, ModelRequest)
                     or last.parts or state["metadata"] is not None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            messages = []
+            messages = MessageArchive().snapshot(()) if isinstance(messages, MessageSnapshot) else []
         else:
-            messages[-1] = replace(last, metadata=state["metadata"])
+            decoded_last = replace(last, metadata=state["metadata"])
+            messages = (MessageArchive().concatenate(messages[:-1], (decoded_last,))
+                        if isinstance(messages, MessageSnapshot) else [*messages[:-1], decoded_last])
         return cls(**{
             field.name: messages if field.name == "messages" else getattr(snapshot, field.name)
             for field in fields(ContinuableSnapshot)

@@ -253,20 +253,20 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
 @pytest.mark.asyncio
 async def test_volatile_archive_and_staging_keep_original_attempt_views() -> None:
     prepared = PreparedArchive()
-    from linktools.ai.persistence._model_interaction_store import ModelInteractionInMemoryStepArchive
-
-    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
-    await archive.initialize()
+    storage = Persistence(PersistenceStorage.in_memory())
+    await storage.initialize(namespace="native-client", tenant_id="tenant")
+    await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+    archive = storage.run_store.read_store(PersistenceDomain.TRACE)
     try:
         requests = _requests(large=True)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=prepared)
-        assert records[0].client_requests[0].body.content.payload.kind == "inline"
+        assert records[0].client_requests[0].body.raw_size == len(requests[0].body)
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)
         resolved = await archive.resolve_model_interactions(records, include_client_requests=True)
         assert resolved == [(None, None, None, requests, None)]
         assert await archive.prepare_relocated_interactions(records, resolved, prepared=prepared) == records
     finally:
-        await archive.close()
+        await storage.close()
 
     storage = Persistence(PersistenceStorage(PersistencePlan(execution=StorageRoute.transient())))
     await storage.initialize(namespace="native-client", tenant_id="tenant")

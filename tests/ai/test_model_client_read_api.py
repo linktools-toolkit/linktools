@@ -13,6 +13,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserProm
 from linktools.ai.core import (
     ExecutionStatus, HmacCursorSigner, Page, Principal, TenantAuthorizationPolicy, agent_conversation_id, agent_run_id,
 )
+from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
 from linktools.ai.runtime import RuntimeExecutions
@@ -30,8 +31,8 @@ from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._archive import PreparedArchive
 from linktools.ai.persistence._archive_closure import iter_archive_roots, iter_native_message_roots
 from linktools.ai.persistence.codec import _encode_persisted_domain, iter_runtime_object_refs
-from linktools.ai.persistence.contracts import ContextProjection, RuntimePayloadRef
-from linktools.ai.persistence._model_interaction_store import ModelInteractionInMemoryStepArchive
+from linktools.ai.persistence.contracts import ContextProjection, RuntimePayloadRef, TranscriptSpanRef
+from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
@@ -233,11 +234,17 @@ async def test_existing_custom_readers_and_services_keep_default_call_shape() ->
 @pytest.mark.asyncio
 async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload() -> None:
     original = _requests()
-    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
+    archive = ModelInteractionStateStepArchive(
+        InMemoryStateStore(), object_store=None, namespace="test", tenant_id="tenant",
+        runtime_domain=PersistenceDomain.TRACE,
+    )
+    await archive.state_store.initialize()
     await archive.initialize()
     try:
-        record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(original),), lambda _: b"{}")
-        pending_sdk = replace(record, request_context=ContextProjection(()), request_envelope=RuntimePayloadRef(
+        record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(original),), lambda _: b"{}", prepared=PreparedArchive())
+        pending_sdk = replace(record, request_context=ContextProjection((
+            TranscriptSpanRef(PersistenceDomain.TRACE, "run", 0, 1),
+        )), request_envelope=RuntimePayloadRef(
             StoredPayload.inline_bytes(b"{}"), PersistenceDomain.TRACE,
         ))
         assert await archive.resolve_model_interactions(
@@ -251,6 +258,7 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await archive.close()
+        await archive.state_store.close()
 
     storage = Persistence(PersistenceStorage(PersistencePlan(execution=StorageRoute.transient())))
     await storage.initialize(namespace="native-client", tenant_id="tenant")

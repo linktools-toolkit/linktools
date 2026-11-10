@@ -107,7 +107,9 @@ async def purge_step_content(
     """Reclaim one offline namespace in one rollback-safe owner transaction.
 
     All retained owner references and canonical content are verified before
-    deletion. This complete offline scan never runs in normal reads or writes.
+    deletion. Body reads are limited to batches of retained messages; identity
+    metadata and owner roots still require a complete offline scan. This scan
+    never runs in normal reads or writes.
     """
     from sqlalchemy import delete, inspect, select
 
@@ -156,27 +158,36 @@ async def purge_step_content(
         for root in owner_roots:
             if root.store_digest == store_digest:
                 closure.mark(store_digest, root.slices)
-        body_rows = (await session.execute(select(
-            messages.c.store_digest, messages.c.sha256, messages.c.message,
-        ).where(messages.c.store_digest == store_digest))).mappings().all()
-        bodies = {row["sha256"]: row for row in body_rows}
+        # Candidate discovery reads identities only: orphan bodies may dominate
+        # the namespace's bytes and are not needed to prove retained integrity.
+        body_ids = set((await session.execute(select(messages.c.sha256).where(
+            messages.c.store_digest == store_digest,
+        ))).scalars())
         retained_nodes = {identity for _, identity in closure.retained_sequences}
         retained_messages = {identity for _, identity in closure.retained_messages}
-        if not retained_messages.issubset(bodies):
+        if not retained_messages.issubset(body_ids):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for identity in retained_messages:
-            content = validate_native_message_content(bodies[identity], group_id=group_id)
-            if content.payload.ref is not None:
-                if read_object is None:
-                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
-                encoded = await read_object(content.payload.ref)
-                if len(encoded) != content.payload.size or hashlib.sha256(encoded).hexdigest() != content.payload.digest:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                decode_payload_bytes(encoded, codec=content.compression,
-                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
-        by_identity = {row["sha256"]: row for row in rows}
-        body_ids = set(bodies)
-        unused_nodes = sorted(set(by_identity).difference(retained_nodes))
+        retained_ids = sorted(retained_messages)
+        for offset in range(0, len(retained_ids), 128):
+            batch = retained_ids[offset:offset + 128]
+            body_rows = (await session.execute(select(
+                messages.c.store_digest, messages.c.sha256, messages.c.message,
+            ).where(
+                messages.c.store_digest == store_digest, messages.c.sha256.in_(batch),
+            ))).mappings().all()
+            if {row["sha256"] for row in body_rows} != set(batch):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for row in body_rows:
+                content = validate_native_message_content(row, group_id=group_id)
+                if content.payload.ref is not None:
+                    if read_object is None:
+                        raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+                    encoded = await read_object(content.payload.ref)
+                    if len(encoded) != content.payload.size or hashlib.sha256(encoded).hexdigest() != content.payload.digest:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    decode_payload_bytes(encoded, codec=content.compression,
+                                         raw_digest=content.raw_digest, raw_size=content.raw_size)
+        unused_nodes = sorted({row["sha256"] for row in rows}.difference(retained_nodes))
         unused_messages = sorted(body_ids.difference(retained_messages))
         for table, identities in ((sequences, unused_nodes), (messages, unused_messages)):
             for offset in range(0, len(identities), 128):

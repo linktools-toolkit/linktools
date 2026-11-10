@@ -32,7 +32,7 @@ class _ReadTraffic:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [10])
 async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_reads(
-    tmp_path: Path, size: int,
+    tmp_path: Path, size: int, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     url = f"sqlite+aiosqlite:///{tmp_path / 'growing.db'}"
     engine = create_async_engine(url)
@@ -65,10 +65,24 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
     traffic = _ReadTraffic()
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     try:
+        from linktools.ai.persistence import _step_store as step_module
+
+        decoded_occurrences = 0
+        decode_payloads = step_module.decode_model_message_payloads
+
+        def decode_once(payloads):
+            nonlocal decoded_occurrences
+            decoded_occurrences += len(payloads)
+            return decode_payloads(payloads)
+
+        monkeypatch.setattr(step_module, "decode_model_message_payloads", decode_once)
         assert await cold.latest_snapshot(run_id="run") == latest
         assert traffic.count == 2
+        assert decoded_occurrences == size
+        decoded_occurrences = 0
         history = await cold.list_snapshots(run_id="run")
         assert len(history) == size
+        assert decoded_occurrences == sum(range(1, size + 1))
         for length, snapshot in enumerate(history, 1):
             assert snapshot.messages == messages[:length]
             assert snapshot.step_index == length

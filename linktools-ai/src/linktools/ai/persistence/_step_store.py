@@ -1395,20 +1395,13 @@ class SqlStepStore:
         self, *, run_id: str, include_interrupted: bool = False,
     ) -> ContinuableSnapshot | None:
         snapshots = await self._load_snapshots(run_id, include_interrupted=include_interrupted, latest=True)
-        return None if not snapshots else await self._snapshot_from_data(*snapshots[0])
+        return None if not snapshots else snapshots[0]
 
     async def list_snapshots(
         self, *, run_id: str, include_interrupted: bool = False,
     ) -> list[ContinuableSnapshot]:
         """Return retained upstream snapshots in insertion order."""
-        snapshots = await self._load_snapshots(run_id, include_interrupted=include_interrupted, latest=False)
-        result = []
-        for snapshot in snapshots:
-            try:
-                result.append(await self._snapshot_from_data(*snapshot))
-            except Exception:
-                _logger.warning("Skipping unparsable snapshot for run %s", run_id, exc_info=True)
-        return result
+        return await self._load_snapshots(run_id, include_interrupted=include_interrupted, latest=False)
 
     def with_tool_effect_store(self, store: StepStore) -> "SqlStepStore":
         """Borrow this SQL partition with an attempt's existing effect owner."""
@@ -1468,7 +1461,7 @@ class SqlStepStore:
 
     async def _load_snapshots(
         self, run_id: str, *, include_interrupted: bool, latest: bool,
-    ) -> list[tuple[dict[str, object], tuple[bytes, ...]]]:
+    ) -> list[ContinuableSnapshot]:
         from sqlalchemy import select
 
         await self.initialize()
@@ -1532,17 +1525,16 @@ class SqlStepStore:
                                _replay_digest(self._store_digest, _digest(run_id), row["idempotency_key"])):
                         raise ValueError("snapshot owner identity is invalid")
                     data = self._record_data(row)
-                    await self._snapshot_from_data(dict(data), readback.payloads)
+                    snapshot, raw = self._decode_snapshot(data, readback.payloads)
+                    integrity = hashlib.sha256(raw).hexdigest(), len(raw)
                 except (ValueError, AIError):
                     if latest:
                         raise
                     _logger.warning("Skipping corrupt snapshot for run %s", run_id)
                     continue
-                verified.append(readback)
-                results.append((data, readback.payloads))
-        for readback in verified:
-            raw = combine_model_message_payloads(readback.payloads)
-            integrity = hashlib.sha256(raw).hexdigest(), len(raw)
+                verified.append((readback, integrity))
+                results.append(snapshot)
+        for readback, integrity in verified:
             self._remember_message_proof(self._message_content.adopt_read(readback),
                                          integrity=integrity)
             self._seed_snapshot_baseline(run_id, readback.root, integrity)
@@ -1553,11 +1545,6 @@ class SqlStepStore:
         if not any(sequence.count for sequence in sequences):
             return None
         return self._message_content.range_query(sequences).statement
-
-    async def _snapshot_from_data(
-        self, data: dict[str, object], payloads: tuple[bytes, ...],
-    ) -> ContinuableSnapshot:
-        return self.decode_backup_snapshot(data, payloads)
 
     @classmethod
     def validate_backup_snapshot_tail(
@@ -1591,9 +1578,15 @@ class SqlStepStore:
         authenticated against the shared native message closure by the caller.
         This operation does not open a store or modify the supplied row.
         """
+        return cls._decode_snapshot(data, payloads)[0]
+
+    @classmethod
+    def _decode_snapshot(
+        cls, data: Mapping[str, object], payloads: tuple[bytes, ...],
+    ) -> tuple[ContinuableSnapshot, bytes]:
         sequence = cls.snapshot_message_sequence(data)
         descriptor = json.loads(data["messages"])
-        _raw, messages = decode_model_message_payloads(payloads)
+        raw, messages = decode_model_message_payloads(payloads)
         if len(messages) != sequence.count:
             raise ValueError("snapshot message references are incomplete")
         data = dict(data)
@@ -1602,7 +1595,7 @@ class SqlStepStore:
         # values back through the SDK's narrower message union.
         data["messages"] = []
         snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(data), messages=list(messages))
-        return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"])
+        return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"]), raw
 
     def _table(self, name: str) -> "Table":
         return self._metadata.tables[f"ai_step_{name}"]

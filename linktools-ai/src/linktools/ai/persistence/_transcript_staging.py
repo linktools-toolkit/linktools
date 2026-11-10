@@ -36,6 +36,15 @@ class MessageSnapshot(Sequence[ModelMessage]):
     def __init__(self, roots: tuple[_MessageTree, ...]) -> None:
         self._roots = roots
         self._count = sum(root.count for root in roots)
+        self._digest_state = None
+        self._encoded_size = 2
+        self._prefix_digest = None
+
+    def __copy__(self) -> "MessageSnapshot":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "MessageSnapshot":
+        return self
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, MessageSnapshot):
@@ -64,17 +73,20 @@ class MessageSnapshot(Sequence[ModelMessage]):
 
     def encoded_digest(self) -> tuple[str, int]:
         """Identify the canonical message array without rebuilding SDK values."""
-        digest = hashlib.sha256(b"[")
-        size = 2
-        for index, payload in enumerate(self._payloads()):
-            if index:
-                digest.update(b",")
-                size += 1
-            fragment = memoryview(payload)[1:-1]
-            digest.update(fragment)
-            size += len(fragment)
+        if self._digest_state is None:
+            digest = hashlib.sha256(b"[")
+            size = 2
+            for index, payload in enumerate(self._payloads()):
+                if index:
+                    digest.update(b",")
+                    size += 1
+                fragment = memoryview(payload)[1:-1]
+                digest.update(fragment)
+                size += len(fragment)
+            self._digest_state, self._encoded_size = digest, size
+        digest = self._digest_state.copy()
         digest.update(b"]")
-        return digest.hexdigest(), size
+        return digest.hexdigest(), self._encoded_size
 
     def __iter__(self) -> Iterator[ModelMessage]:
         for payload in self._payloads():
@@ -86,6 +98,8 @@ class MessageSnapshot(Sequence[ModelMessage]):
             if step != 1:
                 return MessageSnapshot(tuple(self._leaf(index) for index in range(start, stop, step)))
             lo, hi = start, max(start, stop)
+            if lo == 0 and hi == len(self):
+                return self
             selected: list[_MessageTree] = []
             offset = 0
             for root in self._roots:
@@ -100,7 +114,10 @@ class MessageSnapshot(Sequence[ModelMessage]):
                         stack.append((node.right, first + node.left.count))
                         stack.append((node.left, first))
                 offset += root.count
-            return MessageSnapshot(tuple(selected))
+            result = MessageSnapshot(tuple(selected))
+            if lo == 0 and self._prefix_digest is not None and hi == self._prefix_digest[0]:
+                _, result._digest_state, result._encoded_size = self._prefix_digest
+            return result
         return decode_model_messages(self._leaf(index).payload)[0]
 
     def _leaf(self, index: int) -> _MessageTree:
@@ -132,7 +149,44 @@ class MessageArchive:
 
     def concatenate(self, *groups: Sequence[ModelMessage]) -> MessageSnapshot:
         """Join frozen sequences without decoding or copying their message bodies."""
-        return MessageSnapshot(tuple(root for group in groups for root in self.snapshot(group)._roots))
+        frozen = tuple(self.snapshot(group) for group in groups if len(group))
+        if not frozen:
+            return MessageSnapshot(())
+        if len(frozen) == 1:
+            return frozen[0]
+        first, *tail = frozen
+        roots = list(first._roots)
+        for group in tail:
+            pending = list(reversed(group._roots))
+            while pending:
+                node = pending.pop()
+                if roots and roots[-1].count < node.count:
+                    pending.extend((node.right, node.left))
+                    continue
+                while roots and roots[-1].count == node.count:
+                    left = roots.pop()
+                    key = (left, node)
+                    branch = self._branches.get(key)
+                    if branch is None:
+                        branch = _MessageTree(left.count + node.count, left=left, right=node)
+                        self._branches[key] = branch
+                    node = branch
+                roots.append(node)
+        first.encoded_digest()
+        result = MessageSnapshot(tuple(roots))
+        digest = first._digest_state.copy()
+        size = first._encoded_size
+        for group in tail:
+            for payload in group.encoded_payloads():
+                digest.update(b",")
+                fragment = memoryview(payload)[1:-1]
+                digest.update(fragment)
+                size += 1 + len(fragment)
+        result._digest_state, result._encoded_size = digest, size
+        # This proof is carried only by immutable bytes, never SDK object identity.
+        # Keep one predecessor state, not a chain retaining all prior snapshots.
+        result._prefix_digest = (len(first), first._digest_state, first._encoded_size)
+        return result
 
     def snapshot(self, messages: Sequence[ModelMessage]) -> MessageSnapshot:
         if isinstance(messages, MessageSnapshot):
@@ -148,7 +202,18 @@ class MessageArchive:
 
     def _snapshot_payloads(self, payloads: Iterable[bytes]) -> MessageSnapshot:
         roots: list[_MessageTree] = []
+        digest = hashlib.sha256(b"[")
+        size, count = 2, 0
+        prefix = None
         for payload in payloads:
+            prefix = (count, digest.copy(), size)
+            if count:
+                digest.update(b",")
+                size += 1
+            fragment = memoryview(payload)[1:-1]
+            digest.update(fragment)
+            size += len(fragment)
+            count += 1
             node = self._leaves.get(payload)
             if node is None:
                 node = _MessageTree(1, payload)
@@ -162,4 +227,7 @@ class MessageArchive:
                     self._branches[key] = branch
                 node = branch
             roots.append(node)
-        return MessageSnapshot(tuple(roots))
+        snapshot = MessageSnapshot(tuple(roots))
+        snapshot._digest_state, snapshot._encoded_size = digest, size
+        snapshot._prefix_digest = prefix
+        return snapshot

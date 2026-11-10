@@ -63,7 +63,7 @@ async def test_offline_cleanup_preserves_shared_roots_namespaces_and_reinserts_r
         event.listen(engine.sync_engine, "before_cursor_execute", observe)
         result = await store.purge_unreferenced_content(exclusive=guard)
         event.remove(engine.sync_engine, "before_cursor_execute", observe)
-        assert len(reads) == 3
+        assert reads, "cleanup must inspect retained content under offline exclusion"
         assert result.deleted_sequences > 0
         assert result.deleted_messages == 1
         assert result.retained_messages == 2
@@ -192,5 +192,78 @@ async def test_cleanup_lost_acknowledgement_clears_body_cache_before_new_writes(
         await store.save_snapshot(revived)
         assert await store.latest_snapshot(run_id="revived") == revived
     finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_reads_only_retained_bodies_in_bounded_batches(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'bounded.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
+    await store.initialize(local=True)
+    body_batches = []
+
+    def observe(connection, cursor, statement, parameters, context, many):
+        if statement.lstrip().upper().startswith("SELECT") and "ai_step_messages.message" in statement:
+            # Observe the SQL boundary: no query may materialize orphan bodies
+            # or the entire retained message corpus in one result.
+            assert "ai_step_messages.sha256 IN" in statement
+            body_batches.append(set(parameters[1:]))
+
+    try:
+        await store.save_snapshot(_snapshot("run", 1, "orphan"))
+        async with engine.connect() as connection:
+            orphan_id = await connection.scalar(text("SELECT sha256 FROM ai_step_messages"))
+        current = _snapshot("run", 2, *(f"retained-{index}" for index in range(260)))
+        await store.save_snapshot(current)
+        async with engine.connect() as connection:
+            all_ids = set((await connection.execute(text("SELECT sha256 FROM ai_step_messages"))).scalars())
+        event.listen(engine.sync_engine, "before_cursor_execute", observe)
+        result = await store.purge_unreferenced_content(exclusive=_Offline())
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)
+        assert result.deleted_messages == 1
+        assert result.retained_messages == 260
+        assert body_batches and max(map(len, body_batches)) <= 128
+        assert set.union(*body_batches) == all_ids - {orphan_id}
+        assert sum(map(len, body_batches)) == 260
+        assert await store.latest_snapshot(run_id="run") == current
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", observe):
+            event.remove(engine.sync_engine, "before_cursor_execute", observe)
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_validates_late_retained_batch_before_deleting(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'late-damage.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
+    await store.initialize(local=True)
+    deletions = []
+
+    def observe(connection, cursor, statement, parameters, context, many):
+        if statement.lstrip().upper().startswith("DELETE"):
+            deletions.append(statement)
+
+    try:
+        current = _snapshot("run", 1, *(f"retained-{index}" for index in range(130)))
+        await store.save_snapshot(current)
+        async with engine.begin() as connection:
+            # The highest digest belongs to the last bounded validation batch.
+            damaged = await connection.scalar(text("SELECT max(sha256) FROM ai_step_messages"))
+            await connection.execute(text("UPDATE ai_step_messages SET message = '{}' WHERE sha256 = :id"),
+                                     {"id": damaged})
+        await store.save_snapshot(_snapshot("orphan", 1, "orphan"))
+        await store.save_snapshot(_snapshot("orphan", 2))
+        event.listen(engine.sync_engine, "before_cursor_execute", observe)
+        with pytest.raises(AIError) as failure:
+            await store.purge_unreferenced_content(exclusive=_Offline())
+        assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert not deletions
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 131
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", observe):
+            event.remove(engine.sync_engine, "before_cursor_execute", observe)
         await store.close()
         await engine.dispose()

@@ -4,40 +4,23 @@
 
 from __future__ import annotations
 
-from pydantic_ai.messages import ModelMessage
-
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
-from ._model_interaction import (
-    StagedContextProjection,
-    StagedContextSpan,
-    StagedModelInteraction,
-    context_projection_to_durable,
-)
 from .contracts import (
-    ContextProjection,
     ExecutionRecord,
     ExecutionInsertionReceipt,
-    InlineContextBlock,
     ModelInteractionRecord,
-    RuntimePayloadRef,
-    TranscriptSpanRef,
 )
 from ._history import PreparedTranscriptObservation
-from ._model_client import prepare_client_requests
-from ._plan import PersistenceDomain
-from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
+from ._step_contracts import AgentRunRecord, StepEvent
 from ._step_archive import (
-    InMemoryStepArchive,
     PreparedAgentRunCheckpoint,
     StateStepArchive,
     _decode_step,
     _encode_step,
     _validate_interaction_page,
 )
-from ._archive import PreparedArchive
 from .state import (
     RecordQuery,
     RecordReplacement,
@@ -47,146 +30,6 @@ from .state import (
     record_key_digest,
     require_no_run_history_lock,
 )
-
-
-class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
-    """Volatile archive using the same resolved interaction contract as durable stores."""
-
-    async def prepare_interactions(
-        self,
-        run: AgentRunRecord,
-        interactions: Sequence[StagedModelInteraction],
-        payload: Callable[[str], bytes],
-        *,
-        local_message_base: int = 0,
-        local_message_count: int = 0,
-        local_messages: Sequence[ModelMessage] = (),
-        prepared: PreparedArchive | None = None,
-    ) -> tuple[ModelInteractionRecord, ...]:
-        values = tuple(
-            replace(value, request_context=None, request_envelope_digest=None)
-            if self.runtime_domain is PersistenceDomain.TRACE and value.status == "RUNNING"
-            else replace(value, response_context=None)
-            if self.runtime_domain is not PersistenceDomain.TRACE and value.stream_attempts and value.status != "SUCCEEDED"
-            else value
-            for value in _validate_interaction_batch(run, interactions)
-        )
-        if local_message_base < 0 or local_message_count < 0:
-            raise ValueError("local interaction transcript range is invalid")
-
-        def prepare_context(staged: StagedContextProjection) -> ContextProjection:
-            for item in staged.items:
-                if isinstance(item, StagedContextSpan) and item.end > local_message_count:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if isinstance(item, TranscriptSpanRef) and (
-                    item.source_domain is not self.runtime_domain
-                    or item.owner_id != run.agent_run_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            return context_projection_to_durable(
-                staged,
-                owner_id=run.agent_run_id,
-                source_domain=self.runtime_domain,
-                payload=payload,
-                local_message_base=local_message_base,
-            )
-
-        return tuple([
-            ModelInteractionRecord(
-                staged.agent_run_id,
-                staged.step_index,
-                staged.model_request_seq,
-                staged.purpose,
-                staged.output_retry_index,
-                staged.model,
-                None
-                if staged.request_context is None
-                else prepare_context(staged.request_context),
-                None
-                if staged.request_envelope_digest is None
-                else RuntimePayloadRef(
-                    StoredPayload.inline_bytes(payload(staged.request_envelope_digest)),
-                    self.runtime_domain,
-                ),
-                None
-                if staged.response_context is None
-                else prepare_context(staged.response_context),
-                staged.status,
-                staged.error_code,
-                staged.duration_ns,
-                staged.usage,
-                staged.started_at,
-                staged.finished_at,
-                staged.attachments,
-                await prepare_client_requests(staged.client_requests, self.runtime_domain),
-                None if staged.stream_attempts is None else tuple(
-                    attempt.to_durable(
-                        prepare_context(attempt.response_context)
-                        if self.runtime_domain is PersistenceDomain.TRACE and attempt.response_context is not None
-                        else None
-                    ) for attempt in staged.stream_attempts
-                ),
-            )
-            for staged in values
-        ])
-
-    async def sync_projection(
-        self,
-        run: AgentRunRecord,
-        *,
-        events: Sequence[StepEvent],
-        checkpoints: Sequence[AgentRunCheckpoint],
-        interactions: Sequence[ModelInteractionRecord] = (),
-        execution_id: str | None = None,
-        archive: PreparedArchive | None = None,
-    ) -> None:
-        fresh: list[ModelInteractionRecord] = []
-        seen: set[int] = set()
-        for interaction in interactions:
-            if not isinstance(interaction, ModelInteractionRecord):
-                raise TypeError("model interaction is invalid")
-            interaction.validate_storage_domain(self.runtime_domain)
-            if interaction.agent_run_id != run.agent_run_id or interaction.model_request_seq in seen:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            seen.add(interaction.model_request_seq)
-            existing = await super().list_model_interactions(
-                agent_run_id=run.agent_run_id,
-                after_model_request_seq=interaction.model_request_seq - 1,
-                limit=1,
-            )
-            previous = existing[0] if existing else None
-            if previous is None or previous.model_request_seq != interaction.model_request_seq:
-                fresh.append(interaction)
-            else:
-                if not isinstance(previous, ModelInteractionRecord):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                previous.validate_successor(interaction)
-                if previous != interaction:
-                    fresh.append(interaction)
-        await super().sync_projection(
-            run,
-            events=events,
-            checkpoints=checkpoints,
-            interactions=fresh,
-            execution_id=execution_id,
-            archive=archive,
-        )
-
-    async def list_model_interactions(
-        self,
-        *,
-        agent_run_id: str,
-        after_model_request_seq: int | None = None,
-        limit: int | None = None,
-    ) -> list[object]:
-        values = await super().list_model_interactions(
-            agent_run_id=agent_run_id,
-            after_model_request_seq=after_model_request_seq,
-            limit=limit,
-        )
-        if any(not isinstance(value, ModelInteractionRecord) for value in values):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return values
 
 
 class ModelInteractionStateStepArchive(StateStepArchive):
@@ -502,28 +345,10 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         return len(fresh) + len(replacements)
 
 
-def _validate_interaction_batch(
-    run: AgentRunRecord,
-    interactions: Sequence[StagedModelInteraction],
-) -> tuple[StagedModelInteraction, ...]:
-    values = tuple(interactions)
-    sequences: set[int] = set()
-    for interaction in values:
-        if (
-            not isinstance(interaction, StagedModelInteraction)
-            or interaction.agent_run_id != run.agent_run_id
-            or interaction.model_request_seq in sequences
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        sequences.add(interaction.model_request_seq)
-    return values
-
-
 def _interaction_sort_key(model_request_seq: int) -> str:
     return f"m:{model_request_seq:020d}"
 
 
 __all__ = [
-    "ModelInteractionInMemoryStepArchive",
     "ModelInteractionStateStepArchive",
 ]
