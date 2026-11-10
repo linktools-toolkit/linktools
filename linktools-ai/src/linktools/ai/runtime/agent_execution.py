@@ -87,6 +87,12 @@ class AgentExecutionPort(Generic[AppT]):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self.resolve_current(agent_id, self.derivations, None)
 
+    def validate_persistence(self, persistence: Persistence) -> None:
+        """Require this producer's exact persistence owner before checking the producer is open."""
+        if self.persistence is not persistence:
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        self.operations.ensure_open()
+
     async def record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
         """Record the Task handoff when this producer has input capture enabled."""
         if self.captures is not None:

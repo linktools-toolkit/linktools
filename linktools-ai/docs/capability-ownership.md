@@ -117,7 +117,7 @@ methods are a public surface. Task currently consumes the following paths:
 | Consumer path | Current operation / result | Contract that a narrower boundary must preserve |
 | --- | --- | --- |
 | `Task.from_agent`; `AgentTaskRunner` construction | Read `binding_contract.agent_spec` and `binding_contract` | Capture declaration identity, planning/thinking defaults and the full binding once; do not recapture per operation |
-| `TaskEngine` and runner binding | Exact `persistence` identity; `operations.ensure_open()` | A matching database URL does not replace shared ownership; reject a closed producer before work |
+| `TaskEngine` and runner binding | `validate_persistence(persistence)` → None | A matching database URL does not replace shared ownership; reject a closed producer before work |
 | Admission input | `canonicalize_files(files)` → tuple; `materialize_input(prompt, files=())` → canonical input | Canonical Workspace-relative paths, original tenant and the existing captured content boundary |
 | Durable binding validation | `resolve_contract(contract)` → `AgentBindingContract` | Preserve the admitted Agent, hooks and child contracts; new business/MCP calls and Skill reads use current candidates within the recorded selectors |
 | Start and get | Overridable `start(...)` / `get(execution_id, principal)` → `Execution` | Original principal, output contract, correlation, graph budget scope, invocation-capture requirement and dependency hold |
@@ -134,6 +134,15 @@ The existing regression in `test_agent_task_binding_owner.py` deliberately
 allows `port.service` and `port.operations.service` to differ. Start/get overrides
 also remain independent from service dispatch. A blanket equality requirement,
 replacement with a handle, or use of `acquire_hold` would change this contract.
+
+Borrowing compatibility is validated by the existing port before Task engine
+initialization and before Agent-node binding. `validate_persistence(persistence)`
+requires the exact Persistence object used by the producer, then checks producer
+availability through its existing execution operations. A different owner raises
+`RUNTIME_SERVICE_MISMATCH` before any availability check; a matching owner retains
+the producer's existing closed-state error. Validation neither binds a new
+resource nor transfers ownership. An equivalent database or an open Persistence
+alone does not make a closed Agent producer usable.
 
 Invocation capture is selected inside the existing port. It passes the original
 execution ID and `TaskNodeInvocation` to the producer's `InputCaptures` when
@@ -153,7 +162,7 @@ It must cover the whole table, including history, graph-aware cancellation and
 tenant-level retention. Merely adding wrappers for start/get/inspect leaves the
 rest unchanged and adds another maintenance surface.
 
-Beyond the invocation-capture operation above, no replacement port names,
+Beyond the borrowing-validation and invocation-capture operations above, no replacement port names,
 parameters, default values, constructor shape or lifecycle are adopted here.
 Ordinary `Task.from_agent` and Runtime composition remain unchanged.
 Runtime's current execution/turn authority

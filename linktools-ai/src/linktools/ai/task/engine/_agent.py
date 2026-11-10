@@ -139,9 +139,7 @@ class AgentTaskRunner(Generic[AppT]):
             elif task.contract.get("type") == "agent":
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             return task
-        if port.persistence is not persistence:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        port.operations.ensure_open()
+        port.validate_persistence(persistence)
         runner = cls(
             task, port=port, persistence=persistence, materializer=materializer,
             task_admissions=task_admissions, budgets=budgets,

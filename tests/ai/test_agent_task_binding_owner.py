@@ -127,3 +127,33 @@ async def test_invocation_capture_preserves_optional_owner_and_failure(capture: 
             await port.record_invocation("execution", invocation)
         assert raised.value is error
         captures.record_invocation.assert_awaited_once_with("execution", invocation)
+
+
+@pytest.mark.parametrize("same_owner", (False, True))
+@pytest.mark.parametrize("closed", (False, True))
+def test_producer_binding_checks_identity_before_open_state(same_owner: bool, closed: bool) -> None:
+    class Owner:
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError("producer binding requires identity, not equality")
+
+    owner = Owner()
+    failure = AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    ensure_open = Mock(side_effect=failure if closed else None)
+    port = AgentExecutionPort(
+        persistence=owner, compiled=None, _binding_contract=None, compiler=None,
+        service=object(), sessions=None,
+        operations=SimpleNamespace(service=object(), ensure_open=ensure_open),
+        watch_tree=None, resolve_binding=None, default_principal=None,
+        correlation={}, captures=None,
+    )
+    candidate = owner if same_owner else Owner()
+    if not same_owner or closed:
+        with pytest.raises(AIError) as raised:
+            port.validate_persistence(candidate)
+        if not same_owner:
+            assert raised.value.code is ErrorCode.RUNTIME_SERVICE_MISMATCH
+        else:
+            assert raised.value is failure
+    else:
+        assert port.validate_persistence(candidate) is None
+    assert ensure_open.call_count == int(same_owner)
