@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Semantic output membership uses original admitted references, not schema enums."""
 
+from collections.abc import Sequence
 import hashlib
 import json
 from typing import Any
@@ -14,7 +15,7 @@ from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
-from linktools.ai.capability import AgentContext, ReferencedInputsCapability
+from linktools.ai.capability import AgentContext, ReferencedInputResult, ReferencedInputsCapability
 from linktools.ai.core import ExecutionStatus, PromptLimits
 from linktools.ai.model import ReferencedContent
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -64,15 +65,20 @@ async def test_semantic_membership_uses_original_admitted_file_set(selected: tup
     loaded: list[str] = []
     schemas: list[str] = []
 
-    async def authorized_load(context: AgentContext[None], content: ReferencedContent) -> bytes:
+    async def authorized_load_many(
+        context: AgentContext[None], contents: Sequence[ReferencedContent],
+    ) -> list[ReferencedInputResult]:
         assert context.original_input is not None
         admitted = {item["input_identifier"]: item for item in context.original_input["attachments"]}
-        expected = admitted[content.identifier]
-        assert (expected["digest"], expected["size"], expected["media_type"]) == (
-            content.ref.digest, content.ref.size, content.media_type,
-        )
-        loaded.append(content.identifier)
-        return _BODY
+        results = []
+        for content in contents:
+            expected = admitted[content.identifier]
+            assert (expected["digest"], expected["size"], expected["media_type"]) == (
+                content.ref.digest, content.ref.size, content.media_type,
+            )
+            loaded.append(content.identifier)
+            results.append(ReferencedInputResult(content, _BODY))
+        return results
 
     def record_effect(context: AgentContext[None]) -> str:
         effects.append(context.execution_id)
@@ -96,7 +102,8 @@ async def test_semantic_membership_uses_original_admitted_file_set(selected: tup
 
     features = RuntimeFeatures("admitted-membership", limits=PromptLimits(max_binary_input_parts=1000))
     features.capability(_AdmittedMembership(), revision=1, scope="agent")
-    features.capability(ReferencedInputsCapability(authorized_load), id=_SOURCE.id, revision=1, scope="agent")
+    features.capability(ReferencedInputsCapability(authorized_load_many=authorized_load_many),
+                        id=_SOURCE.id, revision=1, scope="agent")
     features.tool(record_effect, effect_policy="replay_safe")
     features.agent("default", allow_tools=("record_effect",), allow_skills=(), allow_subagents=(),
                    output_schema=_SCHEMA, output_retries=1)
