@@ -15,8 +15,9 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from linktools.ai.model.messages import SummaryPromptPart, decode_model_messages
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
-from linktools.ai.persistence._payload import encode_payload_bytes
+from linktools.ai.persistence._payload import decode_payload_bytes, encode_payload_bytes
 from linktools.ai.persistence._step_message_content import (
     NativeMessageContent, NativeMessageReadback, NativeMessageSequence, PreparedMessagePayload,
 )
@@ -50,9 +51,9 @@ class _Traffic:
         self.bound_bytes += sum(len(value.encode("utf-8")) for batch in batches
                                 for value in (batch.values() if isinstance(batch, dict) else batch)
                                 if isinstance(value, str))
-        for table in ("ai_step_messages", "ai_step_sequences"):
+        for table, width in (("ai_step_messages", 3), ("ai_step_sequences", 7)):
             if statement.startswith("INSERT INTO " + table):
-                self.submitted_rows[table] += len(batches)
+                self.submitted_rows[table] += sum(len(batch) // width for batch in batches)
 
 
 async def _inline(raw: bytes) -> PreparedMessagePayload:
@@ -345,3 +346,258 @@ async def test_direct_session_publication_and_retained_cas_keep_outer_confirmati
     finally:
         await native.close()
         await engine.dispose()
+
+
+async def _payload_owner(state, objects):
+    from linktools.ai.persistence._archive import ContentArchive
+
+    opened = await state.storage_group.open_archive(create=True)
+    assert opened is not None
+    group_id, records = opened
+    archive = ContentArchive(records, group_id, namespace="payloads", tenant_id="one", object_store=objects)
+    native = SqlStepStore(state.context, namespace="payloads", tenant_id="one")
+    native.bind_message_archive(archive)
+    return native, archive
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damaged", ("messages", "nodes"))
+async def test_native_winners_are_exact_and_mismatch_poisons_owner_mutation(
+    tmp_path: Path, damaged: str,
+) -> None:
+    from sqlalchemy import update
+    from linktools.ai.persistence._archive import PreparedArchive
+    from .test_state_group_record_batch import _database, _record
+
+    async with _database(tmp_path / "native-winners.db") as (engine, state, _other):
+        native, archive = await _payload_owner(state, None)
+        await native.initialize(local=True)
+        messages = _messages("one", "two")
+        bundle = PreparedArchive()
+        await native.prepare_archived_messages(messages, bundle)
+        await archive.store.mutate(lambda transaction: archive.publish(transaction, bundle))
+        tables = (native._message_content._messages, native._message_content._nodes)
+
+        async def rows():
+            async with engine.connect() as connection:
+                return tuple([tuple((await connection.execute(select(table).order_by(table.c.id))).mappings().all())
+                              for table in tables])
+
+        original = await rows()
+        cold, _ = await _payload_owner(state, None)
+        replay = PreparedArchive()
+        await cold.prepare_archived_messages(messages, replay)
+        await archive.store.mutate(lambda transaction: archive.publish(transaction, replay))
+        assert await rows() == original
+        table = tables[0 if damaged == "messages" else 1]
+        async with engine.begin() as connection:
+            for row in original[0 if damaged == "messages" else 1]:
+                if damaged == "messages":
+                    body = json.loads(row["message"])
+                    body["raw_size"] += 1
+                    values = {"message": json.dumps(body)}
+                else:
+                    values = {"tree_count": row["tree_count"] + 1}
+                await connection.execute(update(table).where(table.c.id == row["id"]).values(**values))
+        corrupted = await rows()
+        candidate, _ = await _payload_owner(state, None)
+        retry = PreparedArchive()
+        await candidate.prepare_archived_messages([*messages, *_messages("new")], retry)
+
+        async def swallow(transaction):
+            try:
+                await archive.publish(transaction, retry)
+            except AIError as error:
+                assert error.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            else:
+                pytest.fail("corrupt native winner was accepted")
+            await transaction.insert_record(_record("must-roll-back"))
+
+        with pytest.raises(AIError) as caught:
+            await archive.store.mutate(swallow)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await rows() == corrupted
+        assert await archive.store.read_record(_record("must-roll-back").key_digest) is None
+        assert not candidate._message_proofs and not candidate._message_content._known_messages
+
+
+@pytest.mark.asyncio
+async def test_archived_message_rollback_revokes_receipts_but_preserves_exact_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.persistence._archive import PreparedArchive
+    from .test_state_group_record_batch import _database
+
+    async with _database(tmp_path / "archive-retry.db") as (_engine, state, _other):
+        native, archive = await _payload_owner(state, None)
+        await native.initialize(local=True)
+        bundle, receipts = PreparedArchive(), []
+        root = await native.prepare_archived_messages(_messages("retry"), bundle)
+        content = native._message_content
+        publish = content.publish_retained
+
+        async def capture(*args, **kwargs):
+            receipt = await publish(*args, **kwargs)
+            receipts.append(receipt)
+            return receipt
+
+        monkeypatch.setattr(content, "publish_retained", capture)
+        marker = AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+        async def rollback(transaction):
+            await archive.publish(transaction, bundle)
+            raise marker
+
+        with pytest.raises(AIError) as caught:
+            await archive.store.mutate(rollback)
+        assert caught.value is marker
+        assert not content._known_messages and not native._message_proofs
+        assert len(receipts) == 1
+        with pytest.raises(ValueError, match="committed root"):
+            content.confirm_committed(receipts[0])
+        await archive.store.mutate(lambda transaction: archive.publish(transaction, bundle))
+        assert root.sequence in native._message_proofs
+        assert len(receipts) == 2
+        assert await native.read_message_roots((root,)) == (
+            tuple(MessageArchive().snapshot(_messages("retry")).encoded_payloads()),
+        )
+        native.invalidate_message_content()
+        with pytest.raises(AIError) as stale:
+            await archive.store.mutate(lambda transaction: archive.publish(transaction, bundle))
+        assert isinstance(stale.value.__cause__, ValueError)
+        assert "prepared content" in str(stale.value.__cause__)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", (32, 65536))
+async def test_prepared_payload_reuse_is_bounded_by_batch_owner_and_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: int,
+) -> None:
+    from linktools.ai.persistence import _archive
+    from linktools.ai.persistence._archive import PreparedArchive
+    from linktools.ai.storage import InMemoryObjectStore
+    from .test_state_group_record_batch import _database
+
+    monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
+    objects, puts = InMemoryObjectStore(), []
+    original_put = objects.put
+
+    async def put(key, chunks, **kwargs):
+        puts.append(key)
+        return await original_put(key, chunks, **kwargs)
+
+    monkeypatch.setattr(objects, "put", put)
+    async with _database(tmp_path / "batch.db") as (engine, state, _other):
+        native, archive = await _payload_owner(state, objects)
+        bundle, traffic = PreparedArchive(), _Traffic()
+        messages = _messages("x" * size)
+        event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
+        try:
+            first = await native.prepare_archived_messages(messages, bundle)
+            second = await native.prepare_archived_messages(messages, bundle)
+            assert first == second and len(puts) == 1
+            repeated = await native.prepare_archived_messages(messages * 2, bundle)
+            assert repeated.count == 2 and len(puts) == 1
+            prepared = bundle.native_messages[repeated.sequence]
+            assert len(prepared.messages) == 1
+            identity, body = prepared.messages[0]
+            content = _archive.ContentRecord.from_json(json.loads(body))
+            raw = next(MessageArchive().snapshot(messages).encoded_payloads())
+            assert identity == content.raw_digest == hashlib.sha256(raw).hexdigest()
+            assert content.raw_size == len(raw)
+            assert content.payload.ref is not None
+            encoded = await archive.read_payload_object(content.payload.ref)
+            assert decode_payload_bytes(encoded, codec=content.compression,
+                                        raw_digest=content.raw_digest, raw_size=content.raw_size) == raw
+            await native.prepare_archived_messages(_messages("y" * size), bundle)
+            assert len(puts) == 2 and puts[0] != puts[1]
+            await native.prepare_archived_messages(messages, PreparedArchive.combine((bundle,)))
+            assert len(puts) == 3
+            foreign = SqlStepStore(state.context, namespace="payloads", tenant_id="one")
+            foreign.bind_message_archive(archive)
+            await foreign.prepare_archived_messages(messages, bundle)
+            assert len(puts) == 4
+            native.invalidate_message_content()
+            await native.prepare_archived_messages(messages, bundle)
+            assert len(puts) == 5
+            assert not native._message_proofs and not native._message_content._known_messages
+            assert traffic.verbs == {}
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
+
+
+@pytest.mark.asyncio
+async def test_prepared_payload_reuse_preserves_current_encoding_and_object_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.persistence import _archive
+    from linktools.ai.persistence._archive import PreparedArchive
+    from linktools.ai.storage import InMemoryObjectStore
+    from .test_state_group_record_batch import _database
+
+    objects, puts = InMemoryObjectStore(), []
+    original_put = objects.put
+
+    async def put(key, chunks, **kwargs):
+        puts.append(key)
+        return await original_put(key, chunks, **kwargs)
+
+    monkeypatch.setattr(objects, "put", put)
+    monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
+    async with _database(tmp_path / "policy.db") as (_engine, state, _other):
+        native, _content = await _payload_owner(state, objects)
+        bundle = PreparedArchive()
+        messages = _messages("compressible " * 6000)
+        root = await native.prepare_archived_messages(messages, bundle)
+        first = json.loads(bundle.native_messages[root.sequence].messages[0][1])
+        assert first["compression"] == "zlib" and len(puts) == 1
+
+        def uncompressed(raw):
+            return "raw", hashlib.sha256(raw).hexdigest(), len(raw), raw
+
+        monkeypatch.setattr(_archive, "encode_payload_bytes", uncompressed)
+        root = await native.prepare_archived_messages(messages, bundle)
+        second = json.loads(bundle.native_messages[root.sequence].messages[0][1])
+        assert second["compression"] == "raw" and len(puts) == 2 and puts[0] != puts[1]
+        assert first["raw_digest"] == second["raw_digest"]
+        assert first["raw_size"] == second["raw_size"]
+        monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 10**9)
+        root = await native.prepare_archived_messages(messages, bundle)
+        inline = _archive.ContentRecord.from_json(json.loads(bundle.native_messages[root.sequence].messages[0][1]))
+        assert inline.payload.kind == "inline" and len(puts) == 2
+        monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
+        await native.prepare_archived_messages(messages, bundle)
+        assert len(puts) == 3
+        await native.prepare_archived_messages(messages, bundle)
+        assert len(puts) == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_preparation_does_not_retain_partial_payload_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.persistence import _archive
+    from linktools.ai.persistence._archive import PreparedArchive
+    from linktools.ai.storage import InMemoryObjectStore
+    from .test_state_group_record_batch import _database
+
+    monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
+    objects, puts = InMemoryObjectStore(), []
+    original_put = objects.put
+
+    async def put(key, chunks, **kwargs):
+        puts.append(key)
+        if len(puts) == 2:
+            raise RuntimeError("interrupted payload preparation")
+        return await original_put(key, chunks, **kwargs)
+
+    monkeypatch.setattr(objects, "put", put)
+    async with _database(tmp_path / "failure.db") as (_engine, state, _other):
+        native, _content = await _payload_owner(state, objects)
+        bundle = PreparedArchive()
+        with pytest.raises(RuntimeError, match="interrupted payload preparation"):
+            await native.prepare_archived_messages(_messages("first", "second"), bundle)
+        assert not bundle.native_messages and not bundle.native_payloads
+        assert not native._message_proofs and not native._message_content._known_messages
+        await native.prepare_archived_messages(_messages("first", "second"), bundle)
+        assert len(puts) == 4 and puts[:2] == puts[2:]

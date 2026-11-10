@@ -690,7 +690,7 @@ class TranscriptRepository:
         digest, size = snapshot.encoded_digest()
         archive = await self.content_archive(create=True)
         if self._native_messages is not None:
-            native = await self._native_messages.prepare_message_content(snapshot)
+            native = await self._native_messages.prepare_message_content(snapshot, archive=prepared)
             prepared.native_messages[native.root] = native
             prepared.native_publishers[native.root] = self._native_messages.publish_archived_messages
             root = self._native_messages.message_root(native.root)
@@ -1024,7 +1024,7 @@ class TranscriptRepository:
                             block.root, raw_digest=block.raw_digest, raw_size=block.raw_size,
                         )):
                     previous = (block.root, block.raw_digest, block.raw_size)
-            native = await self._native_messages.prepare_message_content(snapshot, baseline=previous)
+            native = await self._native_messages.prepare_message_content(snapshot, baseline=previous, archive=prepared)
             prepared.native_messages[native.root] = native
             prepared.native_publishers[native.root] = self._native_messages.publish_archived_messages
             return ContextProjection((ArchivedContextBlock(

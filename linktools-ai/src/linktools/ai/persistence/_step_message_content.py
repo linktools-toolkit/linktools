@@ -20,7 +20,7 @@ from weakref import WeakSet
 from ..core import canonical_json_bytes
 from ..errors import AIError
 from ..storage import ObjectRef, SqlStorageContext, StoredPayload
-from ._archive import ContentRecord, ImmutableSequenceNode
+from ._archive import ContentRecord, ImmutableSequenceNode, PreparedArchive
 from ._message_root import NativeMessageRoot, NativeMessageSequence, NativeMessageSlice
 from ._payload import decode_payload_bytes
 from ._step_schema import build_step_sql_metadata
@@ -30,7 +30,7 @@ from .state import SqlStateTransaction, StateTransaction
 if TYPE_CHECKING:
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy.sql import Insert, Select
+    from sqlalchemy.sql import Select
 
 
 _MAX_COUNT = (1 << 63) - 1
@@ -162,8 +162,8 @@ class NativeMessageContent:
     references require bind_group with the actual durable group ID; publication
     additionally checks the physical SQL context. No synthetic group is minted.
     No inference from mutable SDK identity or checkpoint length is permitted.
-    Immutable content identities permit duplicate-key reuse without a SELECT or
-    UPDATE. The native canonical schema is required: no additional triggers,
+    Immutable content identities permit byte-exact duplicate reuse without a
+    separate SELECT or body rewrite. The canonical schema is required: no additional triggers,
     constraints or narrower column definitions. Owner replay keys have different
     semantics and never establish content proof on a conflicting insertion.
     """
@@ -260,6 +260,8 @@ class NativeMessageContent:
         self, delta: MessageSnapshot, *,
         prepare_payload: Callable[[bytes], Awaitable[PreparedMessagePayload]],
         base: CommittedNativeMessages | None = None,
+        archive: PreparedArchive | None = None,
+        reuse_payload: Callable[[bytes, ContentRecord], Awaitable[PreparedMessagePayload]] | None = None,
     ) -> PreparedNativeMessages:
         """Prepare O(delta) bodies/nodes plus O(log n + r) frontier/descriptors.
 
@@ -287,15 +289,28 @@ class NativeMessageContent:
             count = tail.count
             if len(delta):
                 slices.pop()
+        candidates: dict[str, ContentRecord] = {}
+        if archive is not None and reuse_payload is not None:
+            generation, candidates = archive.native_payloads.get(self, (self._generation, {}))
+            if generation != self._generation:
+                candidates = {}
+        additions: dict[str, ContentRecord] = {}
         messages: dict[str, str] = {}
         nodes: dict[str, ImmutableSequenceNode] = {}
         for raw in delta.encoded_payloads():
             identity = hashlib.sha256(raw).hexdigest()
             if identity not in messages and identity not in self._known_messages:
-                payload = await prepare_payload(raw)
+                candidate = candidates.get(identity)
+                if candidate is not None and (candidate.codec != "model-message"
+                        or candidate.raw_digest != identity or candidate.raw_size != len(raw)):
+                    raise ValueError("prepared native message identity or size is corrupt")
+                payload = (await reuse_payload(raw, candidate)
+                           if candidate is not None and reuse_payload is not None else await prepare_payload(raw))
                 if not isinstance(payload, PreparedMessagePayload) or (payload.identity, payload.raw_size) != (identity, len(raw)):
                     raise ValueError("native message payload factory changed canonical content")
                 messages[identity] = payload.body
+                if archive is not None and reuse_payload is not None:
+                    additions[identity] = ContentRecord.from_json(json.loads(payload.body))
             first = frontier[0] if frontier else None
             second = frontier[1] if len(frontier) > 1 else None
             node = ImmutableSequenceNode.extend(identity, first, second)
@@ -313,6 +328,9 @@ class NativeMessageContent:
             tuple(messages.items()), tuple(nodes.items()), self._generation,
         )
         self._prepared.add(prepared)
+        if archive is not None and reuse_payload is not None:
+            candidates.update(additions)
+            archive.native_payloads[self] = self._generation, candidates
         return prepared
 
     async def publish(
@@ -389,11 +407,9 @@ class NativeMessageContent:
         return receipt
 
     async def _insert_rows(self, session: "AsyncSession", table: "Table", rows: Sequence[Mapping[str, object]]) -> None:
-        # Every value is validated against the canonical native DDL before MySQL
-        # IGNORE: exact SHA CHARs, bounded signed BIGINTs, valid utf8mb4 LONGTEXT,
-        # and declared nullable edges. Under that schema only key conflicts may
-        # be ignored. Extra triggers/constraints or schema drift are unsupported.
-        # These inserts still submit bytes and probe each immutable unique index.
+        # Compare the winning immutable row inside INSERT. An exact duplicate
+        # leaves its surrogate ID, audit columns and body unchanged. A mismatch
+        # must abort the enclosing owner mutation, including earlier batches.
         batch: list[Mapping[str, object]] = []
         size = 0
         for row in rows:
@@ -410,32 +426,29 @@ class NativeMessageContent:
                     raise ValueError("native message sequence identity is invalid")
             row_size = sum(len(value.encode("utf-8")) for value in row.values() if isinstance(value, str))
             if batch and (len(batch) >= 64 or size + row_size > 256 * 1024):
-                await session.execute(self._content_insert(table), batch)
+                await self._context.dialect.insert_immutable_many(
+                    session, table=table, rows=batch,
+                    index_elements=("store_digest", "sha256"), conflict_column="id",
+                )
                 batch, size = [], 0
             batch.append(row)
             size += row_size
         if batch:
-            await session.execute(self._content_insert(table), batch)
-
-    def _content_insert(self, table: "Table") -> "Insert":
-        dialect = self._context.engine.dialect.name
-        if dialect == "mysql":
-            from sqlalchemy.dialects.mysql import insert
-
-            return insert(table).prefix_with("IGNORE")
-        if dialect == "postgresql":
-            from sqlalchemy.dialects.postgresql import insert
-        elif dialect == "sqlite":
-            from sqlalchemy.dialects.sqlite import insert
-        else:
-            raise ValueError("native message content requires SQLite, PostgreSQL or MySQL")
-        return insert(table).on_conflict_do_nothing(index_elements=("store_digest", "sha256"))
+            await self._context.dialect.insert_immutable_many(
+                session, table=table, rows=batch,
+                index_elements=("store_digest", "sha256"), conflict_column="id",
+            )
 
     def confirm_current(self, receipt: NativeMessageReceipt) -> CommittedNativeMessages | None:
         """An expired optimization receipt cannot change an already committed outcome."""
         if receipt.prepared is None or receipt.prepared.generation != self._generation:
             return None
         return self.confirm_committed(receipt)
+
+    def discard_uncommitted(self, receipts: Sequence[NativeMessageReceipt]) -> None:
+        """Revoke failed mutation receipts without invalidating frozen retry input."""
+        for receipt in receipts:
+            self._receipts.discard(receipt)
 
     def confirm_committed(self, receipt: NativeMessageReceipt) -> CommittedNativeMessages:
         """Record the owning mutation's confirmed successful return.

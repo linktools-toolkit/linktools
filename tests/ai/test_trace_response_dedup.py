@@ -26,6 +26,7 @@ from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import NativeMessageRoot, PersistenceStorage
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
+from linktools.ai.persistence._step_message_content import NativeMessageContent
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, ContentRecord
 from linktools.ai.persistence.contracts import ArchivedContextBlock, ContextProjection, ModelInteractionRecord
@@ -208,6 +209,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                     raise AssertionError("metadata read decoded archived message content")
 
                 patch.setattr(ContentArchive, "_read_content", reject_body)
+                patch.setattr(NativeMessageContent, "read_hydrated_ranges", reject_body)
 
                 async def reject_projection(*args: object, **kwargs: object) -> None:
                     raise AssertionError("metadata read resolved full model context")

@@ -32,9 +32,10 @@ class _SqlTraffic:
         self.bound_bytes += self._bytes(parameters)
         if statement.startswith("INSERT INTO ai_step_messages "):
             self.statements["message_insert"] += 1
-            assert not many
-            self.message_rows += len(parameters) // 3
-            self.message_bytes += sum(len(value.encode()) for value in parameters[2::3])
+            batches = parameters if many else (parameters,)
+            for batch in batches:
+                self.message_rows += len(batch) // 3
+                self.message_bytes += sum(len(value.encode()) for value in batch[2::3])
         elif statement.startswith("INSERT INTO ai_step_snapshots "):
             self.statements["snapshot_insert"] += 1
         elif statement.startswith("INSERT INTO ai_step_sequences "):
@@ -243,7 +244,7 @@ async def test_concurrent_clone_cannot_use_another_transactions_uncommitted_rece
     await root.initialize(local=True)
     clone = root.with_tool_effect_store(InMemoryStepStore())
     pending, release = asyncio.Event(), asyncio.Event()
-    original = context.dialect.insert_ignore_conflict_many
+    original = context.dialect.insert_immutable_many
     held = False
 
     async def pause_then_fail(session, **kwargs):
@@ -256,13 +257,13 @@ async def test_concurrent_clone_cannot_use_another_transactions_uncommitted_rece
             raise RuntimeError("first transaction rolled back")
         return result
 
-    monkeypatch.setattr(context.dialect, "insert_ignore_conflict_many", pause_then_fail)
+    monkeypatch.setattr(context.dialect, "insert_immutable_many", pause_then_fail)
     traffic = _SqlTraffic()
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     first = _snapshot("first", "pending-body")
     try:
         failed = asyncio.create_task(root.save_snapshot(first))
-        await pending.wait()
+        await asyncio.wait_for(pending.wait(), 5)
         second = replace(first, idempotency_key="second")
         successful = asyncio.create_task(clone.save_snapshot(second))
         await asyncio.sleep(0)

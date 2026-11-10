@@ -352,6 +352,11 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
             )
 
         if owner_conflict:
+            archive_baselines = []
+            for owner in (trace, conversation):
+                content = await owner.transcript_repository.content_archive()
+                archive_baselines.append(await content.store.read(lambda tx: tx.scan_records()))
+
             async def reject_owner(*args, **kwargs):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
@@ -359,9 +364,9 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
             with pytest.raises(AIError) as raised:
                 await commit_terminal()
             assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-            for owner in (trace, conversation):
+            for owner, baseline in zip((trace, conversation), archive_baselines, strict=True):
                 content = await owner.transcript_repository.content_archive()
-                assert not await content.store.read(lambda tx: tx.scan_records())
+                assert await content.store.read(lambda tx: tx.scan_records()) == baseline
                 assert await owner.get_agent_run(agent_run_id="run") is None
             assert await state.execution.executions.get("execution", tenant_id="tenant") == current
             assert (await state.execution.executions.get("execution", tenant_id="tenant")).recovery == current.recovery

@@ -29,7 +29,7 @@ from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
-from ._archive import ContentArchive, PreparedArchive
+from ._archive import ContentArchive, ContentRecord, PreparedArchive
 from ._archive_closure import NativeMessageClosure, validate_native_message_content
 from ._message_root import NativeMessageRoot, NativeMessageSequence, NativeMessageSlice
 from ._step_message_content import (
@@ -961,7 +961,7 @@ class SqlStepStore:
     async def prepare_archived_messages(
         self, messages: Sequence[ModelMessage], prepared: PreparedArchive,
     ) -> NativeMessageRoot:
-        value = await self.prepare_message_content(self._frozen_messages.snapshot(messages))
+        value = await self.prepare_message_content(self._frozen_messages.snapshot(messages), archive=prepared)
         prepared.native_messages[value.root] = value
         prepared.native_publishers[value.root] = self.publish_archived_messages
         return self.message_root(value.root)
@@ -974,7 +974,7 @@ class SqlStepStore:
             raise ValueError("native messages require an observable SQL mutation")
         receipts = await self.publish_message_content(transaction, prepared, owner_written=True)
         transaction.observe_mutation(lambda committed: (
-            self.confirm_message_content(receipts) if committed else self.invalidate_message_content()
+            self.confirm_message_content(receipts) if committed else self._message_content.discard_uncommitted(receipts)
         ))
 
     def bind_message_archive(self, archive: ContentArchive) -> None:
@@ -1007,18 +1007,24 @@ class SqlStepStore:
         self._prepared_integrity.clear()
         self._message_inputs.clear()
 
-    async def _prepare_message_payload(self, raw: bytes) -> PreparedMessagePayload:
+    async def _prepare_message_payload(
+        self, raw: bytes, existing: ContentRecord | None = None,
+    ) -> PreparedMessagePayload:
         if self._message_archive is None:
             compression, _digest, _size, encoded = encode_payload_bytes(raw)
             payload = StoredPayload.inline_bytes(encoded)
         else:
-            compression, payload, encoded = await self._message_archive.prepare_payload(raw)
+            compression, payload, encoded = (
+                await self._message_archive.prepare_payload(raw) if existing is None
+                else await self._message_archive.prepare_payload(raw, existing=existing)
+            )
         return PreparedMessagePayload(raw, encoded=encoded, compression=compression, payload=payload)
 
     async def prepare_message_content(
         self, messages: MessageSnapshot, *,
         baseline: tuple[NativeMessageRoot | NativeMessageSequence, str, int] | None = None,
         single_sequence: bool = False,
+        archive: PreparedArchive | None = None,
     ) -> PreparedNativeMessages:
         """Use frozen bytes; mutable callers must first encode and check all inputs."""
         base = None
@@ -1037,6 +1043,8 @@ class SqlStepStore:
                     base, start = proof, sequence.count
         prepared = await self._message_content.prepare_append(
             messages[start:], prepare_payload=self._prepare_message_payload, base=base,
+            archive=archive,
+            reuse_payload=self._prepare_message_payload,
         )
         self._prepared_integrity[prepared] = messages.encoded_digest()
         return prepared

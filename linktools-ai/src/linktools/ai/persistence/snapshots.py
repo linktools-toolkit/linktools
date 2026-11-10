@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from ._execution_binding import ExecutionBindingContent, expand_snapshot_binding
+from ._execution_binding import ExecutionBindingContent, expand_snapshot_binding, snapshot_binding_size
 
 from ..core import (
     canonical_json_bytes,
@@ -182,6 +182,11 @@ class _SnapshotCaptureBudget:
 
     def page_size(self, requested: int) -> int:
         return min(requested, max(1, self.limits.max_entries - self.entries))
+
+    def reserve_bytes(self, size: int) -> None:
+        if self.byte_size + size > self.limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        self.byte_size += size
 
     def accept(self, value: object) -> None:
         size = len(canonical_json_bytes(value))
@@ -370,7 +375,8 @@ class RuntimeSnapshotOperations:
                     execution_records = tuple(record for record in readers[PersistenceDomain.EXECUTION].records
                                               if record.kind == "execution")
                     for offset in range(0, len(execution_records), 1000):
-                        for semantic_record in await execution_bindings.expand_many(execution_records[offset:offset + 1000]):
+                        for semantic_record in await execution_bindings.expand_many(
+                                execution_records[offset:offset + 1000], reserve=capture_budget.reserve_bytes):
                             execution = _decode_enveloped_domain(semantic_record.data, ExecutionRecord)
                             if not isinstance(execution.binding, AgentBindingContract) or not execution.restart_checkpoints:
                                 continue
@@ -500,6 +506,7 @@ async def _export_snapshot(
     snapshot_records: dict[PersistenceDomain, tuple[StoredRecord, ...]] = {}
     snapshot_facts: dict[PersistenceDomain, tuple[StoredFact, ...]] = {}
     objects: list[dict[str, object]] = []
+    binding_budget = _SnapshotCaptureBudget(limits)
     copied_objects: set[tuple[str, str, str, int]] = set()
     entry_count = 0
     object_bytes = 0
@@ -645,7 +652,7 @@ async def _export_snapshot(
                 break
             for value in page:
                 semantic_value = expand_snapshot_binding(value, binding_contents,
-                    namespace=source.namespace, tenant_id=source.tenant_id)
+                    namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
                 if domain is PersistenceDomain.EXECUTION and value.kind == "execution":
                     from .contracts import ExecutionRecord
                     execution = _decode_enveloped_domain(semantic_value.data, ExecutionRecord)
@@ -829,6 +836,9 @@ async def _export_snapshot(
             for group_id, projected in (source.native_projections or {}).items()],
         "objects": objects,
     }
+    for optional in ("native_messages", "native_checkpoints", "native_projections"):
+        if not manifest[optional]:
+            del manifest[optional]
     payload = canonical_json_bytes(manifest)
     budget_entries, budget_bytes = snapshot_manifest_usage(manifest)
     if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
@@ -1471,7 +1481,7 @@ def snapshot_manifest_usage(
 ) -> tuple[int, int]:
     """Return entry count and bytes outside the serialized storage manifest.
 
-    Native decoded bytes are reserved in addition to encoded object bytes so
+    Native and per-execution binding decoded bytes supplement encoded bytes so
     exporters and restorers enforce the same hydration allowance.
     """
     domains = manifest.get("domains")
@@ -1517,6 +1527,21 @@ def snapshot_manifest_usage(
             except (KeyError, TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             object_bytes += content.raw_size
+    binding_contents = {}
+    for group in manifest.get("archives", []):
+        records = tuple(decode_record(row) for row in group["records"]
+                        if isinstance(row, Mapping) and row.get("kind") == "archive_content"
+                        and isinstance(row.get("data"), Mapping)
+                        and row["data"].get("codec") == "execution-binding")
+        if records:
+            scope = group.get("scope_id")
+            if not isinstance(scope, str) or not scope:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            binding_contents.update(ArchiveClosure(scope, records).binding_contents())
+    for raw_domain in domains.values():
+        for row in raw_domain["records"]:
+            if isinstance(row, Mapping) and row.get("kind") == "execution":
+                object_bytes += snapshot_binding_size(decode_record(row), binding_contents)
     return entries, object_bytes
 
 

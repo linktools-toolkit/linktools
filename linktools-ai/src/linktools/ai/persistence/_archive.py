@@ -18,7 +18,7 @@ from .state import StateStore, StateTransaction, StoredRecord, record_key_digest
 
 if TYPE_CHECKING:
     from ._message_root import NativeMessageSequence
-    from ._step_message_content import PreparedNativeMessages
+    from ._step_message_content import NativeMessageContent, PreparedNativeMessages
 
 
 def _integrity() -> AIError:
@@ -209,6 +209,8 @@ class PreparedArchive:
     nodes: dict[str, ImmutableSequenceNode] = field(default_factory=dict)
     native_messages: dict["NativeMessageSequence", "PreparedNativeMessages"] = field(default_factory=dict)
     native_publishers: dict["NativeMessageSequence", Callable[[StateTransaction, "PreparedArchive"], Awaitable[None]]] = field(default_factory=dict, repr=False, compare=False)
+    # Uncommitted representation reuse belongs only to this preparation and owner epoch.
+    native_payloads: dict["NativeMessageContent", tuple[int, dict[str, ContentRecord]]] = field(default_factory=dict, repr=False, compare=False)
     _verified_content: dict[bytes, StoredRecord] = field(default_factory=dict, repr=False, compare=False)
     _observed_content: dict[bytes, StoredRecord | None] = field(default_factory=dict, repr=False, compare=False)
 
@@ -364,9 +366,11 @@ class ContentArchive:
             prepared.verify_content(prepared.records[key])
         return identities
 
-    async def prepare_payload(self, raw: bytes) -> tuple[str, StoredPayload, bytes]:
+    async def prepare_payload(
+        self, raw: bytes, *, existing: ContentRecord | None = None,
+    ) -> tuple[str, StoredPayload, bytes]:
         """Prepare the shared representation without reading or publishing SQL rows."""
-        compression, _digest, size, encoded = encode_payload_bytes(raw)
+        compression, raw_digest, size, encoded = encode_payload_bytes(raw)
         if self._objects is None or size < PAYLOAD_COMPRESS_MINIMUM:
             payload = StoredPayload.inline_bytes(encoded)
         else:
@@ -374,9 +378,15 @@ class ContentArchive:
             object_key = self._object_prefix + stored_digest
             async def chunks() -> AsyncIterator[bytes]:
                 yield encoded
-            stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
-                                           expected_digest=stored_digest)
-            payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
+            expected = StoredPayload.object(ObjectRef("runtime", object_key, stored_digest, len(encoded)))
+            if (existing is not None and existing.codec == "model-message"
+                    and existing.raw_digest == raw_digest and existing.raw_size == size
+                    and existing.compression == compression and existing.payload == expected):
+                payload = existing.payload
+            else:
+                stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
+                                               expected_digest=stored_digest)
+                payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
         return compression, payload, encoded
 
     async def read_payload_object(self, reference: ObjectRef) -> bytes:
@@ -905,7 +915,8 @@ class ContentArchive:
             append_frontiers.update(frontiers)
         return tuple(tuple(decoded[identity] for identity in group) for group in groups)
 
-    async def read_contents(self, identities: Sequence[str], *, codec: str) -> tuple[bytes, ...]:
+    async def read_contents(self, identities: Sequence[str], *, codec: str,
+                            reserve: Callable[[str, int], None] | None = None) -> tuple[bytes, ...]:
         keys = {identity: self._key("archive_content", _digest(identity)) for identity in identities}
         records = await self.store.read_records(tuple(keys.values())) if keys else {}
         decoded: dict[str, bytes] = {}
@@ -916,6 +927,8 @@ class ContentArchive:
             content = ContentRecord.from_json(record.data)
             if content.identity != identity or content.codec != codec:
                 raise _integrity()
+            if reserve is not None:
+                reserve(identity, content.raw_size)
             decoded[identity] = await self._read_content(content)
         return tuple(decoded[identity] for identity in identities)
 

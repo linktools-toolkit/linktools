@@ -1449,8 +1449,7 @@ class DefaultExecutionService(TaskExecutionService):
                 StoredPayload.inline_json(request.input_context.to_payload()), PersistenceDomain.EXECUTION,
             )
             if request.input_context.repository_instructions is not None:
-                repository_instructions = self._capture_repository_instructions(
-                    RepositoryInstructions.from_payload(request.input_context.repository_instructions))
+                RepositoryInstructions.from_payload(request.input_context.repository_instructions)
         elif self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:

@@ -621,13 +621,14 @@ class MySQLDialect(SQLiteDialect):
         current = table.c[conflict_column]
         matches = self._immutable_match(table, statement.inserted, tuple(rows[0]))
         # SQLAlchemy's MySQL drivers enable FOUND_ROWS: insert/exact no-op = 1,
-        # changed duplicate = 2. A mismatch changes a bounded integer marker,
+        # changed duplicate = 2. A mismatch complements a bounded integer marker,
         # even without STRICT sql_mode. The caller must poison and roll back
         # the enclosing transaction when any row fails this exact comparison.
         # Keep constants out of the UPDATE parameter suffix so MySQL drivers
         # can batch the VALUES tuples within their escaped-packet limit.
-        negative, zero = literal_column("-1"), literal_column("0")
-        changed = case((current == negative, zero), else_=negative)
+        # Keep distinct surrogate IDs distinct and avoid signed BIGINT overflow.
+        zero, one = literal_column("0"), literal_column("1")
+        changed = case((current >= zero, -current - one), else_=-(current + one))
         statement = statement.on_duplicate_key_update(**{
             conflict_column: case((matches, current), else_=changed),
         })

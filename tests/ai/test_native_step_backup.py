@@ -173,7 +173,6 @@ def test_backup_snapshot_decodes_retry_binding_without_store_or_database() -> No
 @pytest.mark.parametrize("count", (0, 1, 1024))
 def test_checkpoint_tail_validation_preserves_empty_and_nonempty_retry_binding(count: int) -> None:
     import hashlib
-    from linktools.ai.core import canonical_json_bytes
     from linktools.ai.model.messages import encode_model_messages
 
     messages = [] if count == 0 else [ModelRequest(parts=[UserPromptPart("terminal")])]
@@ -186,7 +185,7 @@ def test_checkpoint_tail_validation_preserves_empty_and_nonempty_retry_binding(c
                "output_retries_used": 3,
                "message_sha256": hashlib.sha256(encode_model_messages(encoded.messages[-1:])).hexdigest(),
            }})}
-    payload = None if count == 0 else canonical_json_bytes(json.loads(encode_model_messages(messages))[0])
+    payload = None if count == 0 else encode_model_messages(messages)
     SqlStepStore.validate_backup_snapshot_tail(row, payload)
     with pytest.raises(ValueError, match="corrupt or misbound"):
         SqlStepStore.validate_backup_snapshot_tail(dict(row, step_index=3), payload)

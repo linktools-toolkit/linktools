@@ -6,8 +6,10 @@ import hashlib
 import json
 
 import pytest
+from pydantic_ai.messages import ModelRequest
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence._archive import ContentRecord
 from linktools.ai.persistence.snapshots import _SnapshotCaptureBudget, _capture_native_payloads, SnapshotLimits
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
@@ -40,7 +42,7 @@ async def test_native_raw_budget_rejects_before_object_open_or_decompression(mon
 async def test_native_capture_retains_authenticated_encoded_payload_for_publication(monkeypatch) -> None:
     from linktools.ai.persistence import snapshots
 
-    raw = b'[{"kind":"request","parts":[]}]'
+    raw = encode_model_messages((ModelRequest(parts=[]),))
     digest = hashlib.sha256(raw).hexdigest()
     content = ContentRecord("model-message", digest, len(raw), "raw",
         StoredPayload.object(ObjectRef("objects", "v1/archive/group/body", digest, len(raw))))
@@ -64,7 +66,7 @@ def test_storage_and_outer_snapshot_share_exact_decoded_byte_boundary(external: 
     from linktools.ai.persistence.snapshots import snapshot_manifest_usage, snapshot_object_ref_payload
     from linktools.ai.snapshot._snapshot import _storage_snapshot_usage
 
-    raw = b'[{"kind":"request","parts":[]}]'
+    raw = encode_model_messages((ModelRequest(parts=[]),))
     digest = hashlib.sha256(raw).hexdigest()
     reference = ObjectRef("objects", "v1/archive/group/body", digest, len(raw))
     payload = StoredPayload.object(reference) if external else StoredPayload.inline_bytes(raw)

@@ -4143,7 +4143,8 @@ class LocalExecutionBackend:
                     await prepared.publish()
                     return await self._execution.executions.compare_and_swap(current.execution_id, tenant_id=self._tenant_id,
                         expected_revision=current.revision,
-                        next_record=replace(current, input_context=reference, revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
+                        next_record=replace(current, input_context=reference, repository_instructions=None,
+                                            revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
                 committed = await self._execution.executions.state_store.mutate(publish_context)
                 return committed, context
             except AIError as error:
@@ -5241,7 +5242,8 @@ class LocalExecutionBackend:
                 if previous is not None:
                     capture_execution = replace(
                         capture_execution, stored_user_input=previous.execution.stored_user_input,
-                        repository_instructions=previous.execution.repository_instructions,
+                        repository_instructions=(None if previous.execution.input_context is not None
+                            or capture_execution.input_context is not None else previous.execution.repository_instructions),
                         input_context=previous.execution.input_context or capture_execution.input_context,
                     )
                     reservation = previous.reservation
@@ -5312,7 +5314,8 @@ class LocalExecutionBackend:
         if previous is not None:
             logical_execution = replace(
                 logical_execution, stored_user_input=previous.execution.stored_user_input,
-                repository_instructions=previous.execution.repository_instructions,
+                repository_instructions=(None if previous.execution.input_context is not None
+                    or logical_execution.input_context is not None else previous.execution.repository_instructions),
                 input_context=previous.execution.input_context or logical_execution.input_context,
             )
         logical_commit = replace(commit, execution=logical_execution)
@@ -5586,11 +5589,19 @@ class LocalExecutionBackend:
         async def publish_boundary(*, run=None, events=(), snapshot=None) -> StepWriteReceipt | None:
             if run is None and not events and snapshot is None:
                 return
+            terminal = any(isinstance(event, NativeLifecycleEvent) for event in events)
+
+            def require_publication() -> None:
+                if not terminal:
+                    self._require_turn_dispatch(owner)
+                elif self._turn_owners.get(execution.execution_id) is not owner:
+                    raise asyncio.CancelledError
+
             managed = run is not None and self._run_store.has_pending_native_start(run.run_id)
             prepared = (await native.prepare_step(run=run, events=events, snapshot=snapshot, managed_start=True)
                         if managed else await native.prepare_step(run=run, events=events, snapshot=snapshot))
             async with owner.boundary:
-                self._require_turn_dispatch(owner)
+                require_publication()
                 if owner.observed is None or owner.attempt is None:
                     observed = await repository.get_observed(execution.execution_id, tenant_id=self._tenant_id)
                     if (observed is None or observed.value.producer_generation != generation
@@ -5609,9 +5620,10 @@ class LocalExecutionBackend:
                     receipt = await repository.commit_boundary_in_transaction(
                         transaction, observed, next_record=next_record,
                         expected_producer_generation=generation, expected_producer_claim_id=claim_id,
+                        allow_cancelling=terminal,
                     )
                     source_receipt = (self._run_store.step_event_receipt(agent_run_id)
-                                      if managed or any(isinstance(event, NativeLifecycleEvent) for event in events) else None)
+                                      if managed or terminal else None)
                     written = (await native.write_prepared_step(transaction, prepared, confirmed=source_receipt)
                                if source_receipt is not None else await native.write_prepared_step(transaction, prepared))
                     return receipt
@@ -5633,11 +5645,15 @@ class LocalExecutionBackend:
                                         and await verify_native(run=run, events=events, snapshot=snapshot, receipt=written)):
                                     return actual
                             elif (error.code is ErrorCode.STORAGE_CONFLICT and written is None
-                                    and actual is not None and actual.value == observed.value
-                                    and actual.storage_revision > observed.storage_revision):
-                                # A concurrent Trace fact guarded the same unchanged
-                                # execution. No native write from this attempt committed.
-                                self._require_turn_dispatch(owner)
+                                    and actual is not None
+                                    and actual.storage_revision > observed.storage_revision
+                                    and (actual.value == observed.value or terminal
+                                         and actual.value.status is ExecutionStatus.CANCELLING
+                                         and actual.value.producer_generation == generation
+                                         and actual.value.producer_claim_id == claim_id)):
+                                # Cancellation stops new dispatch but must retain this
+                                # producer's terminal source and interrupted checkpoint.
+                                require_publication()
                                 observed = actual
                                 next_record = actual.value
                                 owner.observed = actual

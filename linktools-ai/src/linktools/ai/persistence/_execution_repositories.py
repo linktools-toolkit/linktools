@@ -272,12 +272,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def commit_boundary_in_transaction(
         self, transaction: StateTransaction, observed: Observed[ExecutionRecord], *,
         next_record: ExecutionRecord, expected_producer_generation: int,
-        expected_producer_claim_id: str,
+        expected_producer_claim_id: str, allow_cancelling: bool = False,
     ) -> Observed[ExecutionRecord]:
         """Publish a prepared boundary using its confirmed control receipt."""
         current = observed.value
         if (current.execution_id != next_record.execution_id
-                or current.status is not ExecutionStatus.STARTED
+                or not (current.status is ExecutionStatus.STARTED
+                        or allow_cancelling and current.status is ExecutionStatus.CANCELLING
+                        and next_record == current)
                 or current.producer_generation != expected_producer_generation
                 or current.producer_claim_id != expected_producer_claim_id
                 or next_record.producer_generation != current.producer_generation
@@ -361,6 +363,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return tuple(self._key(kind, execution.execution_id) for kind in kinds)
 
     async def create_execution(self, execution: ExecutionRecord) -> ExecutionRecord:
+        _require_tenant(execution, self._tenant_id)
+        await self._binding_content.prepare(self._stored(
+            "execution", execution.execution_id, execution, state=execution.status.value,
+        ))
         return await self._store.mutate(
             lambda transaction: self.create_execution_in_transaction(transaction, execution)
         )
@@ -369,14 +375,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         self, transaction: StateTransaction, execution: ExecutionRecord,
     ) -> ExecutionRecord:
         _require_tenant(execution, self._tenant_id)
+        if execution.input_context is not None:
+            execution = replace(execution, repository_instructions=None)
         current = await transaction.get_record(self._key("execution", execution.execution_id))
         if current is not None:
             existing = await self._decode(current, ExecutionRecord)
-            candidate = (
-                replace(execution, repository_instructions=None)
-                if execution.input_context is not None else execution
-            )
-            if existing != candidate:
+            if existing != execution:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return existing
         await transaction.insert_record(await self._stored_content(
@@ -668,6 +672,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
         self._idempotency._require_resource_kind(reservation.idempotency)
+        if reservation.execution.input_context is not None:
+            reservation = replace(reservation, execution=replace(reservation.execution, repository_instructions=None))
+        await self._binding_content.prepare(self._stored(
+            "execution", reservation.execution.execution_id, reservation.execution,
+            state=reservation.execution.status.value,
+        ))
         if reservation.budget is not None and (
             reservation.execution.budget_scope_id != "execution:" + reservation.execution.execution_id
         ):
@@ -1014,7 +1024,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         admitted = replace(current, agent_run_seq=1, revision=current.revision + 1,
                            producer_generation=current.revision + 1, producer_claim_id=producer_claim_id,
                            updated_at=await transaction.now(), recovery=current.recovery if recovery is None else recovery)
-        final = replace(admitted, input_context=input_context, revision=admitted.revision + 1)
+        final = replace(admitted, input_context=input_context, repository_instructions=None,
+                        revision=admitted.revision + 1)
         await _replace_checked(transaction, await self._projected_content(record, final), record.storage_revision)
         return final
 

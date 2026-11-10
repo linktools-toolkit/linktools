@@ -177,9 +177,9 @@ async def test_instruction_read_does_not_materialize_history_or_other_components
         reads = []
         original = ContentArchive.read_contents
 
-        async def read_contents(self, identities, *, codec):
+        async def read_contents(self, identities, *, codec, reserve=None):
             reads.extend(identities)
-            return await original(self, identities, codec=codec)
+            return await original(self, identities, codec=codec, reserve=reserve)
 
         async def reject_history(*args, **kwargs):
             raise AssertionError("instruction-only reads must not read history")

@@ -91,7 +91,7 @@ class _RepositoryBase:
     async def initialize(self) -> None:
         return None
 
-    async def initialize_content(self, *, create: bool) -> None:
+    async def initialize_content(self, *, create: bool, deferred: bool = False) -> None:
         """Opt into shared binding writes before entering repository transactions.
 
         Standalone repositories otherwise retain complete inline bindings. A
@@ -99,7 +99,11 @@ class _RepositoryBase:
         operation before entry; callbacks cannot enlist new archive stores.
         """
         if self._domain is PersistenceDomain.EXECUTION:
-            await self._binding_content.initialize(create=create)
+            if deferred:
+                if create:
+                    self._binding_content.enable_sharing()
+            else:
+                await self._binding_content.initialize(create=create)
 
     async def close(self) -> None:
         return None
@@ -274,6 +278,7 @@ class _RepositoryBase:
         return await self._store.read(lambda transaction: transaction.get_records(keys))
 
     async def _insert(self, record: StoredRecord) -> None:
+        await self._binding_content.prepare(record)
         async def insert(transaction: StateTransaction) -> None:
             await transaction.insert_record(await self._binding_content.compact(record))
         await self._store.mutate(insert)

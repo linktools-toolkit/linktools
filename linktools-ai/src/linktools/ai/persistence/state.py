@@ -1163,6 +1163,15 @@ class StateStorageGroup(Protocol):
         """
         ...
 
+    @property
+    def opened_archive(self) -> tuple[str, "StateStore"] | None:
+        """Return an already opened archive handle without I/O or enlistment.
+
+        Callbacks must still verify that its store belongs to their active
+        transaction. An absent handle never authorizes opening storage there.
+        """
+        ...
+
     async def open_archive(
         self, *, create: bool = False,
     ) -> tuple[str, "StateStore"] | None:

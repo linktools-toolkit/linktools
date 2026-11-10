@@ -587,14 +587,22 @@ async def test_native_source_write_failure_prevents_provider_dispatch(tmp_path: 
                                               ErrorCode.STORAGE_INTEGRITY_ERROR}
                     else:
                         assert result.result.status is not ExecutionStatus.SUCCEEDED
+                    assert rejected
+                    assert calls == []
+                    assert await native.list_runs() == []
+                    archive = state.run_store.read_store(PersistenceDomain.TRACE)
+                    for run in await archive.list_agent_runs():
+                        raw = await _raw_events(archive, run.agent_run_id)
+                        assert all(fact.data["value"]["type"] != "native_event_reference" for fact in raw)
+                    event.remove(engine.sync_engine, "before_cursor_execute", reject)
+                    cancellation = await execution.cancel(idempotency_key="cancel-rejected-source")
+                    if not cancellation.cancelled:
+                        await execution.recover(idempotency_key="recover-rejected-source-cancel")
+                    assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.CANCELLED
+                    assert calls == []
             finally:
-                event.remove(engine.sync_engine, "before_cursor_execute", reject)
-            assert rejected
-            assert calls == []
-            archive = state.run_store.read_store(PersistenceDomain.TRACE)
-            for run in await archive.list_agent_runs():
-                raw = await _raw_events(archive, run.agent_run_id)
-                assert all(fact.data["value"]["type"] != "native_event_reference" for fact in raw)
+                if event.contains(engine.sync_engine, "before_cursor_execute", reject):
+                    event.remove(engine.sync_engine, "before_cursor_execute", reject)
     finally:
         await native.close()
         await engine.dispose()

@@ -230,7 +230,7 @@ async def materialize_runtime_storage(
     for component in _unique(components):
         register_cleanup((component.close,))
     for component in _unique(components):
-        await component.initialize_content(create=not read_only)
+        await component.initialize_content(create=not read_only, deferred=True)
         await component.initialize()
 
     repositories = _repositories(bundles)

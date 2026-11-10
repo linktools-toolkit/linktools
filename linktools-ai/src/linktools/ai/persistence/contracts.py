@@ -1366,7 +1366,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def commit_boundary_in_transaction(
         self, transaction: StateTransaction, observed: Observed[ExecutionRecord], *,
         next_record: ExecutionRecord, expected_producer_generation: int,
-        expected_producer_claim_id: str,
+        expected_producer_claim_id: str, allow_cancelling: bool = False,
     ) -> Observed[ExecutionRecord]: ...
     async def get_many(
         self,

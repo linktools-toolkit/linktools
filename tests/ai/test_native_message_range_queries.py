@@ -17,13 +17,14 @@ from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.migrate import provision_database
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._payload import encode_payload_bytes
 from linktools.ai.persistence._step_message_content import (
     NativeMessageContent, NativeMessageRoot, NativeMessageSlice, NativeRangeBudget, PreparedMessagePayload,
 )
 from linktools.ai.persistence._transcript_staging import MessageArchive
-from linktools.ai.storage import StoredPayload
+from linktools.ai.storage import StoredPayload, dialect_for_name
 
 
 _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -51,7 +52,7 @@ async def _publish(native, content, prepared):
 
 
 def _owner(dialect) -> NativeMessageContent:
-    context = SimpleNamespace(engine=SimpleNamespace(dialect=dialect))
+    context = SimpleNamespace(engine=SimpleNamespace(dialect=dialect), dialect=dialect_for_name(dialect.name))
     return NativeMessageContent(context, group_id="execution", store_digest="a" * 64)
 
 
@@ -117,15 +118,43 @@ def test_repeated_span_work_is_shared_and_singleton_batches_fit_one_read(dialect
 
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect(), mysql.dialect()])
-def test_immutable_content_insert_never_updates_on_duplicate(dialect) -> None:
+@pytest.mark.asyncio
+async def test_immutable_content_insert_compares_winners_without_body_reads(dialect) -> None:
     content = _owner(dialect)
-    for table in (content._messages, content._nodes):
-        sql = str(content._content_insert(table).compile(dialect=dialect)).upper()
-        assert re.search(r"\b(?:UPDATE|SELECT)\b", sql) is None
+    prepared = await content.prepare_append(MessageArchive().snapshot([
+        ModelRequest(parts=[UserPromptPart("exact", timestamp=_STAMP)], timestamp=_STAMP),
+    ]), prepare_payload=_payload)
+    identity, body = prepared.messages[0]
+    node_id, node = prepared.nodes[0]
+    rows = ((content._messages, {"store_digest": "a" * 64, "sha256": identity, "message": body}),
+            (content._nodes, {"store_digest": "a" * 64, "sha256": node_id,
+                "message_sha256": node.content_id, "tree_count": node.tree_count,
+                "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}))
+
+    class Session:
+        rowcount = 1
+        sql = ""
+
+        async def execute(self, statement, parameters=None):
+            self.sql = str(statement.compile(dialect=dialect)).upper()
+            return SimpleNamespace(rowcount=self.rowcount)
+
+    session = Session()
+    for table, row in rows:
+        await content._insert_rows(session, table, (row,))
+        sql = session.sql
+        assert re.search(r"\b(?:SELECT|IGNORE)\b", sql) is None
+        assert all(name.upper() in sql for name in row)
         if dialect.name == "mysql":
-            assert sql.startswith("INSERT IGNORE")
+            assert "ON DUPLICATE KEY UPDATE ID = CASE WHEN" in sql
+            assert "THEN AI_STEP_" in sql and ".ID ELSE CASE" in sql
         else:
-            assert "DO NOTHING" in sql
+            assert "DO UPDATE SET ID = AI_STEP_" in sql and ".ID WHERE" in sql
+        session.rowcount = 0
+        with pytest.raises(AIError) as caught:
+            await content._insert_rows(session, table, (row,))
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        session.rowcount = 1
 
 
 @pytest.mark.asyncio

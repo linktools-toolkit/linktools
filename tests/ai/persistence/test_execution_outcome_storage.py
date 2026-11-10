@@ -20,7 +20,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.storage import ObjectRef, StoredPayload
 
-from .test_repository_instruction_persistence import _execution
+from tests.ai.persistence.test_repository_instruction_persistence import _execution
 
 
 def _terminal(status: ExecutionStatus = ExecutionStatus.SUCCEEDED) -> ExecutionRecord:

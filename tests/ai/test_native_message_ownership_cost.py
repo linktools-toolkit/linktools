@@ -80,9 +80,9 @@ class _Traffic:
             self.context_hash_input_bytes += len(data)
             return context_sha256(data, **kwargs)
 
-        async def prepared(store, raw):
+        async def prepared(store, raw, existing=None):
             self.preparations += 1
-            return await prepare(store, raw)
+            return await prepare(store, raw, existing)
 
         async def hydrated(owner, roots, rows, **kwargs):
             # Observe the rows actually materialized by the scoped join, rather

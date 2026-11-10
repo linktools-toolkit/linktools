@@ -203,6 +203,7 @@ class SqlStateStorageGroup:
         self._initialized = False
         self._members: dict[bytes, SqlStateStore] = {}
         self._archive_member: SqlStateStore | None = None
+        self._opened_archive: tuple[str, SqlStateStore] | None = None
         self._archive_scope_initialized = False
         self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
@@ -238,6 +239,10 @@ class SqlStateStorageGroup:
                 if result.first() is None:
                     return None
         return await self._open_partition(key)
+
+    @property
+    def opened_archive(self) -> tuple[str, "SqlStateStore"] | None:
+        return self._opened_archive
 
     async def open_archive(
         self, *, create: bool = False,
@@ -287,7 +292,8 @@ class SqlStateStorageGroup:
         archive_digest = hashlib.sha256(b"linktools-ai:state-group-archive").digest()
         self._archive_member = await self._open_partition(archive_digest)
         self._archive_scope_initialized = True
-        return scope, self._archive_member
+        self._opened_archive = scope, self._archive_member
+        return self._opened_archive
 
     async def _initialize_archive_scope(
         self, session: "AsyncSession", clock: "_SqlTransactionClock",
