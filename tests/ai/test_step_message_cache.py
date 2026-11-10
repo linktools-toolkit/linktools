@@ -26,18 +26,20 @@ class _SqlTraffic:
         self.bound_bytes = 0
 
     def capture(self, connection, cursor, statement, parameters, context, many) -> None:
-        words = statement.split()
-        self.statements[words[0]] += 1
+        verb = statement.split()[0].upper()
+        # Recursive sequence reads start WITH but still consume one SELECT.
+        self.statements["SELECT" if verb == "WITH" else verb] += 1
         self.bound_bytes += self._bytes(parameters)
         if statement.startswith("INSERT INTO ai_step_messages "):
             self.statements["message_insert"] += 1
-            assert not many
-            self.message_rows += len(parameters) // 3
-            self.message_bytes += sum(len(value.encode()) for value in parameters[2::3])
+            batches = parameters if many else (parameters,)
+            for batch in batches:
+                self.message_rows += len(batch) // 3
+                self.message_bytes += sum(len(value.encode()) for value in batch[2::3])
         elif statement.startswith("INSERT INTO ai_step_snapshots "):
             self.statements["snapshot_insert"] += 1
-        elif statement.startswith("INSERT INTO ai_step_message_refs "):
-            self.statements["reference_insert"] += 1
+        elif statement.startswith("INSERT INTO ai_step_sequences "):
+            self.statements["sequence_insert"] += 1
 
     @classmethod
     def _bytes(cls, value: object) -> int:
@@ -73,9 +75,10 @@ async def test_repeated_snapshots_skip_only_confirmed_message_body_submissions(
         await store.save_snapshot(second)
         assert traffic.message_rows == submitted
         assert traffic.statements["snapshot_insert"] == 2
-        assert traffic.statements["reference_insert"] == 2
         # Retention reads belong to the existing pruning contract, not the cache.
         assert traffic.statements["SELECT"] == 2
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
         assert await store.latest_snapshot(run_id="run") == second
         await store.save_snapshot(first)
         assert traffic.message_rows == submitted
@@ -99,7 +102,7 @@ async def test_failed_publication_does_not_cache_uncommitted_messages(tmp_path: 
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
 
     def fail(connection, cursor, statement, parameters, context, many) -> None:
-        if statement.startswith("INSERT INTO ai_step_message_refs "):
+        if statement.startswith("INSERT INTO ai_step_sequences "):
             raise RuntimeError("publication failed")
 
     try:
@@ -124,8 +127,9 @@ async def test_failed_publication_does_not_cache_uncommitted_messages(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_lost_commit_ack_does_not_promote_or_promote_on_idempotent_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
+@pytest.mark.parametrize("readback", [False, True])
+async def test_lost_commit_ack_requires_readback_or_new_owner_before_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool, readback: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lost-ack.db'}")
     context = create_sql_storage_context(engine)
@@ -148,13 +152,23 @@ async def test_lost_commit_ack_does_not_promote_or_promote_on_idempotent_retry(
             await store.save_snapshot(first)
         assert traffic.message_rows == 1
         monkeypatch.setattr(type(context), "run_mutation", original)
-        assert await store.latest_snapshot(run_id="run") == first
+        # A duplicate owner key cannot confirm the earlier unknown receipt.
         await store.save_snapshot(first)
         assert traffic.message_rows == 1
+        if readback:
+            # Fully verified durable bytes can independently authorize reuse.
+            assert await store.latest_snapshot(run_id="run") == first
         await store.save_snapshot(replace(first, idempotency_key="new-boundary"))
-        assert traffic.message_rows == 2
-        await store.save_snapshot(replace(first, idempotency_key="warm-boundary"))
-        assert traffic.message_rows == 2
+        submitted = 1 if readback else 2
+        assert traffic.message_rows == submitted
+        warm = replace(first, idempotency_key="warm-boundary")
+        await store.save_snapshot(warm)
+        assert traffic.message_rows == submitted
+        assert await store.latest_snapshot(run_id="run") == warm
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == 3
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
         await store.close()
@@ -241,7 +255,7 @@ async def test_concurrent_clone_cannot_use_another_transactions_uncommitted_rece
     await root.initialize(local=True)
     clone = root.with_tool_effect_store(InMemoryStepStore())
     pending, release = asyncio.Event(), asyncio.Event()
-    original = context.dialect.insert_ignore_conflict_many
+    original = context.dialect.insert_immutable_many
     held = False
 
     async def pause_then_fail(session, **kwargs):
@@ -254,13 +268,13 @@ async def test_concurrent_clone_cannot_use_another_transactions_uncommitted_rece
             raise RuntimeError("first transaction rolled back")
         return result
 
-    monkeypatch.setattr(context.dialect, "insert_ignore_conflict_many", pause_then_fail)
+    monkeypatch.setattr(context.dialect, "insert_immutable_many", pause_then_fail)
     traffic = _SqlTraffic()
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     first = _snapshot("first", "pending-body")
     try:
         failed = asyncio.create_task(root.save_snapshot(first))
-        await pending.wait()
+        await asyncio.wait_for(pending.wait(), 5)
         second = replace(first, idempotency_key="second")
         successful = asyncio.create_task(clone.save_snapshot(second))
         await asyncio.sleep(0)

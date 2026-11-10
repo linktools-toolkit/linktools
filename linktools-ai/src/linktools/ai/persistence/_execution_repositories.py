@@ -104,7 +104,7 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
         identity = self._identity_key(record.scope, record.idempotency_key_digest)
         try:
             await self._insert(
-                self._stored("idempotency", identity, record, state=record.status.value)
+                await self._stored_content("idempotency", identity, record, state=record.status.value)
             )
             return record
         except AIError as error:
@@ -168,7 +168,7 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await _replace_checked(
                 transaction,
-                _projected_record(self, current_record, next_record),
+                await self._projected_content(current_record, next_record),
                 current_record.storage_revision,
             )
             return next_record
@@ -235,7 +235,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             records = await self._records("execution", states=states, cursor=next_cursor, limit=limit + 1)
             if not records:
                 break
-            for record in records:
+            for record in await self._binding_content.expand_many(records):
                 value = await self._decode(record, ExecutionRecord)
                 next_cursor = _record_cursor(record)
                 if value.recovery is not None and value.recovery_state is not ExecutionRecoveryState.COMPLETED:
@@ -266,18 +266,20 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         current = await self._decode(stored, ExecutionRecord)
         if current.revision != expected_revision or next_record.execution_id != execution_id or next_record.revision != expected_revision + 1:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await _replace_checked(transaction, _projected_record(self, stored, next_record), stored.storage_revision)
+        await _replace_checked(transaction, await self._projected_content(stored, next_record), stored.storage_revision)
         return next_record
 
     async def commit_boundary_in_transaction(
         self, transaction: StateTransaction, observed: Observed[ExecutionRecord], *,
         next_record: ExecutionRecord, expected_producer_generation: int,
-        expected_producer_claim_id: str,
+        expected_producer_claim_id: str, allow_cancelling: bool = False,
     ) -> Observed[ExecutionRecord]:
         """Publish a prepared boundary using its confirmed control receipt."""
         current = observed.value
         if (current.execution_id != next_record.execution_id
-                or current.status is not ExecutionStatus.STARTED
+                or not (current.status is ExecutionStatus.STARTED
+                        or allow_cancelling and current.status is ExecutionStatus.CANCELLING
+                        and next_record == current)
                 or current.producer_generation != expected_producer_generation
                 or current.producer_claim_id != expected_producer_claim_id
                 or next_record.producer_generation != current.producer_generation
@@ -291,7 +293,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if revision is None or revision != observed.storage_revision + 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return Observed(current, revision)
-        candidate = replace(self._stored("execution", next_record.execution_id, next_record,
+        candidate = replace(await self._stored_content("execution", next_record.execution_id, next_record,
                                          state=next_record.status.value),
                             storage_revision=observed.storage_revision + 1)
         await _replace_checked(transaction, candidate, observed.storage_revision)
@@ -329,6 +331,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
         records = (await self._refresh_records(tuple(keys.values())) if refresh else
                    await self._store.read_records(tuple(keys.values())))
+        records = {record.key_digest: record for record in
+                   await self._binding_content.expand_many(tuple(records.values()))}
         values: dict[str, ExecutionRecord] = {}
         for execution_id, key in keys.items():
             record = records.get(key)
@@ -359,6 +363,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return tuple(self._key(kind, execution.execution_id) for kind in kinds)
 
     async def create_execution(self, execution: ExecutionRecord) -> ExecutionRecord:
+        _require_tenant(execution, self._tenant_id)
+        await self._binding_content.prepare(self._stored(
+            "execution", execution.execution_id, execution, state=execution.status.value,
+        ))
         return await self._store.mutate(
             lambda transaction: self.create_execution_in_transaction(transaction, execution)
         )
@@ -367,13 +375,15 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         self, transaction: StateTransaction, execution: ExecutionRecord,
     ) -> ExecutionRecord:
         _require_tenant(execution, self._tenant_id)
+        if execution.input_context is not None:
+            execution = replace(execution, repository_instructions=None)
         current = await transaction.get_record(self._key("execution", execution.execution_id))
         if current is not None:
             existing = await self._decode(current, ExecutionRecord)
             if existing != execution:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return existing
-        await transaction.insert_record(self._stored(
+        await transaction.insert_record(await self._stored_content(
             "execution", execution.execution_id, execution, state=execution.status.value,
         ))
         return execution
@@ -394,7 +404,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if statuses is None
             else frozenset(status.value for status in statuses) | {"execution_handoff"},
         )
-        values = tuple([await self._decode(record, ExecutionRecord) for record in records])
+        values = tuple([await self._decode(record, ExecutionRecord)
+                        for record in await self._binding_content.expand_many(records)])
         return tuple(value for value in values if statuses is None or value.status in statuses)
 
     async def list_children(
@@ -407,7 +418,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             parent=self._parent("execution", "execution", execution_id),
         )
         return tuple(
-            [await self._decode(record, ExecutionRecord) for record in records]
+            [await self._decode(record, ExecutionRecord)
+             for record in await self._binding_content.expand_many(records)]
         )
 
     async def list_candidates(
@@ -444,7 +456,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             cursor=cursor,
             limit=limit,
         )
-        selected = records[:limit]
+        selected = await self._binding_content.expand_many(records[:limit])
         candidates: list[ExecutionCandidate] = []
         for record in selected:
             candidates.append(
@@ -536,7 +548,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         await _replace_checked(
             transaction,
-            _projected_record(self, stored, updated),
+            await self._projected_content(stored, updated),
             stored.storage_revision,
         )
         stream = stream_digest(
@@ -611,7 +623,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         await _replace_checked(
             transaction,
-            _projected_record(self, stored, updated),
+            await self._projected_content(stored, updated),
             stored.storage_revision,
         )
         stream = stream_digest(
@@ -660,6 +672,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
         self._idempotency._require_resource_kind(reservation.idempotency)
+        if reservation.execution.input_context is not None:
+            reservation = replace(reservation, execution=replace(reservation.execution, repository_instructions=None))
+        await self._binding_content.prepare(self._stored(
+            "execution", reservation.execution.execution_id, reservation.execution,
+            state=reservation.execution.status.value,
+        ))
         if reservation.budget is not None and (
             reservation.execution.budget_scope_id != "execution:" + reservation.execution.execution_id
         ):
@@ -724,7 +742,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
             await transaction.insert_records(
                 (
-                    self._stored(
+                    await self._stored_content(
                         "execution",
                         reservation.execution.execution_id,
                         reservation.execution,
@@ -860,7 +878,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             recovery=current.recovery or (ExecutionRecoveryDetail() if current.binding_kind == "agent" else None),
         )
         execution_replacement = RecordReplacement(
-            _projected_record(self, execution_record, next_execution),
+            await self._projected_content(execution_record, next_execution),
             execution_record.storage_revision,
         )
         if idempotency_created:
@@ -972,7 +990,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         await _replace_checked(
             transaction,
-            _projected_record(self, record, next_value),
+            await self._projected_content(record, next_value),
             record.storage_revision,
         )
         return next_value
@@ -995,7 +1013,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             current = observed.value
             if current.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            record = replace(self._stored("execution", execution_id, current, state=current.status.value),
+            record = replace(await self._stored_content("execution", execution_id, current, state=current.status.value),
                              storage_revision=observed.storage_revision)
         if (current.status is not ExecutionStatus.STARTED
                 or current.revision != expected_revision
@@ -1006,8 +1024,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         admitted = replace(current, agent_run_seq=1, revision=current.revision + 1,
                            producer_generation=current.revision + 1, producer_claim_id=producer_claim_id,
                            updated_at=await transaction.now(), recovery=current.recovery if recovery is None else recovery)
-        final = replace(admitted, input_context=input_context, revision=admitted.revision + 1)
-        await _replace_checked(transaction, _projected_record(self, record, final), record.storage_revision)
+        final = replace(admitted, input_context=input_context, repository_instructions=None,
+                        revision=admitted.revision + 1)
+        await _replace_checked(transaction, await self._projected_content(record, final), record.storage_revision)
         return final
 
     async def enter_deferred_wait_in_transaction(
@@ -1104,7 +1123,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         await _replace_checked(
             transaction,
-            _projected_record(self, record, next_value),
+            await self._projected_content(record, next_value),
             record.storage_revision,
         )
         return next_value
@@ -1226,7 +1245,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             await _replace_checked(
                 transaction,
-                _projected_record(self, record, next_value),
+                await self._projected_content(record, next_value),
                 record.storage_revision,
             )
             return next_value
@@ -1305,7 +1324,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 updated_at=updated_at,
                 **task_updates,
             )
-            candidate = _projected_record(self, stored, next_value)
+            candidate = await self._projected_content(stored, next_value)
             await _replace_checked(transaction, candidate, stored.storage_revision)
             first_sequence = stored_value.event_seq + 1
             facts = [
@@ -1431,6 +1450,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if (
                 stored_value.revision != commit.expected_revision
                 or stored_value.event_seq != commit.expected_event_seq
+                or stored_value.native_step_source != commit.execution.native_step_source
                 or stored_value.restart_checkpoints != commit.execution.restart_checkpoints
                 or stored_value.durable_trace != commit.execution.durable_trace
                 or stored_value.producer_generation != commit.execution.producer_generation
@@ -1486,7 +1506,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             replacements = [
                 RecordReplacement(
-                    _projected_record(self, stored, next_execution),
+                    await self._projected_content(stored, next_execution),
                     stored.storage_revision,
                 )
             ]
@@ -1660,7 +1680,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                      "parent_execution_id", "parent_invocation_id", "root_execution_id", "previous_execution_id",
                      "fork_base_execution_id", "lineage_kind", "created_at", "mode", "planning", "thinking",
                      "memory_scope", "repository_instructions", "context_imported", "correlation",
-                     "requires_task_invocation_capture", "budget_scope_id", "restart_checkpoints", "durable_trace", "tool_effects", "session_context",
+                     "requires_task_invocation_capture", "budget_scope_id", "native_step_source", "restart_checkpoints", "durable_trace", "tool_effects", "session_context",
                      "conversation"):
             if getattr(reservation.execution, name) != getattr(commit.execution, name):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1682,7 +1702,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                             result_digest=None if commit.result.output is None else commit.result.output.digest,
                             error_code=commit.execution.error_code,
                             updated_at=await transaction.now())
-        execution_record = self._stored("execution", execution_id, final, state=final.status.value)
+        execution_record = await self._stored_content("execution", execution_id, final, state=final.status.value)
         await transaction.insert_records((
             execution_record,
             self._idempotency._stored("idempotency", identity, completed, state=completed.status.value),
@@ -1733,7 +1753,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             await _replace_checked(
                 transaction,
-                _projected_record(self, stored, next_value),
+                await self._projected_content(stored, next_value),
                 stored.storage_revision,
             )
             return True
@@ -1771,7 +1791,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             await _replace_checked(
                 transaction,
-                _projected_record(self, stored, next_value),
+                await self._projected_content(stored, next_value),
                 stored.storage_revision,
             )
             return next_value
@@ -1810,7 +1830,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             current = observed.value
             if current.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            stored = replace(self._stored("execution", execution_id, current, state=current.status.value),
+            stored = replace(await self._stored_content("execution", execution_id, current, state=current.status.value),
                              storage_revision=observed.storage_revision)
         if current.status not in {
             ExecutionStatus.SUCCEEDED,
@@ -1828,7 +1848,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         await _replace_checked(
             transaction,
-            _projected_record(self, stored, next_value),
+            await self._projected_content(stored, next_value),
             stored.storage_revision,
         )
         return True, next_value
@@ -1930,7 +1950,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         await transaction.insert_record(
-            self._stored(
+            await self._stored_content(
                 "execution_history_seal",
                 seal.execution_id,
                 seal,
@@ -2027,7 +2047,7 @@ class EventRepositoryImpl(_RepositoryBase):
         )
         await _replace_checked(
             transaction,
-            _projected_record(self, current, next_execution),
+            await self._projected_content(current, next_execution),
             current.storage_revision,
         )
         facts = tuple(

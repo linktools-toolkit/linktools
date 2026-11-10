@@ -24,10 +24,18 @@ def encode_payload_bytes(raw: bytes) -> tuple[str, str, int, bytes]:
 def decode_payload_bytes(
     content: bytes, *, codec: str, raw_digest: str, raw_size: int,
 ) -> bytes:
+    if type(raw_size) is not int or raw_size < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if codec == "zlib":
         try:
-            content = zlib.decompress(content)
-        except zlib.error as error:
+            decoder = zlib.decompressobj()
+            # The extra byte distinguishes a false declared size without ever
+            # materializing the rest of an oversized compressed payload.
+            content = decoder.decompress(content, raw_size + 1)
+            if (len(content) > raw_size or not decoder.eof
+                    or decoder.unused_data or decoder.unconsumed_tail):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        except (zlib.error, OverflowError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     elif codec != "raw":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

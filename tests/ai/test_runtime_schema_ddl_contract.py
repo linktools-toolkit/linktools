@@ -5,8 +5,11 @@
 
 import re
 from pathlib import Path
+from typing import cast
 
-from linktools.ai.migrate import build_sql_schema_metadata
+import pytest
+
+from linktools.ai.migrate import build_sql_schema_metadata, provision_runtime_database
 from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from sqlalchemy.dialects import mysql
@@ -200,3 +203,71 @@ def test_runtime_fact_ddl_comments_match_canonical_metadata() -> None:
     ).read_text(encoding="utf-8")
     assert f"COMMENT='{facts.comment}'" in migration
     assert f"COMMENT '{facts.c.state.comment}'" in migration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("domain", (PersistenceDomain.TRACE, PersistenceDomain.EXECUTION, PersistenceDomain.CONVERSATION))
+@pytest.mark.parametrize("dialect_name", ("sqlite", "postgresql", "mysql"))
+async def test_selected_native_schema_preserves_canonical_dialect_ddl(
+    monkeypatch: pytest.MonkeyPatch, domain: PersistenceDomain, dialect_name: str,
+) -> None:
+    from sqlalchemy import MetaData, create_mock_engine
+    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.schema import ExecutableDDLElement
+
+    from linktools.ai.migrate import _database
+    from linktools.ai.storage import InMemoryObjectStore
+
+    captured: list[MetaData] = []
+
+    async def capture(_engine: AsyncEngine, metadata: MetaData) -> None:
+        captured.append(metadata)
+
+    monkeypatch.setattr(_database, "provision_sql", capture)
+    await provision_runtime_database(
+        cast(AsyncEngine, object()), domains=(domain,), object_store=InMemoryObjectStore(),
+    )
+    selected = captured[0]
+    assert set(selected.tables) == {
+        "ai_state_records", "ai_state_aliases", "ai_state_facts",
+        "ai_state_sequences", "ai_state_operations", "ai_step_messages", "ai_step_sequences",
+    } | ({"ai_step_runs", "ai_step_events"} if domain is not PersistenceDomain.CONVERSATION else set())
+
+    def compile_ddl(metadata: MetaData) -> list[str]:
+        statements: list[str] = []
+
+        def emit(statement: ExecutableDDLElement, *_args: object, **_kwargs: object) -> None:
+            statements.append(str(statement.compile(dialect=engine.dialect)))
+
+        engine = create_mock_engine(f"{dialect_name}://", emit)
+        metadata.create_all(
+            engine, tables=[metadata.tables[name] for name in selected.tables],
+            checkfirst=False,
+        )
+        return sorted(statements)
+
+    # Mock-engine emission honors dialect conditions, unlike direct CreateIndex compilation.
+    assert compile_ddl(selected) == compile_ddl(build_sql_schema_metadata())
+
+
+@pytest.mark.parametrize("domains", (
+    (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION, PersistenceDomain.CHECKPOINT),
+    (PersistenceDomain.EXECUTION, PersistenceDomain.CONVERSATION, PersistenceDomain.CHECKPOINT),
+    (PersistenceDomain.CHECKPOINT, PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION),
+))
+def test_native_domain_schema_composes_without_replacing_canonical_tables(domains) -> None:
+    from sqlalchemy import MetaData
+    from linktools.ai.persistence.schema import build_step_domain_sql_metadata, build_step_sql_metadata
+
+    metadata = MetaData()
+    retained = {}
+    for domain in domains:
+        build_step_domain_sql_metadata((domain,), metadata=metadata)
+        for name, table in retained.items():
+            assert metadata.tables[name] is table
+        retained.update(metadata.tables)
+    complete = build_step_sql_metadata()
+    assert set(metadata.tables) == set(complete.tables)
+    for name, table in metadata.tables.items():
+        assert set(index.name for index in table.indexes) == set(index.name for index in complete.tables[name].indexes)
+        assert len(table.indexes) == len(complete.tables[name].indexes)

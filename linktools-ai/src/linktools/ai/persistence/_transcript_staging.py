@@ -3,7 +3,7 @@
 """Process-local transcript visibility before checkpoint materialization."""
 
 import hashlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from weakref import WeakValueDictionary
 
@@ -137,9 +137,18 @@ class MessageArchive:
     def snapshot(self, messages: Sequence[ModelMessage]) -> MessageSnapshot:
         if isinstance(messages, MessageSnapshot):
             return messages
+        return self._snapshot_payloads(encode_model_messages((message,)) for message in messages)
+
+    def snapshot_payloads(self, payloads: Sequence[bytes]) -> MessageSnapshot:
+        """Validate frozen singleton messages without replacing omitted wire fields."""
+        for payload in payloads:
+            if type(payload) is not bytes or len(decode_model_messages(payload)) != 1:
+                raise ValueError("frozen message payload must contain exactly one message")
+        return self._snapshot_payloads(payloads)
+
+    def _snapshot_payloads(self, payloads: Iterable[bytes]) -> MessageSnapshot:
         roots: list[_MessageTree] = []
-        for message in messages:
-            payload = encode_model_messages((message,))
+        for payload in payloads:
             node = self._leaves.get(payload)
             if node is None:
                 node = _MessageTree(1, payload)

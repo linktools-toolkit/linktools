@@ -21,7 +21,7 @@ from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.contracts import ContextProjection, ExecutionEventAppend, ExecutionHistorySealRecord, ExecutionTerminalCommit, ExecutionTerminalCommitResult, HistoryQuality, ResultRecord, TranscriptChunk
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence._history import TranscriptRepository
-from linktools.ai.persistence._archive_closure import rekey_archive_roots
+from linktools.ai.persistence._archive_closure import rekey_archive_roots, rekey_native_message_roots
 from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._sql import _SqlTransaction
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
@@ -47,8 +47,12 @@ async def _snapshot(store, *, scope_mapping=None):
         return snapshot
     records, facts, sequences = snapshot
     return (
-        tuple(replace(item, data=rekey_archive_roots(dict(item.data), scope_mapping)) for item in records),
-        tuple(replace(item, data=rekey_archive_roots(dict(item.data), scope_mapping)) for item in facts),
+        tuple(replace(item, data=rekey_native_message_roots(
+            rekey_archive_roots(dict(item.data), scope_mapping), scope_mapping,
+        )) for item in records),
+        tuple(replace(item, data=rekey_native_message_roots(
+            rekey_archive_roots(dict(item.data), scope_mapping), scope_mapping,
+        )) for item in facts),
         sequences,
     )
 
@@ -82,6 +86,7 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
             states.append(state)
             archive = await _trace_archive(state)
             if name == "scalar":
+                native_messages = archive.transcript_repository._native_messages
                 archive._history = ScalarTranscript(
                     archive.state_store, object_store=archive.transcript_repository._object_store, namespace="checkpoint-batch",
                     tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
@@ -90,6 +95,8 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
                         PersistenceDomain.TRACE, reference,
                     ),
                 )
+                if native_messages is not None:
+                    archive.transcript_repository.bind_native_message_store(native_messages)
             archives.append(archive)
         messages = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(133)]
         checkpoints = (
@@ -213,6 +220,8 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
             repository = original if name == "batch" else ScalarExecution(
                 original.state_store, namespace="terminal-batch", tenant_id="tenant",
             )
+            if name == "scalar":
+                await repository.initialize_content(create=False)
             await repository.create_execution(current)
             commands = StateCommands(
                 repository, namespace="terminal-batch", events=state.execution.events,

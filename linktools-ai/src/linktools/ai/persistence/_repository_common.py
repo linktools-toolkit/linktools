@@ -42,6 +42,7 @@ from .contracts import (
     MemoryRecord,
     SessionRecord,
 )
+from ._execution_binding import ExecutionBindingContent
 from ._evaluation_records import (
     EvaluationCaseRecord,
     EvaluationDatasetRecord,
@@ -85,9 +86,24 @@ class _RepositoryBase:
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._domain = domain
+        self._binding_content = ExecutionBindingContent(store, namespace=namespace, tenant_id=tenant_id)
 
     async def initialize(self) -> None:
         return None
+
+    async def initialize_content(self, *, create: bool, deferred: bool = False) -> None:
+        """Opt into shared binding writes before entering repository transactions.
+
+        Standalone repositories otherwise retain complete inline bindings. A
+        low-level callback reading shared Runtime data must also call this
+        operation before entry; callbacks cannot enlist new archive stores.
+        """
+        if self._domain is PersistenceDomain.EXECUTION:
+            if deferred:
+                if create:
+                    self._binding_content.enable_sharing()
+            else:
+                await self._binding_content.initialize(create=create)
 
     async def close(self) -> None:
         return None
@@ -150,6 +166,17 @@ class _RepositoryBase:
             parent=parent,
             state=state,
         )
+
+    async def _stored_content(
+        self, kind: str, identity: object, value: object, *, scope: bytes | None = None,
+        parent: bytes | None = None, state: str | None = None,
+    ) -> StoredRecord:
+        return await self._binding_content.compact(self._stored(
+            kind, identity, value, scope=scope, parent=parent, state=state,
+        ))
+
+    async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
+        return await self._binding_content.compact(_projected_record(self, current, value), previous=current)
 
     async def _record(self, key: bytes) -> StoredRecord | None:
         return await self._store.read(lambda transaction: transaction.get_record(key))
@@ -251,9 +278,14 @@ class _RepositoryBase:
         return await self._store.read(lambda transaction: transaction.get_records(keys))
 
     async def _insert(self, record: StoredRecord) -> None:
-        await self._store.mutate(lambda transaction: transaction.insert_record(record))
+        await self._binding_content.prepare(record)
+        async def insert(transaction: StateTransaction) -> None:
+            await transaction.insert_record(await self._binding_content.compact(record))
+        await self._store.mutate(insert)
 
     async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
+        if target is ExecutionRecord:
+            record = await self._binding_content.expand(record)
         value = _decode_enveloped_domain(
             record.data,
             target,
@@ -298,7 +330,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         self._value_type = value_type
 
     async def initialize(self) -> None:
-        return None
+        await super().initialize()
 
     def _identity(self, value: object) -> object:
         return _canonical_record_identity(self._kind, value)
@@ -336,7 +368,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return existing
         await transaction.insert_record(
-            self._stored(self._kind, identity, value, state=_record_state(value))
+            await self._stored_content(self._kind, identity, value, state=_record_state(value))
         )
         _logger.debug(
             "created Runtime record in group: kind=%s id=%s",

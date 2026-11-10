@@ -110,12 +110,12 @@ async def materialize_runtime_storage(
     register_cleanup: Callable[[tuple[Callable[[], Awaitable[None]], ...]], None],
 ) -> _MaterializedRuntimeStorage:
     from ._schema import build_runtime_sql_metadata
-    from ._step_schema import build_step_sql_metadata
+    from ._step_schema import build_step_domain_sql_metadata
 
     def configure_schema(domain: PersistenceDomain, metadata: "MetaData") -> None:
         build_runtime_sql_metadata(frozenset({domain}), metadata=metadata)
-        if domain is PersistenceDomain.EXECUTION and plan.route(domain).kind == "sqlite":
-            build_step_sql_metadata(metadata=metadata)
+        if plan.route(domain).kind == "sqlite":
+            build_step_domain_sql_metadata((domain,), metadata=metadata)
         if object_store is None and runtime_domain_uses_object_store(domain):
             build_object_sql_metadata(metadata=metadata)
 
@@ -230,6 +230,7 @@ async def materialize_runtime_storage(
     for component in _unique(components):
         register_cleanup((component.close,))
     for component in _unique(components):
+        await component.initialize_content(create=not read_only, deferred=True)
         await component.initialize()
 
     repositories = _repositories(bundles)

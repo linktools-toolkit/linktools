@@ -94,6 +94,10 @@ class InMemoryStateStorageGroup:
                 self._partitions[key] = store
             return store
 
+    @property
+    def opened_archive(self) -> tuple[str, "InMemoryStateStore"] | None:
+        return self._archive
+
     async def open_archive(
         self, *, create: bool = False,
     ) -> tuple[str, "InMemoryStateStore"] | None:

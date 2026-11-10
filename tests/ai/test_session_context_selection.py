@@ -9,7 +9,7 @@ from sqlalchemy import event
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.persistence.runs import ContentArchive
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence._conversation_persistence import ConversationPersistence
 from linktools.ai.runtime import Runtime
 
@@ -47,6 +47,15 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
         return result
 
     monkeypatch.setattr(ContentArchive, "_read_content", read_content)
+    original_native_read = SqlStepStore.read_message_roots
+
+    async def read_native(self, roots):
+        result = await original_native_read(self, roots)
+        if active:
+            bodies.extend(len(body) for group in result for body in group)
+        return result
+
+    monkeypatch.setattr(SqlStepStore, "read_message_roots", read_native)
     original = ConversationPersistence.load_committed_conversation_context
 
     async def load(self, **kwargs):

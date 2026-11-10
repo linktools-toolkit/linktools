@@ -1056,6 +1056,7 @@ async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkey
     from linktools.ai.persistence import _archive
     from linktools.ai.persistence.state import FactQuery
     from linktools.ai.storage import _write_cache
+    from .test_history_projection_conformance import _message_content_records
 
     clock = _clock(monkeypatch)
     monkeypatch.setattr(_write_cache, "time", lambda: clock.now)
@@ -1071,17 +1072,15 @@ async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkey
         stream = transcript.transcript_stream(session.history_id)
         facts = await archive.state_store.read(lambda tx: tx.list_facts(FactQuery(stream)))
         contents = await transcript.content_archive()
-        content_ids = []
-        for fact in facts:
-            content_ids.extend(await contents.content_ids(transcript.decode_chunk(fact).content))
-        records = await contents.content_records(content_ids)
+        roots = tuple(transcript.decode_chunk(fact).content for fact in facts)
+        records = await _message_content_records(contents, roots)
         references = [record.payload.ref for record in records]
         assert references and all(reference is not None for reference in references)
         if warm_page:
             detail = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         else:
             await transcript.load_messages(session.history_id)
-        objects = state.object_store(PersistenceDomain.CONVERSATION)
+        objects = state.archive_object_store(PersistenceDomain.CONVERSATION)
         for reference in references:
             await objects.delete_object(reference.key, expected_digest=reference.digest)
         clock.now += 2

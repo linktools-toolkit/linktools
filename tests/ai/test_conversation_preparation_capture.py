@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Completed preparation captures bind missing observations to exact owner keys."""
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,10 +9,10 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, Persistence
-from linktools.ai.persistence.state import active_state_scope
+from linktools.ai.persistence.state import GroupRecordReader, active_state_scope
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
-from .test_checkpoint_metadata_snapshot_io import _checkpoint
+from .test_checkpoint_metadata_snapshot_io import _assert_prepared_values_equal, _checkpoint
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
@@ -75,20 +76,30 @@ async def test_completed_capture_matches_uncaptured_preparation_outside_transact
         expected = await archive.prepare_conversation_checkpoint(run, checkpoint)
         observed = await _capture(archive, run, checkpoint)
         content = await archive.transcript_repository.content_archive(create=True)
-        prepare_content = content.prepare_append
+        native = archive.transcript_repository._native_messages
+        prepare_owner = native if native is not None else content
+        prepare_name = "prepare_message_content" if native is not None else "prepare_append"
+        prepare_content = getattr(prepare_owner, prepare_name)
         checked = []
         async def outside_scope(*args, **kwargs):
             assert active_state_scope() is None
             checked.append(True)
             return await prepare_content(*args, **kwargs)
-        monkeypatch.setattr(content, "prepare_append", outside_scope)
+        monkeypatch.setattr(prepare_owner, prepare_name, outside_scope)
         actual = await archive.prepare_conversation_checkpoint(run, checkpoint, observed_records=observed)
-        assert actual == expected and checked
+        assert actual[0] == expected[0] and checked
+        await _assert_prepared_values_equal(archive, actual[1], expected[1])
         async def nested(group):
             with pytest.raises(AIError) as raised:
                 await archive.prepare_conversation_checkpoint(run, checkpoint, observed_records=observed)
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         await archive.state_store.storage_group.read_many(tuple(observed), nested)
+        await archive.state_store.mutate(lambda transaction: archive.materialize_checkpoint_in_transaction(
+            transaction, run, actual[1][0],
+        ))
+        restored = await archive.latest_checkpoint(agent_run_id=run.agent_run_id, include_interrupted=True)
+        assert restored is not None and restored.messages == actual[0].messages
+        assert (restored.step_index, restored.state) == (actual[0].step_index, actual[0].state)
     finally:
         await state.close()
 
@@ -123,24 +134,49 @@ async def test_custom_preparation_keys_do_not_open_archive_or_encode_bodies(
         await state.close()
 
 
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("observation", ("changed_body", "omitted_content"))
-async def test_unobserved_actual_content_is_freshly_checked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, observation: str,
+async def test_unobserved_content_is_validated_before_owner_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, observation: str, backend: str,
 ) -> None:
     from linktools.ai.model.messages import encode_model_messages
     from linktools.ai.persistence._archive import PreparedArchive
-    state = Persistence(_storage("sqlite", tmp_path))
+    state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="capture", tenant_id="tenant")
     archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     try:
-        observed = await _capture(archive, run, checkpoint)
+        observed = (await _capture(archive, run, checkpoint)
+                    if isinstance(archive.state_store.storage_group, GroupRecordReader) else None)
         content = await archive.transcript_repository.content_archive(create=True)
         if observation == "changed_body":
             checkpoint.messages[0].parts[0].content = "x"
-        else:
+        elif observed is not None:
             observed[content.store] = {}
         actual = PreparedArchive()
+        native = archive.transcript_repository._native_messages
+        if native is not None:
+            await native.prepare_archived_messages(checkpoint.messages[:1], actual)
+            identity, body = next(iter(actual.native_messages.values())).messages[0]
+            corrupt = json.loads(body)
+            corrupt["raw_size"] += 1
+            async with native.storage_context.engine.begin() as connection:
+                await connection.execute(native._message_content._messages.insert().values(
+                    store_digest=native.store_digest, sha256=identity, message=json.dumps(corrupt),
+                ))
+            _relocated, batch = await archive.prepare_conversation_checkpoint(
+                run, checkpoint, observed_records=observed,
+            )
+            assert (identity, body) in tuple(
+                item for value in batch[0].archive.native_messages.values() for item in value.messages
+            )
+            with pytest.raises(AIError) as raised:
+                await archive.state_store.mutate(lambda transaction: archive.materialize_checkpoint_in_transaction(
+                    transaction, run, batch[0],
+                ))
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            assert not await archive.get_agent_run(agent_run_id="run")
+            return
         values = (("model-message", encode_model_messages((checkpoint.messages[0],))),)
         await content.prepare_content(values, actual)
         record = actual.records[content.content_record_keys(values)[0]]
@@ -176,7 +212,8 @@ async def test_changed_body_does_not_reuse_unrelated_missing_observations(tmp_pa
         actual = await archive.prepare_conversation_checkpoint(
             run, checkpoint, observed_records=observed, archive=prepared,
         )
-        assert actual == expected
+        assert actual[0] == expected[0]
+        await _assert_prepared_values_equal(archive, actual[1], expected[1])
         assert not prepared._observed_content
     finally:
         await state.close()

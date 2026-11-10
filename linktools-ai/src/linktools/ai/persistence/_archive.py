@@ -6,6 +6,7 @@ import hashlib
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -13,6 +14,11 @@ from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
 from ._payload import PAYLOAD_COMPRESS_MINIMUM, decode_payload_bytes, encode_payload_bytes
 from .state import StateStore, StateTransaction, StoredRecord, record_key_digest
+
+
+if TYPE_CHECKING:
+    from ._message_root import NativeMessageSequence
+    from ._step_message_content import NativeMessageContent, PreparedNativeMessages
 
 
 def _integrity() -> AIError:
@@ -125,6 +131,28 @@ class ImmutableSequenceNode:
         if (self.tree_count == 1) != (self.left is None):
             raise _integrity()
 
+    @classmethod
+    def forest_weights(cls, count: int) -> tuple[int, ...]:
+        """Return the bounded tree sizes of a canonical occurrence sequence."""
+        count = _count(count)
+        values: list[int] = []
+        while count:
+            size = (1 << ((count + 1).bit_length() - 1)) - 1
+            values.append(size)
+            count -= size
+        return tuple(reversed(values))
+
+    @classmethod
+    def extend(
+        cls, content_id: str, first: "ImmutableSequenceNode | None",
+        second: "ImmutableSequenceNode | None",
+    ) -> "ImmutableSequenceNode":
+        """Append one occurrence using the captured immutable forest frontier."""
+        if first is not None and second is not None and first.tree_count == second.tree_count:
+            return cls(content_id, 1 + first.tree_count + second.tree_count,
+                       first.identity, second.identity, second.next_forest)
+        return cls(content_id, next_forest=None if first is None else first.identity)
+
     def to_json(self) -> dict[str, JsonValue]:
         return {"content": self.content_id, "count": self.tree_count,
                 "left": self.left, "right": self.right, "next": self.next_forest}
@@ -179,6 +207,10 @@ class PreparedArchive:
     owner: tuple[str, str, str] | None = None
     records: dict[bytes, StoredRecord] = field(default_factory=dict)
     nodes: dict[str, ImmutableSequenceNode] = field(default_factory=dict)
+    native_messages: dict["NativeMessageSequence", "PreparedNativeMessages"] = field(default_factory=dict)
+    native_publishers: dict["NativeMessageSequence", Callable[[StateTransaction, "PreparedArchive"], Awaitable[None]]] = field(default_factory=dict, repr=False, compare=False)
+    # Uncommitted representation reuse belongs only to this preparation and owner epoch.
+    native_payloads: dict["NativeMessageContent", tuple[int, dict[str, ContentRecord]]] = field(default_factory=dict, repr=False, compare=False)
     _verified_content: dict[bytes, StoredRecord] = field(default_factory=dict, repr=False, compare=False)
     _observed_content: dict[bytes, StoredRecord | None] = field(default_factory=dict, repr=False, compare=False)
 
@@ -206,6 +238,8 @@ class PreparedArchive:
                 if combined.owner is not None and combined.owner != value.owner:
                     raise _integrity()
                 combined.owner = value.owner
+            combined.native_messages.update(value.native_messages)
+            combined.native_publishers.update(value.native_publishers)
             for key, record in value.records.items():
                 previous = combined.records.get(key)
                 if previous is not None and previous != record:
@@ -232,19 +266,12 @@ class _RangeNode:
     expand: bool = True
 
 
-def _forest_weights(count: int) -> tuple[int, ...]:
-    values: list[int] = []
-    while count:
-        size = (1 << ((count + 1).bit_length() - 1)) - 1
-        values.append(size)
-        count -= size
-    return tuple(reversed(values))
-
 
 class ContentArchive:
     def __init__(self, store: StateStore, scope_id: str, *, namespace: str,
                  tenant_id: str, object_store: ObjectStore | None,
                  object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None) -> None:
+        self._message_publisher: Callable[[StateTransaction, PreparedArchive], Awaitable[None]] | None = None
         self.store = store
         self.scope_id = scope_id
         self._namespace = namespace
@@ -332,21 +359,46 @@ class ContentArchive:
                     prepared.verify_content(stored)
                 prepared.records[key] = stored
                 continue
-            compression, digest, size, encoded = encode_payload_bytes(raw)
-            if self._objects is None or size < PAYLOAD_COMPRESS_MINIMUM:
-                payload = StoredPayload.inline_bytes(encoded)
-            else:
-                stored_digest = hashlib.sha256(encoded).hexdigest()
-                object_key = self._object_prefix + stored_digest
-                async def chunks(value: bytes = encoded) -> AsyncIterator[bytes]:
-                    yield value
-                stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
-                                               expected_digest=stored_digest)
-                payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
+            compression, payload, _encoded = await self.prepare_payload(raw)
+            digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
             content = ContentRecord(codec, digest, size, compression, payload)
             prepared.records[key] = self._record("archive_content", identity, content.to_json())
             prepared.verify_content(prepared.records[key])
         return identities
+
+    async def prepare_payload(
+        self, raw: bytes, *, existing: ContentRecord | None = None,
+    ) -> tuple[str, StoredPayload, bytes]:
+        """Prepare the shared representation without reading or publishing SQL rows."""
+        compression, raw_digest, size, encoded = encode_payload_bytes(raw)
+        if self._objects is None or size < PAYLOAD_COMPRESS_MINIMUM:
+            payload = StoredPayload.inline_bytes(encoded)
+        else:
+            stored_digest = hashlib.sha256(encoded).hexdigest()
+            object_key = self._object_prefix + stored_digest
+            async def chunks() -> AsyncIterator[bytes]:
+                yield encoded
+            expected = StoredPayload.object(ObjectRef("runtime", object_key, stored_digest, len(encoded)))
+            if (existing is not None and existing.codec == "model-message"
+                    and existing.raw_digest == raw_digest and existing.raw_size == size
+                    and existing.compression == compression and existing.payload == expected):
+                payload = existing.payload
+            else:
+                stat = await self._objects.put(object_key, chunks(), expected_size=len(encoded),
+                                               expected_digest=stored_digest)
+                payload = StoredPayload.object(ObjectRef("runtime", object_key, stat.digest, stat.size))
+        return compression, payload, encoded
+
+    async def read_payload_object(self, reference: ObjectRef) -> bytes:
+        """Resolve a canonical message's object through this physical archive route."""
+        if (reference.store_id != "runtime" or reference.key != self._object_prefix + reference.digest):
+            raise _integrity()
+        if self._object_reader is not None:
+            return await self._object_reader(reference)
+        if self._objects is None:
+            raise _integrity()
+        return await read_object(self._objects, reference.key,
+                                 expected_digest=reference.digest, expected_size=reference.size)
 
     async def _frontiers(
         self, transaction: StateTransaction, requests: Sequence[ArchiveNodeRead],
@@ -428,7 +480,7 @@ class ContentArchive:
         tail = root.slices[-1] if root.slices else None
         if tail is None or tail.start != 0 or tail.end != tail.count:
             raise _integrity()
-        weights = _forest_weights(tail.count)
+        weights = ImmutableSequenceNode.forest_weights(tail.count)
         if len(records) != min(2, len(weights)):
             raise _integrity()
         identity = tail.first
@@ -531,11 +583,7 @@ class ContentArchive:
                 if first.next_forest is not None:
                     await self._nodes((first.next_forest,), prepared, cache)
                     second = cache[first.next_forest]
-            if first is not None and second is not None and first.tree_count == second.tree_count:
-                node = ImmutableSequenceNode(content_id, 1 + first.tree_count + second.tree_count,
-                                             first_id, first.next_forest, second.next_forest)
-            else:
-                node = ImmutableSequenceNode(content_id, next_forest=first_id)
+            node = ImmutableSequenceNode.extend(content_id, first, second)
             identity = node.identity
             prepared.nodes[identity] = cache[identity] = node
             record = self._record("archive_sequence", identity, node.to_json())
@@ -608,12 +656,31 @@ class ContentArchive:
                                 (node.left, node.right, node.next_forest) if child is not None)
         return dependencies
 
-    async def publish(self, transaction: StateTransaction, prepared: PreparedArchive) -> None:
+    def bind_message_publisher(
+        self, publisher: Callable[[StateTransaction, PreparedArchive], Awaitable[None]],
+    ) -> None:
+        """Bind native dependencies without making the generic archive their owner."""
+        self._message_publisher = publisher
+
+    async def publish_native(self, transaction: StateTransaction, prepared: PreparedArchive) -> None:
+        """Keep each provisional native sequence with the producer that prepared it."""
+        for root, value in prepared.native_messages.items():
+            publisher = prepared.native_publishers.get(root, self._message_publisher)
+            if publisher is None:
+                raise _integrity()
+            await publisher(transaction, PreparedArchive(native_messages={root: value}))
+
+    async def publish(self, transaction: StateTransaction, prepared: PreparedArchive, *, native: bool = True) -> None:
         """Use the archive transaction enlisted with every owner publication."""
+        if native and prepared.native_messages:
+            await self.publish_native(transaction, prepared)
         prepared.clear_verified_content()
         prepared.clear_content_observation()
         self._bind(prepared)
         dependencies = self._publication_dependencies(prepared)
+        if dependencies.issubset(prepared.records):
+            await transaction.insert_immutable_records(tuple(prepared.records.values()))
+            return
         existing = await transaction.get_records(tuple(set(prepared.records) | dependencies))
         if not dependencies.issubset(set(prepared.records) | set(existing)):
             raise _integrity()
@@ -669,7 +736,7 @@ class ContentArchive:
                 tail = root.slices[-1]
                 if tail.start == 0 and tail.end == tail.count:
                     frontier_first.add(tail.first)
-        weights = [_forest_weights(span.count) for span in spans]
+        weights = [ImmutableSequenceNode.forest_weights(span.count) for span in spans]
         ranges = [(span.count - span.end, span.count - span.start) for span in spans]
         matches: list[list[str | None]] = [[None] * (span.end - span.start) for span in spans]
         queue = deque(_RangeNode(index, span.first, 0, weights[index][0], 0)
@@ -848,7 +915,8 @@ class ContentArchive:
             append_frontiers.update(frontiers)
         return tuple(tuple(decoded[identity] for identity in group) for group in groups)
 
-    async def read_contents(self, identities: Sequence[str], *, codec: str) -> tuple[bytes, ...]:
+    async def read_contents(self, identities: Sequence[str], *, codec: str,
+                            reserve: Callable[[str, int], None] | None = None) -> tuple[bytes, ...]:
         keys = {identity: self._key("archive_content", _digest(identity)) for identity in identities}
         records = await self.store.read_records(tuple(keys.values())) if keys else {}
         decoded: dict[str, bytes] = {}
@@ -859,6 +927,8 @@ class ContentArchive:
             content = ContentRecord.from_json(record.data)
             if content.identity != identity or content.codec != codec:
                 raise _integrity()
+            if reserve is not None:
+                reserve(identity, content.raw_size)
             decoded[identity] = await self._read_content(content)
         return tuple(decoded[identity] for identity in identities)
 

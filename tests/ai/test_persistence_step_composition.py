@@ -180,12 +180,8 @@ async def test_shared_native_factory_does_not_provision_or_dispose_callers_engin
     try:
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         async with Persistence.open("shared", storage=PersistenceStorage.sql(engine)) as persistence:
-            native = await persistence.create_step_store()
-            try:
-                with pytest.raises(OperationalError, match="no such table: ai_step_runs"):
-                    await native.get_run(run_id="unprovisioned")
-            finally:
-                await native.close()
+            with pytest.raises(OperationalError, match="no such table: ai_state_records"):
+                await persistence.create_step_store()
         assert not any(statement.lstrip().upper().startswith(("CREATE", "ALTER", "DROP")) for statement in statements)
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
         await provision_database(engine)
@@ -259,11 +255,15 @@ async def test_native_factory_uses_execution_route_in_split_plan(tmp_path: Path)
             await native.close()
     with sqlite3.connect(execution) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_step_messages", "ai_step_message_refs"} <= tables
+        assert {"ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_step_messages", "ai_step_sequences"} <= tables
         assert connection.execute("SELECT run_id FROM ai_step_runs").fetchall() == [("routed",)]
     with sqlite3.connect(conversation) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        assert not any(name.startswith("ai_step_") for name in tables)
+        assert {name for name in tables if name.startswith("ai_step_")} == {
+            "ai_step_messages", "ai_step_sequences",
+        }
+        assert connection.execute("SELECT * FROM ai_step_messages").fetchall() == []
+        assert connection.execute("SELECT * FROM ai_step_sequences").fetchall() == []
 
 
 @pytest.mark.asyncio

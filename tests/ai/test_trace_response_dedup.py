@@ -8,7 +8,7 @@ from ._runtime_test_helpers import model_features
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.capability import TraceCapability
@@ -23,9 +24,11 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import agent_run_id, canonical_json_bytes
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import NativeMessageRoot, PersistenceStorage
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
+from linktools.ai.persistence._step_message_content import NativeMessageContent
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence._archive import ContentArchive, ContentRecord
+from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, ContentRecord
 from linktools.ai.persistence.contracts import ArchivedContextBlock, ContextProjection, ModelInteractionRecord
 from linktools.ai.persistence._history import encode_model_messages
 from linktools.ai.persistence._step_archive import StateStepArchive
@@ -67,14 +70,39 @@ def _archived_block(projection: ContextProjection | None) -> ArchivedContextBloc
     return block
 
 
+async def _message_ids(
+    archive: StateStepArchive, roots: Sequence[ArchiveRoot | NativeMessageRoot],
+) -> tuple[tuple[str, ...], ...]:
+    repository = archive.transcript_repository
+    groups = await repository._read_message_roots(roots)
+    return tuple(tuple(hashlib.sha256(raw).hexdigest() for raw in group) for group in groups)
+
+
+async def _stored_message_records(
+    archive: StateStepArchive, root: ArchiveRoot | NativeMessageRoot, raw_ids: Sequence[str],
+) -> tuple[ContentRecord, ...]:
+    if isinstance(root, NativeMessageRoot):
+        table = build_step_sql_metadata().tables["ai_step_messages"]
+        async with archive.state_store.context.engine.connect() as connection:
+            bodies = (await connection.execute(select(table.c.message).where(
+                table.c.store_digest == root.store_digest, table.c.sha256.in_(raw_ids),
+            ))).scalars().all()
+        return tuple(ContentRecord.from_json(json.loads(body)) for body in bodies)
+    content = await archive.transcript_repository.content_archive()
+    records = await content.store.read(lambda tx: tx.list_records(RecordQuery(
+        kind="archive_content", scope_digest=bytes.fromhex(root.content_scope),
+    )))
+    return tuple(value for record in records for value in (ContentRecord.from_json(record.data),)
+                 if value.codec == "model-message" and value.raw_digest in raw_ids)
+
+
 async def _transcript_content_ids(archive: StateStepArchive, run_id: str) -> tuple[str, ...]:
     transcript = archive.transcript_repository
     facts = await archive.state_store.read(
         lambda transaction: transaction.list_facts(FactQuery(transcript.transcript_stream(run_id))),
     )
     chunks = tuple(transcript.decode_chunk(fact) for fact in facts)
-    content = await transcript.content_archive()
-    groups = await content.content_ids_many(tuple(chunk.content for chunk in chunks))
+    groups = await _message_ids(archive, tuple(chunk.content for chunk in chunks))
     ids = tuple(identity for group in groups for identity in group)
     assert len(ids) == await transcript.transcript_message_count(run_id)
     return ids
@@ -128,15 +156,13 @@ async def test_trace_response_payload_storage_and_metadata_reads(
             block = _archived_block(records[0].response_context)
             assert block.root.count == 1
             content_archive = await archive.transcript_repository.content_archive()
-            response_ids = await content_archive.content_ids(block.root)
+            response_ids, = await _message_ids(archive, (block.root,))
             transcript_ids = await _transcript_content_ids(archive, run_id)
             assert transcript_ids[1:2] == response_ids
-            response_content, = await content_archive.content_records(response_ids)
-            response_records = await content_archive.store.read(lambda transaction: transaction.list_records(
-                RecordQuery(kind="archive_content", sort_key_prefix=response_content.identity),
-            ))
+            response_records = await _stored_message_records(archive, block.root, response_ids)
+            response_content, = response_records
             assert len(response_records) == 1
-            assert ContentRecord.from_json(response_records[0].data) == response_content
+            assert response_content.raw_digest == response_ids[0]
             persisted = await archive.state_store.read(
                 lambda transaction: transaction.list_records(RecordQuery(kind="model_interaction")),
             )
@@ -183,6 +209,7 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                     raise AssertionError("metadata read decoded archived message content")
 
                 patch.setattr(ContentArchive, "_read_content", reject_body)
+                patch.setattr(NativeMessageContent, "read_hydrated_ranges", reject_body)
 
                 async def reject_projection(*args: object, **kwargs: object) -> None:
                     raise AssertionError("metadata read resolved full model context")
@@ -282,11 +309,11 @@ async def test_compaction_response_retains_independent_evidence(
             blocks = tuple(_archived_block(record.response_context) for record in records)
             assert all(block.root.count == 1 for block in blocks)
             content_archive = await archive.transcript_repository.content_archive()
-            summary_ids, answer_ids = await content_archive.content_ids_many(tuple(block.root for block in blocks))
+            summary_ids, answer_ids = await _message_ids(archive, tuple(block.root for block in blocks))
             transcript_ids = await _transcript_content_ids(archive, run_id)
             assert summary_ids[0] not in transcript_ids
             assert answer_ids[0] in transcript_ids
-            assert await content_archive.read_contents(summary_ids, codec="model-message")
+            assert (await archive.transcript_repository._read_message_roots((blocks[0].root,)))[0]
             resolved = await archive.resolve_model_interactions(records)
             assert [value[1][0].parts[0].content for value in resolved] == ["retained summary"] * 2
             public = await execution.model_interactions(include_content=True)
@@ -304,7 +331,7 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
     from linktools.ai.observe.journal import ModelRequestJournal
     from linktools.ai.persistence import Persistence
     from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
-    from linktools.ai.storage import ObjectRef, ObjectStoreMaintenance
+    from linktools.ai.storage import ObjectRef, ObjectStoreDeletion
     from .test_evaluation_retention import Offline
 
     response = ModelResponse(
@@ -352,19 +379,17 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
             blocks = tuple(_archived_block(record.response_context) for record in records)
             assert all(block.root.count == 1 for block in blocks)
             content_archive = await archive.transcript_repository.content_archive()
-            first_ids, second_ids = await content_archive.content_ids_many(tuple(block.root for block in blocks))
+            first_ids, second_ids = await _message_ids(archive, tuple(block.root for block in blocks))
             assert len(first_ids) == 1 and first_ids == second_ids
             transcript_ids = await _transcript_content_ids(archive, "run")
             assert len(transcript_ids) == 4
             assert transcript_ids[0] != transcript_ids[2]
             assert transcript_ids[1:2] == transcript_ids[3:4] == first_ids
-            response_content, = await content_archive.content_records(first_ids)
+            response_content, = await _stored_message_records(archive, blocks[0].root, first_ids)
             raw = encode_model_messages((response,))
             assert response_content.raw_digest == hashlib.sha256(raw).hexdigest()
             assert response_content.raw_size == len(raw)
-            response_records = await content_archive.store.read(lambda transaction: transaction.list_records(
-                RecordQuery(kind="archive_content", sort_key_prefix=response_content.identity),
-            ))
+            response_records = await _stored_message_records(archive, blocks[0].root, first_ids)
             assert len(response_records) == 1
             checkpoint = await archive.latest_checkpoint(agent_run_id="run")
             assert len(checkpoint.messages) == 4
@@ -407,11 +432,9 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
                 FactQuery(transcript.transcript_stream("run")),
             )) == ()
             deleted = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
-            assert await content_archive.store.read(lambda transaction: transaction.list_records(
-                RecordQuery(kind="archive_content", sort_key_prefix=response_content.identity),
-            )) == ()
+            assert await _stored_message_records(archive, blocks[0].root, first_ids) == ()
             assert await transcript.get_head("unrelated") == unrelated_head
-            if isinstance(objects, ObjectStoreMaintenance):
+            if isinstance(objects, ObjectStoreDeletion):
                 assert set(deleted.deleted) == set(candidates)
             else:
                 assert set(deleted.blocked) == set(candidates)
@@ -455,7 +478,7 @@ async def test_interrupted_partial_response_shares_retained_transcript(
             block = _archived_block(record.response_context)
             assert block.root.count == 1
             content_archive = await archive.transcript_repository.content_archive()
-            response_ids = await content_archive.content_ids(block.root)
+            response_ids, = await _message_ids(archive, (block.root,))
             transcript_ids = await _transcript_content_ids(archive, run_id)
             assert transcript_ids[1:2] == response_ids
             request, response, envelope, requests, attempts = await archive.resolve_model_interaction(record)

@@ -208,7 +208,7 @@ async def test_fork_and_snapshot_keep_exact_summary_after_latest_replacement(tmp
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         value = await read(archive, child.history_id, reference)
         assert value.model_messages() == (summary,)
-        assert value.archive_root.scope_id != source_root.scope_id
+        assert value.archive_root.group_id != source_root.group_id
         assert child.continuation.checkpoint_sequence == reference[0]
         assert child.continuation.projection_digest == reference[1]
 

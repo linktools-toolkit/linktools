@@ -3,18 +3,22 @@
 """Completed metadata reads cannot bypass body checks or fresh publication."""
 
 import hashlib
+import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from sqlalchemy import insert, select
 
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.state import GroupRecordReader
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._step_archive import PreparedAgentRunCheckpointBatch
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StoredRecord, active_state_scope
 from linktools.ai.storage import InMemoryObjectStore
 
@@ -68,8 +72,20 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
         step = state.storage.run_store.read_store(PersistenceDomain.CONVERSATION)
         original = step.prepare_conversation_checkpoint
         captured: list[tuple[object, ...]] = []
-        rivals: list[StoredRecord] = []
-        content = await step.transcript_repository.content_archive(create=True)
+        rivals: list[dict[str, str]] = []
+        native = step.transcript_repository._native_messages
+        assert native is not None
+        metadata = build_step_sql_metadata()
+        messages = metadata.tables["ai_step_messages"]
+
+        async def native_snapshot() -> tuple[tuple[dict[str, object], ...], ...]:
+            async with native.storage_context.engine.connect() as connection:
+                return tuple([
+                    tuple(dict(row) for row in (await connection.execute(
+                        select(table).order_by(table.c.id),
+                    )).mappings())
+                    for table in metadata.sorted_tables
+                ])
 
         async def inject_after_prepare(
             run: AgentRunRecord, checkpoint: AgentRunCheckpoint, *, archive: PreparedArchive | None = None,
@@ -78,11 +94,16 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
             result = await original(run, checkpoint, archive=archive, observed_records=observed_records)
             assert active_state_scope() is None
             prepared = result[1][0].archive
-            record = next(value for value in prepared.records.values() if value.kind == "archive_content")
-            rival = replace(record, data={**record.data, "raw_size": record.data["raw_size"] + 1})
-            await content.store.mutate(lambda transaction: transaction.insert_record(rival))
+            retained = next(iter(prepared.native_messages.values()))
+            identity, body = retained.messages[0]
+            corrupt = json.loads(body)
+            corrupt["raw_size"] += 1
+            rival = {"store_digest": native.store_digest, "sha256": identity,
+                     "message": canonical_json_bytes(corrupt).decode("utf-8")}
+            async with native.storage_context.engine.begin() as connection:
+                await connection.execute(insert(messages).values(**rival))
             rivals.append(rival)
-            captured.append(await _snapshot(state))
+            captured.append((await _snapshot(state), await native_snapshot()))
             return result
 
         monkeypatch.setattr(step, "prepare_conversation_checkpoint", inject_after_prepare)
@@ -90,8 +111,12 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
             await _commit(state, turn)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert len(captured) == len(rivals) == 1
-        assert await _snapshot(state) == captured[0]
-        assert await content.store.read(lambda transaction: transaction.scan_records()) == tuple(rivals)
+        assert (await _snapshot(state), await native_snapshot()) == captured[0]
+        async with native.storage_context.engine.connect() as connection:
+            remaining = await connection.execute(select(
+                messages.c.store_digest, messages.c.sha256, messages.c.message,
+            ))
+            assert tuple(dict(row) for row in remaining.mappings()) == tuple(rivals)
         assert await state.storage.execution.executions.get("execution", tenant_id="tenant") is None
         assert await state.storage.conversation.sessions.get("session", tenant_id="tenant") == state.session
 

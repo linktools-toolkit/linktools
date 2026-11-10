@@ -134,7 +134,7 @@ class _PendingExecutionTurn:
         # or terminal commit acquires durable authority for the captured turn.
         self.execution = replace(
             self.execution, revision=self.execution.revision + 2,
-            agent_run_seq=1, input_context=context, updated_at=now,
+            agent_run_seq=1, input_context=context, repository_instructions=None, updated_at=now,
             producer_generation=self.execution.revision + 1,
             producer_claim_id=self.coordination.owner_id,
             recovery=replace(self.execution.recovery, agent_run_id=agent_run_id),

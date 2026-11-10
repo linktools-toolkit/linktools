@@ -4,7 +4,8 @@
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from time import monotonic
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -12,7 +13,7 @@ from uuid import uuid4
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepStore
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepStore, StepEvent as NativeStepEvent
 
 from ..core import ExecutionStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode
@@ -49,6 +50,7 @@ from .durability import (
 from ._projection_payload import decode_projection_payload, encode_projection_payload
 from ._plan import PersistenceDomain
 from ._archive import PreparedArchive
+from ._message_root import NativeMessageRoot
 from ._step_archive import (
     CapturedExecutionProjection,
     ExecutionProjectionBatch,
@@ -72,6 +74,10 @@ from ._step_archive import (
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 from ._native_checkpoint import NativeCheckpoint
+from ._native_event_reference import NativeEventReferences
+from ._step_store import SqlStepStore, StepWriteReceipt
+from ..steps import NativeStepSource
+from ._sql import SqlStateStore
 from .state import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
@@ -133,6 +139,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._staging = staging
         self.conversation_persistence = ConversationPersistence(conversation_archive)
         self._execution_repository = execution_repository
+        self._native_step_source: NativeStepSource | None = None
         self._pending_producer_guard: Callable[[str, int, bool], bool] | None = None
         self._tenant_id = tenant_id
         self._archives = {
@@ -142,7 +149,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._initialized = False
         self._preflight = False
         self._execution_producers: dict[str, tuple[str, int]] = {}
-        self._step_boundaries: dict[str, Callable[..., Awaitable[None]]] = {}
+        self._step_boundaries: dict[str, Callable[..., Awaitable[StepWriteReceipt | None]]] = {}
         self._step_boundary_guards: dict[str, Callable[[], None]] = {}
         self._atomic_step_runs: set[str] = set()
         self._execution_persistence: dict[str, tuple[bool, bool, bool]] = {}
@@ -161,6 +168,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             flush_boundary=self.flush_execution_projection,
             capture=self.capture_buffered_execution_projection,
             publish=self.publish_buffered_execution_projection,
+            resolve_run=self._canonical_trace_run,
             background_tasks=self._background_tasks,
         )
         self.checkpoint_persistence = CheckpointPersistence(
@@ -173,13 +181,34 @@ class RuntimeAgentRunStore(AgentRunStore):
     def bind_step_store(self, store: StepStore) -> None:
         """Use the same official StepStore as the run's StepPersistence capability."""
         self.checkpoint_persistence.bind_step_store(store)
+        self._native_step_source = None
+        if type(store) is SqlStepStore and self._execution_repository is not None:
+            state = self._execution_repository.state_store
+            if isinstance(state, SqlStateStore) and state.context.engine is store.storage_context.engine:
+                self._native_step_source = store.backup_source
+        if isinstance(store, SqlStepStore):
+            for archive in self._archives.values():
+                if (isinstance(archive, StateStepArchive)
+                        and isinstance(archive.state_store, SqlStateStore)
+                        and archive.state_store.context.engine is store.storage_context.engine):
+                    archive.bind_native_run_store(store)
+
+    @property
+    def native_step_source(self) -> NativeStepSource | None:
+        """Admitted built-in checkpoint owner, without querying native tables."""
+        return self._native_step_source
+
+    def validate_native_step_source(self, source: NativeStepSource | None) -> None:
+        """Prevent a restored execution from using a different native owner."""
+        if source is not None and source != self.native_step_source:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
     @property
     def step_store(self) -> StepStore:
         return self.checkpoint_persistence.step_store
 
     def bind_step_boundary(
-        self, run_id: str, commit: Callable[..., Awaitable[None]],
+        self, run_id: str, commit: Callable[..., Awaitable[StepWriteReceipt | None]],
         require_active: Callable[[], None],
     ) -> None:
         """Bind the admitted Runtime's single short-transaction boundary."""
@@ -193,13 +222,94 @@ class RuntimeAgentRunStore(AgentRunStore):
         if run_id in self._step_boundaries:
             self._atomic_step_runs.add(run_id)
 
-    def step_boundary(self, run_id: str) -> Callable[..., Awaitable[None]] | None:
+    def step_boundary(self, run_id: str) -> Callable[..., Awaitable[StepWriteReceipt | None]] | None:
         return self._step_boundaries.get(run_id)
 
-    def confirm_step_run(self, record: RunRecord) -> None:
+    def can_share_native_start(self, run_id: str, native: StepStore) -> bool:
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        return (run_id in self._step_boundaries and run_id in self._execution_producers
+                and all(self.execution_persistence(run_id)[1:]) and isinstance(archive, StateStepArchive)
+                and archive.can_share_native_start(native))
+
+    @classmethod
+    def project_native_event(cls, source: NativeStepEvent, *, event_index: int) -> StepEvent:
+        return NativeEventReferences.project(source, event_index=event_index)
+
+    async def stage_native_event(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if not self.can_share_native_start(run.run_id, self.step_store) or not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        await archive.stage_native_event(run, source, event)
+
+    @asynccontextmanager
+    async def native_event_publication(self, run_id: str) -> AsyncIterator[None]:
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if not isinstance(archive, StateStepArchive):
+            yield
+        else:
+            async with archive.native_event_publication(run_id):
+                yield
+
+    def has_pending_native_start(self, run_id: str) -> bool:
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        return isinstance(archive, StateStepArchive) and archive.has_pending_native_start(run_id)
+
+    def step_event_receipt(self, run_id: str) -> StepWriteReceipt | None:
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        return archive.native_event_receipt(run_id) if isinstance(archive, StateStepArchive) else None
+
+    def release_step_event_receipt(self, run_id: str) -> None:
+        """Release settled lifecycle proof, without releasing business staging."""
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if isinstance(archive, StateStepArchive):
+            archive.release_native_event_receipt(run_id)
+
+    def _canonical_trace_run(self, run: AgentRunRecord) -> AgentRunRecord:
+        if (run.agent_run_id not in self._step_boundaries
+                or not self.can_share_native_start(run.agent_run_id, self.step_store)):
+            return run
+        source = self._staging.native_run_local(run.agent_run_id)
+        if source is None:
+            return run
+        if replace(run, metadata=source.metadata) != source:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return source
+
+    def _confirm_native_event_projection(self, events: Sequence[StepEvent]) -> None:
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if isinstance(archive, StateStepArchive):
+            receipts = archive.confirm_native_event_projection(events)
+            if not receipts:
+                return
+            native = self.step_store
+            if not isinstance(native, SqlStepStore):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            for receipt in receipts:
+                source = native.run_from_receipt(receipt)
+                if source is not None:
+                    self.checkpoint_persistence.reader.confirm_run(source)
+                    self._staging.adopt_native_run_local(OfficialStepReader.project_run(source))
+                    archive.confirm_native_run(source)
+
+    def confirm_step_run(self, record: RunRecord, *, receipt: StepWriteReceipt | None = None) -> None:
         """Reuse a successful official registration only for this Runtime's owned run."""
         if record.run_id in self._execution_producers:
-            self.checkpoint_persistence.reader.confirm_run(record)
+            native = self.step_store
+            source = (native.run_from_receipt(receipt) if receipt is not None
+                      else native.confirmed_run(record.run_id)) if isinstance(native, SqlStepStore) else record
+            if source is not None and source.run_id != record.run_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            if source is None:
+                self.invalidate_step_run(record.run_id)
+                return
+            self.checkpoint_persistence.reader.confirm_run(source)
+            archive = self._archives.get(PersistenceDomain.TRACE)
+            if self.execution_persistence(source.run_id)[1] and isinstance(archive, StateStepArchive):
+                archive.confirm_native_run(source)
+                if receipt is not None:
+                    archive.confirm_native_event_source(receipt)
+                    if isinstance(native, SqlStepStore) and native.started_from_receipt(receipt) is not None:
+                        self._staging.adopt_native_run_local(OfficialStepReader.project_run(source))
 
     def confirm_step_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         """Reuse a successful official write without treating a failed write as confirmed."""
@@ -209,6 +319,9 @@ class RuntimeAgentRunStore(AgentRunStore):
     def invalidate_step_run(self, run_id: str) -> None:
         """Discard confirmed data when a source operation has an uncertain outcome."""
         self.checkpoint_persistence.reader.invalidate_run(run_id)
+        archive = self._archives.get(PersistenceDomain.TRACE)
+        if isinstance(archive, StateStepArchive):
+            archive.invalidate_native_run(run_id)
 
     def bind_pending_producer_guard(self, guard: Callable[[str, int, bool], bool]) -> None:
         """Bind the Runtime-owned authority for turns not yet persisted."""
@@ -371,6 +484,12 @@ class RuntimeAgentRunStore(AgentRunStore):
             self._checkpoint_transcript_runs[agent_run_id] = source_run.metadata.get(
                 "linktools.transcript_run_id", source_run.run_id,
             )
+        native = self.checkpoint_persistence.step_store if self._native_step_source is not None else None
+        if isinstance(native, SqlStepStore):
+            if source_run is not None:
+                native.inherit_snapshot_baseline(agent_run_id, source_run_id=source_run.run_id)
+            elif isinstance(context.archive_root, NativeMessageRoot) and context.archive_digest is not None:
+                native.seed_snapshot_baseline(agent_run_id, context.archive_root, raw_digest=context.archive_digest)
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
                 archive.register_context_baseline(agent_run_id, context)
@@ -1032,6 +1151,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 tuple(projection.run.agent_run_id for _seal, projection in captured)
             )
             for _seal, projection in captured:
+                projection = replace(projection, run=self._canonical_trace_run(projection.run))
                 durable_head = durable_heads.get(projection.run.agent_run_id)
                 if durable_head is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1175,6 +1295,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         agent_run_id: str,
         require_owned: bool,
     ) -> None:
+        if projection is not None:
+            self._confirm_native_event_projection(projection.events)
         token = plan.token_for(agent_run_id)
         completion: asyncio.Future[None] | None = None
         async with self._history_lock.hold(agent_run_id):
@@ -1513,6 +1635,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         request_projection: ContextProjection | None = None,
     ) -> None:
         """FINALIZE: advance offsets and clear dirty state after durable success."""
+        self._confirm_native_event_projection(captured.events)
         async with self._history_lock.hold(flight.agent_run_id):
             if self._durability_flights.get(flight.agent_run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1581,6 +1704,20 @@ class RuntimeAgentRunStore(AgentRunStore):
         execution_id: str,
     ) -> None:
         """PREPARE + DURABLE COMMIT without the run lock, then FINALIZE."""
+        delegated = False
+        try:
+            async with self.native_event_publication(captured.run.agent_run_id):
+                captured = replace(captured, run=self._canonical_trace_run(captured.run))
+                delegated = True
+                await self._commit_captured_execution_projection(captured, flight, execution_id=execution_id)
+        except BaseException:
+            if not delegated:
+                await self.abandon_execution_projection(flight)
+            raise
+
+    async def _commit_captured_execution_projection(
+        self, captured: CapturedExecutionProjection, flight: _AgentRunProjectionFlight, *, execution_id: str,
+    ) -> None:
         archive = self._archives.get(PersistenceDomain.TRACE)
         if not isinstance(archive, StateStepArchive):
             if not isinstance(archive, _StepArchiveBatch):
@@ -1763,7 +1900,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 observed_events = await archive.list_event_range(
                     agent_run_id=captured.run.agent_run_id,
                     start=durable_head.event_count,
-                    end=expected_head.event_count,
+                    end=expected_head.event_count, verify_native_source=True,
                 )
                 if tuple(observed_events) != captured.events:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)

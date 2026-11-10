@@ -65,9 +65,14 @@ class ObjectStoreInspection(Protocol):
 
 
 @runtime_checkable
-class ObjectStoreMaintenance(ObjectStoreInspection, Protocol):
+class ObjectStoreDeletion(Protocol):
+    """Digest-guarded deletion; the caller must arrange exclusive maintenance."""
+
     async def delete_object(self, key: str, *, expected_digest: str) -> bool: ...
 
+
+@runtime_checkable
+class ObjectStoreMaintenance(ObjectStoreInspection, ObjectStoreDeletion, Protocol):
     def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
@@ -213,6 +218,7 @@ __all__ = [
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
+    "ObjectStoreDeletion",
     "ObjectStoreInspection",
     "ObjectStoreMaintenance",
     "read_object",

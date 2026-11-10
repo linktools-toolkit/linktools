@@ -17,8 +17,11 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.usage import RequestUsage
+from pydantic_ai_harness.step_persistence import StepPersistence
 
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
+from linktools.ai.spec import AgentUsageLimits
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
@@ -49,7 +52,26 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
     pytest.importorskip("starlette")
     from linktools.ai.web import create_app
 
-    path, execution_id, _standalone_id = _restore_fixture(tmp_path)
+    path = tmp_path / "current-history.db"
+    accepted = RuntimeFeatures("application")
+    accepted.agent("default", model="default", allow_tools=(), usage_limits=AgentUsageLimits(output_tokens=250))
+    accepted.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    accepted.capability(TraceCapability(), scope="runtime")
+    async with Persistence.open("older-history", storage=PersistenceStorage.sqlite(path)) as persistence:
+        native = await persistence.create_step_store()
+        accepted.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+        try:
+            async with Runtime.attach(
+                persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), accepted),
+            ) as runtime:
+                execution = await runtime.agents.get().session("session").start("retained older question")
+                assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+                assert await execution.budget_usage() is None
+                execution_id = execution.execution_id
+            run, = await native.list_runs()
+            assert any(event.kind == "run_started" for event in await native.list_events(run_id=run.run_id))
+        finally:
+            await native.close()
     async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path), tenant_id="default", read_only=True) as history_persistence_52, History.open(persistence=history_persistence_52) as history:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=create_app(history=history)),
@@ -80,7 +102,22 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
 async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path, _session_execution_id, execution_id = _restore_fixture(tmp_path)
+    path = tmp_path / "current-budget.db"
+    accepted = RuntimeFeatures("application")
+    accepted.agent("default", model="default", allow_tools=(), usage_limits=AgentUsageLimits(output_tokens=250))
+    async with Persistence.open("accepted-budget", storage=PersistenceStorage.sqlite(path)) as persistence:
+        native = await persistence.create_step_store()
+        accepted.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+        try:
+            async with Runtime.attach(
+                persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), accepted),
+            ) as runtime:
+                original = await runtime.agents.get().start("accept the original output limit")
+                assert (await original.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
+                assert await original.budget_usage() is None
+                execution_id = original.execution_id
+        finally:
+            await native.close()
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         del messages, info
@@ -89,17 +126,25 @@ async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     application = RuntimeFeatures("application")
     application.agent("default", revision=2, model="default", allow_tools=())
-    async with Persistence.open('older-history', storage=PersistenceStorage.sqlite(path)) as persistence_88, Runtime.attach(persistence=persistence_88, features=model_features(helpers.RuntimeUsageModels(), application)) as runtime:
-        original = await runtime.executions.get(execution_id)
-        assert await original.budget_usage() is None
-        retried = await original.retry("exceed the original output limit")
-        result = (await retried.wait(timeout_seconds=10)).result
-        assert result.status is ExecutionStatus.FAILED
-        assert result.error_code == ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
-        assert result.safe_error_details["limits"]["output_tokens"] == 250
-        assert await retried.budget_usage() is None
-        fresh = await runtime.agents.get().run("use the current unrestricted declaration", timeout_seconds=10)
-        assert fresh.result.status is ExecutionStatus.SUCCEEDED
+    async with Persistence.open("accepted-budget", storage=PersistenceStorage.sqlite(path)) as persistence:
+        native = await persistence.create_step_store()
+        application.capability(StepPersistence(store=native, capture_frontier=True), scope="runtime")
+        try:
+            async with Runtime.attach(
+                persistence=persistence, features=model_features(helpers.RuntimeUsageModels(), application),
+            ) as runtime:
+                original = await runtime.executions.get(execution_id)
+                assert await original.budget_usage() is None
+                retried = await original.retry("exceed the original output limit")
+                result = (await retried.wait(timeout_seconds=10)).result
+                assert result.status is ExecutionStatus.FAILED
+                assert result.error_code == ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED.value
+                assert result.safe_error_details["limits"]["output_tokens"] == 250
+                assert await retried.budget_usage() is None
+                fresh = await runtime.agents.get().run("use the current unrestricted declaration", timeout_seconds=10)
+                assert fresh.result.status is ExecutionStatus.SUCCEEDED
+        finally:
+            await native.close()
 
 
 @pytest.mark.parametrize("scope", (None, "execution:owner", "graph:owner", "", 0, False))
@@ -111,7 +156,7 @@ def test_explicit_shared_budget_scope_keeps_its_value_and_validation(
         row = connection.execute(
             "SELECT payload_json FROM ai_state_records WHERE kind = 'execution'",
         ).fetchone()
-    value = json.loads(row[0])
+    value = json.loads(json.loads(row[0]))
     value["value"]["payload"]["fields"]["budget_scope_id"] = scope
     if scope is None or isinstance(scope, str) and scope:
         assert _decode_enveloped_domain(value, ExecutionRecord).budget_scope_id == scope
