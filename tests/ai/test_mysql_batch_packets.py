@@ -224,7 +224,8 @@ async def test_mysql_large_native_snapshot_rolls_back_and_retries_at_packet_limi
                               for index in range(64)])
 
                 def fail_refs(connection, cursor, statement, parameters, context, many):
-                    if statement.startswith("INSERT INTO ai_step_sequences "):
+                    if (context.compiled is not None and context.compiled.isinsert
+                            and context.compiled.statement.table.name == "ai_step_sequences"):
                         raise RuntimeError("reference write failed")
 
                 event.listen(engine.sync_engine, "before_cursor_execute", fail_refs)

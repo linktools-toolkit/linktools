@@ -4,6 +4,7 @@
 """Terminal archive sharing preserves owner facts and immutable caller plans."""
 
 import hashlib
+import json
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from linktools.ai.capability import TraceCapability
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemoryStepStore, RunRecord
@@ -19,7 +20,8 @@ from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, U
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.storage import StoredPayload
-from linktools.ai.persistence import Persistence, PersistenceDomain
+from linktools.ai.persistence import Persistence, PersistenceDomain, SqlStepStore
+from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.runs import OfficialStepReader
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._checkpoint_persistence import CheckpointPersistence
@@ -157,19 +159,27 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
     application.capability(native, scope="runtime")
     application.capability(TraceCapability(), scope="runtime")
     terminal = ContextVar("terminal_archive_test", default=False)
-    publications: list[list[str]] = []
+    publications: list[list[tuple[str, str]]] = []
     run_publications: list[tuple[int, str]] = []
     verified_snapshots: list[ContinuableSnapshot] = []
     original_recovery = CheckpointPersistence.materialize_recovery_checkpoint
     original_terminal = StateCommands.commit_terminal_checkpoint
     original_publish = ContentArchive.publish
+    original_native_publish = ContentArchive.publish_native
     checked_plans = 0
 
-    async def publish(self, transaction, prepared):
+    async def publish(self, transaction, prepared, *, native=True):
         run_publications.append((id(self.store.storage_group), self.scope_id))
         if terminal.get():
-            publications[-1].append(self.scope_id)
-        return await original_publish(self, transaction, prepared)
+            publications[-1].append(("archive", self.scope_id))
+        return await original_publish(self, transaction, prepared, native=native)
+
+    async def publish_native(self, transaction, prepared):
+        if prepared.native_messages:
+            run_publications.append((id(self.store.storage_group), self.scope_id))
+            if terminal.get():
+                publications[-1].append(("native", self.scope_id))
+        return await original_native_publish(self, transaction, prepared)
 
     async def materialize_recovery(self, *, agent_run_id, require_complete, captured=None):
         before = await self.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
@@ -210,6 +220,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
         return result
 
     monkeypatch.setattr(ContentArchive, "publish", publish)
+    monkeypatch.setattr(ContentArchive, "publish_native", publish_native)
     monkeypatch.setattr(CheckpointPersistence, "materialize_recovery_checkpoint", materialize_recovery)
     monkeypatch.setattr(StateCommands, "commit_terminal_checkpoint", commit)
     async with Persistence.open('terminal-archive-tool', storage=storage) as persistence_211, Runtime.attach(persistence=persistence_211, features=model_features(_ToolModels(), application)) as runtime:
@@ -245,14 +256,21 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
                 owner = runtime._run_store.read_store(domain)
                 content = await owner.transcript_repository.content_archive()
                 retained_scopes.add((id(owner.state_store.storage_group), content.scope_id))
-                assert any(record.kind == "archive_content" for record in
-                           await content.store.read(lambda transaction: transaction.scan_records()))
+                table = build_step_sql_metadata().tables["ai_step_messages"]
+                async with owner.state_store.context.engine.connect() as connection:
+                    assert (await connection.execute(select(table.c.id).where(
+                        table.c.store_digest == SqlStepStore.scope_digest(
+                            namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                        ),
+                    ).limit(1))).first() is not None
                 assert await owner.list_agent_runs()
             assert len(retained_scopes) > 1
             assert retained_scopes.issubset(set(run_publications))
         else:
             assert checked_plans == 1
-            assert [len(scopes) for scopes in publications] == [1]
+            assert len(publications) == 1
+            assert len({scope for _kind, scope in publications[0]}) == 1
+            assert len(publications[0]) == len(set(publications[0]))
         assert verified_snapshots
         for snapshot in verified_snapshots:
             assert await OfficialStepReader(native.store).latest_snapshot(run_id=snapshot.run_id) == snapshot
@@ -287,12 +305,18 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
     await native.register_run(RunRecord(run_id="run"))
     snapshot = ContinuableSnapshot(run_id="run", step_index=2, messages=checkpoint.messages)
     await native.save_snapshot(snapshot)
-    published_scopes: list[str] = []
+    published_scopes: list[tuple[str, str]] = []
     publish = ContentArchive.publish
+    publish_native = ContentArchive.publish_native
 
-    async def capture(self, transaction, prepared):
-        published_scopes.append(self.content_scope)
-        return await publish(self, transaction, prepared)
+    async def capture(self, transaction, prepared, *, native=True):
+        published_scopes.append(("archive", self.content_scope))
+        return await publish(self, transaction, prepared, native=native)
+
+    async def capture_native(self, transaction, prepared):
+        if prepared.native_messages:
+            published_scopes.append(("native", self.content_scope))
+        return await publish_native(self, transaction, prepared)
 
     try:
         await state.execution.executions.create_execution(current)
@@ -307,6 +331,7 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
             conversation_run_store=conversation, background_tasks=set(),
         )
         monkeypatch.setattr(ContentArchive, "publish", capture)
+        monkeypatch.setattr(ContentArchive, "publish_native", capture_native)
 
         async def commit_terminal():
             return await commands.commit_terminal_checkpoint(
@@ -333,8 +358,8 @@ async def test_terminal_archive_batch_keeps_distinct_content_scopes_independent(
         else:
             committed = await commit_terminal()
             assert committed.execution.status is ExecutionStatus.SUCCEEDED
-            assert len(published_scopes) == (2 if foreign_scope else 1)
-            assert len(set(published_scopes)) == (2 if foreign_scope else 1)
+            assert len({scope for _kind, scope in published_scopes}) == (2 if foreign_scope else 1)
+            assert len(published_scopes) == len(set(published_scopes))
             for owner in (trace, conversation):
                 latest = await owner.latest_checkpoint(agent_run_id="run")
                 assert latest is not None and latest.messages == checkpoint.messages
@@ -413,9 +438,9 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
             local_message_count=2, local_messages=messages[:2], prepared=prepared,
         )
         request_object = next(
-            content.payload.ref for record in prepared.records.values()
-            if record.kind == "archive_content"
-            for content in (ContentRecord.from_json(record.data),)
+            content.payload.ref for native in prepared.native_messages.values()
+            for _identity, body in native.messages
+            for content in (ContentRecord.from_json(json.loads(body)),)
             if content.codec == "model-message" and content.raw_size > 16 * 1024
         )
         assert request_object is not None

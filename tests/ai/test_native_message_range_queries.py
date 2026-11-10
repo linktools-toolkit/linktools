@@ -3,6 +3,7 @@
 """CI range correctness and SQL-work budgets, including MySQL 5.7 SQL shape."""
 
 import getpass
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -120,7 +121,7 @@ def test_immutable_content_insert_never_updates_on_duplicate(dialect) -> None:
     content = _owner(dialect)
     for table in (content._messages, content._nodes):
         sql = str(content._content_insert(table).compile(dialect=dialect)).upper()
-        assert "UPDATE" not in sql and "SELECT" not in sql and "FOR UPDATE" not in sql
+        assert re.search(r"\b(?:UPDATE|SELECT)\b", sql) is None
         if dialect.name == "mysql":
             assert sql.startswith("INSERT IGNORE")
         else:
@@ -186,7 +187,8 @@ async def test_trim_branch_and_fragmented_selections_keep_exact_occurrence_order
         proof = await _publish(native, content, await content.prepare_append(frozen, prepare_payload=_payload))
         trimmed = content.select(proof, 1, 5)
         branch = await content.prepare_append(frozen[8:10], prepare_payload=_payload, base=trimmed)
-        assert len(branch.nodes) == 2
+        # The previously published "a" singleton already owns the same immutable node.
+        assert len(branch.nodes) == 1
         branch_proof = await _publish(native, content, branch)
         fragments = NativeMessageRoot("execution", native.store_digest,
             proof.root.slice(0, 2).slices + proof.root.slice(6, 9).slices)

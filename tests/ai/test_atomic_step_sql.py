@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
 from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSessionTransaction, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, AsyncSessionTransaction, create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
@@ -197,20 +197,20 @@ async def test_inflight_compound_group_is_invisible_to_cold_reader_and_cache(
     store, engine = atomic_store
     run, events, snapshot = _records()
     inserted, release = asyncio.Event(), asyncio.Event()
-    original = store._context.dialect.insert_ignore_conflict_many
+    original = AsyncSession.execute
 
-    async def pause_after_bodies(session, **kwargs):
-        result = await original(session, **kwargs)
-        if kwargs["table"].name == "ai_step_messages":
+    async def pause_after_bodies(session, statement, *args, **kwargs):
+        result = await original(session, statement, *args, **kwargs)
+        if statement.is_insert and statement.table.name == "ai_step_messages":
             inserted.set()
             await release.wait()
         return result
 
-    monkeypatch.setattr(store._context.dialect, "insert_ignore_conflict_many", pause_after_bodies)
+    monkeypatch.setattr(AsyncSession, "execute", pause_after_bodies)
     writer = asyncio.create_task(store.commit_step(run=run, events=events, snapshot=snapshot))
     cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
     try:
-        await inserted.wait()
+        await asyncio.wait_for(inserted.wait(), 5)
         assert not writer.done()
         assert not store._message_proofs
         assert not store._message_content._known_nodes

@@ -1185,7 +1185,12 @@ class StateStepArchive(AgentRunStore):
                 self._native_events = NativeEventReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
 
     def bind_native_run_store(self, native: SqlStepStore) -> None:
-        self._history.bind_native_message_store(native)
+        if (type(native) is SqlStepStore and isinstance(self._store, SqlStateStore)
+                and native.storage_context.engine is self._store.context.engine
+                and native.store_digest == SqlStepStore.scope_digest(
+                    namespace=self._namespace, tenant_id=self._tenant_id,
+                )):
+            self._history.bind_native_message_store(native)
         if self._native_runs is not None:
             self._native_runs.bind(native)
             self._native_events.bind(native)

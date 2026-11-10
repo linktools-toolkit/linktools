@@ -230,11 +230,13 @@ async def test_selected_trace_schema_provisions_its_native_run_read_dependency(t
         assert {"ai_step_runs", "ai_step_events"}.issubset(names)
         assert "ai_step_snapshots" not in names
         from linktools.ai.persistence._sql import SqlStateStore
-        from linktools.ai.persistence.runs import StateStepArchive
+        from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 
         store = SqlStateStore(engine, runtime_domain=PersistenceDomain.TRACE)
-        archive = StateStepArchive(store, object_store=None, namespace="selected", tenant_id="one",
-                                   runtime_domain=PersistenceDomain.TRACE)
+        archive = ModelInteractionStateStepArchive(
+            store, object_store=None, namespace="selected", tenant_id="one",
+            runtime_domain=PersistenceDomain.TRACE,
+        )
         archive.enable_native_run_reads()
         await store.initialize()
         try:

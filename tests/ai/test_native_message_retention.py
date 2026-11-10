@@ -201,14 +201,17 @@ def test_native_closure_rejects_malformed_known_node_fields(damage: dict[str, ob
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("domain", (PersistenceDomain.TRACE, PersistenceDomain.EXECUTION, PersistenceDomain.CONVERSATION))
-async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_table(tmp_path: Path, domain: PersistenceDomain) -> None:
+@pytest.mark.parametrize("native_first", (False, True))
+async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_table(
+    tmp_path: Path, domain: PersistenceDomain, native_first: bool,
+) -> None:
     import json
 
     from linktools.ai.migrate import provision_runtime_database
     from linktools.ai.persistence._archive import ContentRecord
     from linktools.ai.persistence._schema import build_runtime_sql_metadata
     from linktools.ai.persistence._step_schema import build_step_domain_sql_metadata
-    from .test_evaluation_retention import put
+    from linktools.ai.persistence._history import encode_model_messages
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'native-only.db'}")
     objects = InMemoryObjectStore()
@@ -223,8 +226,11 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
     native = SqlStepStore(engine, namespace="steps", tenant_id="one")
     native.bind_message_archive(archive)
     try:
-        reference = await put(objects, f"v1/archive/{group_id}/scope/body", [{"kind": "request", "parts": []}])
-        content = ContentRecord("model-message", reference.digest, reference.size, "raw", StoredPayload.object(reference))
+        raw = encode_model_messages(_snapshot("retained", 1, "retained body " * 4000).messages)
+        compression, payload, encoded = await archive.prepare_payload(raw)
+        reference = payload.ref
+        assert reference is not None
+        content = ContentRecord("model-message", hashlib.sha256(raw).hexdigest(), len(raw), compression, payload)
         orphan_raw = b'[{"kind":"response","parts":[]}]'
         orphan = ContentRecord("model-message", hashlib.sha256(orphan_raw).hexdigest(), len(orphan_raw),
                                "raw", StoredPayload.inline_bytes(orphan_raw))
@@ -240,12 +246,22 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
                               encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
         await state.mutate(lambda tx: tx.insert_record(record))
         candidates = ((domain, reference),)
+        if native_first:
+            retained = await native.purge_unreferenced_content(exclusive=_Offline())
+            assert retained.retained_messages == retained.retained_sequences == 1
+            assert retained.deleted_messages == retained.deleted_sequences == 1
         protected = await purge_unreferenced_objects(candidates, namespace="steps", tenant_id="one",
             stores={domain: state}, object_stores={domain: objects}, exclusive=_Offline())
         assert protected.retained == candidates
+        async with engine.connect() as connection:
+            for name, identity in (("ai_step_messages", content.raw_digest),
+                                   ("ai_step_sequences", nodes[0].identity)):
+                table = metadata.tables[name]
+                assert (await connection.execute(select(table.c.sha256))).scalars().all() == [identity]
+        assert await archive.read_payload_object(reference) == encoded
         retained = await native.purge_unreferenced_content(exclusive=_Offline())
         assert retained.retained_messages == retained.retained_sequences == 1
-        assert retained.deleted_messages == retained.deleted_sequences == 1
+        assert retained.deleted_messages == retained.deleted_sequences == 0
         await state.mutate(lambda tx: tx.delete_record(key))
         removed = await native.purge_unreferenced_content(exclusive=_Offline())
         assert removed.deleted_messages == removed.deleted_sequences == 1
