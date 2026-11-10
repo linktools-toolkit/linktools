@@ -95,7 +95,9 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     record = decode_record(primitives["record"])
     assert record.kind == "golden"
     assert record.storage_revision == primitives["record"]["storage_revision"]
-    assert encode_record(record) == primitives["record"]
+    assert record.payload_bytes is None
+    assert encode_record(record) == {**primitives["record"], "payload_bytes": None}
+    assert decode_record(encode_record(record)) == record
     assert decode_fact(primitives["fact"]).sequence == 1
     assert decode_operation(primitives["operation"]).sequence == 1
     assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(

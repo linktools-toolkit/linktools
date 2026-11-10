@@ -118,44 +118,57 @@ async def test_sql_object_store_does_not_sync_staging_payload(
 async def test_session_model_context_reuses_observed_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = TranscriptRepository(
-        object(),  # type: ignore[arg-type]
-        object_store=None,
-        namespace="io-history",
-        tenant_id="tenant",
-        runtime_domain=PersistenceDomain.CONVERSATION,
-    )
-    projection = ContextProjection(())
-    expected = LoadedModelContext(())
-    projection_reads = 0
+    from linktools.ai.persistence._memory import InMemoryStateStore
 
-    async def load_metadata(_owner_id: str) -> tuple[ContextProjection, None]:
-        nonlocal projection_reads
-        projection_reads += 1
-        return projection, None
+    store = InMemoryStateStore()
+    await store.initialize()
+    try:
+        repository = TranscriptRepository(
+            store,
+            object_store=None,
+            namespace="io-history",
+            tenant_id="tenant",
+            runtime_domain=PersistenceDomain.CONVERSATION,
+        )
+        projection = ContextProjection(())
+        expected = LoadedModelContext(())
+        projection_reads = 0
 
-    async def load_projected(
-        owner_id: str,
-        observed: ContextProjection,
-    ) -> LoadedModelContext:
-        assert owner_id == "history"
-        assert observed is projection
-        return expected
+        async def load_metadata(_owner_id: str) -> tuple[ContextProjection, None]:
+            nonlocal projection_reads
+            projection_reads += 1
+            return projection, None
 
-    monkeypatch.setattr(repository, "_load_context_metadata", load_metadata)
-    monkeypatch.setattr(
-        repository,
-        "_load_model_context_from_projection",
-        load_projected,
-    )
+        async def capture_projected(owner_id: str, observed):
+            from linktools.ai.persistence.state import active_state_scope
 
-    result = await repository.load_session_model_context(
-        "history",
-        tenant_id="tenant",
-    )
+            assert owner_id == "history"
+            assert observed == (projection,)
+            assert observed[0] is projection
+            assert active_state_scope() is not None
 
-    assert result is expected
-    assert projection_reads == 1
+            async def load():
+                assert active_state_scope() is None
+                return [expected]
+
+            return load
+
+        monkeypatch.setattr(repository, "_load_context_metadata", load_metadata)
+        monkeypatch.setattr(
+            repository,
+            "capture_projected_contexts",
+            capture_projected,
+        )
+
+        result = await repository.load_session_model_context(
+            "history",
+            tenant_id="tenant",
+        )
+
+        assert result is expected
+        assert projection_reads == 1
+    finally:
+        await store.close()
 
 
 async def test_message_spans_keep_the_observed_head_without_reading_a_new_head(

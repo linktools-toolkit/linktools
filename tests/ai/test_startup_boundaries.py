@@ -259,7 +259,7 @@ async def test_cancel_during_context_preparation_never_calls_provider(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('fault', ('object', 'context', 'timeout'))
+@pytest.mark.parametrize('fault', ('archive', 'context', 'timeout'))
 @pytest.mark.parametrize('checkpointed', (False, True))
 async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancelled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, checkpointed: bool,
@@ -281,17 +281,18 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
     state = PersistenceStorage.sqlite(tmp_path / 'state.db')
     async with Persistence.open('startup-preparation-failure', storage=state) as persistence_248, Runtime.attach(persistence=persistence_248, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         session = await runtime.agents.get().create_session('session',
-            metadata={'large': 'context' * 10_000} if fault == 'object' else None)
+            metadata={'large': 'context' * 10_000} if fault == 'archive' else None)
         observed = []
         async def fail(*args, **kwargs):
             assert active_state_scope() is None
             observed.append(True)
             if fault == 'timeout':
                 raise TimeoutError('preparation deadline')
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE if fault == 'object' else ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE if fault == 'archive' else ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
         with monkeypatch.context() as patch:
-            if fault == 'object':
-                patch.setattr(runtime._state.archive_object_store(PersistenceDomain.EXECUTION), 'put', fail)
+            if fault == 'archive':
+                from linktools.ai.persistence._archive import ContentArchive
+                patch.setattr(ContentArchive, 'prepare_content', fail)
             elif fault == 'context':
                 patch.setattr(LocalExecutionBackend, 'load_input_context', fail)
             else:

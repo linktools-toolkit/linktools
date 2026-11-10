@@ -585,7 +585,7 @@ async def test_unresolved_captured_port_recovery_checks_recorded_agent_identity(
     binding = compiler.bind(compiler.compile_registered("root"))
     recover = AsyncMock(return_value="recovered")
     port = replace(_port(compiler, _resolver(compiler, compiler), _Admissions(), captured=binding),
-                   compiled=None, service=SimpleNamespace(runtime_backend=lambda: SimpleNamespace(recover_execution=recover)))
+                   compiled=None, _service=SimpleNamespace(runtime_backend=lambda: SimpleNamespace(recover_execution=recover)))
     recorded = replace(binding.binding_contract, agent_spec=replace(binding.compiled_agent.spec, id=agent_id, revision=revision))
     execution = SimpleNamespace(requires_task_invocation_capture=True, binding=recorded, execution_id="execution", revision=4)
     operation = SimpleNamespace(tenant_id="tenant", execution_id="execution", resource_id="execution")

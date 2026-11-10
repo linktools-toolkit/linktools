@@ -19,6 +19,7 @@ from linktools.ai.model.attachments import store_attachment_payload
 from linktools.ai.model.messages import SummaryPromptPart, decode_model_messages, encode_model_messages
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
+from linktools.ai.persistence.contracts import ArchivedContextBlock
 from linktools.ai.persistence._payload import decode_payload_bytes, encode_payload_bytes
 from linktools.ai.persistence._step_message_content import (
     NativeMessageContent, NativeMessageReadback, NativeMessageSequence, PreparedMessagePayload,
@@ -406,8 +407,16 @@ async def test_native_winners_are_exact_and_mismatch_poisons_owner_mutation(
         await native.initialize(local=True)
         messages = _messages("one", "two")
         bundle = PreparedArchive()
-        await native.prepare_archived_messages(messages, bundle)
-        await archive.store.mutate(lambda transaction: archive.publish(transaction, bundle))
+        root = await native.prepare_archived_messages(messages, bundle)
+
+        async def publish_owner(transaction):
+            from linktools.ai.persistence.codec import encode_domain
+            await archive.publish(transaction, bundle)
+            await transaction.insert_record(replace(_record("retained-root"), data={"context": encode_domain(ArchivedContextBlock(
+                root, hashlib.sha256(encode_model_messages(messages)).hexdigest(), len(encode_model_messages(messages)),
+            ))}))
+
+        await archive.store.mutate(publish_owner)
         tables = (native._message_content._messages, native._message_content._nodes)
 
         async def rows():
@@ -416,11 +425,18 @@ async def test_native_winners_are_exact_and_mismatch_poisons_owner_mutation(
                               for table in tables])
 
         original = await rows()
+        assert all(original)
         cold, _ = await _payload_owner(state, None)
         replay = PreparedArchive()
         await cold.prepare_archived_messages(messages, replay)
         await archive.store.mutate(lambda transaction: archive.publish(transaction, replay))
-        assert await rows() == original
+        replayed = await rows()
+        # Ownership refreshes may advance GC fencing without changing immutable content.
+        assert tuple(tuple({key: value for key, value in row.items() if key != "gc_revision"}
+                           for row in group) for group in replayed) == tuple(
+            tuple({key: value for key, value in row.items() if key != "gc_revision"}
+                  for row in group) for group in original
+        )
         table = tables[0 if damaged == "messages" else 1]
         async with engine.begin() as connection:
             for row in original[0 if damaged == "messages" else 1]:
@@ -456,13 +472,15 @@ async def test_archived_message_rollback_revokes_receipts_but_preserves_exact_re
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from linktools.ai.persistence._archive import PreparedArchive
-    from .test_state_group_record_batch import _database
+    from .test_state_group_record_batch import _database, _record
+    from linktools.ai.persistence.codec import encode_domain
 
     async with _database(tmp_path / "archive-retry.db") as (_engine, state, _other):
         native, archive = await _payload_owner(state, None)
         await native.initialize(local=True)
         bundle, receipts = PreparedArchive(), []
-        root = await native.prepare_archived_messages(_messages("retry"), bundle)
+        messages = _messages("retry")
+        root = await native.prepare_archived_messages(messages, bundle)
         content = native._message_content
         publish = content.publish_retained
 
@@ -474,8 +492,14 @@ async def test_archived_message_rollback_revokes_receipts_but_preserves_exact_re
         monkeypatch.setattr(content, "publish_retained", capture)
         marker = AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
-        async def rollback(transaction):
+        async def publish_owner(transaction):
             await archive.publish(transaction, bundle)
+            await transaction.insert_record(replace(_record("retained-root"), data={"context": encode_domain(ArchivedContextBlock(
+                root, hashlib.sha256(encode_model_messages(messages)).hexdigest(), len(encode_model_messages(messages)),
+            ))}))
+
+        async def rollback(transaction):
+            await publish_owner(transaction)
             raise marker
 
         with pytest.raises(AIError) as caught:
@@ -485,7 +509,7 @@ async def test_archived_message_rollback_revokes_receipts_but_preserves_exact_re
         assert len(receipts) == 1
         with pytest.raises(ValueError, match="committed root"):
             content.confirm_committed(receipts[0])
-        await archive.store.mutate(lambda transaction: archive.publish(transaction, bundle))
+        await archive.store.mutate(publish_owner)
         assert root.sequence in native._message_proofs
         assert len(receipts) == 2
         assert await native.read_message_roots((root,)) == (

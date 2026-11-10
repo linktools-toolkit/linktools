@@ -3,6 +3,7 @@
 """Bulk owner deletion preserves transaction semantics with linear cleanup work."""
 
 import hashlib
+from collections import Counter
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -245,13 +246,16 @@ async def test_sql_batch_delete_statement_count_does_not_grow_per_owner(tmp_path
                 ))
             finally:
                 event.remove(store.context.engine.sync_engine, "before_cursor_execute", capture)
-            counts.append(len(statements))
+            counts.append(Counter(statement.split()[0].upper() for statement in statements))
             assert await store.read(lambda transaction: transaction.scan_records()) == ()
             assert await store.read(lambda transaction: transaction.scan_aliases()) == ()
             assert await store.read(lambda transaction: transaction.scan_facts()) == ()
             assert max(parameter_counts) < 1000
-    assert counts[1] <= counts[0] <= 4
-    assert counts[2] <= 4 * 3
+    # Each bounded chunk reads owners, wins their CAS fence, then removes
+    # aliases, facts, and owners. Work must not grow per individual owner.
+    chunk = Counter(SELECT=1, UPDATE=1, DELETE=3)
+    assert counts[0] == counts[1] == chunk
+    assert counts[2] == Counter({kind: count * 3 for kind, count in chunk.items()})
 
 
 async def test_sql_batch_delete_preserves_other_logical_stores(tmp_path: Path) -> None:

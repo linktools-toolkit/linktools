@@ -6,7 +6,6 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -15,19 +14,17 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence import FilesystemSnapshotReader, Persistence, PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._snapshot_validation import validate_snapshot_domain
-from linktools.ai.persistence.codec import decode_record
 from linktools.ai.persistence.turns import StateTurnCoordination
 from linktools.ai.persistence.state import StateTransactionNestingError
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.snapshot import Snapshot, SnapshotLimits
 from linktools.ai.storage import (
-    CacheBackend, InMemoryCacheBackend, InMemoryObjectStore, Lease, TurnCoordination, read_object,
+    CacheBackend, InMemoryCacheBackend, InMemoryObjectStore, read_object,
     TurnAdmissionReader, TurnCoordinationBackend, TurnScope, TurnSessionReader,
 )
 
-from ._filesystem_legacy_fixture_helpers import load_legacy_turn_source
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_runtime_snapshot_operations import Offline
 
@@ -235,52 +232,28 @@ async def test_readonly_source_turn_binding_never_mutates(tmp_path: Path, backen
     assert not cache.closed
 
 
-@pytest.mark.parametrize(("backend", "legacy_reader"), (
-    ("exclusive_sqlite", False), ("sqlite", False), ("legacy_filesystem", True),
-))
+@pytest.mark.parametrize("backend", ("exclusive_sqlite", "sqlite"))
 @pytest.mark.parametrize("active", (False, True))
 @pytest.mark.parametrize("exclusive_writer", (False, True))
 async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, legacy_reader: bool, active: bool, exclusive_writer: bool,
+    tmp_path: Path, backend: str, active: bool, exclusive_writer: bool,
 ) -> None:
     cache = _BorrowedCache()
-    if legacy_reader:
-        from linktools.ai.storage._dialects import SQLiteDialect
-
-        captured = load_legacy_turn_source(tmp_path / "source", active=active)
-        stamp = datetime.fromisoformat(captured["clock"])
-
-        async def fixture_clock(self, session):
-            return stamp
-
-        monkeypatch.setattr(SQLiteDialect, "database_now", fixture_clock)
-        monkeypatch.setattr(SQLiteDialect, "database_current_time", fixture_clock)
-        first = TurnCoordination(**{**captured["first"], "lease": Lease(**captured["first"]["lease"])})
-        current = TurnCoordination(**{**captured["current"], "lease": Lease(**captured["current"]["lease"])})
-        expected = tuple(decode_record(record) for record in captured["records"])
-    else:
-        async with _opened(backend, tmp_path / "source", cache) as state:
-            authority = state.coordination_backend
-            first = await _claim(authority)
-            assert await authority.cancel_turn("scope", "execution")
-            assert await authority.release_turn(first.lease)
-            current = await _claim(authority, execution="next")
-            current = await authority.renew_turn(current.lease, lease_seconds=600)
-            if not active:
-                assert await authority.release_turn(current.lease)
-            expected = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
+    async with _opened(backend, tmp_path / "source", cache) as state:
+        authority = state.coordination_backend
+        first = await _claim(authority)
+        assert await authority.cancel_turn("scope", "execution")
+        assert await authority.release_turn(first.lease)
+        current = await _claim(authority, execution="next")
+        current = await authority.renew_turn(current.lease, lease_seconds=600)
+        if not active:
+            assert await authority.release_turn(current.lease)
+        expected = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
     archive = InMemoryObjectStore()
-    if legacy_reader:
-        reader = FilesystemSnapshotReader(tmp_path / "source", namespace="source-turns", tenant_id="tenant")
-        try:
-            reference = await reader.export_snapshot(object_store=archive, limits=_LIMITS)
-        finally:
-            await reader.close()
-    else:
-        async with _opened(backend, tmp_path / "source", cache, read_only=True) as state:
-            # The public wrapper retains caller-owned offline exclusion.
-            assert await Snapshot.create(persistence=state, object_store=archive, exclusive=Offline(), limits=_LIMITS)
-            reference = await state.export_snapshot(object_store=archive, limits=_LIMITS)
+    async with _opened(backend, tmp_path / "source", cache, read_only=True) as state:
+        # The public wrapper retains caller-owned offline exclusion.
+        assert await Snapshot.create(persistence=state, object_store=archive, exclusive=Offline(), limits=_LIMITS)
+        reference = await state.export_snapshot(object_store=archive, limits=_LIMITS)
     destination = tmp_path / "restored"
     await Persistence.restore_snapshot(reference, object_store=archive, root=destination,
                                        limits=_LIMITS, exclusive_writer=exclusive_writer)

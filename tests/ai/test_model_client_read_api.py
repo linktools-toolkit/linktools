@@ -371,7 +371,10 @@ async def test_selected_interaction_content_survives_concurrent_native_collectio
         records = await archive.prepare_interactions(run, (staged, lookahead), payloads.__getitem__, prepared=prepared)
         await archive.sync_projection(run, events=(), checkpoints=(), interactions=records,
                                       execution_id="execution", archive=prepared)
-        service = DefaultExecutionHistoryService(state.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(state))
+        service = DefaultExecutionHistoryService(
+            state.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(state),
+            HmacCursorSigner("concurrent-read", b"concurrent-read-key"),
+        )
         original_capture = SqlStepStore.capture_message_roots
         hydrated = []
         paused = False

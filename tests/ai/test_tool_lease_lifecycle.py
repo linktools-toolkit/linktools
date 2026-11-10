@@ -161,20 +161,20 @@ async def test_long_leaf_signals_preserve_actual_outcome(
 async def test_large_result_persistence_outlasts_leaf_without_tool_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _runtime(monkeypatch) as (_, bridge, clock):
+    async with _runtime(monkeypatch) as (state, bridge, clock):
         async def effect() -> str:
             for seconds in (20, 20, 21):
                 await clock.advance(seconds)
             return "x" * 70000
 
-        put = bridge._checkpoint_objects.put
+        complete = state.checkpoint.tools.complete_payload
 
-        async def slow_put(*args: Any, **kwargs: Any) -> Any:
+        async def slow_complete(*args: Any, **kwargs: Any) -> Any:
             for _ in range(4):
                 await clock.advance(20)
-            return await put(*args, **kwargs)
+            return await complete(*args, **kwargs)
 
-        monkeypatch.setattr(bridge._checkpoint_objects, "put", slow_put)
+        monkeypatch.setattr(state.checkpoint.tools, "complete_payload", slow_complete)
         assert await _call(bridge, effect) == "x" * 70000
         operation, = await bridge.list_operations()
         assert operation.status is ToolOperationStatus.COMPLETED

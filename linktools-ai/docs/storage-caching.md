@@ -39,78 +39,18 @@ file-backed ObjectStore bytes and caches remain separate supported resources.
 `PersistenceStorage.from_root(root)` selects `root/runtime.db` and file-backed
 ObjectStore bytes; it does not migrate filesystem state. When that database is
 absent, the factory refuses a root containing recognizable filesystem state
-manifests instead of silently creating an unrelated empty database. Quiesce the
-old writers and explicitly export/restore supported state into a separate empty
-root, then verify the retained records and object references before switching.
-Portable snapshots preserve the core Memory domain, including its operation
-receipts and object-backed content. Arbitrary durable capability partitions remain
-unsupported; this guard does not add their migration support.
-An existing `runtime.db` remains the selected SQLite source even if old files
-coexist. This check neither verifies that database as a completed migration nor
-recognizes every damaged/custom layout, and is not a cross-process ownership
-barrier against a root being changed after configuration.
+manifests instead of silently creating an unrelated empty database. Choose a
+separate root for new state; this guard does not provide a filesystem migration
+reader. Native file locks, file-backed objects and caches remain independently
+supported.
 
-### Read-only legacy filesystem migration
-
-`FilesystemSnapshotReader` (from `linktools.ai.persistence`) is an offline
-source owner for **clean legacy filesystem state**, not a Runtime backend or a
-reader of portable snapshot archives. It exports the existing storage-snapshot
-format consumed by `Persistence.restore_snapshot`; no second high-level snapshot
-format or Workspace copy is introduced.
-
-```python
-from linktools.ai.persistence import FilesystemSnapshotReader, Persistence
-from linktools.ai.snapshot import SnapshotLimits
-
-reader = FilesystemSnapshotReader(old_root, namespace="app", tenant_id="tenant")
-try:
-    reference = await reader.export_snapshot(
-        object_store=snapshot_objects,
-        limits=SnapshotLimits(max_entries=100_000, max_bytes=100_000_000),
-    )
-finally:
-    await reader.close()
-
-await Persistence.restore_snapshot(
-    reference, object_store=snapshot_objects, root=new_empty_root,
-    limits=SnapshotLimits(max_entries=100_000, max_bytes=100_000_000),
-    exclusive_writer=True,
-)
-```
-
-Keep the reader instance if export or close fails: failed lock release retains
-its exact cleanup responsibility and `reader.close()` can be retried. A closed
-reader cannot export again. The constructor does not create source files;
-export acquires the native group/member writer locks and validates the complete
-standard grouped layout for the explicit namespace and tenant before reading.
-It does not initialize a writable StateStore, repair indexes, replay journals,
-or delete uncommitted staging. A committed recovery journal is an error requiring
-the original recovery procedure, not permission to guess or rewrite its outcome.
-Filesystem read cancellation drains that read before releasing locks; destination
-ObjectStore cancellation is not hidden by shielding the whole export.
-
-The reader preserves typed core records, facts, operation receipts, canonical
-indexes, archive content and their proven object dependencies. Missing members,
-nonstandard/custom layouts, opaque partitions and capability-presence markers
-are rejected rather than exported incompletely. Limits retain the existing
-snapshot-output admission meaning. They are not a bound on every source archive
-record inspected while establishing the reachable closure.
-
-By default, object references are resolved from the original per-domain and
-archive file ObjectStores. For an originally external object resource, pass its
-borrowed instance as `source_object_store`; it is neither closed nor replaced by
-a file-store fallback. Select a separate destination `object_store` if the whole
-source root must remain byte-for-byte unchanged: reader internals write only
-coordination locks, but an explicitly colocated destination still receives the
-requested snapshot objects. Verify the restored records/receipts/content before
-switching consumers. Filesystem State writers and routes are removed; this
-reader preserves only offline access to supported clean legacy data. Restored
-message payloads use the model codec's frozen read-only filesystem-format adapter;
-source/archive bytes and their recorded hashes are not rewritten. This does not
-provide a general converter for obsolete development protocols. The unused
-`storage.FilesystemJournal` transaction API is removed with those State writers;
-independent atomic-file, file-lock, cache and ObjectStore APIs remain. Opaque
-custom-object closure and journal replay are not provided.
+Current `Persistence.export_snapshot` and `Persistence.restore_snapshot` provide
+portable snapshots of supported state, including the core Memory domain's
+operation receipts and object-backed content. Arbitrary durable capability
+partitions remain unsupported.
+An existing `runtime.db` remains the selected SQLite source even if other files
+coexist. This check neither recognizes every damaged/custom layout nor provides
+a cross-process ownership barrier against a root changed after configuration.
 
 ### SQLite contention retries
 
@@ -1162,19 +1102,6 @@ competing ownership changes must use the conditional operation, and external
 effects still require their own fence/idempotency enforcement. Keep mutation
 callbacks free of external effects and short. Task and Tool renewal use this
 operation; other domain transitions retain their existing authorization checks.
-
-## Offline legacy filesystem ownership
-
-`FilesystemSnapshotReader` acquires the legacy group lock before discovering
-members, then all member locks before validating the complete manifest set.
-Committed journals, changed inventories, foreign scope, unsupported custom
-partitions and incomplete archive metadata prevent export. It neither
-repairs nor provisions source state. Cancellation settles owned filesystem
-work before releasing locks; failed release retains exact handles for the same
-reader's retryable `close()`. The reader is not a StateStore or a Runtime route.
-Native locks and file-backed objects remain supported independently of the
-removed filesystem State writer.
-
 
 ## Offline object cleanup and opaque capability state
 

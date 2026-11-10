@@ -134,7 +134,7 @@ async def test_missing_execution_owner_never_falls_back_to_conversation_payloads
 
 
 @pytest.mark.parametrize("mismatch", ("session", "principal", "parent", "nonterminal"))
-async def test_committed_turn_rejects_invalid_execution_owner(
+async def test_committed_turn_validates_membership_independently_of_actor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str,
 ) -> None:
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
@@ -157,9 +157,15 @@ async def test_committed_turn_rejects_invalid_execution_owner(
             return records
 
         monkeypatch.setattr(repository, "get_timeline_many", invalid_owner)
-        with pytest.raises(AIError) as invalid:
-            await session.timeline()
-        assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        if mismatch == "principal":
+            # Session authorization and the admitted execution actor are independent.
+            timeline = await session.timeline()
+            assert len(timeline.items) == 1
+            assert timeline.items[0].execution_id == execution.execution_id
+        else:
+            with pytest.raises(AIError) as invalid:
+                await session.timeline()
+            assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.parametrize("backend", ("sqlite", "local_sqlite"))

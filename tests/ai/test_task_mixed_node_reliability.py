@@ -246,12 +246,15 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         assert isinstance(stored_prompt, Mapping)
         assert stored_prompt.get("kind") == "stored-user-content-v1"
         stored = decode_domain(stored_prompt.get("value"), StoredUserInput)
-        assert stored.payload.ref is not None
+        assert stored.payload.kind == "inline"
+        attachment_refs = stored.payload.object_refs()
+        assert len(attachment_refs) == 1
+        attachment_ref = attachment_refs[0]
         frozen_bytes = await read_object(
             runtime._state.object_store(PersistenceDomain.TASK),
-            stored.payload.ref.key,
-            expected_digest=stored.payload.ref.digest,
-            expected_size=stored.payload.ref.size,
+            attachment_ref.key,
+            expected_digest=attachment_ref.digest,
+            expected_size=attachment_ref.size,
         )
         refs = tuple(
             iter_runtime_object_refs(
@@ -259,7 +262,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
                 default_domain=PersistenceDomain.TASK,
             )
         )
-        assert (PersistenceDomain.TASK, stored.payload.ref) in refs
+        assert (PersistenceDomain.TASK, attachment_ref) in refs
         with pytest.raises(AIError) as rejected:
             await start_task_graph(runtime,
                 TaskGraph("forged-input", (handler.node("hold"), frozen_node)),
@@ -310,9 +313,9 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     try:
         assert frozen_bytes == await read_object(
             restored.object_store(PersistenceDomain.TASK),
-            stored.payload.ref.key,
-            expected_digest=stored.payload.ref.digest,
-            expected_size=stored.payload.ref.size,
+            attachment_ref.key,
+            expected_digest=attachment_ref.digest,
+            expected_size=attachment_ref.size,
         )
     finally:
         await restored.close()

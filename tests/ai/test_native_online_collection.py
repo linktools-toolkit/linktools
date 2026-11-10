@@ -131,10 +131,11 @@ async def test_native_binding_enables_retention_after_state_only_initialization(
 
 
 @pytest.mark.asyncio
-async def test_cold_state_owner_retains_and_releases_native_content(tmp_path: Path) -> None:
+@pytest.mark.parametrize("release", ("replace", "delete"))
+async def test_cold_state_owner_retains_and_releases_native_content(tmp_path: Path, release: str) -> None:
     async with _shared(tmp_path / "cold-owner.db") as (engine, _state, native, root):
         other_engine = create_async_engine(str(engine.url))
-        owner = SqlStateStore(other_engine)
+        owner = SqlStateStore(other_engine, native_content_index=True)
         await owner.initialize()
         try:
             record = _record(encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
@@ -142,12 +143,57 @@ async def test_cold_state_owner_retains_and_releases_native_content(tmp_path: Pa
             await native.save_snapshot(_snapshot("run", 2, "current"))
             assert (await native.read_message_roots((root,)))[0]
             assert await _count(engine, "ai_step_messages") == 2
-            assert await owner.mutate(lambda tx: tx.delete_record(record.key_digest))
+            await owner.close()
+            owner = SqlStateStore(other_engine, native_content_index=True)
+            await owner.initialize()
+            assert await owner.read(lambda tx: tx.get_record(record.key_digest)) == record
+            if release == "replace":
+                async def release_owner(tx):
+                    previous = await tx.get_record(record.key_digest)
+                    assert previous == record
+                    return await tx.replace_record(
+                        replace(previous, storage_revision=1, data={}), expected_storage_revision=0,
+                    )
+                assert await owner.mutate(release_owner)
+            else:
+                assert await owner.mutate(lambda tx: tx.delete_record(record.key_digest))
             await index.maintain_native_content(native.storage_context, store_digests=(native.store_digest,))
             assert await _count(engine, "ai_step_messages") == 1
         finally:
             await owner.close()
             await other_engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("record", "fact", "operation"))
+async def test_undeclared_native_owner_fails_closed_without_rejecting_business_json(
+    tmp_path: Path, kind: str,
+) -> None:
+    async with _shared(tmp_path / "undeclared.db") as (engine, _state, _native, root):
+        owner = SqlStateStore(engine, store_digest=b"u" * 32)
+        await owner.initialize()
+        try:
+            payload = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))
+            record = _record(payload if kind == "record" else {})
+            async def publish(tx):
+                await tx.insert_record(record)
+                try:
+                    if kind == "fact":
+                        await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key_digest, "chunk", None, "UNKNOWN", payload))
+                    elif kind == "operation":
+                        await tx.insert_operation(StoredOperation(b"o" * 32, b"s" * 32, 1, "UNKNOWN", False, payload))
+                except AIError:
+                    # Catching the direct failure must not allow a partial commit.
+                    pass
+            with pytest.raises(AIError) as raised:
+                await owner.mutate(publish)
+            assert raised.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+            assert await owner.read(lambda tx: tx.get_record(record.key_digest)) is None
+            business = _record(encode_domain({"root": payload}))
+            await owner.mutate(lambda tx: tx.insert_record(business))
+            assert await owner.read(lambda tx: tx.get_record(business.key_digest)) == business
+        finally:
+            await owner.close()
 
 
 @pytest.mark.asyncio
@@ -284,7 +330,7 @@ async def test_pin_winning_against_collector_keeps_target_and_unknown_owner(tmp_
         async with engine.connect() as connection:
             await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
         other_engine = create_async_engine(str(engine.url))
-        other = SqlStateStore(other_engine)
+        other = SqlStateStore(other_engine, native_content_index=True)
         await other.initialize()
         await other.storage_group.open_archive()
         execute = AsyncSession.execute

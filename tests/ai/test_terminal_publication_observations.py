@@ -99,9 +99,9 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                         changed = await session.execute(update(table).where(
                             table.c.store_digest == candidate["store_digest"],
                             table.c.sha256 == candidate["sha256"],
-                        ).values(message='{"corrupt":true}'))
+                        ).values(message=b'{"corrupt":true}'))
                         if changed.rowcount == 0:
-                            await session.execute(table.insert().values(dict(candidate, message='{"corrupt":true}')))
+                            await session.execute(table.insert().values(dict(candidate, message=b'{"corrupt":true}')))
                         else:
                             assert changed.rowcount == 1
                     return await original_insert(self, session, table, rows)

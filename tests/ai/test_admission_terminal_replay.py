@@ -98,7 +98,10 @@ async def _terminal_race(
                     if receipt_fault == "not_started":
                         return replace(result, execution=replace(result.execution, started_at=None))
                     if receipt_fault == "missing_result":
-                        return replace(result, execution=replace(result.execution, result=None))
+                        # Inject a corrupt repository receipt without weakening constructor validation.
+                        corrupt = replace(result.execution)
+                        object.__setattr__(corrupt, "result", None)
+                        return replace(result, execution=corrupt)
                     if receipt_fault == "digest":
                         return replace(result, idempotency=replace(result.idempotency, result_digest="f" * 64))
                     return replace(result, idempotency=replace(result.idempotency, status=IdempotencyStatus.START_UNKNOWN))

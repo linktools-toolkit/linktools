@@ -226,7 +226,10 @@ async def test_failed_start_retains_known_outcome_instead_of_unknown(tmp_path, m
         async def failed_identity(*args, **kwargs):
             return replace(identity, status=status, error_code=code.value)
         async def failed_execution(*args, **kwargs):
-            return replace(record, started_at=None, status=ExecutionStatus(status.value), error_code=code.value) if has_record else None
+            return replace(
+                record, started_at=None, status=ExecutionStatus(status.value),
+                error_code=code.value, result=None, completed_at=None,
+            ) if has_record else None
         with monkeypatch.context() as patch:
             patch.setattr(repo, "get", failed_identity)
             patch.setattr(service, "load_source_execution", failed_execution)

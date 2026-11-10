@@ -76,7 +76,10 @@ async def test_pending_unsuccessful_outcome_and_source_replay(
                     transaction, session_id=state.session.session_id, execution_id=result.execution.execution_id,
                 )
             )
-            assert committed.status is status and committed.output is None
+            assert committed.session_id == state.session.session_id
+            assert committed.execution_id == recovery.execution_id
+            assert recovery.status is status and recovery.result.output is None
+            assert recovery.completed_at == turn.commit.result.created_at
             assert committed.start_message_index == committed.end_message_index == 0
         before = await _snapshot(state)
         assert await state.commands.read_pending_turn(

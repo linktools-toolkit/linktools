@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -16,7 +17,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence import _archive, _history, _step_message_content
+from linktools.ai.persistence import _history, _step_message_content
 from linktools.ai.persistence import NativeMessageRoot
 from linktools.ai.persistence.state import FactQuery, active_state_scope
 
@@ -215,21 +216,25 @@ async def test_transcript_payload_and_yield_release_state_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     backend: str, reader: str, finish: str,
 ) -> None:
-    monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-payload-scope", tenant_id="tenant")
     task = None
     try:
         session = await state.conversation.sessions.create(_session())
         assert session.history_id is not None
-        await _materialize(state, "first", ("x" * 17000,))
+        attachment = BinaryContent(data=b"attachment body", media_type="image/png")
+        await _materialize(state, "first", (), messages=[
+            ModelRequest(parts=[UserPromptPart(content=[attachment])]),
+            ModelResponse(parts=[TextPart(content="answer")]),
+        ])
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         latest = await repository.latest_chunk(session.history_id)
         assert latest is not None
         contents = await repository.content_archive()
         records = await _message_content_records(contents, (latest.content,))
-        assert all(record.payload.kind == "object" for record in records)
+        assert all(record.payload is None or record.payload.kind == "inline" for record in records)
+        assert sum(len(record.payload.object_refs()) for record in records if record.payload is not None) == 1
         objects = contents._objects
         assert objects is not None
         original_open = objects.open
@@ -262,7 +267,10 @@ async def test_transcript_payload_and_yield_release_state_scope(
         )
         if finish == "close":
             first = await anext(stream)
-            assert first.parts[0].content == "x" * 17000
+            content = first.parts[0].content
+            assert len(content) == 1 and isinstance(content[0], BinaryContent)
+            assert content[0].data == attachment.data
+            assert content[0].media_type == attachment.media_type
             assert active_state_scope() is None
             await stream.aclose()
         else:

@@ -160,6 +160,7 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert result.execution == replace(
         turn.commit.execution, revision=4 + len(turn.audit_events),
         event_seq=2 + len(turn.audit_events), result=turn.commit.result, retention_closed=True,
+        completed_at=turn.commit.result.created_at,
         recovery=ExecutionRecoveryDetail(agent_run_id=agent_run_id(
             namespace=_NAMESPACE, tenant_id="tenant", execution_id=execution_id, agent_run_seq=1,
         )),

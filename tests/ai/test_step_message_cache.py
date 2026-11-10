@@ -34,10 +34,17 @@ class _SqlTraffic:
         self.bound_bytes += self._bytes(parameters)
         if statement.startswith("INSERT INTO ai_step_messages "):
             self.statements["message_insert"] += 1
+            # Codec, size, and manifest columns are bound alongside message
+            # bodies; only the body column contributes to message_bytes.
+            insert_columns = statement.split("(", 1)[1].split(")", 1)[0]
+            columns = [column.strip().strip('"`') for column in insert_columns.split(",")]
+            width = len(columns)
+            body_index = columns.index("message")
             batches = parameters if many else (parameters,)
             for batch in batches:
-                self.message_rows += len(batch) // 3
-                self.message_bytes += sum(len(value.encode()) for value in batch[2::3])
+                assert len(batch) % width == 0
+                self.message_rows += len(batch) // width
+                self.message_bytes += sum(self._bytes(value) for value in batch[body_index::width])
         elif statement.startswith("INSERT INTO ai_step_snapshots "):
             self.statements["snapshot_insert"] += 1
         elif statement.startswith("INSERT INTO ai_step_sequences "):
@@ -47,11 +54,39 @@ class _SqlTraffic:
     def _bytes(cls, value: object) -> int:
         if isinstance(value, str):
             return len(value.encode())
-        if isinstance(value, bytes):
+        if isinstance(value, memoryview):
+            return value.nbytes
+        if isinstance(value, (bytes, bytearray)):
             return len(value)
         if isinstance(value, (tuple, list)):
             return sum(cls._bytes(item) for item in value)
         return 0
+
+
+@pytest.mark.parametrize("many", [False, True])
+def test_sql_traffic_counts_binary_message_rows_and_bound_bytes(many: bool) -> None:
+    traffic = _SqlTraffic()
+    # Include an attachment manifest with no inline body, and non-ASCII text.
+    rows = (("store", "one", memoryview(b"compressed"), "zlib", 1000, None),
+            ("store", "two", None, "raw", 20, '{"name":"文"}'))
+    statement = (
+        "INSERT INTO ai_step_messages "
+        "(store_digest, sha256, message, compression, raw_size, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    if not many:
+        statement += ", (?, ?, ?, ?, ?, ?)"
+    parameters = rows if many else tuple(value for row in rows for value in row)
+    traffic.capture(None, None, statement, parameters, None, many)
+    assert traffic.message_rows == 2
+    assert traffic.message_bytes == len(b"compressed")
+    assert traffic.bound_bytes == (
+        2 * len(b"store") + len(b"one") + len(b"two") + len(b"compressed")
+        + len(b"zlib") + len(b"raw") + len('{"name":"文"}'.encode())
+    )
+    assert traffic.statements["message_insert"] == 1
+    assert traffic._bytes(memoryview(b"12345678").cast("I")) == 8
+    assert traffic._bytes(bytearray(b"body")) == 4
 
 
 def _snapshot(key: str, *messages: str) -> ContinuableSnapshot:

@@ -72,9 +72,9 @@ _RECORD_DELETE_BATCH_SIZE = 256
 _IMMUTABLE_RECORD_BATCH_SIZE = 64
 # One store and one stream predicate leave 997 SQLite sequence binds.
 _FACT_READ_BATCH_SIZE = 997
-# Six CASE assignments and seven identity/CAS binds plus the IN key
-# require at most 20 binds per row and one shared store bind.
-_RECORD_REPLACE_BATCH_SIZE = 49
+# Seven CASE assignments and seven identity/CAS binds plus the IN key
+# require at most 22 binds per row and one shared store bind.
+_RECORD_REPLACE_BATCH_SIZE = 45
 # Store, scope, and kind predicates leave 996 SQLite subject binds.
 _RECORD_SUBJECT_READ_BATCH_SIZE = 996
 _GROUP_RECORD_BIND_BUDGET = 999
@@ -180,7 +180,11 @@ class _SqlGroupTransaction:
 
 
 class SqlStateStorageGroup:
-    """Own one SQL context and one physical transaction for its logical stores."""
+    """Own one SQL context and one physical transaction for its logical stores.
+
+    ``native_content_index`` declares provisioned native owner tables; it never
+    probes or creates them. Binding a native partition makes the same promise.
+    """
 
     def __init__(
         self,
@@ -190,6 +194,7 @@ class SqlStateStorageGroup:
         owns_context: bool = False,
         read_only: bool = False,
         uses_archive: bool = False,
+        native_content_index: bool = False,
     ) -> None:
         self._context = context
         self._metadata = metadata
@@ -208,7 +213,7 @@ class SqlStateStorageGroup:
         self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
         self._native_partitions: set[str] = set()
-        self._native_content_index = False
+        self._native_content_index = native_content_index
 
     def bind_native_partition(self, store_digest: str) -> None:
         """Limit automatic physical maintenance to explicitly bound native owners."""
@@ -389,15 +394,6 @@ class SqlStateStorageGroup:
         await self._context.initialize()
         if not self._read_only:
             await self._context.require_write_access()
-        from sqlalchemy import inspect
-        # State metadata describes logical primitives, not every provisioned
-        # physical table. Cold owners must retain native roots even without a
-        # bound StepStore in this process.
-        async with self._context.engine.connect() as connection:
-            provisioned_native_index = await connection.run_sync(
-                lambda sync: inspect(sync).has_table("ai_native_content_edges"),
-            )
-        self._native_content_index = self._native_content_index or provisioned_native_index
         self._initialized = True
         _logger.info(
             "SQL StateStorageGroup initialized: dialect=%s tables=%s",
@@ -647,7 +643,11 @@ class SqlStateStorageGroup:
 
 
 class SqlStateStore:
-    """Optimistic SQL StateStore backed by the five primitive tables."""
+    """Optimistic SQL StateStore backed by the five primitive tables.
+
+    Standalone native owners opt into ``native_content_index`` after explicit
+    provisioning. Stores sharing a group use that group's owner declaration.
+    """
 
     def __init__(
         self,
@@ -659,6 +659,7 @@ class SqlStateStore:
         group: SqlStateStorageGroup | None = None,
         cache: CacheBackend | None = None,
         store_digest: bytes | None = None,
+        native_content_index: bool = False,
     ) -> None:
         resolved_context = context or create_sql_storage_context(engine)
         self._metadata = (
@@ -681,6 +682,7 @@ class SqlStateStore:
             resolved_context,
             self._metadata,
             owns_context=context is None,
+            native_content_index=native_content_index,
         )
         self._close_lock = asyncio.Lock()
         self._closed = False
@@ -1047,13 +1049,34 @@ class _SqlTransaction:
         if self._native_content_index:
             from ._native_content_index import stage_owner
             stage_owner(self._session, kind, self._store_hex, identity, data, state=state, inserting=inserting)
+        elif data is not None:
+            from ._archive_closure import iter_native_message_roots
+            if next(iter_native_message_roots(data), None) is not None:
+                error = AIError(
+                    ErrorCode.STORAGE_CAPABILITY_MISSING,
+                    "Native content owners require an explicitly provisioned native content index",
+                )
+                self._abort_mutation(error)
+                raise error
 
-    def _stage_native_record_owner(self, record: StoredRecord, *, inserting: bool = False) -> None:
+    def _native_record_owner_data(self, record: StoredRecord) -> object:
         from .captures import CAPTURE_RECORD_KINDS, capture_retention_value
 
         # Content rows own payload objects, never native message roots.
-        data = (None if record.kind == "archive_content" else
+        return (None if record.kind == "archive_content" else
                 capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS else record.data)
+
+    def _stage_native_record_owner(
+        self, record: StoredRecord, *, inserting: bool = False, previous: StoredRecord | None = None,
+    ) -> None:
+        data = self._native_record_owner_data(record)
+        if previous is not None:
+            from ._archive_closure import iter_native_message_roots
+            # The successful owner CAS validates the transaction's old revision.
+            # Without old roots and new roots there are no edges to retire.
+            if (next(iter_native_message_roots(self._native_record_owner_data(previous)), None) is None
+                    and next(iter_native_message_roots(data), None) is None):
+                return
         self._stage_native_owner("record", (_hex(record.key_digest),), data, state=record.state, inserting=inserting)
 
     async def _retire_native_rows(self, kind: str, table: "Table", *conditions: "ColumnElement[bool]") -> None:
@@ -1491,7 +1514,10 @@ class _SqlTransaction:
                 raise error
         for replacement in ordered:
             record = replacement.record
-            self._stage_native_record_owner(record)
+            previous = self._record_cache.get(record.key_digest)
+            if previous is not None and previous.storage_revision != replacement.expected_storage_revision:
+                previous = None
+            self._stage_native_record_owner(record, previous=previous)
         self._log_batch("replace_records", len(ordered), statement_count)
         for replacement in ordered:
             self._guarded_record_revisions[replacement.record.key_digest] = replacement.record.storage_revision

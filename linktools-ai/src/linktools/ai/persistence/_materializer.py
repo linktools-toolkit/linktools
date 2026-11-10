@@ -124,6 +124,10 @@ async def materialize_runtime_storage(
             name=domain.value,
             route=plan.route(domain),
             configure_schema=partial(configure_schema, domain),
+            native_content_index=domain in {
+                PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION,
+                PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT,
+            },
             uses_archive=domain in {
                 PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION,
                 PersistenceDomain.TRACE, PersistenceDomain.CHECKPOINT,

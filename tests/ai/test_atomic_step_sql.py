@@ -44,30 +44,66 @@ def _records() -> tuple[RunRecord, list[StepEvent], ContinuableSnapshot]:
 
 
 @pytest.mark.asyncio
-async def test_compound_native_records_use_one_physical_commit_and_warm_bodies(atomic_store: tuple[SqlStepStore, AsyncEngine]) -> None:
+async def test_compound_native_records_use_one_owner_commit_and_bounded_maintenance(
+    atomic_store: tuple[SqlStepStore, AsyncEngine], record_property,
+) -> None:
     store, engine = atomic_store
     assert isinstance(store, AtomicStepStore)
     run, events, snapshot = _records()
-    commits = []
-    record_commit = commits.append
+    commits: list[list[tuple[str, str]]] = []
+    pending: list[tuple[str, str]] = []
     traffic = _SqlTraffic()
-    event.listen(engine.sync_engine, "commit", record_commit)
-    event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
-    await store.commit_step(run=run, events=events, snapshot=snapshot)
-    assert len(commits) == 1
-    event.remove(engine.sync_engine, "commit", record_commit)
-    assert traffic.message_rows == 1
-    assert await store.get_run(run_id="run") == run
-    assert await store.list_events(run_id="run") == events
-    assert await store.latest_snapshot(run_id="run") == snapshot
-    commits.clear()
-    event.listen(engine.sync_engine, "commit", record_commit)
-    await store.commit_step(events=events, snapshot=replace(snapshot, idempotency_key="next"))
-    assert len(commits) == 1
-    assert traffic.message_rows == 1
-    assert await store.list_events(run_id="run") == events
-    await store.commit_step()
-    assert len(commits) == 1
+
+    def capture(connection, cursor, statement, parameters, context, many):
+        traffic.capture(connection, cursor, statement, parameters, context, many)
+        compiled = context.compiled.statement
+        if compiled.is_dml:
+            pending.append((statement.split()[0].upper(), compiled.table.name))
+
+    def committed(connection):
+        commits.append(list(pending))
+        pending.clear()
+
+    def rolled_back(connection):
+        pending.clear()
+
+    def assert_boundary_commits() -> None:
+        owners = [group for group in commits if ("INSERT", "ai_step_snapshots") in group]
+        assert len(owners) == 1
+        assert owners[0].count(("INSERT", "ai_step_snapshots")) == 1
+        maintenance = [group for group in commits if group is not owners[0]]
+        assert len(maintenance) <= 1
+        assert all(verb == "DELETE" and table in {
+            "ai_native_content_edges", "ai_step_sequences", "ai_step_messages",
+        } for group in maintenance for verb, table in group)
+        record_property("native_owner_commits", len(owners))
+        record_property("native_maintenance_commits", len(maintenance))
+
+    event.listen(engine.sync_engine, "commit", committed)
+    event.listen(engine.sync_engine, "rollback", rolled_back)
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        await store.commit_step(run=run, events=events, snapshot=snapshot)
+        assert_boundary_commits()
+        owner = next(group for group in commits if ("INSERT", "ai_step_snapshots") in group)
+        assert owner.count(("INSERT", "ai_step_runs")) == 1
+        assert owner.count(("INSERT", "ai_step_events")) == 1
+        assert traffic.message_rows == 1
+        assert await store.get_run(run_id="run") == run
+        assert await store.list_events(run_id="run") == events
+        assert await store.latest_snapshot(run_id="run") == snapshot
+        commits.clear()
+        await store.commit_step(events=events, snapshot=replace(snapshot, idempotency_key="next"))
+        assert_boundary_commits()
+        assert traffic.message_rows == 1
+        assert await store.list_events(run_id="run") == events
+        commits.clear()
+        await store.commit_step()
+        assert commits == []
+    finally:
+        event.remove(engine.sync_engine, "commit", committed)
+        event.remove(engine.sync_engine, "rollback", rolled_back)
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
 
 
 @pytest.mark.asyncio
@@ -231,7 +267,9 @@ async def test_inflight_compound_group_is_invisible_to_cold_reader_and_cache(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shared_context", (False, True))
-async def test_native_boundary_joins_control_transaction_without_reads_or_early_receipts(tmp_path: Path, shared_context: bool) -> None:
+async def test_native_boundary_joins_control_transaction_with_identity_reads_and_no_early_receipts(
+    tmp_path: Path, shared_context: bool, record_property,
+) -> None:
     from .test_state_group_record_batch import _database, _record
 
     async with _database(tmp_path / "joined.db") as (engine, state, _):
@@ -255,7 +293,16 @@ async def test_native_boundary_joins_control_transaction_without_reads_or_early_
         receipt = await state.mutate(commit)
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert len(commits) == 1
-        assert not any(statement.lstrip().upper().startswith(("SELECT", "WITH")) for statement in statements)
+        reads = [statement for statement in statements if statement.lstrip().upper().startswith(("SELECT", "WITH"))]
+        assert len(reads) <= 4, reads
+        for statement in reads:
+            projection = statement.split("FROM", 1)[0].strip()
+            assert projection in {
+                "SELECT ai_step_sequences.sha256, ai_step_sequences.id",
+                "SELECT ai_step_messages.sha256, ai_step_messages.id",
+            }, statement
+        record_property("native_joined_identity_selects", len(reads))
+        record_property("native_joined_owner_commits", len(commits))
         assert not native._message_proofs
         native.confirm_prepared_step(receipt)
         assert native._message_proofs
@@ -415,25 +462,11 @@ async def test_pruned_headers_keep_replay_identity_without_body_retention_roots(
             messages=[ModelRequest(parts=[UserPromptPart("retained")])])
         await native.save_snapshot(last)
         await native.close()
-        async with engine.begin() as connection:
-            # Pruning drops roots only. Offline collection follows every live root
-            # before deleting unreachable immutable sequence nodes and bodies.
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 4
-            await connection.execute(text("""
-                WITH RECURSIVE edges(parent, child) AS (
-                    SELECT sha256, left_sha256 FROM ai_step_sequences
-                    UNION ALL SELECT sha256, right_sha256 FROM ai_step_sequences
-                    UNION ALL SELECT sha256, next_sha256 FROM ai_step_sequences
-                ), live(sha256) AS (
-                    SELECT sequence_root FROM ai_step_snapshots WHERE pruned = 0
-                    UNION SELECT edges.child FROM edges JOIN live ON edges.parent = live.sha256
-                    WHERE edges.child IS NOT NULL
-                )
-                DELETE FROM ai_step_sequences WHERE sha256 NOT IN (SELECT sha256 FROM live WHERE sha256 IS NOT NULL)
-            """))
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE sha256 NOT IN (SELECT message_sha256 FROM ai_step_sequences)"))
+        async with engine.connect() as connection:
+            # Online collection removes unreachable content, but replay headers
+            # must survive and must never restore their retired body roots.
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 1 AND messages = '{}' AND sequence_root IS NULL")) == 2
         cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
         await cold.save_snapshot(replace(first, messages=[ModelRequest(parts=[UserPromptPart("different replay")])]))
