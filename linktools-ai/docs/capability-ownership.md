@@ -121,7 +121,7 @@ methods are a public surface. Task currently consumes the following paths:
 | Admission input | `canonicalize_files(files)` → tuple; `materialize_input(prompt, files=())` → canonical input | Canonical Workspace-relative paths, original tenant and the existing captured content boundary |
 | Durable binding validation | `resolve_contract(contract)` → `AgentBindingContract` | Preserve the admitted Agent, hooks and child contracts; new business/MCP calls and Skill reads use current candidates within the recorded selectors |
 | Start and get | Overridable `start(...)` / `get(execution_id, principal)` → `Execution` | Original principal, output contract, correlation, graph budget scope, invocation-capture requirement and dependency hold |
-| Invocation capture | Optional `captures.record_invocation(execution_id, invocation)` | Persist Task-to-execution capture before releasing the handoff obligation |
+| Invocation capture | `record_invocation(execution_id, invocation)` → None | The producer selects its optional capture owner; persist Task-to-execution capture before releasing the handoff obligation |
 | Authorized reads | `service.inspect`, `result`, `result_payload_size`, `wait`, `list_children`, `budget_usage` | Existing authorization and exact producer service. Service `wait` returns `ExecutionResult`, not the observer's `WaitResult` |
 | History and live observation | `operations.history` cutoff/read/subscribe operations; `watch_tree` | Root/child producer routing, cursors, readiness, stream cleanup and observation lifetime |
 | Task execution handle | `operations`, `watch_tree` plus Task-owned cancel callback | Node cancellation must also settle the graph. Returning ordinary `port.get()` alone loses that callback |
@@ -135,7 +135,16 @@ allows `port.service` and `port.operations.service` to differ. Start/get overrid
 also remain independent from service dispatch. A blanket equality requirement,
 replacement with a handle, or use of `acquire_hold` would change this contract.
 
-### Decision required before changing the public port
+Invocation capture is selected inside the existing port. It passes the original
+execution ID and `TaskNodeInvocation` to the producer's `InputCaptures` when
+configured, and is a no-op otherwise. It neither re-resolves admission nor
+changes the invocation principal. Failure or cancellation propagates to the
+existing Task handoff logic; returning from this operation is not permission to
+release the hold early. The public `captures` constructor field remains
+available for producer composition. Ordinary application calls do not change.
+This operation does not complete the remaining read/history/handle boundary.
+
+### Remaining public port design
 
 The next boundary design must specify whether it retains existing public
 collaborators with narrower protocol types, or replaces direct access with
@@ -144,7 +153,8 @@ It must cover the whole table, including history, graph-aware cancellation and
 tenant-level retention. Merely adding wrappers for start/get/inspect leaves the
 rest unchanged and adds another maintenance surface.
 
-No new port names, parameters, default values, constructor shape or lifecycle
-are adopted by this document. Ordinary `Task.from_agent` and Runtime composition
-remain unchanged in either design. Runtime's current execution/turn authority
+Beyond the invocation-capture operation above, no replacement port names,
+parameters, default values, constructor shape or lifecycle are adopted here.
+Ordinary `Task.from_agent` and Runtime composition remain unchanged.
+Runtime's current execution/turn authority
 and Persistence contracts are not part of this API decision.

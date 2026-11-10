@@ -79,7 +79,7 @@ def _runner(execution: _Execution) -> AgentTaskRunner:
 
     runner._inspect_execution = inspect
     runner._get_execution = get
-    runner._record_invocation = AsyncMock()
+    runner.execution_port = SimpleNamespace(record_invocation=AsyncMock())
     return runner
 
 
@@ -225,7 +225,7 @@ async def test_rebound_deadline_preserves_invocation_before_failure(
         assert execution_id == "execution" and invocation.node.node_id == "agent"
         captured.set()
 
-    runner._record_invocation = capture
+    runner.execution_port.record_invocation = capture
     monkeypatch.setattr(_agent_task, "_DEADLINE_CANCEL_TIMEOUT_SECONDS", 0.02)
     try:
         with pytest.raises(TaskNodeRunError) as caught:

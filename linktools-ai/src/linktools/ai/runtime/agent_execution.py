@@ -22,6 +22,7 @@ from ..model import CanonicalUserInput, normalize_input_files
 if TYPE_CHECKING:
     from ._execution import DefaultExecutionService
     from ..execution import ExecutionRecord, SessionService
+    from ..task import TaskNodeInvocation
     from ..inputs import InputCaptures
     from ..persistence import Persistence
 
@@ -85,6 +86,11 @@ class AgentExecutionPort(Generic[AppT]):
         if agent_id is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self.resolve_current(agent_id, self.derivations, None)
+
+    async def record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
+        """Record the Task handoff when this producer has input capture enabled."""
+        if self.captures is not None:
+            await self.captures.record_invocation(execution_id, invocation)
 
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
         self.operations.ensure_open()

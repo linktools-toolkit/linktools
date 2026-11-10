@@ -4,6 +4,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -77,7 +78,7 @@ async def test_cancelled_wait_leaves_handed_off_execution_for_graph_recovery() -
         SimpleNamespace(id="agent-task", revision=1, build_input=None),
         port=SimpleNamespace(
             compiled=SimpleNamespace(spec=binding.agent_spec),
-            binding_contract=binding, captures=None,
+            binding_contract=binding, record_invocation=AsyncMock(),
         ),
         persistence=SimpleNamespace(
             task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
@@ -157,7 +158,7 @@ async def test_cancelled_start_defers_binding_to_idempotent_recovery() -> None:
         SimpleNamespace(id="agent-task", revision=1, build_input=None),
         port=SimpleNamespace(
             compiled=SimpleNamespace(spec=binding.agent_spec),
-            binding_contract=binding, captures=None,
+            binding_contract=binding, record_invocation=AsyncMock(),
         ),
         persistence=SimpleNamespace(
             task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
@@ -275,7 +276,7 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         SimpleNamespace(id="agent-task", revision=1, build_input=None),
         port=SimpleNamespace(
             compiled=SimpleNamespace(spec=binding.agent_spec),
-            binding_contract=binding, captures=None,
+            binding_contract=binding, record_invocation=AsyncMock(),
         ),
         persistence=SimpleNamespace(
             task=SimpleNamespace(admissions=None), execution=SimpleNamespace(budgets=None),
