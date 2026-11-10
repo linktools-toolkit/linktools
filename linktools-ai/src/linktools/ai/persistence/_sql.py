@@ -48,6 +48,7 @@ from .state import (
     StoredRecord,
     active_state_group_transaction,
     active_state_scope,
+    is_active_state_transaction,
     active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
@@ -57,6 +58,7 @@ from .state import (
 )
 
 if TYPE_CHECKING:
+    from ..storage import SqlValue
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
     from sqlalchemy.sql import ColumnElement, Executable, Select
@@ -66,6 +68,8 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
+# Each immutable record contributes thirteen bound values.
+_IMMUTABLE_RECORD_BATCH_SIZE = 64
 # One store and one stream predicate leave 997 SQLite sequence binds.
 _FACT_READ_BATCH_SIZE = 997
 # Six CASE assignments and seven identity/CAS binds plus the IN key
@@ -76,7 +80,7 @@ _RECORD_SUBJECT_READ_BATCH_SIZE = 996
 _GROUP_RECORD_BIND_BUDGET = 999
 _ARCHIVE_READ_BIND_BUDGET = 999
 # Fixed predicates and JSON-path bindings across all eight edge branches.
-_ARCHIVE_READ_FIXED_BINDS = 96
+_ARCHIVE_READ_FIXED_BINDS = 106
 
 
 class _SqlGroupTransaction:
@@ -199,6 +203,7 @@ class SqlStateStorageGroup:
         self._initialized = False
         self._members: dict[bytes, SqlStateStore] = {}
         self._archive_member: SqlStateStore | None = None
+        self._opened_archive: tuple[str, SqlStateStore] | None = None
         self._archive_scope_initialized = False
         self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
@@ -234,6 +239,10 @@ class SqlStateStorageGroup:
                 if result.first() is None:
                     return None
         return await self._open_partition(key)
+
+    @property
+    def opened_archive(self) -> tuple[str, "SqlStateStore"] | None:
+        return self._opened_archive
 
     async def open_archive(
         self, *, create: bool = False,
@@ -283,7 +292,8 @@ class SqlStateStorageGroup:
         archive_digest = hashlib.sha256(b"linktools-ai:state-group-archive").digest()
         self._archive_member = await self._open_partition(archive_digest)
         self._archive_scope_initialized = True
-        return scope, self._archive_member
+        self._opened_archive = scope, self._archive_member
+        return self._opened_archive
 
     async def _initialize_archive_scope(
         self, session: "AsyncSession", clock: "_SqlTransactionClock",
@@ -437,6 +447,7 @@ class SqlStateStorageGroup:
     def _create_transactions(
         self, stores: Sequence["SqlStateStore"], session: "AsyncSession",
         clock: "_SqlTransactionClock",
+        observers: list[Callable[[bool], None]] | None = None,
     ) -> dict["SqlStateStore", "_SqlTransaction"]:
         partitions: dict[bytes, _SqlTransaction] = {}
         transactions: dict[SqlStateStore, _SqlTransaction] = {}
@@ -444,7 +455,7 @@ class SqlStateStorageGroup:
             digest = store.store_digest
             if digest not in partitions:
                 partitions[digest] = _SqlTransaction(
-                    session, self._metadata, self._context, digest, clock=clock,
+                    session, self._metadata, self._context, digest, clock=clock, observers=observers,
                 )
             transactions[store] = partitions[digest]
         return transactions
@@ -470,15 +481,19 @@ class SqlStateStorageGroup:
         capture_tokens: dict[SqlStateStore, object] = {}
         changed: set[SqlStateStore] = set()
         confirmed = False
+        observers: list[Callable[[bool], None]] = []
+        aborted_observers: list[Callable[[bool], None]] = []
 
         async def execute(session: "AsyncSession") -> ValueT:
             nonlocal captured_at, captures, capture_tokens, changed
+            aborted_observers.extend(observers)
+            observers.clear()
             captured_at = time()
             capture_tokens = {store: store._reads.capture_token for store in members}
             clock = _SqlTransactionClock(session, self._context)
             if self._archive_on_mutation and not self._archive_scope_initialized:
                 await self._initialize_archive_scope(session, clock)
-            transactions = self._create_transactions(members, session, clock)
+            transactions = self._create_transactions(members, session, clock, observers)
             group_transaction = _SqlGroupTransaction(self, transactions)
             token = bind_state_scope(self, transactions, record_reader=group_transaction)
             try:
@@ -571,14 +586,23 @@ class SqlStateStorageGroup:
         finally:
             if lock is not None:
                 lock.release()
-            for store in members:
-                if confirmed and store not in changed:
-                    continue
-                previous = await store._reads.invalidate()
-                # A delayed source return must not acquire a newer capture boundary.
-                if confirmed and previous is capture_tokens.get(store):
-                    for record in captures.get(store, ()):
-                        store._reads.publish_record(record, captured_at=captured_at)
+            try:
+                for store in members:
+                    if confirmed and store not in changed:
+                        continue
+                    previous = await store._reads.invalidate()
+                    # A delayed source return must not acquire a newer capture boundary.
+                    if confirmed and previous is capture_tokens.get(store):
+                        for record in captures.get(store, ()):
+                            store._reads.publish_record(record, captured_at=captured_at)
+            finally:
+                for observer in (observers if confirmed else (*aborted_observers, *observers)):
+                    try:
+                        observer(confirmed)
+                    except Exception:
+                        # Cache maintenance cannot change the durable commit outcome.
+                        _logger.warning("SQL mutation observer failed", exc_info=True)
+                observers.clear()
 
     @asynccontextmanager
     async def _session(self):
@@ -881,6 +905,7 @@ class _SqlTransaction:
         store_digest: bytes,
         *,
         clock: _SqlTransactionClock | None = None,
+        observers: list[Callable[[bool], None]] | None = None,
     ) -> None:
         if not isinstance(store_digest, bytes) or len(store_digest) != 32:
             raise ValueError("store_digest must be a 32-byte digest")
@@ -896,6 +921,82 @@ class _SqlTransaction:
         self._sequence_cache: dict[bytes, int] = {}
         self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
+        self._observers = observers
+
+    def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]:
+        if not is_active_state_transaction(self):
+            raise StateTransactionNestingError("record cache requires its active storage transaction")
+        return {key: self._record_cache[key] for key in keys if key in self._record_cache}
+
+    async def read_sql_rows(
+        self, context: SqlStorageContext, statement: "Select",
+    ) -> tuple[Mapping[str, object], ...]:
+        from sqlalchemy.sql import Select, visitors
+        from sqlalchemy.sql.dml import UpdateBase
+        from sqlalchemy.sql.elements import TextClause
+        from sqlalchemy.sql.selectable import ForUpdateArg
+
+        if (not isinstance(statement, Select) or context.engine is not self._context.engine
+                or context.closed or self._context.closed or not is_active_state_transaction(self)
+                or any(isinstance(node, (UpdateBase, TextClause, ForUpdateArg))
+                       for node in visitors.iterate(statement))):
+            raise StateTransactionNestingError("native rows require a read-only SQL plan in their active boundary")
+        return tuple(dict(row) for row in (await self._execute(statement)).mappings())
+
+    async def read_joined_records(
+        self, context: SqlStorageContext, statement: "Select", *, keys: Sequence[bytes] = (),
+    ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]:
+        from sqlalchemy.sql import Select, visitors
+        from sqlalchemy.sql.dml import UpdateBase
+        from sqlalchemy.sql.elements import TextClause
+        from sqlalchemy.sql.selectable import ForUpdateArg
+
+        if (not isinstance(statement, Select) or context.engine is not self._context.engine
+                or context.closed or self._context.closed or not is_active_state_transaction(self)
+                or any(isinstance(node, (UpdateBase, TextClause, ForUpdateArg))
+                       for node in visitors.iterate(statement))):
+            raise StateTransactionNestingError("joined records require a read-only SQL plan in their active boundary")
+        rows = (await self._execute(statement)).mappings().all()
+        result: list[tuple[StoredRecord, Mapping[str, object]]] = []
+        for row in rows:
+            if row["store_digest"] != self._store_hex:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            record = _record_from_row(row)
+            self._record_cache[record.key_digest] = record
+            result.append((record, row))
+        for key in keys:
+            self._record_cache.setdefault(key, None)
+        return tuple(result)
+
+    async def read_joined_facts(
+        self, context: SqlStorageContext, statement: "Select",
+    ) -> tuple[tuple[StoredFact, Mapping[str, "SqlValue"]], ...]:
+        from sqlalchemy.sql import Select, visitors
+        from sqlalchemy.sql.dml import UpdateBase
+        from sqlalchemy.sql.elements import TextClause
+        from sqlalchemy.sql.selectable import ForUpdateArg
+
+        if (not isinstance(statement, Select) or context.engine is not self._context.engine
+                or context.closed or self._context.closed
+                or context.dialect.name != self._context.dialect.name
+                or not is_active_state_transaction(self)
+                or any(isinstance(node, (UpdateBase, TextClause, ForUpdateArg))
+                       for node in visitors.iterate(statement))):
+            raise StateTransactionNestingError(
+                "joined facts require a read-only SQL plan in their active boundary"
+            )
+        rows = (await self._execute(statement)).mappings().all()
+        result: list[tuple[StoredFact, Mapping[str, "SqlValue"]]] = []
+        for row in rows:
+            if row["store_digest"] != self._store_hex:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result.append((_fact_from_row(row), row))
+        return tuple(result)
+
+    def observe_mutation(self, callback: Callable[[bool], None]) -> None:
+        if self._observers is None or (not is_active_state_transaction(self) or active_state_scope() is None or not active_state_scope().writable):
+            raise StateTransactionNestingError("commit observer requires its active writable SQL boundary")
+        self._observers.append(callback)
 
     async def run_sql(
         self, context: SqlStorageContext,
@@ -1090,9 +1191,10 @@ class _SqlTransaction:
     def _payload_field(self, column: "ColumnElement", field: str) -> "ColumnElement":
         from sqlalchemy import JSON, cast, type_coerce
 
-        # Parse only archive string links in SQL; authoritative payloads stay text.
-        payload = (cast(column, JSON) if self._context.dialect.name == "postgresql"
-                   else type_coerce(column, JSON))
+        # The JSON scalar retains canonical text; parse only archive string links.
+        encoded = type_coerce(column, JSON)[()].as_string()
+        payload = (cast(encoded, JSON) if self._context.dialect.name == "postgresql"
+                   else type_coerce(encoded, JSON))
         return payload[field].as_string()
 
     def _archive_read_statement(
@@ -1167,6 +1269,27 @@ class _SqlTransaction:
             )
         )
         self._log_batch("insert_records", len(values), 1)
+        for record in values:
+            self._guarded_record_revisions[record.key_digest] = record.storage_revision
+            self._record_cache[record.key_digest] = record
+
+    async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        values = tuple(sorted(records, key=lambda record: record.key_digest))
+        try:
+            if len({record.key_digest for record in values}) != len(values):
+                raise ValueError("insert_immutable_records contains duplicate keys")
+            for record in values:
+                validate_record_identity(record)
+            for offset in range(0, len(values), _IMMUTABLE_RECORD_BATCH_SIZE):
+                rows = [{**_record_values(record), "store_digest": self._store_hex}
+                        for record in values[offset:offset + _IMMUTABLE_RECORD_BATCH_SIZE]]
+                await self._context.run_statement(self._context.dialect.insert_immutable_many(
+                    self._session, table=self._table("ai_state_records"), rows=rows,
+                    index_elements=("store_digest", "key_digest"), conflict_column="storage_revision",
+                ))
+        except BaseException as error:
+            self._abort_mutation(error)
+            raise
         for record in values:
             self._guarded_record_revisions[record.key_digest] = record.storage_revision
             self._record_cache[record.key_digest] = record

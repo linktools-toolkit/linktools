@@ -20,7 +20,7 @@ async def _materialize_execution_payloads(
     if stored_input is not None and input_materializer is not None:
         stored_input = await input_materializer.materialize_payload(stored_input, tenant_id=tenant_id)
     instructions = execution.repository_instructions
-    if (instructions is not None and instructions.payload.kind == "inline"
+    if (execution.input_context is None and instructions is not None and instructions.payload.kind == "inline"
             and instructions.source_domain is PersistenceDomain.EXECUTION):
         if keys is None or policy is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

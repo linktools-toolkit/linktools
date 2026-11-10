@@ -15,7 +15,7 @@ CREATE TABLE ai_state_records (
     lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
     lease_fence BIGINT NOT NULL DEFAULT 0 COMMENT 'Monotonic fencing token for the current durable record lease.',
     lease_expires_at TIMESTAMP(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.',
-    payload_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical domain JSON text preserving numeric representations.',
+    payload_json JSON NOT NULL COMMENT 'Canonical domain JSON encoded as a JSON string preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest),
@@ -47,7 +47,7 @@ CREATE TABLE ai_state_facts (
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.',
     subject_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping identity for multiple facts of one logical subject such as a tool call.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.',
-    payload_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical immutable fact JSON text preserving numeric representations.',
+    payload_json JSON NOT NULL COMMENT 'Canonical immutable fact JSON encoded as a JSON string preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
@@ -74,7 +74,7 @@ CREATE TABLE ai_state_operations (
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current durable operation state used by replay and completion logic.',
     compactable BOOLEAN NOT NULL COMMENT 'Whether a terminal operation may be removed by ledger compaction.',
-    payload_json LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical operation JSON text preserving numeric representations.',
+    payload_json JSON NOT NULL COMMENT 'Canonical operation JSON encoded as a JSON string preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
@@ -194,6 +194,7 @@ CREATE TABLE ai_step_events (
 	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
 	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream boundary event kind.',
+	outcome VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Owned lifecycle outcome, absent for ordinary upstream events.',
 	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 event time.',
 	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
@@ -202,7 +203,10 @@ CREATE TABLE ai_step_events (
 	tool_call_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream tool call identifier.',
 	tool_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream tool name.',
 	error LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary error text.',
-	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
+	metadata JSON COMMENT 'Upstream string metadata encoded as JSON, unless referenced from the native run.',
+	run_fields SMALLINT UNSIGNED NOT NULL COMMENT 'Native run field references: conversation 1, parent 2, agent 4, metadata 8.' DEFAULT 0,
+	body_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Integrity digest of the managed lifecycle source body.',
+	fields_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Integrity digest of managed lifecycle fields excluding metadata.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
 	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -212,18 +216,6 @@ CREATE TABLE ai_step_events (
 	UNIQUE KEY uk_key_digest (key_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Append-only upstream agent execution boundary events.' COLLATE utf8mb4_bin;
-
-CREATE TABLE ai_step_message_refs (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	snapshot_id BIGINT NOT NULL COMMENT 'Physical snapshot row identifier.',
-	position BIGINT NOT NULL COMMENT 'Zero-based position in the upstream message history.',
-	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	UNIQUE KEY uk_snapshot_id_position (snapshot_id, position),
-	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Ordered message references belonging to upstream snapshots.' COLLATE utf8mb4_bin;
 
 CREATE TABLE ai_step_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -259,6 +251,22 @@ CREATE TABLE ai_step_runs (
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;
 
+CREATE TABLE ai_step_sequences (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the immutable sequence node.',
+	message_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
+	tree_count BIGINT NOT NULL COMMENT 'Number of ordered message occurrences in this tree.',
+	left_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable left subtree root.',
+	right_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable right subtree root.',
+	next_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Next immutable tree in the sequence forest.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	UNIQUE KEY uk_store_digest_sha256 (store_digest, sha256),
+	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Shared immutable message sequence nodes for native snapshots.' COLLATE utf8mb4_bin;
+
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
@@ -270,7 +278,8 @@ CREATE TABLE ai_step_snapshots (
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 snapshot time.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
-    messages LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Ordered message count and bound native checkpoint state.',
+	messages VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Bounded message descriptor and native checkpoint state without message bodies.',
+	sequence_root CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable message sequence root retained by this snapshot.',
 	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
 	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
 	pruned BOOL NOT NULL COMMENT 'Retired snapshot identity without retained message references.',

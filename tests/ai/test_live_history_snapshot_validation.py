@@ -60,7 +60,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
                         "transcript_pending_parts", ["run", 1],
                     ))
                 elif corruption == "content-scope":
-                    chunk = replace(chunk, content=replace(chunk.content, content_scope="0" * 64))
+                    chunk = replace(chunk, content=replace(chunk.content, store_digest="0" * 64))
                 elif corruption == "content-count":
                     chunk = replace(chunk, content=replace(chunk.content, slices=()))
                 else:

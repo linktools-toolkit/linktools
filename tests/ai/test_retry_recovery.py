@@ -44,8 +44,7 @@ async def test_pending_retry_retains_bytes_and_cursor_through_recovery() -> None
             lambda tx: repository.capture_pending_in_transaction(tx, head),
         )
         assert keys == ("tool_result:call",)
-        content_archive = await repository.content_archive()
-        original = await content_archive.read_ranges((chunks[0].content,), codec="model-message")
+        original = await repository._read_message_roots((chunks[0].content,))
         with pytest.raises(AIError) as corrupt:
             await repository._decode_chunk_messages(replace(chunks[0], raw_digest="0" * 64))
         assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -82,7 +81,7 @@ async def test_pending_retry_retains_bytes_and_cursor_through_recovery() -> None
             "execution", tenant_id="tenant", cursor=None, limit=10, tool_call_id="call",
         )
         assert [item.status for item in latest.items] == ["FAILED", "FAILED"]
-        assert await content_archive.read_ranges((chunks[0].content,), codec="model-message") == original
+        assert await repository._read_message_roots((chunks[0].content,)) == original
         results = [part for item in recorder.transcript_messages() for part in item.parts
                    if isinstance(part, ToolReturnPart)]
         assert results == [retry]

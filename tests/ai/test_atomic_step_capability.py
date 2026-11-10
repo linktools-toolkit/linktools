@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Atomic hook boundaries preserve the original native recovery transcript."""
 
+from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -369,9 +370,9 @@ async def test_same_registration_retry_keeps_one_run_and_one_started_event(
     await store.initialize(local=True)
 
     async def registration(self):
-        return "journaled-registration"
+        return "journaled-registration", datetime.now(timezone.utc)
 
-    monkeypatch.setattr(AtomicStepPersistence, "_atomic_registration_id", registration)
+    monkeypatch.setattr(AtomicStepPersistence, "_atomic_registration_seed", registration)
 
     async def emit(event):
         pass
@@ -388,10 +389,10 @@ async def test_same_registration_retry_keeps_one_run_and_one_started_event(
         assert len(await store.list_events(run_id="run")) == 2
 
         async def different_registration(self):
-            return "different-registration"
+            return "different-registration", datetime.now(timezone.utc)
 
         monkeypatch.setattr(
-            AtomicStepPersistence, "_atomic_registration_id", different_registration
+            AtomicStepPersistence, "_atomic_registration_seed", different_registration
         )
         with pytest.raises(ValueError, match="single-shot"):
             capability = AtomicStepPersistence(store=RuntimeStepStore(store, InMemoryStepStore()), run_id="run")

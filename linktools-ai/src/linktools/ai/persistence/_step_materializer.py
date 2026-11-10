@@ -15,6 +15,8 @@ from ._object_router import _RuntimeObjectRouter
 from ._plan import PersistenceDomain, PersistencePlan
 from ._step_archive import StagingAgentRunStore, StateStepArchive
 from ._step_contracts import AgentRunStore
+from ._sql import SqlStateStore
+from ._step_store import SqlStepStore
 from .runs import RuntimeAgentRunStore
 from .state import StateStore
 
@@ -66,6 +68,21 @@ def build_runtime_agent_run_store(
                 execution_repository if domain is PersistenceDomain.TRACE else None
             ),
         )
+    native_by_engine: dict[object, SqlStepStore] = {}
+    for domain, archive in archives.items():
+        state = stores[domain]
+        if isinstance(state, SqlStateStore):
+            native = native_by_engine.get(state.context.engine)
+            if native is None:
+                native = SqlStepStore(state.context, namespace=namespace, tenant_id=tenant_id)
+                native_by_engine[state.context.engine] = native
+            archive.bind_native_run_store(native)
+    trace = archives.get(PersistenceDomain.TRACE)
+    execution = stores[PersistenceDomain.EXECUTION]
+    if (isinstance(trace, StateStepArchive) and isinstance(trace.state_store, SqlStateStore)
+            and isinstance(execution, SqlStateStore)
+            and trace.state_store.context.engine is execution.context.engine):
+        trace.enable_native_run_reads()
     return RuntimeAgentRunStore(
         StagingAgentRunStore(),
         execution_repository=execution_repository,

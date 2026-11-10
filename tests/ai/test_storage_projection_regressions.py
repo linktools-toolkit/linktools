@@ -146,7 +146,7 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
             assert records[0].repository_instructions is None
             assert records[2].repository_instructions is None
             reader = runtime._execution_service.runtime_backend()
-            assert await reader.load_repository_instructions(records[1].repository_instructions) == expected
+            assert records[1].repository_instructions is None
             contexts = [await reader.load_input_context(record.input_context) for record in records]
             assert all(context is not None for context in contexts)
             assert contexts[0].repository_instructions is None

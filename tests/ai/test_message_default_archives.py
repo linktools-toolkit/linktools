@@ -174,6 +174,7 @@ async def test_pending_missing_clock_factory_does_not_claim_exact_historical_rec
     await repository.create_head("run")
     with monkeypatch.context() as writer:
         writer.setattr(history_module, "encode_model_messages", omitted_clock)
+        writer.setattr(staging_module, "encode_model_messages", omitted_clock)
         prepared = await repository.prepare_observation(
             "run", (), first_message_index=0,
             pending=ModelRequest(parts=[ToolReturnPart("tool", "result", tool_call_id="call", timestamp=_NOW)], timestamp=_NOW),
@@ -226,8 +227,16 @@ async def test_loaded_projection_reuse_digest_describes_original_root_bytes(tmp_
             namespace="message-defaults-reuse", tenant_id="tenant",
         )
         prepared = await service.prepare(context, history_root=loaded.archive_root, history_digest=loaded.archive_digest)
-        assert prepared.archive.scope_id == loaded.archive_root.scope_id
-        assert prepared.archive.content_scope == loaded.archive_root.content_scope
+        if backend == "sqlite":
+            from linktools.ai.persistence import SqlStepStore
+
+            assert prepared.archive.scope_id == loaded.archive_root.group_id
+            assert loaded.archive_root.store_digest == SqlStepStore.scope_digest(
+                namespace="message-defaults-reuse", tenant_id="tenant",
+            )
+        else:
+            assert prepared.archive.scope_id == loaded.archive_root.scope_id
+            assert prepared.archive.content_scope == loaded.archive_root.content_scope
         await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
         assert await service.load(prepared.reference) == context
         assert prepared.reference.payload.decode()["history"] != loaded.archive_root.to_json()

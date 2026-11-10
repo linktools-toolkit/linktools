@@ -13,6 +13,7 @@ from ..execution import RuntimePayloadRef
 from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..execution import ExecutionInputContext
 from ..model.messages import combine_model_message_payloads
+from ..persistence import NativeMessageRoot, SqlStepStore
 from ..persistence.runs import ArchiveRoot, ContentArchive, PreparedArchive
 from ..persistence.state import StateStorageGroup, StateStore, active_state_scope
 
@@ -39,8 +40,10 @@ class ExecutionContextArchive:
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._archive: ContentArchive | None = None
+        self._native = SqlStepStore.for_state_store(store, namespace=namespace, tenant_id=tenant_id)
 
     async def _open(self, *, create: bool = False) -> ContentArchive:
+        await self._store.initialize()
         if self._archive is not None:
             return self._archive
         if not isinstance(self._store.storage_group, StateStorageGroup):
@@ -51,17 +54,28 @@ class ExecutionContextArchive:
         scope, store = opened
         self._archive = ContentArchive(store, scope, namespace=self._namespace,
                                        tenant_id=self._tenant_id, object_store=self._objects, object_reader=self._object_reader)
+        if self._native is not None:
+            self._native.bind_message_archive(self._archive)
         return self._archive
 
     async def prepare(
-        self, context: ExecutionInputContext, *, history_root: ArchiveRoot | None = None,
+        self, context: ExecutionInputContext, *, history_root: ArchiveRoot | NativeMessageRoot | None = None,
         history_digest: str | None = None,
     ) -> PreparedExecutionContext:
         archive = await self._open(create=True)
         prepared = PreparedArchive()
         semantic = context.to_payload()
         messages = semantic["history"]
-        if (history_root is not None and history_root.scope_id == archive.scope_id
+        if (self._native is not None and isinstance(history_root, NativeMessageRoot)
+                and history_digest == hashlib.sha256(context.history).hexdigest()
+                and self._native.can_reuse_message_root(history_root, raw_digest=history_digest,
+                                                        raw_size=len(context.history))):
+            history = history_root
+        elif self._native is not None:
+            history = await self._native.prepare_archived_message_payloads(
+                tuple(canonical_json_bytes([message]) for message in messages), prepared,
+            )
+        elif (isinstance(history_root, ArchiveRoot) and history_root.scope_id == archive.scope_id
                 and history_root.content_scope == archive.content_scope
                 and history_root.count == len(messages)
                 and history_digest == hashlib.sha256(context.history).hexdigest()):
@@ -112,6 +126,32 @@ class ExecutionContextArchive:
         return PreparedExecutionContext(RuntimePayloadRef(StoredPayload.inline_json(manifest), PersistenceDomain.EXECUTION),
                                         archive, prepared)
 
+    async def load_repository_instructions(
+        self, reference: RuntimePayloadRef,
+    ) -> Mapping[str, JsonValue] | None:
+        """Read the accepted instruction component without materializing model history."""
+        try:
+            if (reference.source_domain is not PersistenceDomain.EXECUTION
+                    or reference.payload.kind != "inline" or reference.payload.encoding != "json"):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = reference.payload.decode()
+            if not isinstance(value, Mapping) or value.get("kind") != "execution-context" or value.get("version") != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            item = value["repository_instructions"]
+            if item is None:
+                return None
+            archive = await self._open()
+            if (not isinstance(item, Mapping) or item.get("archive_scope") != archive.scope_id
+                    or item.get("content_scope") != archive.content_scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            bodies = await archive.read_contents((item["content_id"],), codec="json")
+            instructions = json.loads(bodies[0])
+            if not isinstance(instructions, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return instructions
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
     async def load(self, reference: RuntimePayloadRef) -> ExecutionInputContext:
         if reference.payload.kind != "inline":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -120,8 +160,15 @@ class ExecutionContextArchive:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archive = await self._open()
         try:
-            root = ArchiveRoot.from_json(value["history"])
-            message_bytes = (await archive.read_ranges((root,), codec="model-message"))[0]
+            wire = value["history"]
+            if isinstance(wire, Mapping) and wire.get("type") == "native_message_root":
+                root = NativeMessageRoot.from_json(wire)
+                if self._native is None:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                message_bytes = (await self._native.read_message_roots((root,)))[0]
+            else:
+                root = ArchiveRoot.from_json(wire)
+                message_bytes = (await archive.read_ranges((root,), codec="model-message"))[0]
             history = combine_model_message_payloads(message_bytes)
             references: list[Mapping[str, JsonValue]] = []
             maps: dict[str, list[tuple[str, int]] | None] = {}

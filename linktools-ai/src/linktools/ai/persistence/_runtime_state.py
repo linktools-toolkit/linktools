@@ -29,12 +29,12 @@ from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_objec
 from .contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
                          ExecutionRepositories, MemoryRepositories, CheckpointRepositories, TaskRepositories)
 from .state import StateStore
+from ..steps import NativeStepSource
 from ._snapshot import SnapshotLimits, SnapshotExclusiveGuard
 from .snapshots import SnapshotResources, RuntimeSnapshotOperations, restore_snapshot
 from ._object_cleanup import ObjectCleanupResult
 
 if TYPE_CHECKING:
-    from pydantic_ai_harness.media import MediaStore
     from pydantic_ai_harness.step_persistence import StepStore
     from ._step_store import SqlStepStore
     from ._materializer import _MaterializedRuntimeStorage
@@ -242,8 +242,6 @@ class Persistence:
         self,
         *,
         tool_effect_store: "StepStore | None" = None,
-        media_store: "MediaStore | None" = None,
-        media_threshold_bytes: int = 64 * 1024,
         max_snapshots_per_run: int | None = None,
         max_cached_messages: int = 4096,
     ) -> "SqlStepStore":
@@ -257,6 +255,8 @@ class Persistence:
         """
         from ._sql import SqlStateStore
         from ._step_store import SqlStepStore
+        from ._archive import ContentArchive
+        from functools import partial
 
         async with self._lock:
             self._require_ready()
@@ -270,12 +270,20 @@ class Persistence:
                 )
             store = SqlStepStore(
                 state.context, namespace=self.namespace, tenant_id=self.tenant_id,
-                tool_effect_store=tool_effect_store, media_store=media_store,
-                media_threshold_bytes=media_threshold_bytes,
+                tool_effect_store=tool_effect_store,
                 max_snapshots_per_run=max_snapshots_per_run,
                 max_cached_messages=max_cached_messages,
             )
             await store.initialize()
+            opened = await state.storage_group.open_archive(create=True)
+            if opened is None or self._objects is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            scope_id, archive_store = opened
+            store.bind_message_archive(ContentArchive(
+                archive_store, scope_id, namespace=self.namespace, tenant_id=self.tenant_id,
+                object_store=self._objects.archive_object_store(PersistenceDomain.EXECUTION),
+                object_reader=partial(self._objects.read_archive_object, PersistenceDomain.EXECUTION),
+            ))
             return store
 
     async def create_agent_run_store(self, *, step_store: "StepStore | None" = None) -> "RuntimeAgentRunStore":
@@ -574,6 +582,33 @@ class Persistence:
             return self._stores[PersistenceDomain.EXECUTION]
         return next((self._stores[domain] for domain in PersistenceDomain if domain in domains), None)
 
+    async def checkpoint_backup_source(self, source: NativeStepSource) -> "SqlStepStore":
+        """Resolve an admitted native owner in this Persistence's Execution group."""
+        from ._sql import SqlStateStore
+        from ._step_store import SqlStepStore
+
+        self._require_ready()
+        state = self._stores[PersistenceDomain.EXECUTION]
+        if not isinstance(source, NativeStepSource) or not isinstance(state, SqlStateStore):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        opened = await state.storage_group.open_archive()
+        if (opened is None or opened[0] != source.group_id
+                or source.store_digest != SqlStepStore.scope_digest(
+                    namespace=self.namespace, tenant_id=self.tenant_id)):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        from functools import partial
+        from ._archive import ContentArchive
+
+        if self._objects is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        store = SqlStepStore(state.context, namespace=self.namespace, tenant_id=self.tenant_id)
+        store.bind_message_archive(ContentArchive(
+            opened[1], opened[0], namespace=self.namespace, tenant_id=self.tenant_id,
+            object_store=self._objects.archive_object_store(PersistenceDomain.EXECUTION),
+            object_reader=partial(self._objects.read_archive_object, PersistenceDomain.EXECUTION),
+        ))
+        return store
+
     def snapshot_resources(self) -> SnapshotResources:
         self._require_ready()
         return SnapshotResources(
@@ -585,6 +620,7 @@ class Persistence:
             capability_stores=self.capability_stores,
             read_only=self.read_only,
             portable_export=not self.durable_capability_ids,
+            checkpoint_backup_source=self.checkpoint_backup_source,
         )
 
     def snapshot_operations(self) -> RuntimeSnapshotOperations:

@@ -43,6 +43,7 @@ def build_runtime_sql_metadata(
     from sqlalchemy import (
         TIMESTAMP,
         BigInteger,
+        JSON,
         Boolean,
         Column,
         MetaData,
@@ -144,9 +145,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            sql_sort_key(),
+            JSON(),
             nullable=False,
-            comment="Canonical domain JSON text preserving numeric representations.",
+            comment="Canonical domain JSON encoded as a JSON string preserving numeric representations.",
         ),
         *_audit(),
         comment=_RECORD_COMMENT,
@@ -237,9 +238,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            sql_sort_key(),
+            JSON(),
             nullable=False,
-            comment="Canonical immutable fact JSON text preserving numeric representations.",
+            comment="Canonical immutable fact JSON encoded as a JSON string preserving numeric representations.",
         ),
         *_audit(),
         comment=_FACT_COMMENT,
@@ -321,9 +322,9 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "payload_json",
-            sql_sort_key(),
+            JSON(),
             nullable=False,
-            comment="Canonical operation JSON text preserving numeric representations.",
+            comment="Canonical operation JSON encoded as a JSON string preserving numeric representations.",
         ),
         *_audit(),
         comment=_OPERATION_COMMENT,

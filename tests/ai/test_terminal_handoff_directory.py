@@ -92,7 +92,9 @@ async def test_terminal_handoff_rejects_corruption_without_model_route(
                     fields["binding"]["output_mode"] = "invalid"
                 else:
                     outcome = fields["recovery"]["fields"]["terminal_handoff"]["fields"]["outcome"]["fields"]
-                    outcome["output"]["fields"]["digest"] = "0" * 64
+                    output = (fields["result"]["fields"]["output"]
+                              if outcome.get("execution_result") is True else outcome["output"])
+                    output["fields"]["digest"] = "0" * 64
                 malformed = replace(
                     stored, data=encode_envelope(value),
                     storage_revision=stored.storage_revision + 1,

@@ -34,6 +34,7 @@ from ..execution import (ExecutionManager, ExecutionDriver, CancelEffectOutcome,
 )
 
 from ..model import validate_model_inputs
+from ..steps import NativeStepSource
 
 from ..agent import (
     AgentBinding,
@@ -260,6 +261,10 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         self, reference: "RuntimePayloadRef | None",
     ) -> RepositoryInstructions | None: ...
 
+    async def load_input_repository_instructions(
+        self, reference: RuntimePayloadRef,
+    ) -> RepositoryInstructions | None: ...
+
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,
@@ -382,6 +387,7 @@ class DefaultExecutionService(TaskExecutionService):
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         restore_binding: Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None = None,
+        native_step_source: Callable[[AgentBinding], Awaitable[NativeStepSource | None]] | None = None,
         runtime_bridge: _ExecutionRuntimeBridge,
         live_broker: _LiveExecutionStreamBroker,
         operation_ids: "Callable[[], str] | None" = None,
@@ -418,6 +424,7 @@ class DefaultExecutionService(TaskExecutionService):
         self._catalog = catalog
         self._compiler = compiler
         self._restore_binding = restore_binding
+        self._native_step_source = native_step_source
         self._runtime_bridge = runtime_bridge
         self._live_broker = live_broker
         self._history_reader = history_reader
@@ -1442,13 +1449,20 @@ class DefaultExecutionService(TaskExecutionService):
                 StoredPayload.inline_json(request.input_context.to_payload()), PersistenceDomain.EXECUTION,
             )
             if request.input_context.repository_instructions is not None:
-                repository_instructions = self._capture_repository_instructions(
-                    RepositoryInstructions.from_payload(request.input_context.repository_instructions))
+                RepositoryInstructions.from_payload(request.input_context.repository_instructions)
         elif self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 repository_instructions = parent.repository_instructions
+                if parent.input_context is not None:
+                    port = self._runtime_bridge.port
+                    if port is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    inherited = await port.load_input_repository_instructions(parent.input_context)
+                    repository_instructions = (
+                        None if inherited is None else self._capture_repository_instructions(inherited)
+                    )
                 if repository_instructions is None or input_instruction_paths:
                     documents = {}
                     if repository_instructions is not None:
@@ -1502,6 +1516,9 @@ class DefaultExecutionService(TaskExecutionService):
                         resolved_instructions,
                     )
 
+        native_source = None
+        if (policy.restart_checkpoints or parent is not None and parent.restart_checkpoints) and self._native_step_source is not None:
+            native_source = await self._native_step_source(binding)
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
@@ -1538,6 +1555,7 @@ class DefaultExecutionService(TaskExecutionService):
             stored_user_input=context.stored_user_input,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id or (None if request.budget is None else "execution:" + execution_id),
+            native_step_source=native_source,
             restart_checkpoints=(policy.restart_checkpoints
                                  or parent is not None and parent.restart_checkpoints),
             durable_trace=(policy.durable_trace or requires_task_invocation_capture

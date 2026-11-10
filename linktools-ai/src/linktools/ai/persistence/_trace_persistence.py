@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Protocol
 from uuid import uuid4
@@ -19,7 +19,7 @@ from ..errors import AIError, ErrorCode
 from .durability import await_owned_task
 from ._projection_payload import decode_projection_payload
 from ._step_archive import CapturedExecutionProjection, _AgentRunHistoryLock, _ProjectionOffset
-from ._step_contracts import AgentRunStore
+from ._step_contracts import AgentRunRecord, AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.state.trace")
 _BUFFER_TIMEOUT_SECONDS = 5.0
@@ -101,6 +101,7 @@ class TracePersistence:
         capture: _CaptureProjection,
         publish: _PublishProjection,
         background_tasks: set[asyncio.Task[object]],
+        resolve_run: Callable[[AgentRunRecord], AgentRunRecord] | None = None,
     ) -> None:
         self.archive = archive
         self.offsets: dict[str, _ProjectionOffset] = {}
@@ -113,6 +114,7 @@ class TracePersistence:
         self._flush_boundary = flush_boundary
         self._capture = capture
         self._publish = publish
+        self._resolve_run = resolve_run
         self._background_tasks = background_tasks
         self._caches: dict[str, WriteBufferBackend | None] = {}
         self._buffers: dict[str, _ObservationBuffer] = {}
@@ -369,6 +371,8 @@ class TracePersistence:
             if (capture.run.agent_run_id != buffer.key[0]
                     or capture.producer_generation != buffer.key[2]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._resolve_run is not None:
+            captures = tuple(replace(capture, run=self._resolve_run(capture.run)) for capture in captures)
         for previous, current in zip(captures, captures[1:]):
             self._validate_cumulative_prefix(previous, current)
         return captures[-1], pending_ids

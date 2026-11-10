@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Offline native cleanup preserves live roots and discards stale write caches."""
+
+import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.persistence import SqlStepStore
+
+
+class _Offline:
+    def __init__(self) -> None:
+        self.entered = False
+
+    @asynccontextmanager
+    async def offline_exclusivity(self):
+        assert not self.entered
+        self.entered = True
+        try:
+            yield
+        finally:
+            self.entered = False
+
+
+def _snapshot(run: str, step: int, *messages: str) -> ContinuableSnapshot:
+    return ContinuableSnapshot(run_id=run, step_index=step, idempotency_key=str(step),
+        messages=[ModelRequest(parts=[UserPromptPart(value, timestamp=datetime(2026, 11, 9, tzinfo=timezone.utc))]) for value in messages])
+
+
+@pytest.mark.asyncio
+async def test_offline_cleanup_preserves_shared_roots_namespaces_and_reinserts_retired_content(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cleanup.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
+    other = SqlStepStore(engine, namespace="steps", tenant_id="two")
+    await store.initialize(local=True)
+    retired = _snapshot("run", 1, "shared", "retired")
+    latest = _snapshot("run", 2, "shared", "current", "shared", "current", "shared", "shared", "current")
+    repeated = _snapshot("branch", 1, "shared", "shared")
+    foreign = _snapshot("foreign", 1, "retired")
+    guard = _Offline()
+    reads = []
+
+    def observe(connection, cursor, statement, parameters, context, many):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+            assert guard.entered
+            reads.append(statement)
+
+    try:
+        for snapshot in (retired, latest, repeated, _snapshot("empty", 1)):
+            await store.save_snapshot(snapshot)
+        await other.save_snapshot(foreign)
+        await other.close()
+        event.listen(engine.sync_engine, "before_cursor_execute", observe)
+        result = await store.purge_unreferenced_content(exclusive=guard)
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)
+        assert len(reads) == 3
+        assert result.deleted_sequences > 0
+        assert result.deleted_messages == 1
+        assert result.retained_messages == 2
+        assert not guard.entered
+        assert await store.latest_snapshot(run_id="run") == latest
+        assert await store.latest_snapshot(run_id="branch") == repeated
+        assert len(await store.list_snapshots(run_id="run")) == 1
+        # Replay tombstones survive cleanup. A new occurrence can reuse the
+        # deleted content because this adapter's old body knowledge was cleared.
+        await store.save_snapshot(retired)
+        assert len(await store.list_snapshots(run_id="run")) == 1
+        revived = replace(retired, run_id="revived")
+        await store.save_snapshot(revived)
+        assert await store.latest_snapshot(run_id="revived") == revived
+        foreign_reader = SqlStepStore(engine, namespace="steps", tenant_id="two")
+        try:
+            assert await foreign_reader.latest_snapshot(run_id="foreign") == foreign
+        finally:
+            await foreign_reader.close()
+        again = await store.purge_unreferenced_content(exclusive=guard)
+        assert again.deleted_messages == again.deleted_sequences == 0
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", observe):
+            event.remove(engine.sync_engine, "before_cursor_execute", observe)
+        await store.close()
+        await other.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ("missing-body", "wrong-node", "wrong-root-count"))
+async def test_cleanup_rejects_broken_live_references_before_deleting_orphans(tmp_path: Path, damage: str) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'broken.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
+    await store.initialize(local=True)
+    try:
+        await store.save_snapshot(_snapshot("run", 1, "retired"))
+        await store.save_snapshot(_snapshot("run", 2, "live", "another"))
+        async with engine.begin() as connection:
+            root = await connection.scalar(text("SELECT sequence_root FROM ai_step_snapshots WHERE pruned = 0"))
+            if damage == "missing-body":
+                await connection.execute(text(
+                    "DELETE FROM ai_step_messages WHERE sha256 = "
+                    "(SELECT message_sha256 FROM ai_step_sequences WHERE sha256 = :root)"
+                ), {"root": root})
+            elif damage == "wrong-node":
+                await connection.execute(text(
+                    "UPDATE ai_step_sequences SET tree_count = tree_count + 2 WHERE sha256 = :root"
+                ), {"root": root})
+            else:
+                await connection.execute(text(
+                    "UPDATE ai_step_snapshots SET messages = :value WHERE pruned = 0"
+                ), {"value": '{"stored_messages":0,"checkpoint":null}'})
+            before = tuple([await connection.scalar(text(f"SELECT count(*) FROM {table}"))
+                            for table in ("ai_step_sequences", "ai_step_messages")])
+        with pytest.raises(AIError) as failure:
+            await store.purge_unreferenced_content(exclusive=_Offline())
+        assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        async with engine.connect() as connection:
+            after = tuple([await connection.scalar(text(f"SELECT count(*) FROM {table}"))
+                           for table in ("ai_step_sequences", "ai_step_messages")])
+        assert after == before
+    finally:
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_rolls_back_sequence_deletion_when_body_deletion_fails(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'rollback.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
+    await store.initialize(local=True)
+
+    def fail_body_delete(connection, cursor, statement, parameters, context, many):
+        if statement.lstrip().upper().startswith("DELETE FROM AI_STEP_MESSAGES"):
+            raise RuntimeError("body deletion rejected")
+
+    try:
+        await store.save_snapshot(_snapshot("run", 1, "retired"))
+        current = _snapshot("run", 2, "retained")
+        await store.save_snapshot(current)
+        event.listen(engine.sync_engine, "before_cursor_execute", fail_body_delete)
+        with pytest.raises(RuntimeError, match="body deletion rejected"):
+            await store.purge_unreferenced_content(exclusive=_Offline())
+        event.remove(engine.sync_engine, "before_cursor_execute", fail_body_delete)
+        async with engine.connect() as connection:
+            for table in ("ai_step_sequences", "ai_step_messages"):
+                assert await connection.scalar(text(f"SELECT count(*) FROM {table}")) == 2
+        assert await store.latest_snapshot(run_id="run") == current
+        result = await store.purge_unreferenced_content(exclusive=_Offline())
+        assert result.deleted_sequences == result.deleted_messages == 1
+    finally:
+        if event.contains(engine.sync_engine, "before_cursor_execute", fail_body_delete):
+            event.remove(engine.sync_engine, "before_cursor_execute", fail_body_delete)
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ("unknown", "cancelled"))
+async def test_cleanup_lost_acknowledgement_clears_body_cache_before_new_writes(tmp_path: Path, monkeypatch, outcome: str) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unacknowledged.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
+    await store.initialize(local=True)
+    retired = _snapshot("run", 1, "retired")
+    original = type(store.storage_context).run_mutation
+
+    async def unacknowledged(context, callback, **kwargs):
+        result = await original(context, callback, **kwargs)
+        if kwargs.get("domain") == "steps.content_cleanup":
+            if outcome == "unknown":
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            raise asyncio.CancelledError()
+        return result
+
+    try:
+        await store.save_snapshot(retired)
+        await store.save_snapshot(_snapshot("run", 2, "retained"))
+        monkeypatch.setattr(type(store.storage_context), "run_mutation", unacknowledged)
+        with pytest.raises(AIError if outcome == "unknown" else asyncio.CancelledError):
+            await store.purge_unreferenced_content(exclusive=_Offline())
+        monkeypatch.setattr(type(store.storage_context), "run_mutation", original)
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+        revived = replace(retired, run_id="revived")
+        await store.save_snapshot(revived)
+        assert await store.latest_snapshot(run_id="revived") == revived
+    finally:
+        await store.close()
+        await engine.dispose()

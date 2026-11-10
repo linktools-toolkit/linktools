@@ -121,7 +121,8 @@ def _copy_archive_union(values: Sequence[PreparedArchive]) -> PreparedArchive:
     """Combine values without consuming a caller's preparation receipts."""
     unique = {id(value): value for value in values}
     return PreparedArchive.combine(tuple(
-        PreparedArchive(owner=value.owner, records=dict(value.records), nodes=dict(value.nodes))
+        PreparedArchive(owner=value.owner, records=dict(value.records), nodes=dict(value.nodes),
+                        native_messages=dict(value.native_messages), native_publishers=dict(value.native_publishers))
         for value in unique.values()
     ))
 
@@ -2852,12 +2853,12 @@ class StateCommands:
                     if await self._execution_run_store.get_agent_run(agent_run_id=run_id) is not None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for projection in execution_projections:
-                    await self._execution_run_store.transcript_repository.publish_archive(projection.archive)
                     await self._execution_run_store.sync_projection_in_transaction(
                         group.transaction(self._execution_run_store.state_store), projection.run,
                         events=projection.events, checkpoints=projection.checkpoints,
                         interactions=projection.interactions, observation=projection.observation,
-                        producer_generation=projection.producer_generation, execution_id=execution.execution_id,
+                        producer_generation=projection.producer_generation,
+                        archive=projection.archive, execution_id=execution.execution_id,
                         execution_guard=(insertion.execution, insertion.record),
                         inserted_terminal=insertion,
                     )
@@ -3331,7 +3332,6 @@ class StateCommands:
                         )
                         if execution_projections:
                             for projection in terminal_projections:
-                                await self._execution_run_store.transcript_repository.publish_archive(projection.archive)
                                 await self._execution_run_store.sync_projection_in_transaction(
                                     execution_transaction_for_steps,
                                     projection.run,
@@ -3340,6 +3340,7 @@ class StateCommands:
                                     interactions=projection.interactions,
                                     observation=projection.observation,
                                     producer_generation=projection.producer_generation,
+                                    archive=projection.archive,
                                     execution_id=commit.execution.execution_id,
                                     execution_guard=execution_guard,
                                 )
@@ -3366,6 +3367,10 @@ class StateCommands:
                             await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
                         closed_result = await self._execution.commit_terminal_in_transaction(
                             execution_transaction, effective_commit, pending_events=audit_events,
+                        )
+                    if shared_archive is not None:
+                        await terminal_archives[0].transcript_repository.publish_native_archive(
+                            group.transaction(terminal_archives[0].state_store), shared_archive, owner_written=True,
                         )
                     if closed_result.execution.recovery_state is ExecutionRecoveryState.HANDOFF:
                         return closed_result
@@ -3647,7 +3652,6 @@ class StateCommands:
                 )
                 if execution_projections:
                     for projection in execution_projections:
-                        await self._execution_run_store.transcript_repository.publish_archive(projection.archive)
                         await self._execution_run_store.sync_projection_in_transaction(
                             execution_transaction_for_steps,
                             projection.run,
@@ -3656,6 +3660,7 @@ class StateCommands:
                             interactions=projection.interactions,
                             observation=projection.observation,
                             producer_generation=projection.producer_generation,
+                            archive=projection.archive,
                             execution_id=commit.execution.execution_id,
                             execution_guard=execution_guard,
                         )
@@ -3959,7 +3964,13 @@ class StateCommands:
                 else DurableCommitState.NOT_COMMITTED
             )
 
-        await self._commit_or_raise(materialize, readback)
+        async def operation() -> None:
+            await archive.state_store.storage_group.mutate(
+                archive.transaction_stores,
+                lambda group: materialize(group.transaction(archive.state_store)),
+            )
+
+        await self._commit_or_raise(operation, readback)
 
     async def _sync_prepared_projection_with_reconciliation(
         self,
@@ -3971,16 +3982,15 @@ class StateCommands:
         if archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        async def sync(transaction: StateTransaction) -> None:
-            await archive.transcript_repository.publish_archive(projection.archive)
-            await archive.sync_projection_in_transaction(
-                transaction,
+        async def sync() -> None:
+            await archive.sync_prepared_projection(
                 projection.run,
                 events=projection.events,
                 checkpoints=projection.checkpoints,
                 interactions=projection.interactions,
                 observation=projection.observation,
                 producer_generation=projection.producer_generation,
+                archive=projection.archive,
                 execution_id=execution_id,
             )
 

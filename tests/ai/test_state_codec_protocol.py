@@ -35,6 +35,8 @@ from linktools.ai.persistence.codec import (
 from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
 from linktools.ai.task import TaskBindingContract
+from linktools.ai.steps import NativeStepSource
+from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
 
 
 def _fixture() -> dict[str, object]:
@@ -53,6 +55,16 @@ def test_current_wire_registry_matches_golden_manifest() -> None:
 
     for wire_id, target in _V1_WIRE_TYPES:
         assert wire_type_id(target) == wire_id
+
+
+@pytest.mark.parametrize("value", (
+    NativeStepSource("a" * 32, "b" * 64),
+    NativeMessageSlice("c" * 64, 7, 2, 5),
+    NativeMessageRoot("a" * 32, "b" * 64, (NativeMessageSlice("c" * 64, 7, 2, 5),)),
+))
+def test_native_owner_wire_values_roundtrip(value: object) -> None:
+    payload = _encode_persisted_domain(value)
+    assert _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True) == value
 
 
 def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
