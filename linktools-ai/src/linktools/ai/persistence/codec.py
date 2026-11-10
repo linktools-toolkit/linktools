@@ -1744,6 +1744,21 @@ def _decode_enveloped_domain(
     return _decode_domain(payload, target, codec, persisted=True)
 
 
+def binding_reference(value: object) -> tuple[str, str, str] | None:
+    """Recognize only the typed complete-binding content reference."""
+    if not isinstance(value, Mapping) or "$execution_binding" not in value:
+        return None
+    if set(value) != {"$execution_binding", "archive_scope", "content_scope"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    identity, scope, content_scope = value["$execution_binding"], value["archive_scope"], value["content_scope"]
+    if not isinstance(scope, str) or not scope:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    for digest in (identity, content_scope):
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return scope, content_scope, identity
+
+
 def iter_runtime_object_refs(
     value: JsonValue,
     *,
@@ -1884,6 +1899,10 @@ def _iter_runtime_object_refs(
                     and isinstance(item, Mapping)
                     and "$dataclass" not in item
                 ):
+                    if binding_reference(item) is not None:
+                        # The shared binding owns no object references. Its
+                        # content row is retained by the archive closure walker.
+                        continue
                     binding = _decode_external(
                         item,
                         AgentBindingContract,
@@ -2585,4 +2604,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

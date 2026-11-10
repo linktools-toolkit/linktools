@@ -213,6 +213,8 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
             repository = original if name == "batch" else ScalarExecution(
                 original.state_store, namespace="terminal-batch", tenant_id="tenant",
             )
+            if name == "scalar":
+                await repository.initialize_content(create=False)
             await repository.create_execution(current)
             commands = StateCommands(
                 repository, namespace="terminal-batch", events=state.execution.events,

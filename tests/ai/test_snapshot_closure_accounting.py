@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import zlib
 from copy import deepcopy
 
 import pytest
@@ -45,10 +46,33 @@ def _manifest(group: str) -> dict:
     }
 
 
-def test_closure_usage_counts_each_transport_row_once() -> None:
+@pytest.mark.parametrize("external", (False, True))
+@pytest.mark.parametrize("compressed", (False, True))
+def test_closure_usage_counts_each_transport_row_once(external: bool, compressed: bool) -> None:
     manifest = _manifest("1" * 32)
     manifest["archives"] = [{"scope_id": "1" * 32, "domain": "trace", "records": [{}, {}]}]
-    assert _storage_snapshot_usage(manifest) == (6, 2)
+    raw = b"[]"
+    encoded = zlib.compress(raw) if compressed else raw
+    row = manifest["native_messages"][0]["messages"][0]
+    if external:
+        entry, = manifest["objects"]
+        for reference in (entry["source"], entry["content"]):
+            reference.update(digest=hashlib.sha256(encoded).hexdigest(), size=len(encoded))
+        payload = StoredPayload.object(ObjectRef(**entry["source"]))
+    else:
+        manifest["objects"] = []
+        payload = StoredPayload.inline_bytes(encoded)
+    content = ContentRecord("model-message", hashlib.sha256(raw).hexdigest(), len(raw),
+                            "zlib" if compressed else "raw", payload)
+    row["message"] = canonical_json_bytes(content.to_json()).decode()
+
+    # Inline encoded bytes are already in the manifest; hydration always reserves decoded bytes.
+    entries = 5 + int(external)
+    outside_bytes = len(raw) + (len(encoded) if external else 0)
+    assert _storage_snapshot_usage(manifest) == (entries, outside_bytes)
+    manifest["domains"]["conversation"] = deepcopy(manifest["domains"]["trace"])
+    # Another root reference adds a domain row, not another native row or object body.
+    assert _storage_snapshot_usage(manifest) == (entries + 1, outside_bytes)
 
 
 def test_manifest_identity_preserves_relocated_native_content() -> None:

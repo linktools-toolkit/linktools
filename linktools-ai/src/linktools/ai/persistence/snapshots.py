@@ -11,6 +11,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from ._execution_binding import ExecutionBindingContent, expand_snapshot_binding
+
 from ..core import (
     canonical_json_bytes,
     canonical_sha256,
@@ -345,6 +347,12 @@ class RuntimeSnapshotOperations:
                 native = await resolver(NativeStepSource(opened[0], SqlStepStore.scope_digest(
                     namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)))
 
+            execution_bindings = None
+            if PersistenceDomain.EXECUTION in {domain for domain, _ in members}:
+                execution_bindings = ExecutionBindingContent(self._resources.stores[PersistenceDomain.EXECUTION],
+                    namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
+                await execution_bindings.initialize(create=False)
+
             async def capture_group(transaction: object) -> None:
                 roots = []
                 for domain, store in members:
@@ -359,37 +367,38 @@ class RuntimeSnapshotOperations:
                     from .contracts import ExecutionRecord
                     from ..agent import AgentBindingContract
 
-                    for record in readers[PersistenceDomain.EXECUTION].records:
-                        if record.kind != "execution":
-                            continue
-                        execution = _decode_enveloped_domain(record.data, ExecutionRecord)
-                        if not isinstance(execution.binding, AgentBindingContract) or not execution.restart_checkpoints:
-                            continue
-                        source = execution.native_step_source
-                        resolver = self._resources.checkpoint_backup_source
-                        if source is None or resolver is None:
-                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
-                                          "Native StepStore backup requires an admitted portable producer source")
-                        if opened is None or source.group_id != opened[0]:
-                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                        if source.group_id in native_checkpoints:
-                            if native_checkpoints[source.group_id].store_digest != source.store_digest:
+                    execution_records = tuple(record for record in readers[PersistenceDomain.EXECUTION].records
+                                              if record.kind == "execution")
+                    for offset in range(0, len(execution_records), 1000):
+                        for semantic_record in await execution_bindings.expand_many(execution_records[offset:offset + 1000]):
+                            execution = _decode_enveloped_domain(semantic_record.data, ExecutionRecord)
+                            if not isinstance(execution.binding, AgentBindingContract) or not execution.restart_checkpoints:
+                                continue
+                            source = execution.native_step_source
+                            resolver = self._resources.checkpoint_backup_source
+                            if source is None or resolver is None:
+                                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
+                                              "Native StepStore backup requires an admitted portable producer source")
+                            if opened is None or source.group_id != opened[0]:
                                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                            continue
-                        if native is None:
-                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                        execution_store = self._resources.stores[PersistenceDomain.EXECUTION]
-                        if (not isinstance(execution_store, SqlStateStore)
-                                or native.storage_context.engine is not execution_store.context.engine
-                                or native.store_digest != source.store_digest or not native.backup_supported):
-                            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                        async def capture_native(tx: StateTransaction) -> NativeStepBackup:
-                            if not isinstance(tx, SqlStateRowReader):
+                            if source.group_id in native_checkpoints:
+                                if native_checkpoints[source.group_id].store_digest != source.store_digest:
+                                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                                continue
+                            if native is None:
                                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                            return await native.capture_backup(tx, accept=capture_budget.accept, validate_messages=False)
-                        backup = await execution_store.read(capture_native)
-                        native_checkpoints[source.group_id] = backup
-                        roots.extend(backup.message_roots(source.group_id))
+                            execution_store = self._resources.stores[PersistenceDomain.EXECUTION]
+                            if (not isinstance(execution_store, SqlStateStore)
+                                    or native.storage_context.engine is not execution_store.context.engine
+                                    or native.store_digest != source.store_digest or not native.backup_supported):
+                                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                            async def capture_native(tx: StateTransaction) -> NativeStepBackup:
+                                if not isinstance(tx, SqlStateRowReader):
+                                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                                return await native.capture_backup(tx, accept=capture_budget.accept, validate_messages=False)
+                            backup = await execution_store.read(capture_native)
+                            native_checkpoints[source.group_id] = backup
+                            roots.extend(backup.message_roots(source.group_id))
                 if (opened is not None and opened[0] in native_checkpoints
                         and PersistenceDomain.TRACE in {domain for domain, _ in members}):
                     trace = self._resources.stores[PersistenceDomain.TRACE]
@@ -624,6 +633,8 @@ async def _export_snapshot(
             "sequences": [],
         }
         domain_records: list[StoredRecord] = []
+        binding_contents = {key: content for closure in archive_closures.values()
+                            for key, content in closure.binding_contents().items()}
         domain_facts: list[StoredFact] = []
         domain_operations: list[StoredOperation] = []
 
@@ -633,9 +644,11 @@ async def _export_snapshot(
             if not page:
                 break
             for value in page:
+                semantic_value = expand_snapshot_binding(value, binding_contents,
+                    namespace=source.namespace, tenant_id=source.tenant_id)
                 if domain is PersistenceDomain.EXECUTION and value.kind == "execution":
                     from .contracts import ExecutionRecord
-                    execution = _decode_enveloped_domain(value.data, ExecutionRecord)
+                    execution = _decode_enveloped_domain(semantic_value.data, ExecutionRecord)
                     from ..agent import AgentBindingContract
                     if (isinstance(execution.binding, AgentBindingContract) and execution.restart_checkpoints
                             and (execution.native_step_source is None
@@ -647,7 +660,7 @@ async def _export_snapshot(
                             "Native StepPersistence executions require a consistent database and StepStore backup; "
                             "portable snapshots do not include the external StepStore.",
                         )
-                domain_records.append(value)
+                domain_records.append(semantic_value)
                 encoded = encode_record(value)
                 raw_domain["records"].append(accept(encoded))
                 if value.kind != "evaluation_cleanup":
@@ -655,7 +668,7 @@ async def _export_snapshot(
                 if value.kind in {"execution", "task_admission"}:
                     if value.kind == "execution":
                         from .contracts import ExecutionRecord
-                        identity = _decode_enveloped_domain(value.data, ExecutionRecord).execution_id
+                        identity = _decode_enveloped_domain(semantic_value.data, ExecutionRecord).execution_id
                         capture_kind = "invocation"
                     else:
                         identity = _decode_enveloped_domain(value.data, TaskGraphAdmission).graph_id
@@ -964,6 +977,9 @@ async def restore_snapshot(
         ],
     ] = {}
 
+    semantic_domains = {}
+    binding_contents = {key: content for closure in archive_closures.values()
+                        for key, content in closure.binding_contents().items()}
     for domain_name, raw_domain in raw_domains.items():
         try:
             domain = PersistenceDomain(domain_name)
@@ -1011,6 +1027,9 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
         records = tuple(decode_record(value) for value in raw_records)
+        semantic_records = tuple(expand_snapshot_binding(record, binding_contents,
+            namespace=namespace, tenant_id=tenant_id) for record in records)
+        semantic_domains[domain] = semantic_records
         aliases = _decode_snapshot_aliases(raw_aliases)
         facts = tuple(decode_fact(value) for value in raw_facts)
         operations = tuple(decode_operation(value) for value in raw_operations)
@@ -1019,7 +1038,7 @@ async def restore_snapshot(
             namespace=namespace,
             tenant_id=tenant_id,
             domain=domain,
-            records=records,
+            records=semantic_records,
             aliases=aliases,
             facts=facts,
             operations=operations,
@@ -1057,7 +1076,7 @@ async def restore_snapshot(
                         admission.initial_request_digest,
                     )
                 )
-        for record in records:
+        for record in semantic_records:
             if record.kind == "execution":
                 from .contracts import ExecutionRecord
                 execution = _decode_enveloped_domain(record.data, ExecutionRecord)
@@ -1090,7 +1109,7 @@ async def restore_snapshot(
                 )
 
     validate_snapshot_references(
-        {domain: values[0] for domain, values in decoded_domains.items()},
+        semantic_domains,
         {domain: values[2] for domain, values in decoded_domains.items()},
     )
     if required_checkpoint_groups != set(native_checkpoints):

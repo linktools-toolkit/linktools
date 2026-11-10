@@ -27,7 +27,7 @@ from pydantic_ai_harness.step_persistence import (
 
 from linktools.core import environ
 
-from ..errors import AIError
+from ..errors import AIError, ErrorCode
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
 from ._archive import ContentArchive, PreparedArchive
 from ._archive_closure import NativeMessageClosure, validate_native_message_content
@@ -1103,10 +1103,13 @@ class SqlStepStore:
             async with self._context.sessions() as session, session.begin():
                 await self._context.run_statement(self._context.dialect.begin_consistent_read(session))
                 rows = await self._context.run_statement(read(session))
-        readbacks = await self._message_content.read_hydrated_ranges(
-            roots, rows, read_object=(None if self._message_archive is None
-                                     else self._message_archive.read_payload_object),
-        )
+        try:
+            readbacks = await self._message_content.read_hydrated_ranges(
+                roots, rows, read_object=(None if self._message_archive is None
+                                         else self._message_archive.read_payload_object),
+            )
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         for result in readbacks:
             raw = combine_model_message_payloads(result.payloads)
             self._remember_message_proof(self._message_content.adopt_read(result),

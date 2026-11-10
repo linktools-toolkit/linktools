@@ -847,12 +847,14 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    objects = FilesystemObjectStore(tmp_path / "objects")
-    plan = (PersistenceStorage.in_memory().plan if backend == "memory" else
-            PersistenceStorage.from_root(tmp_path / "state", exclusive_writer=True).plan)
-    state = Persistence(PersistenceStorage(plan, object_store=objects))
+    storage = (PersistenceStorage.in_memory() if backend == "memory" else
+               PersistenceStorage(PersistenceStorage.from_root(
+                   tmp_path / "state", exclusive_writer=True,
+               ).plan, object_store=FilesystemObjectStore(tmp_path / "objects")))
+    state = Persistence(storage)
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
+        objects = state.archive_object_store(PersistenceDomain.TRACE)
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "hello")
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
@@ -884,7 +886,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
                 contents._object_prefix + digest, chunks(), expected_digest=digest,
                 expected_size=len(compressed),
             )
-            payload = StoredPayload.object(ObjectRef(objects.store_id, stat.key, stat.digest, stat.size))
+            payload = StoredPayload.object(ObjectRef("runtime", stat.key, stat.digest, stat.size))
         if corruption == "non-binary":
             payload = StoredPayload.inline_text("not binary")
         changed = replace(
@@ -933,5 +935,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
             if corruption == "zlib":
                 assert isinstance(raised.value.__cause__, zlib.error)
+            elif backend == "sqlite" and corruption in {"raw-digest", "unknown-codec"}:
+                assert isinstance(raised.value.__cause__, ValueError)
     finally:
         await state.close()

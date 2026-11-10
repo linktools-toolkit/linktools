@@ -15,6 +15,7 @@ from ._payload import decode_payload_bytes
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
+    binding_reference,
     decode_domain,
     encode_domain,
     encode_envelope,
@@ -104,6 +105,9 @@ def iter_archive_roots(value: object) -> Iterator[ArchiveRoot]:
 
 def iter_archive_content_refs(value: object) -> Iterator[tuple[str, str, str]]:
     if isinstance(value, Mapping):
+        reference = binding_reference(value)
+        if reference is not None:
+            yield reference
         context = _context_payload(value)
         if context is not None:
             yield from _context_references(context[1].decode())
@@ -373,6 +377,12 @@ class ArchiveClosure(_SequenceClosure):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._mark_slices(root.content_scope, root.slices)
 
+    def binding_contents(self) -> dict[tuple[str, str, str], ContentRecord]:
+        """Expose immutable binding metadata for complete offline validation."""
+        return {(self.scope_id, scope, identity): ContentRecord.from_json(record.data)
+                for (scope, kind, identity), record in self._records.items()
+                if kind == "archive_content" and record.data.get("codec") == "execution-binding"}
+
     @property
     def has_roots(self) -> bool:
         return self._has_roots
@@ -589,6 +599,11 @@ def rekey_native_message_roots(
 def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValue:
     """Rewrite only typed archive roots and execution input-context references."""
     if isinstance(value, dict):
+        reference = binding_reference(value)
+        if reference is not None:
+            if reference[0] not in scopes:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return {**value, "archive_scope": scopes[reference[0]]}
         if value.get("$dataclass") == "archive_root":
             fields = value.get("fields")
             if not isinstance(fields, dict) or fields.get("scope_id") not in scopes:
