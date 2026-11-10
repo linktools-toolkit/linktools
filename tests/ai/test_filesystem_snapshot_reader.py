@@ -83,7 +83,8 @@ async def test_legacy_reader_preserves_source_and_rejects_retired_context(
     manifest = json.loads(await read_object(objects, reference.key, expected_digest=reference.digest,
                                             expected_size=reference.size))
     for field in ("native_messages", "native_checkpoints", "native_projections"):
-        assert manifest.pop(field) == []
+        assert field not in manifest
+    assert reference.digest == provenance["snapshot_digest"]
     assert hashlib.sha256(canonical_json_bytes(manifest)).hexdigest() == provenance["snapshot_digest"]
     assert manifest["archives"] and manifest["domains"]["checkpoint"]["facts"]
     assert any(item["domain"] == "memory" for item in manifest["objects"])

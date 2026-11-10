@@ -122,9 +122,10 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
             counts.append(statements.count("SELECT"))
             domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
         await _assert_prepared_values_equal(archive, results[0], results[1])
-        # Three domain metadata keys plus one content lookup, batched to two reads.
+        # Native message preparation needs no body existence lookup. The three
+        # domain metadata keys still collapse to one grouped read.
         assert domain_counts == [3, 1]
-        assert counts == [4, 2]
+        assert counts == [3, 1]
 
     finally:
         await state.close()

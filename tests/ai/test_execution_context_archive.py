@@ -142,8 +142,12 @@ async def test_context_archive_handle_is_bound_and_failed_open_is_retryable(tmp_
             await other.load(prepared.reference)
     finally:
         await state.close()
-    with pytest.raises(AIError):
+    with pytest.raises(AIError) as closed:
         await service.load(prepared.reference)
+    assert closed.value.code is ErrorCode.STORAGE_CLOSED
+    with pytest.raises(AIError) as closed:
+        await service.prepare(context)
+    assert closed.value.code is ErrorCode.STORAGE_CLOSED
 
 
 @pytest.mark.parametrize("has_instructions", (False, True))

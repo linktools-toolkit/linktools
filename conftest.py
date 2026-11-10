@@ -138,13 +138,13 @@ class _StorageCostReports:
     _MESSAGE_COUNTERS = {
         "materialized_rows", "returned_body_utf8_bytes", "encoded_messages", "prepared_payloads",
         "encoded_bytes", "snapshot_digest_input_bytes", "context_history_digest_input_bytes",
-        "native_bind_json_bytes", "process_cpu_ns", "traced_peak_bytes",
+        "native_bind_json_bytes", "process_cpu_ns",
     }
     _MESSAGE_EXTRAS = {
         "shared_batch": {"stored_message_utf8_bytes"},
         "incremental_turns": {
             "incremental_stored_message_bytes", "unconfirmed_context_encoded_messages",
-            "incremental_turns_completed", "incremental_max_cold_tail_rows",
+            "incremental_turns_completed", "incremental_max_cold_tail_rows", "incremental_sample_turn",
         },
     }
     _MESSAGE_ENCODING_FIELDS = {
@@ -267,7 +267,7 @@ class _StorageCostReports:
                     if not self._count(value):
                         invalid = True
                         break
-                    if name == "incremental_turns_completed" and value != size:
+                    if name in {"incremental_turns_completed", "incremental_sample_turn"} and value != size:
                         invalid = True
                         break
                     result[name] = value
@@ -281,10 +281,12 @@ class _StorageCostReports:
                              and all(self._count(item) for item in parsed.values()))
                 else:
                     statements = parsed.get("sql")
-                    valid = (set(parsed) == self._MESSAGE_COUNTERS | {"sql"}
+                    peak = "sampled_peak_bytes" if label == "incremental_turns" else "traced_peak_bytes"
+                    counters = self._MESSAGE_COUNTERS | {peak}
+                    valid = (set(parsed) == counters | {"sql"}
                              and type(statements) is dict and set(statements) <= self._STATEMENTS
                              and all(self._count(item) for item in statements.values())
-                             and all(self._count(parsed[field]) for field in self._MESSAGE_COUNTERS))
+                             and all(self._count(parsed[field]) for field in counters))
                 if not valid:
                     invalid = True
                     break

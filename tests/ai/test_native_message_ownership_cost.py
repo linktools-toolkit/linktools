@@ -100,7 +100,7 @@ class _Traffic:
         monkeypatch.setattr(SqlStepStore, '_prepare_message_payload', prepared)
         monkeypatch.setattr(NativeMessageContent, 'hydrate_ranges', hydrated)
 
-    def report(self, record_property, phase: str, cpu: int, peak: int) -> None:
+    def report(self, record_property, phase: str, cpu: int, peak: int, *, sampled: bool = False) -> None:
         record_property(phase, json.dumps({
             'sql': dict(self.statements), 'materialized_rows': self.rows,
             'returned_body_utf8_bytes': self.returned_body_bytes,
@@ -108,7 +108,7 @@ class _Traffic:
             'encoded_bytes': self.encoded_bytes, 'snapshot_digest_input_bytes': self.hash_input_bytes,
             'context_history_digest_input_bytes': self.context_hash_input_bytes,
             'native_bind_json_bytes': self.native_bind_bytes,
-            'process_cpu_ns': cpu, 'traced_peak_bytes': peak,
+            'process_cpu_ns': cpu, 'sampled_peak_bytes' if sampled else 'traced_peak_bytes': peak,
         }, sort_keys=True))
 
 
@@ -401,9 +401,8 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     writer_traffic.observe(monkeypatch)
     event.listen(engine.sync_engine, 'before_cursor_execute', writer_traffic.sql)
     event.listen(cold_engine.sync_engine, 'before_cursor_execute', reader_traffic.sql)
-    tracing_started = not tracemalloc.is_tracing()
-    if tracing_started:
-        tracemalloc.start()
+    tracing_started = False
+    sampled_peak = 0
     started = time.process_time_ns()
     messages = []
     frozen_owner = _transcript_staging.MessageArchive()
@@ -413,6 +412,14 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     maximum_tail_rows = 0
     try:
         for turn in range(1, turns + 1):
+            # Trace allocations only for the final, largest continuation. All
+            # traffic and byte counters still observe every committed turn.
+            if turn == turns:
+                tracing_started = not tracemalloc.is_tracing()
+                if tracing_started:
+                    tracemalloc.start()
+                else:
+                    tracemalloc.reset_peak()
             message = ModelRequest(parts=[UserPromptPart(
                 f'turn-{turn:04d}', timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )], timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc))
@@ -480,6 +487,11 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             assert writer_traffic.rows - rows <= 8 * turn.bit_length()
             assert 0 < writer_traffic.returned_body_bytes - body_bytes <= 2048
             maximum_tail_rows = max(maximum_tail_rows, writer_traffic.rows - rows)
+            if turn == turns:
+                sampled_peak = tracemalloc.get_traced_memory()[1]
+                if tracing_started:
+                    tracemalloc.stop()
+                    tracing_started = False
 
         assert phase_encodings['delta_freeze'] == turns
         # Mutable SDK history must still be checked for mutations. Report this
@@ -491,19 +503,20 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         assert 0 < writer_traffic.preparations <= 2 * turns
         assert sum(writer_traffic.statements[op] for op in ('INSERT', 'UPDATE', 'DELETE')) <= 12 * turns
         writer_traffic.report(record_property, 'incremental_lifecycle', time.process_time_ns() - started,
-                              tracemalloc.get_traced_memory()[1])
+                              sampled_peak, sampled=True)
         record_property('incremental_encoding_phases', json.dumps(dict(phase_encodings), sort_keys=True))
         record_property('incremental_turns_completed', turns)
+        record_property('incremental_sample_turn', turns)
         record_property('incremental_max_cold_tail_rows', maximum_tail_rows)
         # A descriptor supplied after proof invalidation is not authority to
-        # skip verification. The current writer must fall back to full freezing
+        # skip verification. The current writer must prepare every frozen body
         # without probing SQL or trusting a naked root from the caller.
         SqlStepStore.invalidate_context(store.context)
-        before, reads = writer_traffic.encodings, writer_traffic.statements['SELECT']
+        before, preparations, reads = writer_traffic.encodings, writer_traffic.preparations, writer_traffic.statements['SELECT']
         fallback = await service.prepare(
             context, history_root=roots[0], history_digest=baselines[0].items[0].raw_digest,
         )
-        assert writer_traffic.encodings - before == turns
+        assert writer_traffic.preparations - preparations == turns
         assert writer_traffic.statements['SELECT'] == reads
         assert NativeMessageRoot.from_json(fallback.reference.payload.decode()['history']) == roots[0]
         record_property('unconfirmed_context_encoded_messages', writer_traffic.encodings - before)

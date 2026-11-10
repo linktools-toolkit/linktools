@@ -331,7 +331,7 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
     from linktools.ai.observe.journal import ModelRequestJournal
     from linktools.ai.persistence import Persistence
     from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
-    from linktools.ai.storage import ObjectRef, ObjectStoreMaintenance
+    from linktools.ai.storage import ObjectRef, ObjectStoreDeletion
     from .test_evaluation_retention import Offline
 
     response = ModelResponse(
@@ -434,7 +434,7 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
             deleted = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
             assert await _stored_message_records(archive, blocks[0].root, first_ids) == ()
             assert await transcript.get_head("unrelated") == unrelated_head
-            if isinstance(objects, ObjectStoreMaintenance):
+            if isinstance(objects, ObjectStoreDeletion):
                 assert set(deleted.deleted) == set(candidates)
             else:
                 assert set(deleted.blocked) == set(candidates)

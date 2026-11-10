@@ -997,6 +997,44 @@ class SqlStepStore:
     def message_root(self, sequence: NativeMessageSequence) -> NativeMessageRoot:
         return self._message_content.scoped_root(sequence)
 
+    def seed_snapshot_baseline(self, run_id: str, root: NativeMessageRoot, *, raw_digest: str) -> bool:
+        """Carry this owner's verified context into a new run without publishing it."""
+        try:
+            self._message_content.validate_root(root)
+        except ValueError:
+            return False
+        integrity = self._message_integrity.get(root.sequence)
+        if integrity is None or integrity[0] != raw_digest:
+            return False
+        return self._seed_snapshot_baseline(run_id, root.sequence, integrity)
+
+    def inherit_snapshot_baseline(self, run_id: str, *, source_run_id: str) -> bool:
+        """Carry a committed or read-back source run's content into its next attempt."""
+        previous = self._message_inputs.get(source_run_id)
+        if previous is None:
+            return False
+        digest, size, _count, sequence = previous
+        return self._seed_snapshot_baseline(run_id, sequence, (digest, size))
+
+    def _seed_snapshot_baseline(
+        self, run_id: str, sequence: NativeMessageSequence, integrity: tuple[str, int],
+    ) -> bool:
+        if (sequence not in self._message_proofs or self._message_integrity.get(sequence) != integrity
+                or len(sequence.slices) > 1 or sequence.slices and (
+                    sequence.slices[0].start != 0 or sequence.slices[0].end != sequence.slices[0].count)):
+            return False
+        self._remember_snapshot_input(run_id, sequence, integrity)
+        return True
+
+    def _remember_snapshot_input(
+        self, run_id: str, sequence: NativeMessageSequence, integrity: tuple[str, int],
+    ) -> None:
+        digest, size = integrity
+        self._message_inputs[run_id] = (digest, size, sequence.count, sequence)
+        self._message_inputs.move_to_end(run_id)
+        while len(self._message_inputs) > _RUN_CACHE_SIZE:
+            self._message_inputs.popitem(last=False)
+
     @classmethod
     def invalidate_context(cls, context: SqlStorageContext) -> None:
         """Discard all same-engine content proofs after offline reclamation."""
@@ -1318,11 +1356,7 @@ class SqlStepStore:
         values["messages"] = _snapshot_descriptor_json({"stored_messages": sequence.count, "checkpoint": checkpoint})
         values["pruned"] = False
         values["sequence_root"] = sequence.slices[0].first if sequence.slices else None
-        digest, size = messages.encoded_digest()
-        self._message_inputs[snapshot.run_id] = (digest, size, len(messages), sequence)
-        self._message_inputs.move_to_end(snapshot.run_id)
-        while len(self._message_inputs) > _RUN_CACHE_SIZE:
-            self._message_inputs.popitem(last=False)
+        self._remember_snapshot_input(snapshot.run_id, sequence, messages.encoded_digest())
         return values, prepared
 
     async def _write_snapshot(
@@ -1508,8 +1542,10 @@ class SqlStepStore:
                 results.append((data, readback.payloads))
         for readback in verified:
             raw = combine_model_message_payloads(readback.payloads)
+            integrity = hashlib.sha256(raw).hexdigest(), len(raw)
             self._remember_message_proof(self._message_content.adopt_read(readback),
-                                         integrity=(hashlib.sha256(raw).hexdigest(), len(raw)))
+                                         integrity=integrity)
+            self._seed_snapshot_baseline(run_id, readback.root, integrity)
         return results
 
     def _sequence_query(self, snapshots: "Sequence[RowMapping]") -> "Select | None":

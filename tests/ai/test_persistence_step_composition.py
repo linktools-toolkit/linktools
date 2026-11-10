@@ -180,12 +180,8 @@ async def test_shared_native_factory_does_not_provision_or_dispose_callers_engin
     try:
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         async with Persistence.open("shared", storage=PersistenceStorage.sql(engine)) as persistence:
-            native = await persistence.create_step_store()
-            try:
-                with pytest.raises(OperationalError, match="no such table: ai_step_runs"):
-                    await native.get_run(run_id="unprovisioned")
-            finally:
-                await native.close()
+            with pytest.raises(OperationalError, match="no such table: ai_state_records"):
+                await persistence.create_step_store()
         assert not any(statement.lstrip().upper().startswith(("CREATE", "ALTER", "DROP")) for statement in statements)
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
         await provision_database(engine)

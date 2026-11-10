@@ -33,29 +33,36 @@ async def test_same_key_race_does_not_cache_losing_payload(tmp_path: Path, monke
     await root.initialize(local=True)
     clone = root.with_tool_effect_store(InMemoryStepStore())
     inserted, release = asyncio.Event(), asyncio.Event()
-    original = context.dialect.insert_ignore_conflict_many
+    original = context.dialect.insert_immutable_many
     held = False
+    pending: list[asyncio.Task] = []
 
     async def pause_after_insert(session, **kwargs):
         nonlocal held
         result = await original(session, **kwargs)
-        if not held:
+        if not held and kwargs["table"].name == "ai_step_messages":
             held = True
             inserted.set()
             await release.wait()
         return result
 
-    monkeypatch.setattr(context.dialect, "insert_ignore_conflict_many", pause_after_insert)
+    monkeypatch.setattr(context.dialect, "insert_immutable_many", pause_after_insert)
     traffic = _SqlTraffic()
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     winner, loser = _snapshot("same-key", "winner"), _snapshot("same-key", "unpublished loser")
     try:
         first = asyncio.create_task(root.save_snapshot(winner))
-        await inserted.wait()
+        reached = asyncio.create_task(inserted.wait())
+        pending.extend((first, reached))
+        done, _ = await asyncio.wait((first, reached), timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        if first in done:
+            await first
+        assert reached in done and inserted.is_set(), "winner did not reach native message publication"
         second = asyncio.create_task(clone.save_snapshot(loser))
+        pending.append(second)
         await asyncio.sleep(0)
         release.set()
-        await asyncio.gather(first, second)
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=10)
         assert traffic.message_rows == 1
         assert await root.latest_snapshot(run_id="run") == winner
         published = replace(loser, idempotency_key="new-key")
@@ -66,6 +73,10 @@ async def test_same_key_race_does_not_cache_losing_payload(tmp_path: Path, monke
         assert traffic.message_rows == 2
     finally:
         release.set()
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
         await clone.close()
         await root.close()
@@ -79,25 +90,26 @@ async def test_sql_aborted_retry_resubmits_before_confirming(tmp_path: Path, mon
     context = create_sql_storage_context(engine)
     store = SqlStepStore(context, namespace="steps", tenant_id="one")
     await store.initialize(local=True)
-    original = context.dialect.insert_ignore_conflict_many
+    original = context.dialect.insert_immutable_many
     fail_once = True
 
     async def abort_first_attempt(session, **kwargs):
         nonlocal fail_once
         result = await original(session, **kwargs)
-        if fail_once:
+        if fail_once and kwargs["table"].name == "ai_step_messages":
             fail_once = False
             error = sqlite3.OperationalError("database is locked")
             error.sqlite_errorcode = sqlite3.SQLITE_BUSY
             raise OperationalError("injected abort", {}, error)
         return result
 
-    monkeypatch.setattr(context.dialect, "insert_ignore_conflict_many", abort_first_attempt)
+    monkeypatch.setattr(context.dialect, "insert_immutable_many", abort_first_attempt)
     traffic = _SqlTraffic()
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     snapshot = _snapshot("first", "retry body")
     try:
         await store.save_snapshot(snapshot)
+        assert not fail_once
         assert traffic.message_rows == 2
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1

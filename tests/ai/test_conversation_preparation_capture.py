@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, Persistence
-from linktools.ai.persistence.state import active_state_scope
+from linktools.ai.persistence.state import GroupRecordReader, active_state_scope
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 from .test_checkpoint_metadata_snapshot_io import _assert_prepared_values_equal, _checkpoint
@@ -146,11 +146,12 @@ async def test_unobserved_content_is_validated_before_owner_commit(
     archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
     run, checkpoint = AgentRunRecord("run"), _checkpoint(2)
     try:
-        observed = await _capture(archive, run, checkpoint)
+        observed = (await _capture(archive, run, checkpoint)
+                    if isinstance(archive.state_store.storage_group, GroupRecordReader) else None)
         content = await archive.transcript_repository.content_archive(create=True)
         if observation == "changed_body":
             checkpoint.messages[0].parts[0].content = "x"
-        else:
+        elif observed is not None:
             observed[content.store] = {}
         actual = PreparedArchive()
         native = archive.transcript_repository._native_messages

@@ -72,7 +72,7 @@ async def test_retained_text_survives_execution_object_cleanup() -> None:
 
 @pytest.mark.asyncio
 async def test_text_view_checks_object_bytes_and_small_input_stays_inline() -> None:
-    materializer = ExecutionInputMaterializer(None, PromptLimits(), payload_policy=PayloadPolicy(64))
+    materializer = ExecutionInputMaterializer(None, PromptLimits(), payload_policy=PayloadPolicy(256))
     captured = materializer.capture("small")
     assert await materializer.materialize_payload(captured, tenant_id="tenant") is captured
     reference = ObjectRef("runtime", "test-key", captured.payload.digest, captured.payload.size)

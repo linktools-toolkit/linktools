@@ -3,6 +3,7 @@
 """Shared bindings preserve complete recovery contracts and archive ownership."""
 
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -343,7 +344,8 @@ async def test_snapshot_restore_rejects_binding_budget_before_hydration(tmp_path
     async def chunks():
         yield raw
 
-    stat = await objects.put("snapshot", chunks())
+    stat = await objects.put("snapshot", chunks(), expected_size=len(raw),
+                             expected_digest=hashlib.sha256(raw).hexdigest())
 
     def reject_hydration(*args, **kwargs):
         raise AssertionError("binding hydration must follow the aggregate budget check")

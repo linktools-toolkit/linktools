@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Optional exact fact reads preserve scope, transaction views and legacy readers."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from sqlalchemy import event
@@ -12,7 +13,11 @@ from sqlalchemy import event
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence import _memory, _sql
-from linktools.ai.persistence.state import FactReader, StateTransaction, StateTransactionNestingError, StoredFact
+from linktools.ai.persistence.state import FactReader, SqlStateFactReader, StateTransaction, StateTransactionNestingError, StoredFact
+
+if TYPE_CHECKING:
+    from sqlalchemy.sql import Select
+    from linktools.ai.storage import SqlStorageContext, SqlValue
 
 from .test_incremental_history_read_cost import _seed_trace
 from .test_state_batch_delete_backends import _digest, _fact, _open_store, _record
@@ -117,6 +122,14 @@ class _CustomFactReader(_LegacyTransaction):
         return await self._transaction.get_facts(stream_digest, sequences)
 
 
+class _CustomSqlFactReader(_CustomFactReader):
+    async def read_joined_facts(
+        self, context: "SqlStorageContext", statement: "Select",
+    ) -> "tuple[tuple[StoredFact, Mapping[str, SqlValue]], ...]":
+        assert isinstance(self._transaction, SqlStateFactReader)
+        return await self._transaction.read_joined_facts(context, statement)
+
+
 def _custom_transactions(monkeypatch, backend, wrapper):
     store_type = _memory.InMemoryStateStore if backend == "memory" else _sql.SqlStateStore
     original = store_type.read
@@ -141,11 +154,13 @@ async def test_custom_fact_capability_and_legacy_fallback_keep_history_contract(
         arguments = dict(agent_run_id=run_id, message_seqs=(), tool_call_ids=("call-4", "call-0", "call-4", "call-8"),
                          event_high_water=5)
         expected = await archive.read_history_associations(**arguments)
-        wrapper = _CustomFactReader if capable else _LegacyTransaction
+        wrapper = (_CustomSqlFactReader if backend == "sql" else _CustomFactReader) if capable else _LegacyTransaction
         _custom_transactions(monkeypatch, backend, wrapper)
 
         async def inspect(transaction):
             assert isinstance(transaction, FactReader) is capable
+            if capable and backend == "sql":
+                assert isinstance(transaction, SqlStateFactReader)
             with pytest.raises(StateTransactionNestingError):
                 await transaction.delete_fact_streams(archive._agent_run_key(run_id))
 

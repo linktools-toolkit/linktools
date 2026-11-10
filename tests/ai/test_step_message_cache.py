@@ -127,8 +127,9 @@ async def test_failed_publication_does_not_cache_uncommitted_messages(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_lost_commit_ack_does_not_promote_or_promote_on_idempotent_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
+@pytest.mark.parametrize("readback", [False, True])
+async def test_lost_commit_ack_requires_readback_or_new_owner_before_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool, readback: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lost-ack.db'}")
     context = create_sql_storage_context(engine)
@@ -151,13 +152,23 @@ async def test_lost_commit_ack_does_not_promote_or_promote_on_idempotent_retry(
             await store.save_snapshot(first)
         assert traffic.message_rows == 1
         monkeypatch.setattr(type(context), "run_mutation", original)
-        assert await store.latest_snapshot(run_id="run") == first
+        # A duplicate owner key cannot confirm the earlier unknown receipt.
         await store.save_snapshot(first)
         assert traffic.message_rows == 1
+        if readback:
+            # Fully verified durable bytes can independently authorize reuse.
+            assert await store.latest_snapshot(run_id="run") == first
         await store.save_snapshot(replace(first, idempotency_key="new-boundary"))
-        assert traffic.message_rows == 2
-        await store.save_snapshot(replace(first, idempotency_key="warm-boundary"))
-        assert traffic.message_rows == 2
+        submitted = 1 if readback else 2
+        assert traffic.message_rows == submitted
+        warm = replace(first, idempotency_key="warm-boundary")
+        await store.save_snapshot(warm)
+        assert traffic.message_rows == submitted
+        assert await store.latest_snapshot(run_id="run") == warm
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == 3
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
         await store.close()

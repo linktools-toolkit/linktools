@@ -651,7 +651,7 @@ async def test_accepted_context_owns_instruction_pin_before_model_dispatch(
     (tmp_path / "AGENTS.md").write_text("LIVE-INSTRUCTION", encoding="utf-8")
     expected = "CAPTURED-INSTRUCTION" if imported else "LIVE-INSTRUCTION"
     context = ExecutionInputContext.from_messages((), repository_instructions=RepositoryInstructions((
-        RepositoryInstructionDocument("captured:root", ".", "CAPTURED-INSTRUCTION"),
+        RepositoryInstructionDocument("agents:AGENTS.md", ".", "CAPTURED-INSTRUCTION"),
     )).to_payload()) if imported else None
     ready = asyncio.Event()
     execution_id = ""

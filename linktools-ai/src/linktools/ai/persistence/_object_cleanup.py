@@ -15,7 +15,7 @@ from ..storage import (
     ObjectStat,
     ObjectStore,
     ObjectStoreInspection,
-    ObjectStoreMaintenance,
+    ObjectStoreDeletion,
     read_object,
 )
 from ._archive_closure import (
@@ -366,7 +366,7 @@ async def _purge_unreferenced_objects(
         source = source_for(domain, reference)
         if reference.key in protected:
             retained.append(candidate)
-        elif not isinstance(source, ObjectStoreMaintenance) or len(deleted) + len(missing) >= limit:
+        elif not isinstance(source, ObjectStoreDeletion) or len(deleted) + len(missing) >= limit:
             blocked.append(candidate)
         else:
             removed = await source.delete_object(reference.key, expected_digest=reference.digest)

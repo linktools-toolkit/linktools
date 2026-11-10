@@ -43,6 +43,7 @@ class ExecutionContextArchive:
         self._native = SqlStepStore.for_state_store(store, namespace=namespace, tenant_id=tenant_id)
 
     async def _open(self, *, create: bool = False) -> ContentArchive:
+        await self._store.initialize()
         if self._archive is not None:
             return self._archive
         if not isinstance(self._store.storage_group, StateStorageGroup):

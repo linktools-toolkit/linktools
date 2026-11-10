@@ -50,6 +50,7 @@ from .durability import (
 from ._projection_payload import decode_projection_payload, encode_projection_payload
 from ._plan import PersistenceDomain
 from ._archive import PreparedArchive
+from ._message_root import NativeMessageRoot
 from ._step_archive import (
     CapturedExecutionProjection,
     ExecutionProjectionBatch,
@@ -483,6 +484,12 @@ class RuntimeAgentRunStore(AgentRunStore):
             self._checkpoint_transcript_runs[agent_run_id] = source_run.metadata.get(
                 "linktools.transcript_run_id", source_run.run_id,
             )
+        native = self.checkpoint_persistence.step_store if self._native_step_source is not None else None
+        if isinstance(native, SqlStepStore):
+            if source_run is not None:
+                native.inherit_snapshot_baseline(agent_run_id, source_run_id=source_run.run_id)
+            elif isinstance(context.archive_root, NativeMessageRoot) and context.archive_digest is not None:
+                native.seed_snapshot_baseline(agent_run_id, context.archive_root, raw_digest=context.archive_digest)
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
                 archive.register_context_baseline(agent_run_id, context)

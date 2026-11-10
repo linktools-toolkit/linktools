@@ -309,3 +309,38 @@ def test_start_cost_schema_distinguishes_counts_flags_and_signed_delta(
 def test_start_cost_reporting_does_not_expand_to_unapproved_test_cases(reporter: object, node: str) -> None:
     reporter.pytest_runtest_logreport(_report(node, list(_START_LIFECYCLE.items())))
     assert _output(reporter) == ""
+
+
+@pytest.mark.parametrize("change", (None, "whole_lifecycle_peak", "wrong_sample_turn"))
+def test_incremental_memory_report_identifies_final_turn_sample(reporter: object, change: "str | None") -> None:
+    node = ("tests/ai/test_native_message_ownership_cost.py::"
+            "test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn[1000]")
+    counts = {field: 1 for field in (
+        "materialized_rows", "returned_body_utf8_bytes", "encoded_messages", "prepared_payloads",
+        "encoded_bytes", "snapshot_digest_input_bytes", "context_history_digest_input_bytes",
+        "native_bind_json_bytes", "process_cpu_ns", "sampled_peak_bytes",
+    )}
+    counts["sql"] = {"SELECT": 3000}
+    if change == "whole_lifecycle_peak":
+        counts["traced_peak_bytes"] = counts.pop("sampled_peak_bytes")
+    properties = [
+        ("incremental_lifecycle", json.dumps(counts)),
+        ("incremental_encoding_phases", json.dumps({field: 1 for field in (
+            "delta_freeze", "mutable_snapshot_freeze", "frozen_projection", "confirmed_context",
+        )})),
+        ("incremental_stored_message_bytes", 1000),
+        ("unconfirmed_context_encoded_messages", 0),
+        ("incremental_turns_completed", 1000),
+        ("incremental_max_cold_tail_rows", 10),
+        ("incremental_sample_turn", 100 if change == "wrong_sample_turn" else 1000),
+    ]
+    reporter.pytest_runtest_logreport(_report(node, properties))
+    output = _output(reporter)
+    if change is None:
+        assert '"sampled_peak_bytes": 1' in output
+        assert '"incremental_sample_turn": 1000' in output
+        assert '"status"' not in output
+    else:
+        assert '"status": "invalid"' in output
+        assert '"sampled_peak_bytes"' not in output
+    assert '"traced_peak_bytes"' not in output

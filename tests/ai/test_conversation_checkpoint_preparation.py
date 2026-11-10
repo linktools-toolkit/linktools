@@ -65,11 +65,11 @@ async def test_conversation_preparation_reuses_new_run_metadata(
             domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
         assert batches[0][0] == batches[1][0]
         await _assert_prepared_values_equal(archive, batches[0][1], batches[1][1])
-        # New-run metadata and content existence share one group query. Replay
-        # still validates the source fact; its embedded projection avoids a head reread.
+        # Native message preparation adds no content existence query. Composing
+        # a new run shares its metadata read; replay still validates source facts.
         assert domain_counts == ([6, 6] if existing == "replay" else [2, 1])
         assert counts == {
-            "absent": [3, 1], "replay": [8, 8], "head_without_run": [3, 1],
+            "absent": [2, 1], "replay": [6, 6], "head_without_run": [2, 1],
         }[existing]
         assert active_state_scope() is None
         relocated, prepared = batches[1]

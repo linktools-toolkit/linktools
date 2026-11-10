@@ -68,6 +68,7 @@ async def test_object_cleanup_preserves_shared_scopes_and_republishes_retired_bo
         await foreign.save_snapshot(_snapshot("shared", 2))
         result = await state.purge_unreferenced_objects(candidates, exclusive=_Offline())
         assert result.deleted == candidates
+        assert result.retained == result.missing == result.blocked == ()
         assert await _bodies(native) == {}
         async with native.storage_context.engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 0
