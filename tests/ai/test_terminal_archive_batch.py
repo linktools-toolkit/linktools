@@ -46,7 +46,7 @@ from .test_session_admission import _session
 pytestmark = pytest.mark.asyncio
 
 
-async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_values(tmp_path: Path) -> None:
+async def test_terminal_shared_preparation_bounds_owner_reads_and_deduplicates_content(tmp_path: Path) -> None:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="terminal-preparation", tenant_id="tenant")
     conversation = state.run_store.read_store(PersistenceDomain.CONVERSATION)
@@ -56,26 +56,30 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
     selected: list[str] = []
 
     def capture(_connection, _cursor, statement, _parameters, _context, _many):
-        if statement.startswith("SELECT"):
+        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
             selected.append(statement)
 
     try:
         await state.execution.executions.create_execution(_execution())
         await conversation.transcript_repository.content_archive(create=True)
         await trace.transcript_repository.content_archive(create=True)
-        batches, counts = [], []
+        batches, owner_reads = [], []
         for shared in (False, True):
             bundle = PreparedArchive() if shared else None
             selected.clear()
             event.listen(engine, "before_cursor_execute", capture)
             try:
                 _, first = await conversation.prepare_conversation_checkpoint(run, checkpoint, archive=bundle)
+                conversation_reads = len(selected)
                 second = await trace.prepare_checkpoints(run, (checkpoint,), archive=bundle)
+                owner_reads.append((conversation_reads, len(selected) - conversation_reads))
                 batches.append((first, second))
             finally:
                 event.remove(engine, "before_cursor_execute", capture)
-            counts.append(len(selected))
-        assert counts[1] < counts[0]
+            assert all("ai_step_messages" not in sql and "ai_step_sequences" not in sql for sql in selected)
+        # Each owner captures its mutable head once; native content preparation
+        # uses frozen bytes rather than querying prior message bodies.
+        assert owner_reads == [(1, 1), (1, 1)]
         for separate, shared in zip(batches[0], batches[1], strict=True):
             assert replace(separate, checkpoints=tuple(
                 replace(item, archive=PreparedArchive()) for item in separate
@@ -83,6 +87,12 @@ async def test_terminal_shared_preparation_reduces_reads_and_preserves_owner_val
                 replace(item, archive=PreparedArchive()) for item in shared
             ))
         assert bundle is not None
+        separate_roots = [
+            root for batch in batches[0] for checkpoint in batch
+            for root in checkpoint.archive.native_messages
+        ]
+        assert set(bundle.native_messages) == set(separate_roots)
+        assert len(bundle.native_messages) < len(separate_roots)
         group = conversation.state_store.storage_group
 
         async def commit(transaction):

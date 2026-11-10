@@ -4255,8 +4255,13 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             binding = await self._execution_binding(current, request.resolved_binding)
             compiled_agent = binding.compiled_agent
-            initial_repository_instructions = await self.load_repository_instructions(
-                current.repository_instructions
+            accepted_context = await self.load_input_context(current.input_context)
+            initial_repository_instructions = (
+                await self.load_repository_instructions(current.repository_instructions)
+                if accepted_context is None else (
+                    None if accepted_context.repository_instructions is None
+                    else RepositoryInstructions.from_payload(accepted_context.repository_instructions)
+                )
             )
             repository_overlay = await self.load_repository_instructions(
                 checkpoint.recovery.repository_instruction_overlay
@@ -4382,7 +4387,6 @@ class LocalExecutionBackend:
                                 metric_status = recovered.status.value
                                 metric_error_code = recovered.error_code
                                 return
-            accepted_context = await self.load_input_context(current.input_context)
             loaded_context = LoadedModelContext(())
             session_history_source = (
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME

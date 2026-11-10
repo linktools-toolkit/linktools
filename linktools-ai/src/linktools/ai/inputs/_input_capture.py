@@ -573,7 +573,14 @@ class InputCaptures:
                 declaration, dependencies)
         if is_agent:
             prompt = await self._materializer.restore(record.stored_user_input)
-            instructions = None if record.repository_instructions is None else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
+            instruction_context = context
+            if instruction_context is None and record.input_context is not None:
+                instruction_context = await self._context_archive.load(record.input_context)
+            instructions = (
+                instruction_context.repository_instructions if instruction_context is not None
+                else None if record.repository_instructions is None
+                else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
+            )
             input_view = record.stored_user_input.view
             payload = {"prompt": task_prompt_draft(prompt), "input_view": None if input_view is None else dict(input_view), "binding": record.binding.to_payload(),
                        "original_input": dict(record.stored_user_input.view or {"prompt": task_prompt_draft(prompt)}) if task_input is None else dict(task_input.original_input),

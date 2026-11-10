@@ -229,6 +229,41 @@ async def test_new_child_inherits_exact_parent_structured_pin_without_live_resol
 
 
 @pytest.mark.asyncio
+async def test_child_inherits_parent_context_instructions_after_source_reload(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.execution import ExecutionInputContext
+    from unittest.mock import AsyncMock
+
+    state = Persistence(PersistenceStorage.in_memory())
+    await state.initialize(namespace="subagent-context", tenant_id="tenant")
+    try:
+        instructions, parent_pin = _pin("accepted-parent")
+        context = ExecutionInputContext.from_messages((), repository_instructions=instructions.to_payload())
+        reference = RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION)
+        proposed = replace(_parent(parent_pin), input_context=reference)
+        await state.execution.executions.create_execution(proposed)
+        await state.execution.executions.create_execution(proposed)
+        from linktools.ai.errors import AIError, ErrorCode
+        with pytest.raises(AIError) as conflict:
+            await state.execution.executions.create_execution(replace(proposed, planning=True))
+        assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+        parent = await state.execution.executions.get("parent", tenant_id="tenant")
+        assert parent is not None and parent.repository_instructions is None
+        resolver = _Resolver(_pin("changed-live-root")[0])
+        service = _service(state, resolver=resolver, ids=("child",))
+        monkeypatch.setattr(service._runtime_bridge.port, "load_input_context", AsyncMock(return_value=context), raising=False)
+        handle = await service.start_subagent(
+            _binding().binding_digest, _request("child-context-key"),
+            parent_execution_id="parent", parent_producer_generation=1,
+            root_execution_id="parent", parent_invocation_id="delegate-call",
+        )
+        child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
+        assert child is not None and child.repository_instructions == parent_pin
+        assert resolver.calls == []
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -> None:
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="subagent-root", tenant_id="tenant")

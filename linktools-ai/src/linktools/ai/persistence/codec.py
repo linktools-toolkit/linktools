@@ -965,6 +965,113 @@ def _decode_v1_stored_user_input(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+_EXECUTION_OUTCOME_FIELDS = {
+    "terminal_status": "status",
+    "error_code": "error_code",
+    "safe_error_details": "safe_error_details",
+    "error_diagnostics": "error_diagnostics",
+}
+_RESULT_OUTCOME_FIELDS = {
+    "output": "output", "stop_reason": "stop_reason", "usage": "usage",
+    "result_created_at": "created_at",
+}
+
+
+def _execution_outcome_source(raw_fields: Mapping[str, object]) -> dict[str, object]:
+    result = raw_fields.get("result")
+    if not isinstance(result, Mapping) or result.get("$dataclass") != "result_record":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result_fields = result.get("fields")
+    if not isinstance(result_fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return {
+            **{name: raw_fields[source] for name, source in _EXECUTION_OUTCOME_FIELDS.items()},
+            **{name: result_fields[source] for name, source in _RESULT_OUTCOME_FIELDS.items()},
+        }
+    except KeyError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _execution_outcome_fields(raw_fields: Mapping[str, object]) -> Mapping[str, object] | None:
+    recovery = raw_fields.get("recovery")
+    if not isinstance(recovery, Mapping):
+        return None
+    recovery_fields = recovery.get("fields")
+    handoff = recovery_fields.get("terminal_handoff") if isinstance(recovery_fields, Mapping) else None
+    handoff_fields = handoff.get("fields") if isinstance(handoff, Mapping) else None
+    outcome = handoff_fields.get("outcome") if isinstance(handoff_fields, Mapping) else None
+    outcome_fields = outcome.get("fields") if isinstance(outcome, Mapping) else None
+    return outcome_fields if isinstance(outcome_fields, Mapping) else None
+
+
+def _replace_execution_outcome_fields(
+    raw_fields: Mapping[str, object], outcome_fields: Mapping[str, object],
+) -> dict[str, object]:
+    # Copy only the typed owner path; caller-owned wire values remain unchanged.
+    result = dict(raw_fields)
+    recovery = dict(result["recovery"])
+    result["recovery"] = recovery
+    recovery_fields = dict(recovery["fields"])
+    recovery["fields"] = recovery_fields
+    handoff = dict(recovery_fields["terminal_handoff"])
+    recovery_fields["terminal_handoff"] = handoff
+    handoff_fields = dict(handoff["fields"])
+    handoff["fields"] = handoff_fields
+    handoff_fields["outcome"] = {**handoff_fields["outcome"], "fields": dict(outcome_fields)}
+    return result
+
+
+def _encode_v1_execution_record(
+    value: object, codec: "_VersionCodec", persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ExecutionRecord):
+        raise TypeError("V1 execution_record encoder received the wrong type")
+    encoded = {
+        name: _encode_domain(getattr(value, name), codec, persisted=persisted)
+        for name in _dataclass_fields(ExecutionRecord)
+        if not (persisted and name == "repository_instructions" and value.input_context is not None)
+    }
+    recovery = value.recovery
+    handoff = None if recovery is None else recovery.terminal_handoff
+    # Until the terminal result exists, recovery owns its complete outcome.
+    # Checkpoint-owned objects must keep their separate retention source.
+    if (persisted and value.result is not None and handoff is not None
+            and handoff.outcome.object_source_domain in {None, PersistenceDomain.EXECUTION}):
+        outcome = _execution_outcome_fields(encoded)
+        source = _execution_outcome_source(encoded)
+        if outcome is not None and all(
+            canonical_json_bytes(outcome.get(name)) == canonical_json_bytes(item)
+            for name, item in source.items()
+        ):
+            compact = {name: item for name, item in outcome.items() if name not in source}
+            compact["execution_result"] = True
+            encoded = _replace_execution_outcome_fields(encoded, compact)
+    return cast(Mapping[str, JsonValue], encoded)
+
+
+def _decode_v1_execution_record(
+    raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
+) -> ExecutionRecord:
+    outcome = _execution_outcome_fields(raw_fields)
+    if outcome is not None and "execution_result" in outcome:
+        if not persisted or outcome["execution_result"] is not True:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = _execution_outcome_source(raw_fields)
+        source_domain = _decode_domain(
+            outcome.get("object_source_domain"), PersistenceDomain | None, codec, persisted=persisted,
+        )
+        if (set(outcome).intersection(source)
+                or source_domain not in {None, PersistenceDomain.EXECUTION}):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raw_fields = _replace_execution_outcome_fields(raw_fields, {
+            **{name: item for name, item in outcome.items() if name != "execution_result"}, **source,
+        })
+    return cast(ExecutionRecord, _decode_dataclass_fields(
+        raw_fields, ExecutionRecord, codec, persisted=persisted,
+    ))
+
+
 def _encode_v1_execution_start_reservation(
     value: object,
     codec: "_VersionCodec",
@@ -1074,6 +1181,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "task_graph_view": _encode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _encode_v1_task_node,
         _TASK_NODE_VIEW_WIRE_ID: _encode_v1_task_node_view,
+        "execution_record": _encode_v1_execution_record,
         "execution_start_reservation": _encode_v1_execution_start_reservation,
         "evaluation_slot_disposition_view": _encode_v1_slot_disposition_view,
     }
@@ -1087,6 +1195,7 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
         _TASK_NODE_WIRE_ID: _decode_v1_task_node,
         _TASK_NODE_VIEW_WIRE_ID: _decode_v1_task_node_view,
         "task_result": _decode_v1_task_result,
+        "execution_record": _decode_v1_execution_record,
         "execution_start_reservation": _decode_v1_execution_start_reservation,
         "evaluation_slot_disposition_view": _decode_v1_slot_disposition_view,
     }

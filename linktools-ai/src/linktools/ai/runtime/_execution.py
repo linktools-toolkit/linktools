@@ -261,6 +261,10 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         self, reference: "RuntimePayloadRef | None",
     ) -> RepositoryInstructions | None: ...
 
+    async def load_input_context(
+        self, reference: RuntimePayloadRef | None,
+    ) -> ExecutionInputContext | None: ...
+
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,
@@ -1452,6 +1456,18 @@ class DefaultExecutionService(TaskExecutionService):
                 if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 repository_instructions = parent.repository_instructions
+                if parent.input_context is not None:
+                    port = self._runtime_bridge.port
+                    if port is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    parent_context = await port.load_input_context(parent.input_context)
+                    if parent_context is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    repository_instructions = (
+                        None if parent_context.repository_instructions is None
+                        else self._capture_repository_instructions(
+                            RepositoryInstructions.from_payload(parent_context.repository_instructions))
+                    )
                 if repository_instructions is None or input_instruction_paths:
                     documents = {}
                     if repository_instructions is not None:

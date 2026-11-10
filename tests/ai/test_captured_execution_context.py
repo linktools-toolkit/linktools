@@ -157,12 +157,24 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
         await source.wait()
         capture = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "instructions-capture"))
         value = await runtime_engine.inputs.read_agent(capture, principal=principal)
+        assert value.repository_instructions == value.input_context.repository_instructions
+        clean_capture = await runtime_engine.inputs.capture_input(
+            source.execution_id, CaptureInputRequest(principal, "instructions-clean", context_policy="clean"))
+        clean = await runtime_engine.inputs.read_agent(clean_capture, principal=principal)
+        assert clean.input_context is None
+        assert clean.repository_instructions == value.repository_instructions
         instructions.write_text("Changed live repository instruction", encoding="utf-8")
         rerun = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED
         interactions = await rerun.model_interactions(include_content=True)
         assert "Historical repository instruction" in str(interactions.items[0].request)
         assert "Changed live repository instruction" not in str(interactions.items[0].request)
+        for handle in (source, rerun):
+            record = await persistence_149.execution.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
+            assert record is not None and record.repository_instructions is None
+            context = await runtime._execution_service.runtime_backend().load_input_context(record.input_context)
+            assert context is not None
+            assert context.repository_instructions == value.input_context.repository_instructions
 
 
 @pytest.mark.asyncio

@@ -370,7 +370,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         current = await transaction.get_record(self._key("execution", execution.execution_id))
         if current is not None:
             existing = await self._decode(current, ExecutionRecord)
-            if existing != execution:
+            candidate = (
+                replace(execution, repository_instructions=None)
+                if execution.input_context is not None else execution
+            )
+            if existing != candidate:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return existing
         await transaction.insert_record(self._stored(
