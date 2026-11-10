@@ -30,13 +30,14 @@ from linktools.core import environ
 from ..errors import AIError
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
 from ._archive import ContentArchive, PreparedArchive
+from ._archive_closure import NativeMessageClosure, validate_native_message_content
 from ._message_root import NativeMessageRoot, NativeMessageSequence, NativeMessageSlice
 from ._step_message_content import (
     CommittedNativeMessages, NativeMessageContent, NativeMessageReceipt, PreparedMessagePayload,
     PreparedNativeMessages,
 )
 from ._transcript_staging import MessageArchive, MessageSnapshot
-from ._payload import encode_payload_bytes
+from ._payload import encode_payload_bytes, decode_payload_bytes
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, encode_model_messages
 from ..storage import StoredPayload
 from ._native_checkpoint import NativeCheckpoint
@@ -837,18 +838,96 @@ class SqlStepStore:
         if not self.backup_supported or backup.store_digest != self._store_digest:
             raise ValueError("native backup belongs to another owner or has external effects")
         self.validate_backup(backup)
-        snapshots = tuple(row for row in backup.snapshots if not row["pruned"])
-        for offset in range(0, len(snapshots), _BATCH_SIZE):
-            selected = snapshots[offset:offset + _BATCH_SIZE]
-            sequences = tuple(self.snapshot_message_sequence(row) for row in selected)
-            query = self._message_content.range_query(sequences)
-            rows = () if query is None else await read(query.statement)
-            readbacks = await self._message_content.read_hydrated_ranges(
-                sequences, rows, read_object=None if self._message_archive is None
-                else self._message_archive.read_payload_object,
-            )
-            for row, readback in zip(selected, readbacks, strict=True):
-                await self._snapshot_from_data(dict(row), readback.payloads)
+        from sqlalchemy import select
+        from ..core import canonical_json_bytes
+
+        sequences = tuple(self.snapshot_message_sequence(row) for row in backup.snapshots if not row["pruned"])
+        table = self._table("sequences")
+        columns = ("store_digest", "sha256", "message_sha256", "tree_count",
+                   "left_sha256", "right_sha256", "next_sha256")
+        nodes: dict[str, Mapping[str, object]] = {}
+        pending = {(span.first, True) for sequence in sequences for span in sequence.slices}
+        visited: set[tuple[str, bool]] = set()
+        while pending:
+            frontier = pending - visited
+            if not frontier:
+                break
+            missing = sorted({identity for identity, _ in frontier} - nodes.keys())
+            for offset in range(0, len(missing), _BATCH_SIZE):
+                batch = missing[offset:offset + _BATCH_SIZE]
+                rows = await read(select(*(table.c[name] for name in columns)).where(
+                    table.c.store_digest == self._store_digest, table.c.sha256.in_(batch)))
+                if len(rows) != len(batch) or {row["sha256"] for row in rows} != set(batch):
+                    raise ValueError("native backup sequence closure is incomplete")
+                nodes.update((row["sha256"], row) for row in rows)
+            pending = set()
+            for identity, forest in frontier:
+                row = nodes[identity]
+                pending.update((row[name], False) for name in ("left_sha256", "right_sha256")
+                               if row[name] is not None)
+                if forest and row["next_sha256"] is not None:
+                    pending.add((row["next_sha256"], True))
+            visited.update(frontier)
+        closure = NativeMessageClosure(tuple(nodes.values()))
+        for sequence in sequences:
+            closure.mark(self._store_digest, sequence.slices)
+        table = self._table("messages")
+        identities = sorted(identity for scope, identity in closure.retained_messages)
+        payloads = {}
+        for offset in range(0, len(identities), _BATCH_SIZE):
+            batch = identities[offset:offset + _BATCH_SIZE]
+            rows = await read(select(table.c.store_digest, table.c.sha256, table.c.message).where(
+                table.c.store_digest == self._store_digest, table.c.sha256.in_(batch)))
+            if len(rows) != len(batch) or {row["sha256"] for row in rows} != set(batch):
+                raise ValueError("native backup message closure is incomplete")
+            for row in rows:
+                content = validate_native_message_content(row,
+                    group_id=None if self._message_archive is None else self._message_archive.scope_id,
+                    verify_inline=False)
+                if content.payload.ref is not None:
+                    if self._message_archive is None:
+                        raise ValueError("native message ObjectStore resolver is required")
+                    encoded = await self._message_archive.read_payload_object(content.payload.ref)
+                else:
+                    encoded = content.payload.decode()
+                    if content.payload.encoding == "json":
+                        encoded = canonical_json_bytes(encoded)
+                    elif isinstance(encoded, str):
+                        encoded = encoded.encode("utf-8")
+                if (not isinstance(encoded, bytes) or len(encoded) != content.payload.size
+                        or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
+                    raise ValueError("native stored message payload is corrupt")
+                raw = decode_payload_bytes(encoded, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
+                decode_model_message_payloads((raw,))
+                payloads[(self._store_digest, row["sha256"])] = raw
+        self.validate_backup_payloads(backup, closure, payloads)
+
+    @classmethod
+    def validate_backup_payloads(
+        cls, backup: NativeStepBackup, closure: NativeMessageClosure,
+        payloads: Mapping[tuple[str, str], bytes],
+    ) -> None:
+        """Bind checkpoint headers to an authenticated complete message closure.
+
+        Callers authenticate every unique canonical message before this method.
+        Only the terminal message participates in the checkpoint retry digest;
+        shared historical prefixes need not be hydrated again for each header.
+        """
+        for row in backup.snapshots:
+            if row["pruned"]:
+                continue
+            sequence = cls.snapshot_message_sequence(row)
+            closure.mark(backup.store_digest, sequence.slices)
+            tail = None
+            if sequence.count:
+                span = sequence.slices[-1]
+                identities = closure.message_identities(backup.store_digest,
+                    (NativeMessageSlice(span.first, span.count, span.end - 1, span.end),))
+                tail = payloads[(backup.store_digest, identities[0])]
+            cls.validate_backup_snapshot_tail(row, tail)
+        if not closure.retained_messages.issubset(payloads):
+            raise ValueError("native backup message closure is incomplete")
 
     async def restore_backup(self, session: "AsyncSession", backup: NativeStepBackup) -> None:
         """Restore into an empty owner after message closure import, without replaying writers."""

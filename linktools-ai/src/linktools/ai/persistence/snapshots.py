@@ -28,7 +28,7 @@ from ._native_run_reference import NativeRunReferences
 from ._native_event_reference import NativeEventReferences
 from ._sql import SqlStateStore
 from ._archive import ContentRecord
-from ._message_root import NativeMessageRoot, NativeMessageSlice
+from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
 from ._archive_closure import (
     ArchiveClosure,
@@ -1637,17 +1637,7 @@ def _validate_native_checkpoint_payloads(
     from ._step_store import SqlStepStore
 
     try:
-        for row in backup.snapshots:
-            if row["pruned"]:
-                continue
-            sequence = SqlStepStore.snapshot_message_sequence(row)
-            tail = None
-            if sequence.count:
-                span = sequence.slices[-1]
-                identities = closure.message_identities(backup.store_digest,
-                    (NativeMessageSlice(span.first, span.count, span.end - 1, span.end),))
-                tail = payloads[(backup.store_digest, identities[0])]
-            SqlStepStore.validate_backup_snapshot_tail(row, tail)
+        SqlStepStore.validate_backup_payloads(backup, closure, payloads)
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
