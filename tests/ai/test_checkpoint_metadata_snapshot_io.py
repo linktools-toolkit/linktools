@@ -61,6 +61,15 @@ async def _assert_prepared_values_equal(
 
     assert facts(left) == facts(right)
     content = await archive.transcript_repository.content_archive()
+    for first, second in zip(left.checkpoints, right.checkpoints, strict=True):
+        for value in (first.archive, second.archive):
+            assert value.owner in (None, (content.scope_id, content._namespace, content._tenant_id))
+        assert first.archive.native_messages.keys() == second.archive.native_messages.keys()
+        for root, value in first.archive.native_messages.items():
+            other = second.archive.native_messages[root]
+            assert (value.root, value.frontier, value.messages, value.nodes) == (
+                other.root, other.frontier, other.messages, other.nodes,
+            )
     pending = [
         {key: record for checkpoint in batch.checkpoints
          for key, record in checkpoint.archive.records.items()}

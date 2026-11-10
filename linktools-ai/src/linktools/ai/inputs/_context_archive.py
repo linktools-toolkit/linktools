@@ -12,7 +12,7 @@ from ..errors import AIError, ErrorCode
 from ..execution import RuntimePayloadRef
 from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..execution import ExecutionInputContext
-from ..model.messages import combine_model_message_payloads, decode_model_messages
+from ..model.messages import combine_model_message_payloads
 from ..persistence import NativeMessageRoot, SqlStepStore
 from ..persistence.runs import ArchiveRoot, ContentArchive, PreparedArchive
 from ..persistence.state import StateStorageGroup, StateStore, active_state_scope
@@ -71,8 +71,9 @@ class ExecutionContextArchive:
                                                         raw_size=len(context.history))):
             history = history_root
         elif self._native is not None:
-            # The canonical codec preserves host content and binary media for every owner.
-            history = await self._native.prepare_archived_messages(decode_model_messages(context.history), prepared)
+            history = await self._native.prepare_archived_message_payloads(
+                tuple(canonical_json_bytes([message]) for message in messages), prepared,
+            )
         elif (isinstance(history_root, ArchiveRoot) and history_root.scope_id == archive.scope_id
                 and history_root.content_scope == archive.content_scope
                 and history_root.count == len(messages)

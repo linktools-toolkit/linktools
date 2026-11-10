@@ -14,7 +14,7 @@ from pydantic_ai import RequestUsage, messages as sdk
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from linktools.ai.model.messages import SummaryPromptPart, decode_model_messages
+from linktools.ai.model.messages import SummaryPromptPart, decode_model_messages, encode_model_messages
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._payload import decode_payload_bytes, encode_payload_bytes
@@ -152,6 +152,28 @@ async def test_mutable_capture_checks_all_messages_but_frozen_delta_never_decode
         await owner.prepare_append(mutable, prepare_payload=_inline)
 
 
+def test_encoded_snapshot_keeps_omitted_wire_fields_without_reencoding(monkeypatch) -> None:
+    from linktools.ai.core import canonical_json_bytes
+    from linktools.ai.persistence import _transcript_staging as staging
+
+    wire = json.loads(encode_model_messages([sdk.ModelResponse(parts=[sdk.TextPart("answer")], timestamp=_STAMP)]))
+    wire[0]["parts"][0].pop("id")
+    payload = canonical_json_bytes(wire)
+
+    def reject_encoding(*args, **kwargs):
+        raise AssertionError("frozen wire bytes must not be reencoded through authoring values")
+
+    monkeypatch.setattr(staging, "encode_model_messages", reject_encoding)
+    snapshot = MessageArchive().snapshot_payloads((payload,))
+    assert tuple(snapshot.encoded_payloads()) == (payload,)
+    assert snapshot.encoded_digest() == (hashlib.sha256(payload).hexdigest(), len(payload))
+    assert snapshot[0].parts[0].content == "answer"
+    assert snapshot[0].parts[0].id is None
+    for invalid in (b"[]", canonical_json_bytes(wire * 2)):
+        with pytest.raises(ValueError, match="exactly one"):
+            MessageArchive().snapshot_payloads((invalid,))
+
+
 @pytest.mark.asyncio
 async def test_cold_duplicates_are_idempotent_without_reads_or_updates(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'duplicates.db'}")
@@ -270,7 +292,15 @@ async def test_canonical_business_fields_and_existing_object_compression_roundtr
         encoded, = await content.hydrate_ranges((proof.root,), rows, read_object=read)
         assert encoded == tuple(frozen.encoded_payloads())
         restored = [decode_model_messages(raw)[0] for raw in encoded]
-        assert restored == messages
+        assert encode_model_messages(restored) == encode_model_messages(messages)
+        assert isinstance(restored[0].parts[0], SummaryPromptPart)
+        media = restored[0].parts[1].content[0]
+        original_media = messages[0].parts[1].content[0]
+        assert (media.data, media.media_type, media.identifier) == (
+            original_media.data, original_media.media_type, original_media.identifier,
+        )
+        assert restored[0].parts[2:] == messages[0].parts[2:]
+        assert restored[1] == messages[1]
         assert len(reads) == (2 if representation == "object" else 0)
         if representation == "object":
             assert any(len(value) < 1000 for value in objects.values())

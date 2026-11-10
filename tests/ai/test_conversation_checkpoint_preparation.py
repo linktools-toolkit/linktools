@@ -16,7 +16,7 @@ from linktools.ai.persistence._model_interaction_store import ModelInteractionSt
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.persistence.state import active_state_scope
 
-from .test_checkpoint_metadata_snapshot_io import _checkpoint
+from .test_checkpoint_metadata_snapshot_io import _assert_prepared_values_equal, _checkpoint
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
@@ -63,7 +63,8 @@ async def test_conversation_preparation_reuses_new_run_metadata(
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
             counts.append(statements.count("SELECT"))
             domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
-        assert batches[0] == batches[1]
+        assert batches[0][0] == batches[1][0]
+        await _assert_prepared_values_equal(archive, batches[0][1], batches[1][1])
         # New-run metadata and content existence share one group query. Replay
         # still validates the source fact; its embedded projection avoids a head reread.
         assert domain_counts == ([6, 6] if existing == "replay" else [2, 1])
@@ -71,6 +72,13 @@ async def test_conversation_preparation_reuses_new_run_metadata(
             "absent": [3, 1], "replay": [8, 8], "head_without_run": [3, 1],
         }[existing]
         assert active_state_scope() is None
+        relocated, prepared = batches[1]
+        await archive.state_store.mutate(lambda transaction: archive.materialize_checkpoint_in_transaction(
+            transaction, run, prepared[0],
+        ))
+        restored = await archive.latest_checkpoint(agent_run_id=run.agent_run_id, include_interrupted=True)
+        assert restored is not None and restored.messages == relocated.messages
+        assert (restored.step_index, restored.state) == (relocated.step_index, relocated.state)
     finally:
         await state.close()
 
@@ -104,7 +112,8 @@ async def test_conversation_preparation_preserves_custom_owner_operations(
         expected_checkpoint = await custom.relocate_conversation_checkpoint(run, checkpoint)
         expected = await custom.prepare_checkpoints(run, (expected_checkpoint,))
         relocated, actual = await custom.prepare_conversation_checkpoint(run, checkpoint)
-        assert relocated == expected_checkpoint and actual == expected
+        assert relocated == expected_checkpoint
+        await _assert_prepared_values_equal(custom, actual, expected)
     finally:
         await state.close()
 

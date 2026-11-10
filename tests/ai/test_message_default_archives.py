@@ -174,6 +174,7 @@ async def test_pending_missing_clock_factory_does_not_claim_exact_historical_rec
     await repository.create_head("run")
     with monkeypatch.context() as writer:
         writer.setattr(history_module, "encode_model_messages", omitted_clock)
+        writer.setattr(staging_module, "encode_model_messages", omitted_clock)
         prepared = await repository.prepare_observation(
             "run", (), first_message_index=0,
             pending=ModelRequest(parts=[ToolReturnPart("tool", "result", tool_call_id="call", timestamp=_NOW)], timestamp=_NOW),

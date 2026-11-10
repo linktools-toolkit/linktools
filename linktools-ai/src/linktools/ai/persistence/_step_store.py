@@ -966,6 +966,12 @@ class SqlStepStore:
         prepared.native_publishers[value.root] = self.publish_archived_messages
         return self.message_root(value.root)
 
+    async def prepare_archived_message_payloads(
+        self, payloads: Sequence[bytes], prepared: PreparedArchive,
+    ) -> NativeMessageRoot:
+        """Preserve validated singleton source bytes in the native content owner."""
+        return await self.prepare_archived_messages(self._frozen_messages.snapshot_payloads(payloads), prepared)
+
     async def publish_archived_messages(self, transaction: StateTransaction, prepared: PreparedArchive) -> None:
         """Publish dependencies inside the owner's atomic mutation, then observe commit."""
         if not prepared.native_messages:
