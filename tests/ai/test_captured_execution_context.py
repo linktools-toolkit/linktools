@@ -140,7 +140,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_captured_repository_instructions_never_refresh_from_workspace(tmp_path: Path) -> None:
+async def test_captured_repository_instructions_never_refresh_from_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.workspace import Workspace
 
     work = tmp_path / "workspace"
@@ -158,8 +158,13 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
         capture = await runtime_engine.inputs.capture_input(source.execution_id, CaptureInputRequest(principal, "instructions-capture"))
         value = await runtime_engine.inputs.read_agent(capture, principal=principal)
         assert value.repository_instructions == value.input_context.repository_instructions
-        clean_capture = await runtime_engine.inputs.capture_input(
-            source.execution_id, CaptureInputRequest(principal, "instructions-clean", context_policy="clean"))
+        from linktools.ai.inputs import ExecutionContextArchive
+        async def reject_full_context(*args, **kwargs):
+            raise AssertionError("clean capture must not load model history")
+        with monkeypatch.context() as patch:
+            patch.setattr(ExecutionContextArchive, "load", reject_full_context)
+            clean_capture = await runtime_engine.inputs.capture_input(
+                source.execution_id, CaptureInputRequest(principal, "instructions-clean", context_policy="clean"))
         clean = await runtime_engine.inputs.read_agent(clean_capture, principal=principal)
         assert clean.input_context is None
         assert clean.repository_instructions == value.repository_instructions

@@ -144,3 +144,73 @@ async def test_context_archive_handle_is_bound_and_failed_open_is_retryable(tmp_
         await state.close()
     with pytest.raises(AIError):
         await service.load(prepared.reference)
+
+
+@pytest.mark.parametrize("has_instructions", (False, True))
+async def test_instruction_read_does_not_materialize_history_or_other_components(tmp_path, monkeypatch, has_instructions):
+    from linktools.ai.persistence import SqlStepStore
+    from linktools.ai.persistence.runs import ContentArchive
+    from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
+
+    state = Persistence(_storage("sqlite", tmp_path))
+    await state.initialize(namespace="context-instructions", tenant_id="tenant")
+    try:
+        service = ExecutionContextArchive(
+            state.execution.executions.state_store,
+            state.archive_object_store(PersistenceDomain.EXECUTION),
+            namespace="context-instructions", tenant_id="tenant",
+        )
+        instructions = (RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "accepted rule"),)).to_payload()
+                        if has_instructions else None)
+        context = ExecutionInputContext.from_messages(
+            tuple(ModelRequest(parts=[UserPromptPart("history" * 1000)]) for _ in range(100)),
+            repository_instructions=instructions, session_metadata={"large": "metadata" * 10000},
+            memory={"large": {"content": "memory" * 10000}}, preload_skills=({"large": "skill" * 10000},),
+        )
+        prepared = await service.prepare(context)
+        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        cold = ExecutionContextArchive(
+            state.execution.executions.state_store,
+            state.archive_object_store(PersistenceDomain.EXECUTION),
+            namespace="context-instructions", tenant_id="tenant",
+        )
+        reads = []
+        original = ContentArchive.read_contents
+
+        async def read_contents(self, identities, *, codec):
+            reads.extend(identities)
+            return await original(self, identities, codec=codec)
+
+        async def reject_history(*args, **kwargs):
+            raise AssertionError("instruction-only reads must not read history")
+
+        monkeypatch.setattr(ContentArchive, "read_contents", read_contents)
+        monkeypatch.setattr(ContentArchive, "read_ranges", reject_history)
+        monkeypatch.setattr(SqlStepStore, "read_message_roots", reject_history)
+        assert await cold.load_repository_instructions(prepared.reference) == instructions
+        component = prepared.reference.payload.decode()["repository_instructions"]
+        assert reads == ([] if component is None else [component["content_id"]])
+        if component is not None:
+            for name, invalid in (("archive_scope", "other"), ("content_scope", "other"), ("content_id", "0" * 64)):
+                manifest = prepared.reference.payload.decode()
+                manifest["repository_instructions"][name] = invalid
+                malformed = replace(prepared.reference, payload=StoredPayload.inline_json(manifest))
+                with pytest.raises(AIError) as failure:
+                    await cold.load_repository_instructions(malformed)
+                assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("has_instructions", (False, True))
+async def test_pending_inline_context_instructions_need_no_archive(has_instructions):
+    from linktools.ai.execution import RuntimePayloadRef
+    from linktools.ai.runtime._local import LocalExecutionBackend
+    from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
+
+    instructions = (RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "pending rule"),))
+                    if has_instructions else None)
+    context = ExecutionInputContext.from_messages((), repository_instructions=(
+        None if instructions is None else instructions.to_payload()))
+    reference = RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION)
+    assert await LocalExecutionBackend.load_input_repository_instructions(object(), reference) == instructions

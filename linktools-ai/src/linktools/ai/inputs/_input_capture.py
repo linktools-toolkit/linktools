@@ -451,12 +451,18 @@ class InputCaptures:
         await self._put(self._key(admission.principal.tenant_id, "declaration", graph.graph_id),
                         encode_domain(TaskGraphTemplate(graph.nodes, admission.limits)))
 
-    async def _payload(self, payload: StoredPayload, domain: PersistenceDomain) -> JsonValue:
+    async def _payload(
+        self, payload: StoredPayload, domain: PersistenceDomain, *, text: bool = False,
+    ) -> JsonValue:
         if payload.kind == "inline":
             return payload.decode()
         if payload.ref is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return json.loads(await read_runtime_object(self._object_stores[domain], payload.ref))
+        raw = await read_runtime_object(self._object_stores[domain], payload.ref)
+        try:
+            return raw.decode("utf-8") if text else json.loads(raw)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     async def _capture_dependencies(self, node: TaskNode, graph_id: str,
                                     states: Mapping[str, TaskDependencyState], principal: Principal) -> tuple[TaskDependencyCapture, ...]:
@@ -573,14 +579,13 @@ class InputCaptures:
                 declaration, dependencies)
         if is_agent:
             prompt = await self._materializer.restore(record.stored_user_input)
-            instruction_context = context
-            if instruction_context is None and record.input_context is not None:
-                instruction_context = await self._context_archive.load(record.input_context)
-            instructions = (
-                instruction_context.repository_instructions if instruction_context is not None
-                else None if record.repository_instructions is None
-                else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
-            )
+            if context is not None:
+                instructions = context.repository_instructions
+            elif record.input_context is not None:
+                instructions = await self._context_archive.load_repository_instructions(record.input_context)
+            else:
+                instructions = None if record.repository_instructions is None else await self._payload(
+                    record.repository_instructions.payload, record.repository_instructions.source_domain)
             input_view = record.stored_user_input.view
             payload = {"prompt": task_prompt_draft(prompt), "input_view": None if input_view is None else dict(input_view), "binding": record.binding.to_payload(),
                        "original_input": dict(record.stored_user_input.view or {"prompt": task_prompt_draft(prompt)}) if task_input is None else dict(task_input.original_input),
@@ -876,7 +881,7 @@ class InputCaptures:
                 prompt = body.get("prompt")
                 if isinstance(prompt, Mapping) and prompt.get("kind") == "stored-user-content-v1":
                     stored = decode_domain(prompt["value"], StoredUserInput)
-                    value = await self._payload(stored.payload, PersistenceDomain.TASK)
+                    value = await self._payload(stored.payload, PersistenceDomain.TASK, text=stored.codec == "text")
                     stored = replace(stored, payload=StoredPayload.inline_text(value) if stored.codec == "text" else StoredPayload.inline_json(value))
                     accepted_prompt = await self._materializer.restore(stored)
                     body["prompt"] = task_prompt_draft(accepted_prompt)

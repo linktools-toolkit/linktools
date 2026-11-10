@@ -250,7 +250,7 @@ async def test_child_inherits_parent_context_instructions_after_source_reload(mo
         assert parent is not None and parent.repository_instructions is None
         resolver = _Resolver(_pin("changed-live-root")[0])
         service = _service(state, resolver=resolver, ids=("child",))
-        monkeypatch.setattr(service._runtime_bridge.port, "load_input_context", AsyncMock(return_value=context), raising=False)
+        monkeypatch.setattr(service._runtime_bridge.port, "load_input_repository_instructions", AsyncMock(return_value=instructions), raising=False)
         handle = await service.start_subagent(
             _binding().binding_digest, _request("child-context-key"),
             parent_execution_id="parent", parent_producer_generation=1,

@@ -4109,6 +4109,19 @@ class LocalExecutionBackend:
             return await self._context_archive.load(reference)
         return ExecutionInputContext.from_payload(value)
 
+    async def load_input_repository_instructions(
+        self, reference: RuntimePayloadRef,
+    ) -> RepositoryInstructions | None:
+        if reference.source_domain is not PersistenceDomain.EXECUTION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload = reference.payload
+        value = payload.decode() if payload.kind == "inline" else json.loads(await read_runtime_object(self._execution_objects, payload.ref))
+        if isinstance(value, Mapping) and value.get("kind") == "execution-context":
+            instructions = await self._context_archive.load_repository_instructions(reference)
+        else:
+            instructions = ExecutionInputContext.from_payload(value).repository_instructions
+        return None if instructions is None else RepositoryInstructions.from_payload(instructions)
+
     async def _prepare_input_context(self, context: ExecutionInputContext) -> RuntimePayloadRef:
         # A pending owner retains this view only in-process. Coordination publishes
         # control facts; promotion/terminal publication retains canonical content.
@@ -4668,6 +4681,12 @@ class LocalExecutionBackend:
                     if not isinstance(memory, RuntimeMemoryStore):
                         raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "memory_store_has_no_isolated_capture"})
                     await memory.seed_capture(accepted_context.memory or {})
+            original_input = current.stored_user_input
+            if original_input.codec == "text" and original_input.payload.kind == "object":
+                prompt = await self.restore_user_input(current)
+                if not isinstance(prompt, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                original_input = replace(original_input, payload=StoredPayload.inline_text(prompt))
             public_context = AgentContext(
                 app=self._app,
                 principal=request.principal,
@@ -4683,7 +4702,7 @@ class LocalExecutionBackend:
                 agent_id=binding.compiled_agent.spec.id,
                 agent_run_seq=current.agent_run_seq,
                 input_context=accepted_context,
-                original_input=stored_user_input_view(current.stored_user_input),
+                original_input=stored_user_input_view(original_input),
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store

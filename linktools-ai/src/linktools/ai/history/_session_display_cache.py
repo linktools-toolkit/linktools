@@ -23,7 +23,7 @@ from ..errors import AIError, ErrorCode
 from ..session import SessionDetail, SessionManager, SessionTurn, SessionTurnItem, SessionView
 from ..storage import CacheBackend
 from ..inputs import stored_user_input_view
-from ._session_timeline import SessionTimelineCapture, SessionTimelineTranscriptStore
+from ._session_timeline import SessionTimelineCapture, SessionTimelineTranscriptStore, load_stored_input_view
 from ..persistence.runs import ConversationPersistence
 from ..persistence.codec import decode_domain, encode_domain
 from ..persistence.contracts import ConversationRepositories, ExecutionRepository
@@ -272,7 +272,10 @@ class SessionDisplayCache:
                 # come from this request's authorized pending publication.
                 turn = SessionTurn(
                     pending.execution_id, pending.status, pending.created_at, pending.updated_at,
-                    stored_user_input_view(pending.stored_user_input), False, (),
+                    stored_user_input_view(pending.stored_user_input)
+                    if pending.stored_user_input.view is not None or pending.stored_user_input.payload.kind == "inline"
+                    else await load_stored_input_view(pending.stored_user_input, self._transcript_store.read_execution_payload),
+                    False, (),
                     pending.error_code, pending.safe_error_details,
                 )
                 return SessionDetail(

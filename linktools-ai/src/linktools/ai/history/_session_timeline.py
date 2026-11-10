@@ -4,7 +4,7 @@
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
@@ -37,7 +37,7 @@ from ..persistence.contracts import (
     ExecutionRepository,
     TranscriptHeadRecord,
 )
-from ..execution import ExecutionRecord
+from ..execution import ExecutionRecord, StoredUserInput
 from ..session import SessionRecord, SessionTurnCommit, SessionTurnRef
 from ..persistence.runs import ConversationPersistence
 from ..persistence.repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
@@ -61,6 +61,8 @@ class SessionTimelineTranscriptStore(Protocol):
     ) -> int: ...
 
     async def read_conversation_payload(self, payload: StoredPayload) -> bytes: ...
+
+    async def read_execution_payload(self, payload: StoredPayload) -> bytes: ...
 
     def iter_conversation_message_range(
         self,
@@ -618,7 +620,12 @@ async def project_captured_session_timeline(
                 status,
                 created_at,
                 updated_at,
-                stored_user_input_view(user_input),
+                stored_user_input_view(user_input)
+                if user_input.view is not None or user_input.payload.kind == "inline"
+                else await load_stored_input_view(
+                    user_input, transcript_store.read_conversation_payload
+                    if commit is not None else transcript_store.read_execution_payload,
+                ),
                 commit is not None,
                 items,
                 error_code,
@@ -640,6 +647,24 @@ async def project_captured_session_timeline(
     return Page(tuple(turns), next_cursor)
 
 
+async def load_stored_input_view(
+    value: StoredUserInput, read_payload: Callable[[StoredPayload], Awaitable[bytes]],
+) -> dict[str, JsonValue]:
+    if value.view is not None or value.payload.kind == "inline":
+        return stored_user_input_view(value)
+    try:
+        raw = await read_payload(value.payload)
+        payload = (StoredPayload.inline_text(raw.decode("utf-8")) if value.codec == "text"
+                   else StoredPayload.inline_json(json.loads(raw.decode("utf-8"))))
+        if payload.digest != value.payload.digest or payload.size != value.payload.size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return stored_user_input_view(replace(value, payload=payload))
+    except AIError:
+        raise
+    except (UnicodeDecodeError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 async def _committed_output(
     payload: StoredPayload, transcript_store: SessionTimelineTranscriptStore,
 ) -> JsonValue:
@@ -659,6 +684,7 @@ async def _committed_output(
 __all__ = [
     "SessionTimelineCapture",
     "SessionTimelineTranscriptStore",
+    "load_stored_input_view",
     "capture_session_refresh",
     "capture_session_timeline",
     "project_captured_session_timeline",

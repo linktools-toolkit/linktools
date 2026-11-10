@@ -476,10 +476,10 @@ class ExecutionInputMaterializer:
         if not isinstance(value, StoredUserInput):
             raise TypeError("value must be StoredUserInput")
         payload = value.payload
-        if (value.codec == _TEXT_CODEC or payload.kind == "object"
-                or payload_fits_inline(payload, self._payload_policy)):
+        if payload.kind == "object" or payload_fits_inline(payload, self._payload_policy):
             return value
-        if value.codec != _USER_CONTENT_CODEC or payload.encoding != "json":
+        if not ((value.codec == _USER_CONTENT_CODEC and payload.encoding == "json")
+                or (value.codec == _TEXT_CODEC and payload.encoding == "utf-8")):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if self._object_store is None or self._object_key_factory is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -489,7 +489,8 @@ class ExecutionInputMaterializer:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         reference = await put_runtime_object(
             self._object_store, self._object_key_factory, self._object_domain,
-            tenant_id, canonical_json_bytes(payload.value),
+            tenant_id, (payload.decode().encode("utf-8") if value.codec == _TEXT_CODEC
+                        else canonical_json_bytes(payload.value)),
         )
         return replace(value, payload=StoredPayload.object(reference))
 
@@ -506,7 +507,7 @@ class ExecutionInputMaterializer:
 
             raw = await read_runtime_object(self._object_store, payload.ref)
             try:
-                decoded = json.loads(raw.decode("utf-8"))
+                decoded = raw.decode("utf-8") if value.codec == _TEXT_CODEC else json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:

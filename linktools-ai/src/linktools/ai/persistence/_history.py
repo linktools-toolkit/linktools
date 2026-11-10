@@ -2240,8 +2240,17 @@ class TranscriptRepository:
             expected_size=payload.size,
         )
 
-    async def read_payload(self, payload: StoredPayload) -> bytes:
-        return await self._read_payload(payload)
+    async def read_payload(
+        self, payload: StoredPayload, *, source_domain: PersistenceDomain | None = None,
+    ) -> bytes:
+        if source_domain is not None and not isinstance(source_domain, PersistenceDomain):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if source_domain is None or source_domain is self._runtime_domain or payload.kind == "inline":
+            return await self._read_payload(payload)
+        require_no_run_history_lock("TranscriptRepository.read_payload")
+        if self._object_reader is None or payload.ref is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        return await self._object_reader(source_domain, payload.ref)
 
     def decode_chunk(self, fact: StoredFact) -> TranscriptChunk:
         try:

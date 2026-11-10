@@ -124,6 +124,32 @@ class ExecutionContextArchive:
         return PreparedExecutionContext(RuntimePayloadRef(StoredPayload.inline_json(manifest), PersistenceDomain.EXECUTION),
                                         archive, prepared)
 
+    async def load_repository_instructions(
+        self, reference: RuntimePayloadRef,
+    ) -> Mapping[str, JsonValue] | None:
+        """Read the accepted instruction component without materializing model history."""
+        try:
+            if (reference.source_domain is not PersistenceDomain.EXECUTION
+                    or reference.payload.kind != "inline" or reference.payload.encoding != "json"):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = reference.payload.decode()
+            if not isinstance(value, Mapping) or value.get("kind") != "execution-context" or value.get("version") != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            item = value["repository_instructions"]
+            if item is None:
+                return None
+            archive = await self._open()
+            if (not isinstance(item, Mapping) or item.get("archive_scope") != archive.scope_id
+                    or item.get("content_scope") != archive.content_scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            bodies = await archive.read_contents((item["content_id"],), codec="json")
+            instructions = json.loads(bodies[0])
+            if not isinstance(instructions, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return instructions
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
     async def load(self, reference: RuntimePayloadRef) -> ExecutionInputContext:
         if reference.payload.kind != "inline":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
