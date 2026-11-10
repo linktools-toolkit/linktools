@@ -3964,7 +3964,13 @@ class StateCommands:
                 else DurableCommitState.NOT_COMMITTED
             )
 
-        await self._commit_or_raise(materialize, readback)
+        async def operation() -> None:
+            await archive.state_store.storage_group.mutate(
+                archive.transaction_stores,
+                lambda group: materialize(group.transaction(archive.state_store)),
+            )
+
+        await self._commit_or_raise(operation, readback)
 
     async def _sync_prepared_projection_with_reconciliation(
         self,
@@ -3976,9 +3982,8 @@ class StateCommands:
         if archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        async def sync(transaction: StateTransaction) -> None:
-            await archive.sync_projection_in_transaction(
-                transaction,
+        async def sync() -> None:
+            await archive.sync_prepared_projection(
                 projection.run,
                 events=projection.events,
                 checkpoints=projection.checkpoints,
