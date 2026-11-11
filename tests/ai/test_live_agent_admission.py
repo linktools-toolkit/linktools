@@ -86,10 +86,10 @@ def _port(
     return AgentExecutionPort(
         persistence=SimpleNamespace(tenant_id="tenant"), compiled=compiled,
         _binding_contract=None if captured is None else captured.binding_contract,
-        compiler=old, service=admissions, sessions=admissions,
-        operations=SimpleNamespace(ensure_open=lambda: None), watch_tree=None,
+        _compiler=old, _service=admissions, _sessions=admissions,
+        _operations=SimpleNamespace(ensure_open=lambda: None), watch_tree=None,
         resolve_binding=resolver.resolve, default_principal=Principal("user", "tenant"),
-        correlation={}, captures=None, captured=captured is not None, agent_id=agent_id,
+        correlation={}, _captures=None, captured=captured is not None, agent_id=agent_id,
         resolve_current=resolver.resolve_agent, restore_binding=resolver.restore,
     )
 
@@ -585,7 +585,7 @@ async def test_unresolved_captured_port_recovery_checks_recorded_agent_identity(
     binding = compiler.bind(compiler.compile_registered("root"))
     recover = AsyncMock(return_value="recovered")
     port = replace(_port(compiler, _resolver(compiler, compiler), _Admissions(), captured=binding),
-                   compiled=None, service=SimpleNamespace(runtime_backend=lambda: SimpleNamespace(recover_execution=recover)))
+                   compiled=None, _service=SimpleNamespace(runtime_backend=lambda: SimpleNamespace(recover_execution=recover)))
     recorded = replace(binding.binding_contract, agent_spec=replace(binding.compiled_agent.spec, id=agent_id, revision=revision))
     execution = SimpleNamespace(requires_task_invocation_capture=True, binding=recorded, execution_id="execution", revision=4)
     operation = SimpleNamespace(tenant_id="tenant", execution_id="execution", resource_id="execution")

@@ -16,7 +16,7 @@ from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
-from linktools.ai.storage import InMemoryObjectStore, ObjectRef, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
 from openai import APIError as OpenAIAPIError
 from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -216,7 +216,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),
-        payload_policy=PayloadPolicy(),
+
     )
 
 
@@ -231,7 +231,6 @@ def _failed_tool_record(
         execution_id="execution",
         agent_run_id="run",
         tool_call_id="call",
-        idempotency_key_digest="b" * 64,
         tool_name="tool",
         arguments_digest="c" * 64,
         binding_digest="a" * 64,

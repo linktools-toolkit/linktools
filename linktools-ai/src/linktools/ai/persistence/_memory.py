@@ -29,6 +29,7 @@ from .state import (
     active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
+    validate_store_key,
 )
 
 ValueT = TypeVar("ValueT")
@@ -76,8 +77,7 @@ class InMemoryStateStorageGroup:
     async def open_partition(
         self, key: bytes, *, create: bool = False,
     ) -> "InMemoryStateStore | None":
-        if not isinstance(key, bytes) or len(key) != 32:
-            raise ValueError("partition key must be a 32-byte digest")
+        validate_store_key(key)
         if active_state_scope() is not None:
             raise StateTransactionNestingError("open_partition must run outside a state callback")
         if self._closing:

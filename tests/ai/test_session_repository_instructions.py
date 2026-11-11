@@ -312,7 +312,7 @@ async def test_session_execution_recovery_keeps_pinned_instructions_and_permissi
             rules.write_text("LATER-RULE", encoding="utf-8")
             await persistence.checkpoint.approvals.decide(
                 approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
-                idempotency_key_digest="a" * 64, decision=ApprovalDecision.APPROVE,
+                idempotency_key="a" * 64, decision=ApprovalDecision.APPROVE,
                 principal_id=runtime.default_principal.principal_id, decision_digest="b" * 64,
                 decided_at=datetime.now(timezone.utc),
                 resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},
@@ -566,7 +566,7 @@ async def test_native_and_custom_approvals_restore_observed_frontier_with_valida
             assert len(approvals) == 1 and calls == [] and requests == 1
         await persistence.checkpoint.approvals.decide(
             approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
-            idempotency_key_digest="c" * 64, decision=ApprovalDecision.APPROVE,
+            idempotency_key="c" * 64, decision=ApprovalDecision.APPROVE,
             principal_id=principal_id, decision_digest="d" * 64,
             decided_at=datetime.now(timezone.utc),
             resolution_metadata={"linktools": {"repository_instruction_frontier": "0" * 64}},

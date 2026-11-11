@@ -6,6 +6,7 @@ from linktools.ai.core import ExecutionContext
 
 import ast
 import asyncio
+import gc
 import inspect
 import time
 from collections import deque
@@ -88,12 +89,12 @@ class _Tree:
     async def capture(self, execution_id: str, *, principal: Principal, after_event_seqs=None):
         sequences = after_event_seqs or {}
         root = ExecutionView(execution_id, "agent", ExecutionStatus.SUCCEEDED,
-            ExecutionLineageKind.RUN, None, execution_id, None)
+            ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
         values = [(root, 0, sequences.get(execution_id, 0))]
         for child_id, sequence in sequences.items():
             if child_id != execution_id:
                 child = ExecutionView(child_id, "agent", ExecutionStatus.SUCCEEDED,
-                    ExecutionLineageKind.SUBAGENT, execution_id, execution_id, "invocation")
+                    ExecutionLineageKind.SUBAGENT, execution_id, execution_id, "invocation", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
                 values.append((child, 1, sequence))
         return tuple(values)
 
@@ -258,7 +259,7 @@ class _Bundle:
             self.get_calls += 1
             return self.execution_run
 
-        self.facade = RuntimeExecutions(self.execution, get_execution)
+        self.facade = RuntimeExecutions(self.execution, get_execution, bind_execution=None)
 
     async def close(self) -> None:
         await self.evaluations.close()
@@ -492,7 +493,7 @@ async def test_terminal_owner_validates_cursor_membership_before_authoritative_w
         async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
             return ExecutionView(
                 execution_id, "agent", ExecutionStatus.SUCCEEDED,
-                ExecutionLineageKind.RUN, None, execution_id, None,
+                ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
 
         async def list_children(self, execution_id: str, *, principal: Principal):
@@ -660,6 +661,8 @@ async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priorit
         bundle.execution.wait = authority
     run = Execution(bundle.runtime._execution_binding, "execution", _PRINCIPAL, tree)
     try:
+        # Keep collection-time cyclic garbage outside the cleanup priority window.
+        gc.collect()
         with pytest.raises(ObservationError if failure == "callback" else AIError) as raised:
             await run.wait(on_event=callback, timeout_seconds=0.01, close_timeout_seconds=0.2,
                            raise_on_stream_error=raise_on_stream_error)
@@ -871,11 +874,11 @@ async def test_optional_root_broker_failure_cannot_skip_execution_cursor_validat
                 if member == "valid":
                     return ExecutionView(
                         "member", "agent", ExecutionStatus.SUCCEEDED,
-                        ExecutionLineageKind.SUBAGENT, "execution", "execution", "invocation",
+                        ExecutionLineageKind.SUBAGENT, "execution", "execution", "invocation", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                     )
             return ExecutionView(
                 execution_id, "agent", ExecutionStatus.SUCCEEDED,
-                ExecutionLineageKind.RUN, None, execution_id, None,
+                ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
 
         async def list_children(self, execution_id: str, *, principal: Principal):
@@ -936,7 +939,7 @@ async def test_optional_first_tree_failure_cannot_skip_later_graph_member_valida
     async def inspect_execution(execution_id: str, *, principal: Principal) -> ExecutionView:
         return ExecutionView(
             execution_id, "agent", ExecutionStatus.SUCCEEDED,
-            ExecutionLineageKind.RUN, None, execution_id, None,
+            ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
     async def tree(execution_id: str, *, after_event_seqs=None, ready=None, **kwargs):

@@ -31,7 +31,6 @@ from ..core import (
     ResourceRef,
     SessionStatus,
     canonical_sha256,
-    idempotency_key_digest,
     validate_agent_id,
     validate_page_limit,
     encode_cursor as encode_runtime_cursor,
@@ -462,7 +461,7 @@ class SessionManager(Generic[HandleT]):
             if source.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             existing = await self._conversation.operations.get(
-                idempotency_key_digest(request.idempotency_key),
+                request.idempotency_key,
                 tenant_id=request.principal.tenant_id,
             )
             contract = _SESSION_FORK_REQUEST_CONTRACT
@@ -553,7 +552,7 @@ class SessionManager(Generic[HandleT]):
         if any(key.startswith("linktools.ai.") for key in metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         existing = await self._conversation.operations.get(
-            idempotency_key_digest(request.idempotency_key),
+            request.idempotency_key,
             tenant_id=request.principal.tenant_id,
         )
         contract = _SESSION_UPDATE_REQUEST_CONTRACT
@@ -1170,7 +1169,7 @@ class SessionManager(Generic[HandleT]):
     ) -> OperationLedgerInput:
         now = datetime.now(timezone.utc)
         return OperationLedgerInput(
-            idempotency_key_digest(operation_id),
+            operation_id,
             tenant_id,
             ResourceKind.SESSION,
             session_id,
@@ -1194,7 +1193,6 @@ class SessionManager(Generic[HandleT]):
         session_id: str,
         request_digest: str,
     ) -> OperationLedgerRecord:
-        operation_id = idempotency_key_digest(operation_id)
         now = datetime.now(timezone.utc)
         requested = OperationLedgerInput(
             operation_id,

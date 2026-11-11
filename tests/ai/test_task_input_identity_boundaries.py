@@ -152,7 +152,6 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
     from linktools.ai.runtime import Runtime, RuntimeFeatures
     from linktools.ai.persistence.codec import decode_domain, encode_domain
     from linktools.ai.persistence.contracts import StoredUserInput
-    from linktools.ai.storage import StoredPayload
     from .test_evaluation_consumers import FixtureModels
 
     features = RuntimeFeatures("identity")
@@ -177,8 +176,11 @@ async def test_agent_submission_identity_survives_materialization_and_reopen(tmp
         body = dict(node.input)
         prompt = dict(body["prompt"])
         stored = decode_domain(prompt["value"], StoredUserInput)
-        assert stored.payload.ref is not None
-        relocated = replace(stored, payload=StoredPayload.object(replace(stored.payload.ref, key="another-location")))
+        assert stored.payload.encoding == "json-attachments"
+        assert len(stored.payload.object_refs()) == 1
+        relocated = replace(stored, payload=stored.payload.map_object_refs(
+            lambda reference: replace(reference, key="another-location"),
+        ))
         prompt["value"] = encode_domain(relocated)
         body["prompt"] = prompt
         wire = encode_domain(node)

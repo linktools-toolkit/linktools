@@ -11,7 +11,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StoredRecord
-from linktools.ai.persistence.state import StoredAlias, StateTransactionNestingError
+from linktools.ai.persistence.state import StoredAlias, StateTransactionNestingError, state_store_key
 
 
 def _key(value: str) -> bytes:
@@ -19,7 +19,7 @@ def _key(value: str) -> bytes:
 
 
 def _record(value: str) -> StoredRecord:
-    return StoredRecord(_key("record"), None, None, "probe", "record", None, 0, None, 0, None, {"value": value})
+    return StoredRecord(_key("record"), None, None, "probe", b'record', None, 0, None, 0, None, {"value": value})
 
 
 def _storage(root: Path, backend: str) -> PersistenceStorage:
@@ -142,3 +142,50 @@ async def test_state_group_partition_closing_one_handle_does_not_close_peers(tmp
         await second.mutate(lambda tx: tx.insert_record(_record("peer")))
         assert await owner.read(lambda tx: tx.get_record(_key("record"))) is None
         assert await second.read(lambda tx: tx.get_record(_key("record"))) == _record("peer")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_binary_alias_boundaries_remain_partition_local(tmp_path: Path, backend: str) -> None:
+    scopes = (("namespace", "tenant", "checkpoint"), ("other", "tenant", "checkpoint"),
+              ("namespace", "other", "checkpoint"), ("namespace", "tenant", "execution"))
+    alias_keys = (b"a", b"z" * 1024)
+    async with Persistence.open("scope", storage=_storage(tmp_path, backend)) as persistence:
+        owner = persistence.execution.executions.state_store
+        stores = [await owner.storage_group.open_partition(state_store_key(*scope), create=True) for scope in scopes]
+        for index, store in enumerate(stores):
+            assert store is not None
+            async def seed(tx):
+                await tx.insert_record(_record(str(index)))
+                await tx.insert_aliases(tuple(StoredAlias(key, _key("record")) for key in alias_keys))
+            await store.mutate(seed)
+            page = await store.read(lambda tx: tx.scan_aliases_page(after=alias_keys[0], limit=1))
+            assert page == (StoredAlias(alias_keys[1], _key("record")),)
+            assert await store.read(lambda tx: tx.resolve_aliases(alias_keys)) == dict.fromkeys(alias_keys, _key("record"))
+            with pytest.raises(ValueError):
+                await store.read(lambda tx: tx.resolve_alias(b"x" * 1025))
+            with pytest.raises(ValueError):
+                await store.read(lambda tx: tx.scan_aliases_page(after=b"x" * 1025, limit=1))
+        await stores[0].mutate(lambda tx: tx.delete_record(_key("record")))
+        assert await stores[0].read(lambda tx: tx.scan_aliases()) == ()
+        for index, store in enumerate(stores[1:], 1):
+            assert await store.read(lambda tx: tx.get_record(_key("record"))) == _record(str(index))
+            assert await store.read(lambda tx: tx.resolve_aliases(alias_keys)) == dict.fromkeys(alias_keys, _key("record"))
+            await store.validate_integrity()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", (b"", b"x" * 1025, "text-in-binary-column"))
+async def test_sql_alias_reads_reject_invalid_persisted_addresses(tmp_path: Path, raw: object) -> None:
+    async with Persistence.open("scope", storage=_storage(tmp_path, "sqlite")) as persistence:
+        store = persistence.execution.executions.state_store
+        async def seed(tx):
+            await tx.insert_record(_record("owner"))
+            await tx.insert_alias(StoredAlias(b"valid", _key("record")))
+        await store.mutate(seed)
+        async with store.storage_group.context.engine.begin() as connection:
+            await connection.exec_driver_sql("UPDATE ai_state_aliases SET alias_key = ?", (raw,))
+        for read in (lambda: store.read(lambda tx: tx.scan_aliases()), store.validate_integrity):
+            with pytest.raises(AIError) as rejected:
+                await read()
+            assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

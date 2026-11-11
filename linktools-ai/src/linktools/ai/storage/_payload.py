@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import json
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import cast
 
 from ..core import JsonValue, canonical_json_bytes, normalize_json_value
@@ -29,7 +30,7 @@ class PayloadPolicy:
             raise ValueError("inline payload limit must be between 0 and 256 KiB")
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class StoredPayload:
     """Own immutable payload data and expose detached JSON consumer views."""
 
@@ -61,9 +62,13 @@ class StoredPayload:
             raise ValueError("payload size is invalid")
         owned_value: bytes | str | None = None
         if kind == "inline":
-            if encoding not in {"json", "utf-8", "base64"} or ref is not None:
+            if encoding not in {"json", "utf-8", "base64", "json-attachments"} or ref is not None:
                 raise ValueError("inline payload descriptor is invalid")
-            if encoding == "json":
+            if encoding == "json-attachments":
+                _attachment_refs(value)
+                owned_value = canonical_json_bytes(normalize_json_value(value))
+                actual_digest, actual_size = digest, size
+            elif encoding == "json":
                 owned_value = canonical_json_bytes(normalize_json_value(value))
                 actual_digest = hashlib.sha256(owned_value).hexdigest()
                 actual_size = len(owned_value)
@@ -170,12 +175,55 @@ class StoredPayload:
             return cls(kind, None, digest, size, ref=reference)
         raise ValueError("stored payload kind is invalid")
 
+    def object_refs(self) -> tuple["ObjectRef", ...]:
+        """Enumerate physical bytes without inspecting opaque application JSON."""
+        if self.ref is not None:
+            return (self.ref,)
+        return _attachment_refs(self.value) if self.encoding == "json-attachments" else ()
+
+    def map_object_refs(self, mapper: Callable[["ObjectRef"], "ObjectRef"]) -> "StoredPayload":
+        """Relocate physical references while preserving complete source integrity."""
+        if self.ref is not None:
+            return StoredPayload.object(mapper(self.ref))
+        if self.encoding != "json-attachments":
+            return self
+        value = self.value
+        for attachment, reference in zip(value["attachments"], self.object_refs(), strict=True):
+            target = mapper(reference)
+            if (target.digest, target.size) != (reference.digest, reference.size):
+                raise ValueError("relocated attachment bytes must be unchanged")
+            attachment["ref"] = {"store_id": target.store_id, "key": target.key,
+                                 "digest": target.digest, "size": target.size}
+        return StoredPayload(self.kind, self.encoding, self.digest, self.size, value)
+
     def decode(self) -> object:
+        if self.encoding == "json-attachments":
+            raise ValueError("attachment payload requires ObjectStore resolution")
         if self.kind != "inline":
             raise ValueError("object payload requires ObjectStore resolution")
         if self.encoding == "base64":
             return base64.b64decode(str(self.value), validate=True)
         return self.value
+
+
+def _attachment_refs(value: object) -> tuple[ObjectRef, ...]:
+    if (not isinstance(value, dict) or set(value) != {"format", "content", "attachments"}
+            or not isinstance(value["format"], str) or not value["format"]
+            or not isinstance(value["attachments"], list) or not value["attachments"]):
+        raise ValueError("attachment payload manifest is invalid")
+    refs, paths = [], set()
+    for item in value["attachments"]:
+        if not isinstance(item, dict) or set(item) != {"path", "ref"}:
+            raise ValueError("attachment payload entry is invalid")
+        path, ref = item["path"], item["ref"]
+        if (not isinstance(path, list) or not path or any(
+                not isinstance(part, str) and (type(part) is not int or part < 0) for part in path)
+                or tuple(path) in paths or not isinstance(ref, dict)
+                or set(ref) != {"store_id", "key", "digest", "size"}):
+            raise ValueError("attachment payload reference is invalid")
+        paths.add(tuple(path))
+        refs.append(ObjectRef(**ref))
+    return tuple(refs)
 
 
 def payload_fits_inline(payload: StoredPayload, policy: PayloadPolicy) -> bool:

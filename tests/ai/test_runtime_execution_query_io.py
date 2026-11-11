@@ -51,6 +51,9 @@ class _Candidates:
             task_deadline_at=None,
             task_next_attempt_at=None,
             event_seq=1,
+            agent_run_seq=1,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            durable_trace=True,
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             result=SimpleNamespace(created_at=datetime(2026, 1, 2, tzinfo=timezone.utc)),
         )

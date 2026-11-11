@@ -10,7 +10,7 @@ from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.state import active_state_scope
+from linktools.ai.persistence.state import active_state_scope, record_key
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_history_projection import _materialize, _session
@@ -40,6 +40,28 @@ async def test_empty_context_batches_projection_and_head(
             projection = await repository.load_projection(owner_id)
             return projection, await repository.get_head(owner_id) if projection is None else None
 
+        cold_queries = []
+
+        def capture_cold(_connection, _cursor, statement, parameters, _context, _many):
+            cold_queries.append((statement, parameters))
+
+        event.listen(engine, "before_cursor_execute", capture_cold)
+        try:
+            cold = (await repository.load_session_model_context(owner, tenant_id="tenant")
+                    if reader == "session" else await repository.load_model_context(owner))
+        finally:
+            event.remove(engine, "before_cursor_execute", capture_cold)
+        assert cold.model_messages() == ()
+        cold_selects = [(sql, parameters) for sql, parameters in cold_queries if sql.startswith("SELECT")]
+        scope_key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
+        assert sum(scope_key in parameters for _, parameters in cold_selects) == 1
+        assert len(cold_selects) == 2
+        assert not any(name in sql for sql, _ in cold_selects
+                       for name in ("ai_step_messages", "ai_step_sequences", "ai_objects"))
+        assert not any(sql.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"} for sql, _ in cold_queries)
+        # Both alternatives now use the same established archive scope.
+        assert await archive.state_store.storage_group.open_archive() is not None
+
         results, counts = [], []
         for baseline in (True, False):
             statements.clear()
@@ -56,7 +78,7 @@ async def test_empty_context_batches_projection_and_head(
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
         assert results[0] == results[1]
         assert results[1].model_messages() == ()
-        assert counts == ([(1, 1), (1, 1)] if reader == "session" else [(2, 2), (1, 1)])
+        assert counts == ([(1, 1), (1, 1)] if reader == "session" else [(2, 1), (1, 1)])
     finally:
         await state.close()
 

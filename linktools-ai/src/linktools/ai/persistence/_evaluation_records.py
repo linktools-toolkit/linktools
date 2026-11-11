@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """Durable evaluation control facts, separate from native execution state."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
-from ..core import Principal, JsonValue
+from ..core import Principal, JsonValue, validate_idempotency_key, validate_resource_id
+from ..errors import AIError
 from ..evaluation import (
-    ScoreBundle, CaseContract, DatasetContract,
+    ScoreBundle, CaseContract, DatasetContract, CaseRef, DatasetRef,
     EvaluationManifest,
     EvidenceRef,
     ScoreAttemptView,
@@ -66,8 +67,14 @@ class EvaluationHumanDecision:
     actor: Principal
     created_at: datetime
     request_digest: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     score: ScoreBundle
+
+    def __post_init__(self) -> None:
+        try:
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("evaluation idempotency key is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +82,7 @@ class EvaluationRecord:
     manifest: EvaluationManifest
     manifest_digest: str
     request_digest: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     gate: Literal["open", "closed_cancel", "closed_budget"]
     revision: int
     created_at: datetime
@@ -91,6 +98,10 @@ class EvaluationRecord:
     owned_input_captures: tuple[TaskInvocationInputRef, ...] = ()
 
     def __post_init__(self) -> None:
+        try:
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("evaluation idempotency key is invalid") from error
         if self.content_deleted_at is None and any(
             candidate.graph_template is not None and candidate.graph_template.template is None
             for candidate in self.manifest.candidates
@@ -107,9 +118,15 @@ class EvaluationTombstone:
     evaluation_id: str
     owner_principal_id: str
     request_digest: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     manifest_digest: str
     deleted_at: datetime
+
+    def __post_init__(self) -> None:
+        try:
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("evaluation idempotency key is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +138,45 @@ class EvaluationContentTombstone:
     deleted_at: datetime
 
 
+    def __post_init__(self) -> None:
+        self.record_identity
+
+    @property
+    def record_identity(self) -> tuple[str, ...]:
+        """Project this content kind's semantic identity into record fields."""
+        if self.kind == "evaluation_dataset":
+            if not isinstance(self.identity, list) or len(self.identity) != 2:
+                raise ValueError("dataset tombstone identity is invalid")
+            identifier, revision = self.identity
+            if not isinstance(identifier, str) or not isinstance(revision, int):
+                raise ValueError("dataset tombstone identity is invalid")
+            dataset = DatasetRef(identifier, revision)
+            return (dataset.id, str(dataset.revision))
+        if self.kind == "evaluation_case":
+            if not isinstance(self.identity, list) or len(self.identity) != 3:
+                raise ValueError("case tombstone identity is invalid")
+            dataset_id, case_id, revision = self.identity
+            if not isinstance(dataset_id, str) or not isinstance(case_id, str) or not isinstance(revision, int):
+                raise ValueError("case tombstone identity is invalid")
+            case = CaseRef(dataset_id, case_id, revision)
+            return (case.dataset_id, case.case_id, str(case.revision))
+        if self.kind in {"evaluation_evidence", "evaluation_report", "evaluation_comparison"}:
+            if not isinstance(self.identity, str):
+                raise ValueError("evaluation content tombstone identity is invalid")
+            try:
+                return (validate_resource_id(self.identity),)
+            except AIError as error:
+                raise ValueError("evaluation content tombstone identity is invalid") from error
+        raise ValueError("evaluation content tombstone kind is invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationCleanupRecord:
     evaluation_id: str
     owner_principal_id: str
     objects: tuple[tuple[PersistenceDomain, ObjectRef], ...]
     created_at: datetime
+    capture_keys: tuple[str, ...] = ()
 
 
 __all__ = [

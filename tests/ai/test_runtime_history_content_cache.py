@@ -3,8 +3,6 @@
 """History content reads share Runtime caching without changing domain ownership."""
 
 import hashlib
-import json
-import zlib
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -13,13 +11,12 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.persistence import Persistence
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import BinaryImage, FilePart, ModelResponse, TextPart
 
 from linktools.ai.core import Principal, TenantAuthorizationPolicy, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.runtime._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._factory import _borrowed_runtime_history
@@ -119,7 +116,7 @@ async def test_history_and_task_results_keep_execution_object_ownership(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("domain", (PersistenceDomain.CONVERSATION, PersistenceDomain.TRACE))
-async def test_composed_transcript_archives_cache_verified_compressed_bytes(
+async def test_composed_transcript_archives_cache_verified_attachment_bytes(
     tmp_path: Path, domain: PersistenceDomain,
 ) -> None:
     objects = _CountingObjects()
@@ -136,7 +133,9 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
         archive = storage.run_store.read_store(domain)
         assert isinstance(archive, StateStepArchive)
         repository = archive.transcript_repository
-        messages = (ModelResponse(parts=[TextPart("compressed body " * 2048)]),)
+        attachment = b"\x00\xffimage" * 4096
+        messages = (ModelResponse(parts=[TextPart("compressed body " * 2048),
+                                       FilePart(BinaryImage(attachment, media_type="image/png"))]),)
         await repository.create_head("run")
         prepared = PreparedArchive()
         chunks = await repository.prepare_chunks(
@@ -152,13 +151,14 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
         await archive.state_store.mutate(publish)
         table = build_step_sql_metadata().tables["ai_step_messages"]
         async with archive.state_store.context.engine.connect() as connection:
-            rows = (await connection.execute(select(table.c.message).where(
-                table.c.store_digest == chunk.content.store_digest,
-            ))).scalars().all()
-        records = tuple(ContentRecord.from_json(json.loads(row)) for row in rows)
+            rows = (await connection.execute(select(table).where(
+                table.c.store_key == chunk.content.store_key,
+            ))).mappings().all()
+        records = tuple(ContentRecord.from_native_row(row) for row in rows)
         assert len(records) == 1
         content = records[0]
-        assert content.compression == "zlib" and content.payload.kind == "object"
+        assert content.compression == "raw" and content.payload.encoding == "json-attachments"
+        reference, = content.object_refs()
 
         assert await repository.load_messages("run") == messages
         assert await repository.load_messages("run") == messages
@@ -167,13 +167,13 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
         key, _envelope = cache.writes[0]
 
         async def unexpected_origin():
-            pytest.fail("fresh verified compressed body must stay hot")
+            pytest.fail("fresh verified attachment bytes must stay hot")
 
-        compressed = await StorageReadCache(cache).get(key, unexpected_origin)
-        assert hashlib.sha256(compressed).hexdigest() == content.payload.digest
-        assert len(compressed) == content.payload.size
-        assert zlib.decompress(compressed) == encode_model_messages(messages)
-        assert chunk.raw_digest != content.payload.digest
+        cached = await StorageReadCache(cache).get(key, unexpected_origin)
+        assert hashlib.sha256(cached).hexdigest() == reference.digest
+        assert len(cached) == reference.size
+        assert cached == attachment
+        assert chunk.raw_digest != reference.digest
 
         await cache.put(key, b"corrupt cached body")
         assert await repository.load_messages("run") == messages
@@ -333,7 +333,8 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
     try:
         archive = storage.run_store.read_store(domain)
         run = AgentRunRecord("run")
-        messages = [ModelResponse(parts=[TextPart("retained checkpoint " * 2048)])]
+        messages = [ModelResponse(parts=[TextPart("retained checkpoint " * 2048),
+                                         FilePart(BinaryImage(b"checkpoint image", media_type="image/png"))])]
         checkpoint = AgentRunCheckpoint("run", 1, messages, state="interrupted", context_messages=messages,
                                         transcript_message_count_before=0)
         await archive.materialize_checkpoint(run, checkpoint)

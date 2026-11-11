@@ -88,45 +88,18 @@ class SessionTurnCommit:
     execution_id: str
     start_message_index: int
     end_message_index: int
-    stored_user_input: StoredUserInput
-    output: StoredPayload | None
-    status: ExecutionStatus
-    created_at: datetime
-    updated_at: datetime
-    error_code: str | None
-    safe_error_details: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.session_id, str) or not self.session_id
             or not isinstance(self.execution_id, str) or not self.execution_id
-            or isinstance(self.turn_seq, bool) or not isinstance(self.turn_seq, int) or self.turn_seq < 1
-            or isinstance(self.start_message_index, bool) or not isinstance(self.start_message_index, int)
-            or isinstance(self.end_message_index, bool) or not isinstance(self.end_message_index, int)
+            or type(self.turn_seq) is not int or self.turn_seq < 1
+            or type(self.start_message_index) is not int
+            or type(self.end_message_index) is not int
             or self.start_message_index < 0
             or self.end_message_index < self.start_message_index
         ):
             raise ValueError("session turn commit is invalid")
-        if any(not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None
-               for value in (self.created_at, self.updated_at)):
-            raise ValueError("session turn timestamps must be aware")
-        if not isinstance(self.stored_user_input, StoredUserInput):
-            raise TypeError("session turn input is invalid")
-        if self.output is not None and not isinstance(self.output, StoredPayload):
-            raise TypeError("session turn output is invalid")
-        if not isinstance(self.status, ExecutionStatus) or self.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            raise ValueError("session turn status must be terminal")
-        if self.status is ExecutionStatus.SUCCEEDED and self.output is None:
-            raise ValueError("successful session turn output is required")
-        if self.status is not ExecutionStatus.SUCCEEDED and self.output is not None:
-            raise ValueError("unsuccessful session turn cannot have output")
-        if self.error_code is not None and not isinstance(self.error_code, str):
-            raise TypeError("session turn error code is invalid")
-        if not isinstance(self.safe_error_details, Mapping):
-            raise TypeError("session turn error details are invalid")
-        canonical_sha256(self.safe_error_details)
-        object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
-
 
 
 @dataclass(frozen=True, slots=True)

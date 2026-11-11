@@ -225,12 +225,12 @@ async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_se
     writer = create_async_engine(url, isolation_level="READ COMMITTED", hide_parameters=True)
     await provision_database(writer)
     digests = [hashlib.sha256(value.encode()).digest() for value in ("group-a", "group-b", "record")]
-    first = SqlStateStore(reader, store_digest=digests[0])
-    second = SqlStateStore(reader, store_digest=digests[1], group=first.storage_group)
-    writer_first = SqlStateStore(writer, store_digest=digests[0])
-    writer_second = SqlStateStore(writer, store_digest=digests[1], group=writer_first.storage_group)
+    first = SqlStateStore(reader, store_key=digests[0])
+    second = SqlStateStore(reader, store_key=digests[1], group=first.storage_group)
+    writer_first = SqlStateStore(writer, store_key=digests[0])
+    writer_second = SqlStateStore(writer, store_key=digests[1], group=writer_first.storage_group)
     stores = (first, second, writer_first, writer_second)
-    value = StoredRecord(digests[2], None, None, "probe", "record", None,
+    value = StoredRecord(digests[2], None, None, "probe", b'record', None,
                          0, None, 0, None, {"value": 1})
     checkouts = []
     event.listen(reader.sync_engine, "checkout", lambda *args: checkouts.append(True))
@@ -246,7 +246,7 @@ async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_se
         checkouts.clear()
 
         async def capture(scope):
-            observed = await first.read(lambda tx: tx.get_record(value.key_digest))
+            observed = await first.read(lambda tx: tx.get_record(value.key))
             assert observed == value
             # The writer runs in an independent task, without inheriting reader ownership.
             async def publish():
@@ -259,17 +259,17 @@ async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_se
             import contextvars
             task = contextvars.Context().run(asyncio.create_task, publish())
             await task
-            assert await second.read(lambda tx: tx.get_record(value.key_digest)) == value
-            assert await scope.transaction(first).get_record(value.key_digest) == value
+            assert await second.read(lambda tx: tx.get_record(value.key)) == value
+            assert await scope.transaction(first).get_record(value.key) == value
 
         await first.storage_group.read_many((first, second), capture)
         assert len(checkouts) == 1
         assert active_state_scope() is None
-        assert (await second.read(lambda tx: tx.get_record(value.key_digest))).data["value"] == 2
+        assert (await second.read(lambda tx: tx.get_record(value.key))).data["value"] == 2
 
         for interruption in (_InterruptedSetup, asyncio.CancelledError):
             async def fail(scope):
-                assert await scope.transaction(first).get_record(value.key_digest) is not None
+                assert await scope.transaction(first).get_record(value.key) is not None
                 raise interruption()
             with pytest.raises(interruption):
                 await first.storage_group.read_many((first, second), fail)
@@ -279,7 +279,7 @@ async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_se
                     "SELECT @@session.transaction_isolation, @@autocommit"
                 ))).one())
                 assert settings == ("READ-COMMITTED", 0)
-            assert (await first.read(lambda tx: tx.get_record(value.key_digest))).data["value"] == 2
+            assert (await first.read(lambda tx: tx.get_record(value.key))).data["value"] == 2
     finally:
         for store in reversed(stores):
             await store.close()

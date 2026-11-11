@@ -4,9 +4,10 @@
 
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 
+from ..steps import encode_native_store_key, decode_native_store_key, encode_native_replay_key, decode_native_replay_key
 from ._message_root import NativeMessageRoot, NativeMessageSequence, NativeMessageSlice
 
 
@@ -15,16 +16,17 @@ class NativeStepBackup:
     """Raw owner inventory; message bodies belong to the shared message closure.
 
     Row position is insertion order. Surrogate SQL IDs and audit timestamps are
-    not identities; replay keys, including unkeyed occurrence digests, are.
+    not identities; keyed replays use their original run/key pair, while NULL
+    replay rows retain every occurrence in insertion order.
     """
 
-    store_digest: str
-    runs: tuple[Mapping[str, object], ...]
-    events: tuple[Mapping[str, object], ...]
-    snapshots: tuple[Mapping[str, object], ...]
+    store_key: bytes = field(repr=False)
+    runs: tuple[Mapping[str, object], ...] = field(repr=False)
+    events: tuple[Mapping[str, object], ...] = field(repr=False)
+    snapshots: tuple[Mapping[str, object], ...] = field(repr=False)
 
     def __post_init__(self) -> None:
-        NativeMessageRoot("validation", self.store_digest)
+        NativeMessageRoot("validation", self.store_key)
         for name in ("runs", "events", "snapshots"):
             values = getattr(self, name)
             if not isinstance(values, tuple) or any(not isinstance(row, Mapping) for row in values):
@@ -47,23 +49,44 @@ class NativeStepBackup:
         return tuple(result)
 
     def message_roots(self, group_id: str) -> tuple[NativeMessageRoot, ...]:
-        return tuple(NativeMessageRoot(group_id, self.store_digest, value.slices)
+        return tuple(NativeMessageRoot(group_id, self.store_key, value.slices)
                      for value in self.message_sequences)
 
     def to_json(self) -> dict[str, object]:
-        return {"type": "native_step_backup", "version": 1, "store_digest": self.store_digest,
-                **{name: [deepcopy(dict(row)) for row in getattr(self, name)]
-                   for name in ("runs", "events", "snapshots")}}
+        result = {"type": "native_step_backup", "version": 1,
+                  "store_key": encode_native_store_key(self.store_key)}
+        for name in ("runs", "events", "snapshots"):
+            rows = []
+            for row in getattr(self, name):
+                value = deepcopy(dict(row))
+                value["store_key"] = encode_native_store_key(value["store_key"])
+                if "idempotency_key" in value:
+                    value["idempotency_key"] = decode_native_replay_key(value["idempotency_key"])
+                rows.append(value)
+            result[name] = rows
+        return result
 
     @classmethod
     def from_json(cls, value: object) -> "NativeStepBackup":
         if (not isinstance(value, Mapping) or set(value) != {
-            "type", "version", "store_digest", "runs", "events", "snapshots",
+            "type", "version", "store_key", "runs", "events", "snapshots",
         } or value["type"] != "native_step_backup" or type(value["version"]) is not int
                 or value["version"] != 1
                 or any(not isinstance(value[name], list) for name in ("runs", "events", "snapshots"))):
             raise ValueError("native backup wire is invalid")
-        return cls(value["store_digest"], *(tuple(value[name]) for name in ("runs", "events", "snapshots")))
+        batches = []
+        for name in ("runs", "events", "snapshots"):
+            rows = []
+            for row in value[name]:
+                if not isinstance(row, Mapping):
+                    raise ValueError("native backup row is invalid")
+                decoded = dict(row)
+                decoded["store_key"] = decode_native_store_key(decoded.get("store_key"))
+                if "idempotency_key" in decoded:
+                    decoded["idempotency_key"] = encode_native_replay_key(decoded["idempotency_key"])
+                rows.append(decoded)
+            batches.append(tuple(rows))
+        return cls(decode_native_store_key(value["store_key"]), *batches)
 
 
 __all__ = ["NativeStepBackup"]

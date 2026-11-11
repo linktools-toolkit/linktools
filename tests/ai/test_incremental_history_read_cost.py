@@ -138,7 +138,7 @@ async def test_exact_memory_fact_lookup_does_not_enumerate_other_facts(
     owner, stream = b"o" * 32, b"s" * 32
 
     async def seed(transaction) -> None:
-        await transaction.insert_record(StoredRecord(owner, None, None, "owner", "owner", None, 0, None, 0, None, {}))
+        await transaction.insert_record(StoredRecord(owner, None, None, "owner", b'owner', None, 0, None, 0, None, {}))
         await transaction.insert_facts(tuple(
             StoredFact(stream, index, owner, "event", None, None, {"index": index})
             for index in (1, 2, 3, 5)
@@ -309,8 +309,8 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
             nonlocal alive, maximum_alive, logical_json_bytes
             value = original_fact(row)
             logical_json_bytes += len(canonical_json_bytes(value.data))
-            tracked = TrackedFact(value.stream_digest, value.sequence, value.owner_key_digest,
-                                  value.kind, value.subject_digest, value.state, value.data)
+            tracked = TrackedFact(value.stream_key, value.sequence, value.owner_key,
+                                  value.kind, value.subject_id, value.state, value.data)
             alive += 1
             maximum_alive = max(maximum_alive, alive)
             weakref.finalize(tracked, released)

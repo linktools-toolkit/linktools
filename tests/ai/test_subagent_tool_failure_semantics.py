@@ -262,7 +262,7 @@ async def test_model_input_failure_reaches_parent_and_receipt_without_losing_saf
     from linktools.ai.model import create_model, validate_model_input
     from linktools.ai.capability import PydanticToolControlCapability
     from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-    from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+    from linktools.ai.storage import InMemoryObjectStore
 
     binding = create_model(api="openai", model="example-model")
     with pytest.raises(AIError) as rejected:
@@ -316,7 +316,7 @@ async def test_model_input_failure_reaches_parent_and_receipt_without_losing_saf
     bridge = RuntimeToolOperationBridge(
         None, InMemoryObjectStore(), namespace="failure-contract", tenant_id="tenant",
         execution_id="parent", agent_run_id="run", binding_digest="a" * 64,
-        owner="worker", background_tasks=set(), payload_policy=PayloadPolicy(),
+        owner="worker", background_tasks=set(),
     )
     code, payload = await bridge._error_payload(signals[0])
     restored = await bridge._decode_error(SimpleNamespace(error_code=code, error_payload=payload))
@@ -440,7 +440,7 @@ async def test_subagent_feedback_bounds_escaped_identity_values():
 ))
 async def test_observed_stream_attempt_identity_survives_parent_receipt_without_claiming_exhaustion(indices):
     from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-    from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+    from linktools.ai.storage import InMemoryObjectStore
 
     async def delegate(ref, task, *, files, invocation_id):
         raise AIError(ErrorCode.TOOL_EXECUTION_FAILED, safe_details={
@@ -465,7 +465,7 @@ async def test_observed_stream_attempt_identity_survives_parent_receipt_without_
     bridge = RuntimeToolOperationBridge(
         None, InMemoryObjectStore(), namespace="failure-contract", tenant_id="tenant",
         execution_id="parent", agent_run_id="run", binding_digest="a" * 64,
-        owner="worker", background_tasks=set(), payload_policy=PayloadPolicy(),
+        owner="worker", background_tasks=set(),
     )
     code, payload = await bridge._error_payload(raised.value)
     restored = await bridge._decode_error(SimpleNamespace(error_code=code, error_payload=payload))

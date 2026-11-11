@@ -151,3 +151,82 @@ async def test_old_trace_writer_racing_source_control_cannot_dispatch(tmp_path: 
         assert await archive.get_agent_run(agent_run_id='old-run') is None
         current = await repo.get('execution', tenant_id='tenant')
         assert current.producer_claim_id == ('new' if change == 'takeover' else 'old')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_producer_authority_never_hydrates_large_execution_bodies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    from linktools.ai.core import StopReason, UsageMetrics
+    from linktools.ai.execution import ResultRecord
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.persistence._archive import ContentArchive
+    from linktools.ai.persistence._archive_closure import iter_archive_content_refs
+    from linktools.ai.persistence.contracts import ExecutionHistorySealRecord
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "bodies.db")
+    async with Persistence.open("producer-control", tenant_id="tenant", storage=storage) as state:
+        repository = state.execution.executions
+        active = replace(_execution(), producer_generation=1, producer_claim_id="producer",
+            binding=replace(_execution().binding, output_schema={"type": "string", "description": "schema " * 20000}),
+            stored_user_input=replace(_execution().stored_user_input, payload=StoredPayload.inline_text("input " * 20000)))
+        seal = ExecutionHistorySealRecord("terminal", (), 0)
+        result = ResultRecord(StoredPayload.inline_json({"text": "output " * 20000}), StopReason.END_TURN, UsageMetrics(), active.created_at)
+        terminal = replace(active, execution_id="terminal", root_execution_id="terminal", status=ExecutionStatus.SUCCEEDED,
+            history_seal_digest=seal.seal_digest, result=result).finalize_terminal(result)
+        await repository.create_execution(active)
+        await repository.create_execution(terminal)
+        await repository.state_store.mutate(lambda tx: repository.put_history_seal_in_transaction(tx, seal))
+        row = await repository.state_store.read_record(repository.execution_record_key("terminal"))
+        assert len(tuple(iter_archive_content_refs(row.data))) == 3
+        async def reject_body(*args, **kwargs):
+            raise AssertionError("producer authority must read only control and seal metadata")
+        monkeypatch.setattr(ContentArchive, "read_contents", reject_body)
+        state.run_store.bind_execution_producer("active-run", execution_id="execution", producer_generation=1)
+        await state.run_store.require_active_producer("active-run")
+        state.run_store.bind_execution_producer("terminal-run", execution_id="terminal", producer_generation=1)
+        with pytest.raises(AIError) as inactive:
+            await state.run_store.require_active_producer("terminal-run")
+        assert inactive.value.code is ErrorCode.STORAGE_CONFLICT
+        archive = state.run_store.read_store(PersistenceDomain.TRACE)
+        await archive.require_revoked_execution_producer(execution_id="terminal", producer_generation=1, terminal_execution=terminal)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", (
+    {"producer_generation": True}, {"producer_generation": -1},
+    {"producer_claim_id": ""}, {"producer_generation": 0, "producer_claim_id": "claim"},
+    {"durable_trace": 1}, {"history_seal_digest": "bad"},
+    {"durable_trace": False, "history_seal_digest": "a" * 64},
+    {"execution_id": "foreign"}, {"_kind": "unexpected"},
+))
+async def test_producer_control_reads_reject_malformed_source_metadata(tmp_path: Path, changes: dict) -> None:
+    from copy import deepcopy
+    async with Persistence.open("producer-control", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state:
+        repository = state.execution.executions
+        await repository.create_execution(replace(_execution(), producer_generation=1, producer_claim_id="claim"))
+        async def corrupt(transaction):
+            key = repository.execution_record_key("execution")
+            record = await transaction.get_record(key)
+            data = deepcopy(dict(record.data))
+            data["value"]["payload"]["fields"].update({key: item for key, item in changes.items() if key != "_kind"})
+            await transaction.delete_record(key)
+            await transaction.insert_record(replace(record, kind=changes.get("_kind", record.kind), data=data))
+        await repository.state_store.mutate(corrupt)
+        for operation in (
+            lambda: repository.require_active_producer("execution", tenant_id="tenant", expected_producer_generation=1, fresh=True),
+            lambda: repository.require_revoked_producer("execution", tenant_id="tenant", producer_generation=0),
+        ):
+            with pytest.raises(AIError) as invalid:
+                await operation()
+            assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_missing_custom_producer_control_implementation_cannot_grant_authority() -> None:
+    from linktools.ai.persistence.contracts import ExecutionRepository
+    class MissingControl(ExecutionRepository):
+        pass
+    repository = MissingControl()
+    with pytest.raises(NotImplementedError):
+        await repository.require_active_producer("execution", tenant_id="tenant", expected_producer_generation=1)
+    with pytest.raises(NotImplementedError):
+        await repository.require_revoked_producer("execution", tenant_id="tenant", producer_generation=1)

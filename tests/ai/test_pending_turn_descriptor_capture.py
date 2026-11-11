@@ -33,7 +33,7 @@ async def test_descriptor_failure_never_publishes_owners(tmp_path: Path, damage:
                 replacement = replace(descriptor, **{
                     "session_id" if damage == "wrong_session" else "history_id": "another-identity",
                 })
-                raw = owner._stored("conversation_history", "history", replacement)
+                raw = owner._stored("conversation_history", ("history",), replacement)
                 assert await tx.replace_record(replace(raw, storage_revision=stored.storage_revision + 1),
                                                expected_storage_revision=stored.storage_revision)
         await owner.state_store.mutate(damage_record)
@@ -66,7 +66,7 @@ async def test_post_capture_descriptor_change_is_rejected_by_fresh_comparison(
                 replacement = replace(captured, **{
                     "session_id" if damage == "session_identity" else "history_id": "changed-after-capture",
                 })
-                new = owner._stored("conversation_history", "history", replacement)
+                new = owner._stored("conversation_history", ("history",), replacement)
                 assert await tx.replace_record(replace(new, storage_revision=old.storage_revision + 1),
                                                expected_storage_revision=old.storage_revision)
             await owner.state_store.mutate(replace_descriptor)

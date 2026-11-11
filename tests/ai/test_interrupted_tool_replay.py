@@ -134,7 +134,7 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         facts = tuple(sorted(
             await archive.state_store.read(lambda tx: tx.scan_facts()),
-            key=lambda fact: (fact.stream_digest, fact.sequence),
+            key=lambda fact: (fact.stream_key, fact.sequence),
         ))
         aliases, sequences = canonical_snapshot_indexes(
             namespace="history", tenant_id="tenant", domain=PersistenceDomain.TRACE,

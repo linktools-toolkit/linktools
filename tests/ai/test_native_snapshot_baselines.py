@@ -31,10 +31,13 @@ class _NativeWrites:
         self.identities: dict[str, list[str]] = defaultdict(list)
 
     def capture(self, _connection, _cursor, statement, parameters, _context, many) -> None:
-        for table, width in (("ai_step_messages", 3), ("ai_step_sequences", 7)):
+        for table in ("ai_step_messages", "ai_step_sequences"):
             if statement.startswith("INSERT INTO " + table + " "):
+                columns = [column.strip() for column in statement.split("(", 1)[1].split(")", 1)[0].split(",")]
+                identity = columns.index("sha256")
                 for values in parameters if many else (parameters,):
-                    self.identities[table].extend(values[1::width])
+                    assert len(values) % len(columns) == 0
+                    self.identities[table].extend(values[identity::len(columns)])
 
 
 async def _identities(engine) -> dict[str, set[str]]:

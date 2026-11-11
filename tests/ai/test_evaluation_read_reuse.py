@@ -113,7 +113,7 @@ async def test_evaluation_read_reuse_keeps_custom_mapping_subclasses_readable(tm
             return len(self.current)
 
     state, repository = await _repository(tmp_path)
-    stored = await repository._record(repository._key("evaluation", "experiment"))
+    stored = await repository._record(repository._key("evaluation", ("experiment",)))
     data = MappingSubclass(dict(stored.data))
     stored = replace(stored, data=data)
 
@@ -184,11 +184,11 @@ async def test_evaluation_read_reuse_rejects_changed_or_failed_storage(tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", (
-    ("scope_digest", b"s" * 32), ("parent_digest", b"p" * 32),
+    ("scope_key", b"s" * 32), ("parent_key", b"p" * 32),
     ("state", "changed"), ("storage_revision", 19),
     ("lease_owner", "other"), ("lease_fence", 7),
     ("lease_expires_at", NOW + timedelta(hours=1)),
-    ("key_digest", b"k" * 32), ("kind", "other"), ("sort_key", "different"),
+    ("key", b"k" * 32), ("kind", "other"), ("sort_key", b"different"),
 ))
 async def test_evaluation_read_reuse_matches_every_storage_header_field(tmp_path, monkeypatch, field, value):
     state, repository = await _repository(tmp_path)
@@ -220,7 +220,7 @@ async def test_evaluation_read_reuse_has_one_entry_and_preserves_concurrent_resu
     original = experiment()
     manifest = replace(original.manifest, experiment_id="other")
     await repository.reserve_experiment(replace(original, manifest=manifest,
-        manifest_digest=manifest.digest, idempotency_key_digest="c" * 64))
+        manifest_digest=manifest.digest, idempotency_key="c" * 64))
     original_read, original_decode = repository._record, repository._decode
     entered, release = asyncio.Event(), asyncio.Event()
     paused = False
@@ -229,14 +229,14 @@ async def test_evaluation_read_reuse_has_one_entry_and_preserves_concurrent_resu
     async def read(key):
         nonlocal paused
         value = await original_read(key)
-        if key == repository._key("evaluation", "experiment") and not paused:
+        if key == repository._key("evaluation", ("experiment",)) and not paused:
             paused = True
             entered.set()
             await release.wait()
         return value
 
     async def decode(stored, target):
-        calls.append(stored.key_digest)
+        calls.append(stored.key)
         return await original_decode(stored, target)
 
     monkeypatch.setattr(repository, "_record", read)

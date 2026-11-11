@@ -57,6 +57,7 @@ def _forbid_cached_dispatch_authority(monkeypatch):
     checking = ContextVar("checking_dispatch", default=False)
     checks = []
     original_guard = RuntimeAgentRunStore.require_active_producer
+    original_control = ExecutionRepositoryImpl.require_active_producer
     original_get = ExecutionRepositoryImpl.get
 
     async def require_active(self, agent_run_id, *, authoritative=False):
@@ -67,11 +68,16 @@ def _forbid_cached_dispatch_authority(monkeypatch):
         finally:
             checking.reset(token)
 
+    async def control(self, *args, **kwargs):
+        assert not checking.get() or kwargs["fresh"], "dispatch authority cannot come from the ordinary read cache"
+        return await original_control(self, *args, **kwargs)
+
     async def get(self, *args, **kwargs):
-        assert not checking.get(), "dispatch authority cannot come from the ordinary read cache"
+        assert not checking.get(), "dispatch authority cannot fall back to an ordinary cached read"
         return await original_get(self, *args, **kwargs)
 
     monkeypatch.setattr(RuntimeAgentRunStore, "require_active_producer", require_active)
+    monkeypatch.setattr(ExecutionRepositoryImpl, "require_active_producer", control)
     monkeypatch.setattr(ExecutionRepositoryImpl, "get", get)
     return checks
 
@@ -252,7 +258,7 @@ async def test_missing_or_corrupt_execution_fails_closed(tmp_path: Path, backend
         repository = state.execution.executions
 
         async def mutate(tx):
-            key = repository._key("execution", "execution")
+            key = repository._key("execution", ("execution",))
             stored = await tx.get_record(key)
             if damage == "missing":
                 await tx.delete_record(key)
@@ -262,7 +268,7 @@ async def test_missing_or_corrupt_execution_fails_closed(tmp_path: Path, backend
             else:
                 value = await repository.get_in_transaction(tx, "execution", tenant_id="tenant")
                 value = replace(value, execution_id="foreign", root_execution_id="foreign")
-                changed = replace(repository._stored("execution", "execution", value),
+                changed = replace(repository._stored("execution", ("execution",), value),
                                   storage_revision=stored.storage_revision + 1)
                 assert await tx.replace_record(changed, expected_storage_revision=stored.storage_revision)
 
@@ -283,9 +289,10 @@ async def test_custom_repository_retains_fresh_source_authority(tmp_path: Path) 
             async def get(self, *args, **kwargs):
                 raise AssertionError("ordinary cached reads cannot authorize dispatch")
 
-            async def get_fresh(self, *args, **kwargs):
+            async def require_active_producer(self, *args, **kwargs):
+                assert kwargs["fresh"]
                 calls.append("execution")
-                return await super().get_fresh(*args, **kwargs)
+                return await super().require_active_producer(*args, **kwargs)
 
         state.run_store._execution_repository = Custom(source, namespace="model-control", tenant_id="tenant")
         for _ in range(2):
@@ -479,15 +486,16 @@ async def test_transient_route_uses_frozen_restart_guarantee(
             restart_checkpoints=restart, durable_trace=trace,
         )
         await state.run_store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
-        original = repository.get_fresh
+        original = repository.require_active_producer
         observations = 0
 
         async def observe(*args, **kwargs):
             nonlocal observations
             observations += 1
+            assert kwargs["fresh"]
             return await original(*args, **kwargs)
 
-        monkeypatch.setattr(repository, "get_fresh", observe)
+        monkeypatch.setattr(repository, "require_active_producer", observe)
         for _ in range(2):
             await state.run_store.require_active_producer("run")
         assert observations == 2

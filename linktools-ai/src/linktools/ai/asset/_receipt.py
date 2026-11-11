@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Versioned Asset batch receipt codec shared by built-in writers."""
 
-import hashlib
 import re
 from collections.abc import Mapping
 from datetime import datetime
@@ -37,11 +36,6 @@ def validate_batch_receipt_identity(
         raise ValueError("request_digest must be a SHA-256 digest")
 
 
-def batch_receipt_key_digest(idempotency_key: str) -> str:
-    validate_idempotency_key(idempotency_key)
-    return hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
-
-
 def encode_asset_batch_receipt(
     result: StorageBatchResult[AssetInfo, AssetKey],
 ) -> dict[str, JsonValue]:
@@ -50,7 +44,7 @@ def encode_asset_batch_receipt(
     validate_batch_receipt_identity(result.idempotency_key, result.request_digest)
     return {
         "version": 1,
-        "idempotency_key_digest": batch_receipt_key_digest(result.idempotency_key),
+        "idempotency_key": result.idempotency_key,
         "request_digest": result.request_digest,
         "store_revision": result.store_revision.value,
         "results": [_encode_result(item) for item in result.results],
@@ -61,7 +55,6 @@ def decode_asset_batch_receipt(
     payload: object,
     *,
     idempotency_key: str | None = None,
-    expected_key_digest: str | None = None,
 ) -> StorageBatchResult[AssetInfo, AssetKey]:
     if not isinstance(payload, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -70,10 +63,12 @@ def decode_asset_batch_receipt(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if version != 1:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    key_digest = _sha256(payload.get("idempotency_key_digest"))
-    if expected_key_digest is not None and key_digest != expected_key_digest:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if idempotency_key is not None and batch_receipt_key_digest(idempotency_key) != key_digest:
+    stored_key = _string(payload.get("idempotency_key"))
+    try:
+        validate_idempotency_key(stored_key)
+    except (AIError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if idempotency_key is not None and stored_key != idempotency_key:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     request_digest = _sha256(payload.get("request_digest"))
     store_revision = StorageRevision(_string(payload.get("store_revision")))
@@ -86,7 +81,7 @@ def decode_asset_batch_receipt(
         True,
         results,
         request_digest,
-        idempotency_key,
+        stored_key,
     )
 
 
@@ -234,7 +229,6 @@ def _boolean(value: object) -> bool:
 
 
 __all__ = [
-    "batch_receipt_key_digest",
     "decode_asset_batch_receipt",
     "encode_asset_batch_receipt",
     "validate_batch_receipt_identity",

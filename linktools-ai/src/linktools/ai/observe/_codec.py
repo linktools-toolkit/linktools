@@ -103,16 +103,6 @@ def observation_envelope(namespace: str, observation: Observation) -> dict[str, 
     return envelope
 
 
-def observation_digest(namespace: str, observation_id: str) -> str:
-    return canonical_sha256(
-        {
-            "version": 1,
-            "namespace": namespace,
-            "observation_id": observation_id,
-        }
-    )
-
-
 def observation_payload_digest(namespace: str, observation: Observation) -> str:
     return canonical_sha256(observation_envelope(namespace, observation))
 

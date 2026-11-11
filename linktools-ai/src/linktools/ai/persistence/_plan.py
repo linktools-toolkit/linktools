@@ -9,7 +9,7 @@ from types import MappingProxyType
 from ..storage import ObjectStore, StorageRoute, StorageRetentionMode
 
 
-from ..core import PersistenceDomain
+from ..core import PersistenceDomain, validate_capability_id
 
 
 def runtime_domain_uses_object_store(domain: PersistenceDomain) -> bool:
@@ -39,9 +39,10 @@ class PersistencePlan:
 
 
     def __post_init__(self) -> None:
-        if any(not isinstance(identity, str) or not identity or not isinstance(route, StorageRoute)
-               for identity, route in self.capability_routes.items()):
-            raise ValueError("capability routes require nonempty identities and StorageRoute values")
+        for identity, route in self.capability_routes.items():
+            validate_capability_id(identity)
+            if not isinstance(route, StorageRoute):
+                raise ValueError("capability routes require StorageRoute values")
         object.__setattr__(self, "capability_routes", MappingProxyType(dict(self.capability_routes)))
         routes = tuple(self.route(domain) for domain in PersistenceDomain)
         if any(not isinstance(route, StorageRoute) for route in routes):

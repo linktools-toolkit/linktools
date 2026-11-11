@@ -3,6 +3,7 @@
 
 from linktools.ai.persistence import Persistence
 import asyncio
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,6 @@ from linktools.ai.core import (
     TaskStatus,
     TenantAuthorizationPolicy,
     canonical_sha256,
-    idempotency_key_digest,
     principal_identity_payload,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -122,6 +122,62 @@ async def _recovery_graph(state: Persistence, graph_id: str) -> TaskGraphRequest
     return request
 
 
+@pytest.mark.parametrize(
+    "request_type",
+    (CancelGraphRequest, RecoverGraphRequest, TaskInputSupplyRequest, TaskEffectResolutionRequest),
+)
+def test_control_idempotency_keys_are_bounded_utf8(request_type: type) -> None:
+    fields = {"principal": Principal("tester", "tenant")}
+    if request_type is TaskInputSupplyRequest:
+        fields.update(wait_id="wait", value={"value": "accepted"})
+    elif request_type is TaskEffectResolutionRequest:
+        fields.update(expected_fence=1, resolution=TaskEffectResolution("applied", "accepted"))
+    key = "恢" * 85 + "r"
+    assert request_type(**fields, idempotency_key=key).idempotency_key == key
+    with pytest.raises(AIError) as raised:
+        request_type(**fields, idempotency_key=key + "x")
+    assert raised.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("control", ("cancel", "recover"))
+async def test_submission_and_control_share_raw_operation_identity(
+    tmp_path: Path, backend: str, control: str,
+) -> None:
+    storage = (PersistenceStorage.in_memory() if backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "state.sqlite"))
+    async with Persistence.open("task-operation-id", storage=storage, tenant_id="tenant") as state:
+        request = _request("identity")
+        admission = TaskGraphAdmission.from_request(request)
+        await state.task.admissions.admit(admission, request.graph)
+        original = await state.task.operations.get(request.idempotency_key, tenant_id="tenant")
+        assert original is not None
+        assert original.operation_id == request.idempotency_key
+        service = DefaultTaskGraphService(state.task, TenantAuthorizationPolicy("tenant"), _Launcher())
+
+        with pytest.raises(AIError) as raised:
+            if control == "cancel":
+                await service.cancel("identity", CancelGraphRequest(request.principal, request.idempotency_key))
+            else:
+                await service.recover("identity", RecoverGraphRequest(request.principal, request.idempotency_key))
+        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert request.idempotency_key not in str(raised.value)
+        assert request.idempotency_key not in repr(raised.value)
+        assert await state.task.operations.get(request.idempotency_key, tenant_id="tenant") == original
+        assert (await state.task.tasks.get_graph("identity", tenant_id="tenant")).status is TaskStatus.PENDING
+
+        distinct_key = hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest()
+        assert await state.task.operations.get(distinct_key, tenant_id="tenant") is None
+        await service.recover("identity", RecoverGraphRequest(request.principal, distinct_key))
+        recovered = await state.task.operations.get(distinct_key, tenant_id="tenant")
+        assert recovered is not None
+        assert recovered.operation_id == distinct_key
+        assert recovered.operation_kind is OperationKind.TASK_RECOVER
+        assert recovered.status is OperationStatus.SUCCEEDED
+        assert await state.task.operations.get(request.idempotency_key, tenant_id="tenant") == original
+
+
 @pytest.mark.asyncio
 async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
     state = PersistenceStorage.in_memory()
@@ -157,7 +213,8 @@ async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_explicit_recovery_rearms_original_graph() -> None:
+@pytest.mark.parametrize("operation_id", ("recover:resume", "恢" * 85 + "r"))
+async def test_explicit_recovery_rearms_original_graph(operation_id: str) -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
@@ -172,7 +229,7 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
 
         result = await service.recover(
             "resume",
-            RecoverGraphRequest(request.principal, "recover:resume"),
+            RecoverGraphRequest(request.principal, operation_id),
         )
 
         assert result.status is TaskStatus.PENDING
@@ -180,10 +237,11 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
         assert result.node_results[0].status is TaskStatus.READY
         assert result.node_results[0].execution_id == "execution"
         operation = await state.task.operations.get(
-            idempotency_key_digest("recover:resume"),
+            operation_id,
             tenant_id="tenant",
         )
         assert operation is not None
+        assert operation.operation_id == operation_id
         assert operation.operation_kind is OperationKind.TASK_RECOVER
         assert operation.status is OperationStatus.SUCCEEDED
     finally:
@@ -228,7 +286,7 @@ async def test_successful_recover_key_does_not_clear_a_later_recovery_boundary()
 
         replayed = await service.recover("recover-replay", recovery_request)
         operation = await state.task.operations.get(
-            idempotency_key_digest("recover:stable-key"),
+            "recover:stable-key",
             tenant_id="tenant",
         )
 
@@ -322,7 +380,7 @@ async def test_concurrent_recover_replay_keeps_stable_receipt_as_graph_advances(
         assert launcher.started == ["recover-concurrent"] * 3
 
         operation = await state.task.operations.get(
-            idempotency_key_digest("recover:concurrent"),
+            "recover:concurrent",
             tenant_id="tenant",
         )
         assert operation is not None
@@ -429,7 +487,7 @@ async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -
             CancelGraphRequest(request.principal, "cancel:intent"),
         )
         cancel_operation = await state.task.operations.get(
-            idempotency_key_digest("cancel:intent"),
+            "cancel:intent",
             tenant_id="tenant",
         )
         pending = await state.task.operations.list_pending(
@@ -489,7 +547,7 @@ async def test_effect_unknown_cancel_is_discovered_after_local_sqlite_reopen(
             "cancel-reopen",
             CancelGraphRequest(request.principal, "cancel:reopen"),
         )
-        operation_id = idempotency_key_digest("cancel:reopen")
+        operation_id = "cancel:reopen"
         operation = await state.task.operations.get(
             operation_id,
             tenant_id="tenant",
@@ -584,7 +642,7 @@ async def test_recover_settles_cancel_receipt_after_graph_is_terminal(
             )
         assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
-        operation_id = idempotency_key_digest("cancel:terminal-receipt")
+        operation_id = "cancel:terminal-receipt"
         interrupted_operation = await state.task.operations.get(
             operation_id,
             tenant_id="tenant",
@@ -692,7 +750,7 @@ async def test_recover_settles_cancel_receipt_when_business_success_wins(
             await asyncio.wait_for(cancellation, 2)
         assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
-        operation_id = idempotency_key_digest("cancel:success-race")
+        operation_id = "cancel:success-race"
         pending = await state.task.operations.get(operation_id, tenant_id="tenant")
         terminal = await state.task.tasks.get_graph(
             request.graph.graph_id,
@@ -747,7 +805,7 @@ async def test_running_cancel_operation_replays_cancel_effect_after_owner_loss()
             }
         )
         claimed, operation = await service._claim_cancel_operation(
-            idempotency_key_digest(cancel_request.idempotency_key),
+            cancel_request.idempotency_key,
             "tenant",
             request.graph.graph_id,
             request_digest,
@@ -857,7 +915,7 @@ async def test_running_cancel_replay_reapplies_durable_graph_projection(
 
         result = await service.cancel("cancel-replay", cancel_request)
         operation = await state.task.operations.get(
-            idempotency_key_digest("cancel:replay"),
+            "cancel:replay",
             tenant_id="tenant",
         )
 
@@ -1013,7 +1071,7 @@ async def test_cancel_intent_blocks_claim_after_not_applied_resolution(
         cancellation_result = await asyncio.wait_for(cancellation, 2)
         assert cancellation_result.status is TaskStatus.PENDING
         operation = await state.task.operations.get(
-            idempotency_key_digest("cancel:resolution-race"),
+            "cancel:resolution-race",
             tenant_id="tenant",
         )
         assert operation is not None
@@ -1192,7 +1250,7 @@ async def test_successful_input_resume_replay_completes_missing_arm() -> None:
             tenant_id="tenant",
         )
         first_operation = await state.task.operations.get(
-            idempotency_key_digest("resume:input-arm"),
+            "resume:input-arm",
             tenant_id="tenant",
         )
         assert first_projection is not None
@@ -1236,7 +1294,7 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
             cancel_request,
         )
         unresolved_operation = await state.task.operations.get(
-            idempotency_key_digest("cancel:node"),
+            "cancel:node",
             tenant_id="tenant",
         )
         graph_state = await state.task.tasks.graph_state(
@@ -1265,7 +1323,7 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
             cancel_request,
         )
         confirmed_operation = await state.task.operations.get(
-            idempotency_key_digest("cancel:node"),
+            "cancel:node",
             tenant_id="tenant",
         )
         graph_state = await state.task.tasks.graph_state(

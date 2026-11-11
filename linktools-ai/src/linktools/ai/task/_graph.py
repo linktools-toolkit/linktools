@@ -23,7 +23,6 @@ from ..core import (
     TaskStatus,
     canonical_json_bytes,
     canonical_sha256,
-    idempotency_key_digest,
     normalize_correlation,
     normalize_tool_effects,
     ToolEffects,
@@ -31,6 +30,7 @@ from ..core import (
     validate_idempotency_key,
     validate_lease_owner,
     validate_tenant_id,
+    validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
 from ..errors import ErrorDiagnostics
@@ -39,6 +39,13 @@ from ._definitions import Task, TaskExpander, TaskExpanderRef, TaskRef
 
 _AppT = TypeVar("_AppT")
 _ResultT = TypeVar("_ResultT", covariant=True, default=JsonValue)
+
+
+def _validate_task_id(value: str) -> None:
+    try:
+        validate_resource_id(value)
+    except AIError as error:
+        raise ValueError("task identity must be a valid resource id") from error
 
 
 def normalize_timeout_seconds(value: object) -> "float | None":
@@ -128,6 +135,8 @@ class TaskResultRef(Generic[_ResultT]):
     result_digest: str
 
     def __post_init__(self) -> None:
+        _validate_task_id(self.graph_id)
+        _validate_task_id(self.node_id)
         if any(
             not isinstance(value, str) or not value.strip()
             for value in (
@@ -153,8 +162,7 @@ class TaskNodeResultRef(Generic[_ResultT]):
         self.__post_init__()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.node_id, str) or not self.node_id.strip():
-            raise ValueError("task node result reference is invalid")
+        _validate_task_id(self.node_id)
 
 
 @dataclass(frozen=True, init=False)
@@ -293,6 +301,9 @@ class TaskNode(Generic[_ResultT]):
             normalized_dependencies = tuple(dependencies)
         except TypeError as error:
             raise TypeError("task node dependencies are invalid") from error
+        _validate_task_id(node_id)
+        for dependency in normalized_dependencies:
+            _validate_task_id(dependency)
         normalized_timeout = normalize_timeout_seconds(timeout_seconds)
         normalized_retry_delay = normalize_retry_delay_seconds(retry_delay_seconds)
         if (
@@ -515,6 +526,8 @@ class TaskLease:
     execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
+        _validate_task_id(self.graph_id)
+        _validate_task_id(self.node_id)
         try:
             validate_tenant_id(self.tenant_id)
             validate_lease_owner(self.owner)
@@ -555,6 +568,10 @@ class TaskNodeView:
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        _validate_task_id(self.graph_id)
+        _validate_task_id(self.node_id)
+        for dependency in self.dependencies:
+            _validate_task_id(dependency)
         if self.owner is not None:
             try:
                 validate_lease_owner(self.owner)
@@ -612,8 +629,7 @@ class TaskGraph:
     nodes: "tuple[TaskNode[object], ...]"
 
     def __post_init__(self) -> None:
-        if not self.graph_id.strip():
-            raise ValueError("task graph id is required")
+        _validate_task_id(self.graph_id)
         object.__setattr__(self, "nodes", tuple(self.nodes))
         ids = {node.node_id for node in self.nodes}
         if len(ids) != len(self.nodes):
@@ -701,6 +717,7 @@ class TaskTerminalRecord:
     execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
+        _validate_task_id(self.node_id)
         if self.owner is not None:
             try:
                 validate_lease_owner(self.owner)
@@ -768,10 +785,9 @@ class TaskGraphLaunch:
     budget: RunBudget | None = None
 
     def __post_init__(self) -> None:
+        _validate_task_id(self.graph_id)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
-            raise ValueError("task graph id is required")
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
 
@@ -781,7 +797,7 @@ class TaskGraphAdmission:
     graph_id: str
     principal: Principal
     limits: TaskGraphLimits
-    operation_id: str
+    operation_id: str = field(repr=False)
     initial_request_digest: str
     correlation: CorrelationData = field(default_factory=dict)
     budget: RunBudget | None = None
@@ -790,6 +806,7 @@ class TaskGraphAdmission:
     request_identity_version: int = 1
 
     def __post_init__(self) -> None:
+        _validate_task_id(self.graph_id)
         if type(self.request_identity_version) is not int:
             raise ValueError("task request identity version is invalid")
         if self.request_identity_version not in (1, 2):
@@ -801,12 +818,13 @@ class TaskGraphAdmission:
             not isinstance(self.version, int)
             or isinstance(self.version, bool)
             or self.version < 1
-            or not isinstance(self.graph_id, str)
-            or not self.graph_id.strip()
-            or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
             or re.fullmatch(r"[0-9a-f]{64}", self.initial_request_digest) is None
         ):
             raise ValueError("task graph admission is invalid")
+        try:
+            validate_idempotency_key(self.operation_id)
+        except AIError as error:
+            raise ValueError("task graph operation id is invalid") from error
         expected_scope = None if self.budget is None else "graph:" + self.graph_id
         if self.budget_scope_id != expected_scope:
             raise ValueError("task graph budget scope is invalid")
@@ -821,7 +839,7 @@ class TaskGraphAdmission:
             request.graph.graph_id,
             request.principal,
             request.limits,
-            idempotency_key_digest(request.idempotency_key),
+            request.idempotency_key,
             _task_graph_request_digest(
                 request.graph, request.principal, request.limits, request.budget, request.tool_effects,
                 request_identity_version,
@@ -895,8 +913,7 @@ class TaskNodeResult:
     content_included: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.node_id, str) or not self.node_id:
-            raise ValueError("task node result id is invalid")
+        _validate_task_id(self.node_id)
         try:
             details = ImmutableJsonMapping(self.safe_error_details)
         except (TypeError, ValueError) as error:
@@ -930,10 +947,8 @@ class TaskResultRecord:
     execution_id: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
-            raise ValueError("task result graph id is required")
-        if not isinstance(self.node_id, str) or not self.node_id.strip():
-            raise ValueError("task result node id is required")
+        _validate_task_id(self.graph_id)
+        _validate_task_id(self.node_id)
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task result digest is invalid")
         if not isinstance(self.execution_id, str) or not self.execution_id.strip():
@@ -1045,8 +1060,7 @@ class TaskGraphState:
 
 
     def __post_init__(self) -> None:
-        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
-            raise ValueError("task graph state id is required")
+        _validate_task_id(self.graph_id)
         if not isinstance(self.status, TaskStatus):
             raise ValueError("task graph state status is invalid")
         if (

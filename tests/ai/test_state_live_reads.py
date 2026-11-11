@@ -23,7 +23,7 @@ def _key(value: str) -> bytes:
 
 def _record(value: str) -> StoredRecord:
     return StoredRecord(
-        _key(value), None, None, "probe", value, "pending", 0,
+        _key(value), None, None, "probe", (value).encode("ascii"), "pending", 0,
         None, 0, None, {"value": 0},
     )
 
@@ -73,11 +73,11 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
     record = _record("record")
     alias, stream, sequence, operation_key = map(_key, ("alias", "stream", "seq", "op"))
     operation = StoredOperation(operation_key, stream, 1, "pending", True, {})
-    fact = StoredFact(stream, 1, record.key_digest, "event", None, None, {})
+    fact = StoredFact(stream, 1, record.key, "event", None, None, {})
 
     async def observe(transaction: StateTransaction) -> tuple[object, ...]:
         return (
-            await transaction.get_record(record.key_digest),
+            await transaction.get_record(record.key),
             await transaction.resolve_alias(alias),
             await transaction.get_sequence(sequence),
             await transaction.list_facts(FactQuery(stream)),
@@ -94,14 +94,14 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
 
         async def create(transaction: StateTransaction) -> None:
             await transaction.insert_record(record)
-            await transaction.insert_alias(StoredAlias(alias, record.key_digest))
+            await transaction.insert_alias(StoredAlias(alias, record.key))
             await transaction.next_sequence(sequence)
             await transaction.insert_fact(fact)
             await transaction.insert_operation(operation)
 
         await writer.mutate(create)
         assert await reader.read(observe) == (
-            record, record.key_digest, 1, (fact,), operation, (record,),
+            record, record.key, 1, (fact,), operation, (record,),
         )
         updated = replace(record, storage_revision=1, data={"value": 1})
         completed = replace(operation, state="done")
@@ -115,19 +115,19 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
 
         await writer.mutate(update)
         assert await reader.read(observe) == (
-            updated, record.key_digest, 2, (fact, next_fact), completed, (updated,),
+            updated, record.key, 2, (fact, next_fact), completed, (updated,),
         )
 
         async def delete(transaction: StateTransaction) -> None:
-            assert await transaction.delete_record(record.key_digest)
+            assert await transaction.delete_record(record.key)
             await transaction.delete_sequence(sequence)
-            await transaction.delete_operations(OperationQuery(stream_digest=stream))
+            await transaction.delete_operations(OperationQuery(stream_key=stream))
 
         await writer.mutate(delete)
         assert await reader.read(observe) == (None, None, 0, (), None, ())
         await writer.mutate(create)
         assert await reader.read(observe) == (
-            record, record.key_digest, 1, (fact,), operation, (record,),
+            record, record.key, 1, (fact,), operation, (record,),
         )
     finally:
         await reader_owner.close()

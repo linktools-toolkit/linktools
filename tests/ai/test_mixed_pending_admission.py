@@ -11,7 +11,7 @@ from dataclasses import replace
 import pytest
 from linktools.ai.agent import AgentBinding, AgentCompiler
 from linktools.ai.capability import CapabilityContribution, ExecutionCapability
-from linktools.ai.core import CommitPolicy, Principal
+from linktools.ai.core import canonical_sha256, CommitPolicy, Principal
 from linktools.ai.model import create_model
 from linktools.ai.spec import AgentSpec
 from linktools.ai.errors import AIError, ErrorCode
@@ -56,8 +56,8 @@ class _Coordinator(PendingTurnCoordination):
             try:
                 async with self.enter(
                     session_key=(f"session:{execution.session_id}" if execution.session_id is not None else
-                                 f"request:{identity.scope}:{identity.idempotency_key_digest}"),
-                    request_key=f"{identity.scope}:{identity.idempotency_key_digest}",
+                                 "request:" + canonical_sha256([identity.scope, identity.idempotency_key])),
+                    request_key=canonical_sha256([identity.scope, identity.idempotency_key]),
                     request_digest=identity.request_digest, execution_id=execution.execution_id,
                     owner_id=uuid.uuid4().hex,
                 ) as coordination:

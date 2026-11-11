@@ -17,6 +17,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from linktools.ai.persistence._archive import PreparedArchive
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._model_interaction import (
     StagedContextInline,
@@ -27,11 +28,8 @@ from linktools.ai.persistence._model_interaction import (
     model_response_projection,
     project_public_messages,
 )
-from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.contracts import TranscriptSpanRef
-from linktools.ai.persistence._model_interaction_store import (
-    ModelInteractionInMemoryStepArchive,
-)
+from linktools.ai.persistence import Persistence, PersistenceStorage, PersistenceDomain
+from linktools.ai.core import ExecutionStatus
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.persistence.runs import (
     InMemoryStepArchive,
@@ -39,6 +37,9 @@ from linktools.ai.persistence.runs import (
     StagingAgentRunStore,
     _ProjectionOffset,
 )
+
+from .test_history_projection_conformance import _record as _execution_record
+
 
 
 def _interaction(sequence: int) -> StagedModelInteraction:
@@ -143,7 +144,10 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
 @pytest.mark.asyncio
 async def test_runtime_run_store_continues_trace_interaction_high_water() -> None:
     staging = StagingAgentRunStore()
-    recovery = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
+    persistence = Persistence(PersistenceStorage.in_memory())
+    await persistence.initialize(namespace="test", tenant_id="tenant")
+    await persistence.execution.executions.create_execution(_execution_record(ExecutionStatus.STARTED, 1))
+    recovery = persistence.run_store.read_store(PersistenceDomain.TRACE)
     store = RuntimeAgentRunStore(
         staging,
         conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
@@ -152,17 +156,18 @@ async def test_runtime_run_store_continues_trace_interaction_high_water() -> Non
     await store.initialize()
     try:
         run = AgentRunRecord("run")
-        await recovery.register_agent_run(run)
+        await recovery.register_agent_run(run, execution_id="execution")
+        prepared = PreparedArchive()
         durable = await recovery.prepare_interactions(
             run,
             (_interaction(1), _interaction(2)),
-            lambda _digest: b"{}",
+            lambda _digest: b"{}", prepared=prepared,
         )
         await recovery.sync_projection(
             run,
             events=(),
             checkpoints=(),
-            interactions=durable,
+            interactions=durable, archive=prepared, execution_id="execution",
         )
 
         assert await store.model_interaction_count(agent_run_id="run") == 2
@@ -171,15 +176,18 @@ async def test_runtime_run_store_continues_trace_interaction_high_water() -> Non
     finally:
         await store.preflight_close()
         await store.close()
+        await persistence.close()
 
 
 @pytest.mark.asyncio
 async def test_interaction_prepare_resolves_explicit_local_span() -> None:
-    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
-    await archive.initialize()
+    persistence = Persistence(PersistenceStorage.in_memory())
+    await persistence.initialize(namespace="test", tenant_id="tenant")
+    await persistence.execution.executions.create_execution(_execution_record(ExecutionStatus.STARTED, 1))
+    archive = persistence.run_store.read_store(PersistenceDomain.TRACE)
     try:
         run = AgentRunRecord("run")
-        await archive.register_agent_run(run)
+        await archive.register_agent_run(run, execution_id="execution")
         source = ModelRequest(parts=[UserPromptPart(content="hello")])
         payloads: dict[str, bytes] = {}
 
@@ -214,21 +222,22 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
             finished_at=timestamp,
         )
 
+        pending = PreparedArchive()
         prepared = await archive.prepare_interactions(
             run,
             (interaction,),
             lambda digest: payloads[digest],
             local_message_base=4,
             local_message_count=1,
-            local_messages=(source,),
+            local_messages=(source,), prepared=pending,
         )
 
         assert len(prepared) == 1
-        assert prepared[0].request_context.items == (
-            TranscriptSpanRef(PersistenceDomain.TRACE, "run", 4, 5),
-        )
+        await archive.sync_projection(run, events=(), checkpoints=(), interactions=prepared, archive=pending, execution_id="execution")
+        request, *_ = await archive.resolve_model_interaction(prepared[0])
+        assert request == (source,)
     finally:
-        await archive.close()
+        await persistence.close()
 
 
 def test_interaction_projection_keeps_exact_stamped_request_content() -> None:
@@ -353,13 +362,15 @@ async def test_interaction_capture_excludes_acknowledged_identities() -> None:
 
 
 @pytest.mark.asyncio
-async def test_volatile_archive_does_not_expose_staged_interactions() -> None:
-    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
-    await archive.initialize()
+async def test_archive_rejects_staged_interactions() -> None:
+    persistence = Persistence(PersistenceStorage.in_memory())
+    await persistence.initialize(namespace="test", tenant_id="tenant")
+    await persistence.execution.executions.create_execution(_execution_record(ExecutionStatus.STARTED, 1))
+    archive = persistence.run_store.read_store(PersistenceDomain.TRACE)
     try:
-        archive.stage_model_interaction(_interaction(1))
-        with pytest.raises(AIError) as raised:
-            await archive.list_model_interactions(agent_run_id="run")
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        with pytest.raises(TypeError, match="model interaction is invalid"):
+            await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(),
+                                          interactions=(_interaction(1),), execution_id="execution")
+        assert await archive.list_model_interactions(agent_run_id="run") == []
     finally:
-        await archive.close()
+        await persistence.close()

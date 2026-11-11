@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from ...core import Principal
 from ...errors import AIError, ErrorCode
-from ...execution import ExecutionHistoryService, ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, UsageReadCutoff
+from ...execution import ModelInteractionItem, ModelInteractionReadBoundary, ModelInteractionSubscription, UsageReadCutoff
 if TYPE_CHECKING:
     from ...execution import ExecutionService
     from ...runtime.agent_execution import AgentExecutionPort
@@ -18,14 +18,14 @@ class TaskHistory:
         self._execution = execution
         self._ports = ports
 
-    async def _reader(self, execution_id: str, principal: Principal) -> ExecutionHistoryService | None:
+    async def _reader(self, execution_id: str, principal: Principal) -> AgentExecutionPort[object] | None:
         view = await self._execution.inspect(execution_id, principal=principal)
         if view.binding_kind == "task":
             return None
         port = self._ports.get(execution_id) or self._ports.get(view.root_execution_id)
-        if port is None or port.operations.history is None:
+        if port is None:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
-        return port.operations.history
+        return port
 
     async def capture_model_interaction_cutoffs(self, execution_id: str, *, principal: Principal) -> ModelInteractionReadBoundary:
         reader = await self._reader(execution_id, principal)

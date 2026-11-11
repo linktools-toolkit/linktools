@@ -97,8 +97,8 @@ def _run(
     timestamp = "TIMESTAMPTZ" if name == "postgresql" else "DATETIME(6)"
     temporary = "TEMPORARY " if name == "postgresql" else ""
     script = "DROP TABLE IF EXISTS ai_metric_observations;\n" + f"""CREATE {temporary}TABLE ai_metric_observations (
-        namespace_digest VARCHAR(64), kind VARCHAR(128), occurred_at {timestamp},
-        observation_digest VARCHAR(64), payload_json JSON, pruned_at {timestamp}, active_occurred_at {timestamp}
+        namespace VARCHAR(256), kind VARCHAR(128), occurred_at {timestamp},
+        observation_id VARCHAR(64), payload_json JSON, pruned_at {timestamp}, active_occurred_at {timestamp}
     );\n""" + "\n".join(inserts)
     if name == "postgresql":
         script += (
@@ -202,12 +202,12 @@ def test_server_sum_large_window_uses_one_source_scan(
     sql = str(text(statement).bindparams(**params).compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
     payload = json.dumps({"observation": {"measurements": [{"name": "value", "revision": 1, "value": 1.0}]}})
     if name == "postgresql":
-        schema = "CREATE TEMPORARY TABLE ai_metric_observations (namespace_digest TEXT, kind TEXT, occurred_at TIMESTAMPTZ, observation_digest TEXT, payload_json JSON, pruned_at TIMESTAMPTZ, active_occurred_at TIMESTAMPTZ);"
+        schema = "CREATE TEMPORARY TABLE ai_metric_observations (namespace TEXT, kind TEXT, occurred_at TIMESTAMPTZ, observation_id TEXT, payload_json JSON, pruned_at TIMESTAMPTZ, active_occurred_at TIMESTAMPTZ);"
         seed = "INSERT INTO ai_metric_observations SELECT 'ns', 'business.numeric', CAST(:start AS TIMESTAMPTZ) + i * INTERVAL '1 microsecond', LPAD(CAST(i AS TEXT), 64, '0'), CAST(:payload AS JSON), NULL, CAST(:start AS TIMESTAMPTZ) + i * INTERVAL '1 microsecond' FROM generate_series(0, :sample_count - 1) AS n(i);"
         explain = "EXPLAIN (ANALYZE, FORMAT JSON) " + sql
         result_query = "SELECT json_agg(q) FROM (" + sql + ") AS q;"
     else:
-        schema = "CREATE TABLE ai_metric_observations (namespace_digest VARCHAR(64), kind VARCHAR(128), occurred_at DATETIME(6), observation_digest VARCHAR(64), payload_json JSON, pruned_at DATETIME(6), active_occurred_at DATETIME(6));"
+        schema = "CREATE TABLE ai_metric_observations (namespace VARCHAR(256), kind VARCHAR(128), occurred_at DATETIME(6), observation_id VARCHAR(64), payload_json JSON, pruned_at DATETIME(6), active_occurred_at DATETIME(6));"
         digits = " UNION ALL ".join(f"SELECT {i} AS d" for i in range(10))
         digit_count = len(str(sample_count - 1))
         number = " + ".join(f"d{i}.d * {10**i}" for i in range(digit_count))

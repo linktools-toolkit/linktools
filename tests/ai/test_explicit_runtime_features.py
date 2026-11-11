@@ -113,10 +113,12 @@ async def test_conversation_pending_requires_complete_coordination(tmp_path, mon
     async with Persistence.open('pending', storage=storage) as persistence_108, Runtime.attach(persistence=persistence_108, features=model_features(_FeatureModels(_FeatureFunctionModel(model)), features)) as runtime:
         session = await runtime.agents.get().create_session("session")
         writes = []
+        cleanups = []
         original = SqlStorageContext.run_mutation
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
-            writes.append(kwargs.get("domain"))
+            domain = kwargs.get("domain")
+            (cleanups if domain == "native.content_cleanup" else writes).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, "run_mutation", count)
         execution = await session.start("question", idempotency_key="turn")
@@ -126,14 +128,15 @@ async def test_conversation_pending_requires_complete_coordination(tmp_path, mon
             record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert (record is None) == pending
             if pending:
-                assert writes == []
+                assert writes == cleanups == []
         finally:
             release.set()
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert len(writes) == 1 if pending else len(writes) > 1
-        total = len(writes)
+        assert len(cleanups) <= len(writes)
+        total = (len(writes), len(cleanups))
         replay = await session.start("question", idempotency_key="turn")
-        assert replay.execution_id == execution.execution_id and len(writes) == total
+        assert replay.execution_id == execution.execution_id and (len(writes), len(cleanups)) == total
 
 
 @pytest.mark.asyncio
@@ -209,9 +212,11 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
+        cleanups = []
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
-            commits.append(kwargs.get('domain'))
+            domain = kwargs.get("domain")
+            (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
         execution = await session.start('question')
@@ -221,9 +226,11 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
         if effect_policy != 'non_replay_safe':
             assert calls == [None]
             assert len(commits) == 1
+            assert len(cleanups) <= 1
         else:
             assert calls[0] is not None and calls[0].status is ExecutionStatus.STARTED
             assert len(commits) > 1
+            assert len(cleanups) <= len(commits)
 
 
 @pytest.mark.asyncio

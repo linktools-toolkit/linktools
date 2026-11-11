@@ -25,7 +25,7 @@ pytestmark = pytest.mark.asyncio
 
 def _record(value: int, identity: str = "record") -> StoredRecord:
     return StoredRecord(hashlib.sha256(identity.encode()).digest(), None, None,
-                        "probe", identity, None, value - 1, None, 0, None,
+                        "probe", (identity).encode("ascii"), None, value - 1, None, 0, None,
                         {"value": value})
 
 
@@ -64,26 +64,26 @@ async def test_record_hot_reads_skip_source_but_control_scope_and_mutation_do_no
             return await source_read(fn)
 
         monkeypatch.setattr(store, "read", read)
-        assert await store.read_record(first.key_digest) == first
-        assert await store.read_record(first.key_digest) == first
-        assert await store.read_records((first.key_digest,)) == {first.key_digest: first}
+        assert await store.read_record(first.key) == first
+        assert await store.read_record(first.key) == first
+        assert await store.read_records((first.key,)) == {first.key: first}
         assert calls == 1
 
         async def committed(tx):
-            assert await store.read_record(first.key_digest) == await tx.get_record(first.key_digest)
-            assert await store.read_records((first.key_digest,)) == await tx.get_records((first.key_digest,))
+            assert await store.read_record(first.key) == await tx.get_record(first.key)
+            assert await store.read_records((first.key,)) == await tx.get_records((first.key,))
             with pytest.raises(StateTransactionNestingError):
-                await asyncio.create_task(store.read_record(first.key_digest))
+                await asyncio.create_task(store.read_record(first.key))
 
         await store.read(committed)
         assert calls == 2
         second = _record(2)
         await store.mutate(lambda tx: tx.replace_record(second, expected_storage_revision=0))
-        assert await store.read_record(first.key_digest) == second
+        assert await store.read_record(first.key) == second
         assert calls == 3
         await store.close()
         with pytest.raises(AIError) as raised:
-            await store.read_record(first.key_digest)
+            await store.read_record(first.key)
         assert raised.value.code is ErrorCode.STORAGE_CLOSED
 
 
@@ -103,8 +103,8 @@ async def test_record_cache_without_backend_preserves_direct_source(
             return await source_read(fn)
 
         monkeypatch.setattr(store, "read", read)
-        assert await store.read_record(record.key_digest) == record
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
+        assert await store.read_record(record.key) == record
         assert calls == 2
 
 
@@ -117,7 +117,7 @@ async def test_sql_shared_record_cache_expires_without_backend_ttl(
     async with _store("sql", tmp_path, cache) as first:
         record = _record(1)
         await first.mutate(lambda tx: tx.insert_record(record))
-        assert await first.read_record(record.key_digest) == record
+        assert await first.read_record(record.key) == record
         async with _store("sql", tmp_path, cache) as second:
             reads = 0
             source_read = second.read
@@ -128,10 +128,10 @@ async def test_sql_shared_record_cache_expires_without_backend_ttl(
                 return await source_read(fn)
 
             monkeypatch.setattr(second, "read", read)
-            assert await second.read_record(record.key_digest) == record
+            assert await second.read_record(record.key) == record
             assert reads == 0
             clock[0] += 3.1
-            assert await second.read_record(record.key_digest) == record
+            assert await second.read_record(record.key) == record
             assert reads == 1
 
 
@@ -147,8 +147,8 @@ async def test_distinct_memory_sources_do_not_share_equal_physical_record_keys()
         other = replace(old, data={"value": 2})
         await first.mutate(lambda tx: tx.insert_record(old))
         await second.mutate(lambda tx: tx.insert_record(other))
-        assert await first.read_record(old.key_digest) == old
-        assert await second.read_record(other.key_digest) == other
+        assert await first.read_record(old.key) == old
+        assert await second.read_record(other.key) == other
     finally:
         await first.close()
         await second.close()
@@ -167,13 +167,13 @@ async def test_record_commit_does_not_wait_for_disposable_hot_delete() -> None:
     try:
         first = _record(1)
         await store.mutate(lambda tx: tx.insert_record(first))
-        assert await store.read_record(first.key_digest) == first
+        assert await store.read_record(first.key) == first
         second = _record(2)
         await asyncio.wait_for(
             store.mutate(lambda tx: tx.replace_record(second, expected_storage_revision=0)),
             timeout=0.2,
         )
-        assert await store.read_record(first.key_digest) == second
+        assert await store.read_record(first.key) == second
     finally:
         blocked.set()
         await store.close()
@@ -195,7 +195,7 @@ async def test_batch_fill_cannot_publish_snapshot_after_local_commit() -> None:
     store = InMemoryStateStore(cache=Cache(max_bytes=100000))
     await store.initialize()
     first, second = _record(1, "first"), _record(1, "second")
-    keys = (first.key_digest, second.key_digest)
+    keys = (first.key, second.key)
     await store.mutate(lambda tx: tx.insert_records((first, second)))
     read = asyncio.create_task(store.read_records(keys))
     try:
@@ -206,9 +206,9 @@ async def test_batch_fill_cannot_publish_snapshot_after_local_commit() -> None:
             timeout=0.2,
         )
         release.set()
-        assert (await read)[second.key_digest] == second
-        assert (await store.read_records(keys))[second.key_digest] == changed
-        assert await store.read_record(second.key_digest) == changed
+        assert (await read)[second.key] == second
+        assert (await store.read_records(keys))[second.key] == changed
+        assert await store.read_record(second.key) == changed
     finally:
         release.set()
         await read
@@ -227,7 +227,7 @@ async def test_batch_cache_uses_original_capture_time(monkeypatch: pytest.Monkey
     store = InMemoryStateStore(cache=Cache(max_bytes=100000))
     await store.initialize()
     first, second = _record(1, "first"), _record(1, "second")
-    keys = (first.key_digest, second.key_digest)
+    keys = (first.key, second.key)
     await store.mutate(lambda tx: tx.insert_records((first, second)))
     reads = 0
     source_read = store.read
@@ -239,10 +239,10 @@ async def test_batch_cache_uses_original_capture_time(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(store, "read", read)
     try:
-        assert await store.read_records(keys) == {first.key_digest: first, second.key_digest: second}
+        assert await store.read_records(keys) == {first.key: first, second.key: second}
         assert reads == 1
         clock[0] = 104.0
-        assert await store.read_records(keys) == {first.key_digest: first, second.key_digest: second}
+        assert await store.read_records(keys) == {first.key: first, second.key: second}
         assert reads == 2
     finally:
         await store.close()
@@ -253,12 +253,12 @@ async def test_record_cache_checks_storage_group_lifetime(backend: str, tmp_path
     async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
         record = _record(1)
         await store.mutate(lambda tx: tx.insert_record(record))
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
         group = store.storage_group
         group._closed = True
         try:
             with pytest.raises(AIError) as raised:
-                await store.read_record(record.key_digest)
+                await store.read_record(record.key)
             assert raised.value.code is ErrorCode.STORAGE_CLOSED
         finally:
             group._closed = False
@@ -279,7 +279,7 @@ async def test_record_cache_without_hot_capability_does_not_roundtrip_codec(
 
     monkeypatch.setattr(_record_cache, "canonical_json_bytes", unexpected_codec)
     try:
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
     finally:
         await store.close()
 
@@ -300,9 +300,9 @@ async def test_sql_close_can_retry_after_cache_waiter_cancellation(tmp_path: Pat
     async with _store("sql", tmp_path, cache) as store:
         record = _record(1)
         await store.mutate(lambda tx: tx.insert_record(record))
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
         cache.blocked = True
-        read = asyncio.create_task(store.read_record(record.key_digest))
+        read = asyncio.create_task(store.read_record(record.key))
         await started.wait()
         close = asyncio.create_task(store.close())
         await asyncio.sleep(0)
@@ -321,7 +321,7 @@ async def test_native_refresh_repairs_negative_batch_and_keeps_authoritative_abs
 ) -> None:
     async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
         record = _record(1)
-        assert await store.read_record(record.key_digest) is None
+        assert await store.read_record(record.key) is None
         # The refreshed source batch models a commit by another owner, which
         # cannot invalidate this reader's earlier negative cache generation.
         calls = 0
@@ -329,11 +329,11 @@ async def test_native_refresh_repairs_negative_batch_and_keeps_authoritative_abs
         async def source(fn):
             nonlocal calls
             calls += 1
-            return {record.key_digest: record}
+            return {record.key: record}
 
         monkeypatch.setattr(store, "read", source)
-        assert await store.refresh_records((record.key_digest,)) == {record.key_digest: record}
-        assert await store.read_record(record.key_digest) == record
+        assert await store.refresh_records((record.key,)) == {record.key: record}
+        assert await store.read_record(record.key) == record
         assert calls == 1
 
         async def absent(fn):
@@ -342,8 +342,8 @@ async def test_native_refresh_repairs_negative_batch_and_keeps_authoritative_abs
             return {}
 
         monkeypatch.setattr(store, "read", absent)
-        assert await store.refresh_records((record.key_digest,)) == {}
-        assert await store.read_record(record.key_digest) is None
+        assert await store.refresh_records((record.key,)) == {}
+        assert await store.read_record(record.key) is None
         assert calls == 2
 
 
@@ -368,13 +368,13 @@ async def test_native_refresh_cannot_publish_before_local_mutation_snapshot(
             return result
 
         monkeypatch.setattr(store, "read", read)
-        task = asyncio.create_task(store.refresh_records((first.key_digest,)))
+        task = asyncio.create_task(store.refresh_records((first.key,)))
         try:
             await started.wait()
             await store.mutate(lambda tx: tx.replace_record(second, expected_storage_revision=0))
             release.set()
-            assert await task == {first.key_digest: first}
-            assert await store.read_record(first.key_digest) == second
+            assert await task == {first.key: first}
+            assert await store.read_record(first.key) == second
         finally:
             release.set()
             await task
@@ -400,12 +400,12 @@ async def test_native_refresh_uses_source_start_deadline(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(store, "read", slow_read)
     try:
-        assert await store.refresh_records((record.key_digest,)) == {record.key_digest: record}
+        assert await store.refresh_records((record.key,)) == {record.key: record}
         clock[0] += .999
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
         assert calls == 1
         clock[0] += .002
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
         assert calls == 2
     finally:
         await store.close()
@@ -426,7 +426,7 @@ async def test_repository_refresh_keeps_custom_store_source_contract() -> None:
 
     repository = RepositoryBase(CustomStore(), namespace="custom", tenant_id="tenant", domain=PersistenceDomain.EXECUTION)
     try:
-        assert await repository._refresh_records((record.key_digest,)) == {record.key_digest: record}
+        assert await repository._refresh_records((record.key,)) == {record.key: record}
     finally:
         await store.close()
 
@@ -446,17 +446,17 @@ async def test_native_refresh_older_source_completion_cannot_replace_newer_refre
             if calls == 1:
                 started.set()
                 await release.wait()
-                return {first.key_digest: first}
-            return {second.key_digest: second}
+                return {first.key: first}
+            return {second.key: second}
 
         monkeypatch.setattr(store, "read", source)
-        older = asyncio.create_task(store.refresh_records((first.key_digest,)))
+        older = asyncio.create_task(store.refresh_records((first.key,)))
         try:
             await started.wait()
-            assert await store.refresh_records((first.key_digest,)) == {second.key_digest: second}
+            assert await store.refresh_records((first.key,)) == {second.key: second}
             release.set()
-            assert await older == {first.key_digest: first}
-            assert await store.read_record(first.key_digest) == second
+            assert await older == {first.key: first}
+            assert await store.read_record(first.key) == second
             assert calls == 2
         finally:
             release.set()
@@ -470,7 +470,7 @@ async def test_unknown_sql_write_invalidates_hot_snapshot_without_replaying_sour
     async with _store("sql", tmp_path, InMemoryCacheBackend(max_bytes=100000)) as store:
         old, new = _record(1), _record(2)
         await store.mutate(lambda tx: tx.insert_record(old))
-        assert await store.read_record(old.key_digest) == old
+        assert await store.read_record(old.key) == old
         context = store.context
         original = type(context).run_mutation
         callbacks = 0
@@ -493,7 +493,7 @@ async def test_unknown_sql_write_invalidates_hot_snapshot_without_replaying_sour
             with pytest.raises(AIError) as raised:
                 await store.mutate(change)
             assert raised.value is uncertain
-        assert await store.read_record(old.key_digest) == (new if committed else old)
+        assert await store.read_record(old.key) == (new if committed else old)
         assert callbacks == int(committed)
 
 
@@ -504,9 +504,9 @@ async def test_batch_cache_reuses_key_set_with_duplicates_and_absent_records(
     async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
         records = tuple(_record(1, str(index)) for index in range(16))
         await store.mutate(lambda tx: tx.insert_records(records))
-        missing = _record(1, "missing").key_digest
-        keys = tuple(record.key_digest for record in records) + (missing,)
-        expected = {record.key_digest: record for record in records}
+        missing = _record(1, "missing").key
+        keys = tuple(record.key for record in records) + (missing,)
+        expected = {record.key: record for record in records}
         assert await store.read_records(keys + keys) == expected
 
         async def unexpected_source_read(fn):

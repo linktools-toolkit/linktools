@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import canonical_json_bytes, canonical_sha256
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain
-from linktools.ai.persistence._archive import ContentRecord
+from linktools.ai.persistence._archive import ContentRecord, archive_content_scope
 from linktools.ai.persistence._archive_closure import iter_archive_content_refs, rekey_archive_roots
-from linktools.ai.persistence._execution_binding import expand_snapshot_binding
+from linktools.ai.persistence._execution_content import expand_snapshot_execution_content
 from linktools.ai.persistence._payload import encode_payload_bytes
 from linktools.ai.persistence._repository_common import project_record
 from linktools.ai.persistence.codec import _decode_enveloped_domain, iter_runtime_object_refs
@@ -34,13 +34,14 @@ def _large_execution():
 def _shared_record():
     execution = _large_execution()
     record = project_record(namespace="bindings", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                            kind="execution", identity=execution.execution_id, value=execution)
+                            kind="execution", identity=(execution.execution_id,), value=execution)
     data = record.data
     binding = data["value"]["payload"]["fields"]["binding"]
     raw = canonical_json_bytes(binding)
-    compression, digest, size, encoded = encode_payload_bytes(raw)
-    content = ContentRecord("execution-binding", digest, size, compression, StoredPayload.inline_bytes(encoded))
-    scope = canonical_sha256(["bindings", "tenant"])
+    compression, encoded = encode_payload_bytes(raw)
+    digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
+    content = ContentRecord("execution-binding", digest, size, compression, body=encoded)
+    scope = archive_content_scope("bindings", "tenant")
     reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope}
     compact = replace(record, data={**data, "value": {**data["value"], "payload": {
         **data["value"]["payload"], "fields": {**data["value"]["payload"]["fields"], "binding": reference},
@@ -52,13 +53,13 @@ def test_complete_binding_snapshot_round_trip_and_scope_remap() -> None:
     execution, full, compact, content, key = _shared_record()
     assert len(canonical_json_bytes(compact.data)) < len(canonical_json_bytes(full.data)) // 10
     assert tuple(iter_archive_content_refs(compact.data)) == (key,)
-    restored = expand_snapshot_binding(compact, {key: content}, namespace="bindings", tenant_id="tenant")
+    restored = expand_snapshot_execution_content(compact, {key: content}, namespace="bindings", tenant_id="tenant")
     assert restored == full
     assert _decode_enveloped_domain(restored.data, ExecutionRecord).binding.to_payload() == execution.binding.to_payload()
     remapped = replace(compact, data=rekey_archive_roots(dict(compact.data), {"source": "target"}))
     target_key = ("target", *key[1:])
     assert tuple(iter_archive_content_refs(remapped.data)) == (target_key,)
-    assert expand_snapshot_binding(remapped, {target_key: content}, namespace="bindings", tenant_id="tenant") == full
+    assert expand_snapshot_execution_content(remapped, {target_key: content}, namespace="bindings", tenant_id="tenant") == full
 
 
 def test_binding_archive_reference_does_not_hide_runtime_object_references() -> None:
@@ -95,18 +96,18 @@ def test_binding_snapshot_rejects_missing_or_corrupt_content(corruption: str) ->
     if corruption == "missing":
         contents = {}
     elif corruption == "body":
-        contents[key] = replace(content, payload=StoredPayload.inline_bytes(b"corrupt"))
+        contents[key] = replace(content, body=b"corrupt")
     elif corruption == "codec":
         contents[key] = replace(content, codec="different")
     with pytest.raises(AIError) as error:
-        expand_snapshot_binding(compact, contents, namespace="bindings",
+        expand_snapshot_execution_content(compact, contents, namespace="bindings",
                                 tenant_id="other" if corruption == "tenant" else "tenant")
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_execution_bindings_share_content_and_survive_cold_reads(tmp_path: Path, backend: str) -> None:
+async def test_execution_contents_share_content_and_survive_cold_reads(tmp_path: Path, backend: str) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="bindings", tenant_id="tenant")
     try:
@@ -134,7 +135,7 @@ async def test_execution_bindings_share_content_and_survive_cold_reads(tmp_path:
         inline = replace(execution, execution_id="inline", root_execution_id="inline")
         await bare.create_execution(inline)
         rows = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
-        inline_row = next(row for row in rows if row.key_digest == repository.execution_record_key("inline"))
+        inline_row = next(row for row in rows if row.key == repository.execution_record_key("inline"))
         assert not tuple(iter_archive_content_refs(inline_row.data))
         changed = replace(execution, revision=execution.revision + 1, error_code="diagnostic")
         await repository.compare_and_swap("execution", tenant_id="tenant",
@@ -243,25 +244,25 @@ async def test_snapshot_capture_reads_shared_bindings_in_batches(tmp_path: Path,
 @pytest.mark.asyncio
 async def test_archive_handle_without_transaction_enlistment_keeps_binding_inline(monkeypatch) -> None:
     from types import SimpleNamespace
-    from linktools.ai.persistence import _execution_binding as binding_module
-    from linktools.ai.persistence._execution_binding import ExecutionBindingContent
+    from linktools.ai.persistence import _execution_content as binding_module
+    from linktools.ai.persistence._execution_content import ExecutionContent
     from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 
     group = InMemoryStateStorageGroup()
     store = InMemoryStateStore(group)
     await store.initialize()
-    content = ExecutionBindingContent(store, namespace="bindings", tenant_id="tenant")
+    content = ExecutionContent(store, namespace="bindings", tenant_id="tenant")
     await content.initialize(create=True)
     try:
-        _, record, _, _, _ = _shared_record()
+        execution, record, _, _, _ = _shared_record()
         # The group handle exists, but this earlier captured callback has no
         # transaction for it. No archive read or write may be attempted.
         monkeypatch.setattr(binding_module, "active_state_scope",
-                            lambda: SimpleNamespace(group=group, transactions={store: object()}))
-        assert await content.compact(record) == record
-        unbound = ExecutionBindingContent(store, namespace="bindings", tenant_id="tenant")
+                            lambda: SimpleNamespace(group=group, transactions={store: object()}, writable=False))
+        assert await content.encode(execution) == record.data["value"]["payload"]
+        unbound = ExecutionContent(store, namespace="bindings", tenant_id="tenant")
         unbound.enable_sharing()
-        assert await unbound.compact(record) == record
+        assert await unbound.encode(execution) == record.data["value"]["payload"]
         _, _, compact, _, _ = _shared_record()
         with pytest.raises(AIError) as error:
             await unbound.expand(compact)
@@ -273,13 +274,17 @@ async def test_archive_handle_without_transaction_enlistment_keeps_binding_inlin
 
 
 def _binding_manifest(copies: int):
+    from linktools.ai.persistence._archive import archive_scope_parts, decode_archive_scope
     from linktools.ai.persistence.codec import encode_record
-    from linktools.ai.persistence.state import record_key_digest
+    from linktools.ai.persistence.state import record_key
 
     _, _, compact, content, key = _shared_record()
-    archive_record = replace(compact, kind="archive_content", sort_key=key[2],
-        scope_digest=bytes.fromhex(key[1]), data=content.to_json(),
-        key_digest=record_key_digest("", "", "archive", "archive_content", [key[1], key[2]]))
+    scope = decode_archive_scope(key[1])
+    namespace, tenant_id = archive_scope_parts(scope)
+    archive_record = replace(compact, kind="archive_content", sort_key=key[2].encode("utf-8"),
+        scope_key=scope, data=content.to_json(), payload_bytes=content.body,
+        key=record_key(namespace, tenant_id, "archive", "archive_content", (key[2],)))
+    assert ContentRecord.from_record(archive_record) == content
     manifest = {
         "kind": "runtime-storage-snapshot", "format_version": 1,
         "namespace": "bindings", "tenant_id": "tenant",
@@ -306,7 +311,7 @@ def test_snapshot_binding_budget_counts_each_retained_execution(copies: int) -> 
 
 
 def test_snapshot_binding_reserves_before_decompression(monkeypatch) -> None:
-    from linktools.ai.persistence import _execution_binding as bindings
+    from linktools.ai.persistence import _execution_content as bindings
     from linktools.ai.persistence.snapshots import SnapshotLimits, _SnapshotCaptureBudget
 
     _, compact, content, key = _binding_manifest(1)
@@ -320,12 +325,12 @@ def test_snapshot_binding_reserves_before_decompression(monkeypatch) -> None:
     monkeypatch.setattr(bindings, "decode_payload_bytes", decode_content)
     budget = _SnapshotCaptureBudget(SnapshotLimits(100, content.raw_size - 1))
     with pytest.raises(AIError) as error:
-        expand_snapshot_binding(compact, {key: content}, namespace="bindings", tenant_id="tenant",
+        expand_snapshot_execution_content(compact, {key: content}, namespace="bindings", tenant_id="tenant",
                                 reserve=budget.reserve_bytes)
     assert error.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
     assert not calls
     budget = _SnapshotCaptureBudget(SnapshotLimits(100, content.raw_size))
-    restored = expand_snapshot_binding(compact, {key: content}, namespace="bindings", tenant_id="tenant",
+    restored = expand_snapshot_execution_content(compact, {key: content}, namespace="bindings", tenant_id="tenant",
                                        reserve=budget.reserve_bytes)
     assert restored == _shared_record()[1]
     assert budget.byte_size == content.raw_size
@@ -353,7 +358,7 @@ async def test_snapshot_restore_rejects_binding_budget_before_hydration(tmp_path
     def reject_target(*args, **kwargs):
         raise AssertionError("an over-budget snapshot must not open a target")
 
-    monkeypatch.setattr(snapshots, "expand_snapshot_binding", reject_hydration)
+    monkeypatch.setattr(snapshots, "expand_snapshot_execution_content", reject_hydration)
     with pytest.raises(AIError) as error:
         await snapshots.restore_snapshot(ObjectRef(objects.store_id, stat.key, stat.digest, stat.size),
             object_store=objects, root=tmp_path / "restore", open_target=reject_target,
@@ -406,7 +411,7 @@ async def test_small_bindings_stay_inline_without_archive_hydration(tmp_path: Pa
         assert repository.state_store.storage_group.opened_archive is None
         execution = _execution()
         stored = project_record(namespace="bindings", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                                kind="execution", identity=execution.execution_id, value=execution)
+                                kind="execution", identity=(execution.execution_id,), value=execution)
         assert len(canonical_json_bytes(stored.data["value"]["payload"]["fields"]["binding"])) <= PayloadPolicy().inline_limit_bytes
 
         async def reject_archive(*args, **kwargs):
@@ -423,3 +428,17 @@ async def test_small_bindings_stay_inline_without_archive_hydration(tmp_path: Pa
         assert await repository.get(execution.execution_id, tenant_id="tenant") == changed
     finally:
         await state.close()
+
+
+def test_binding_capture_detaches_live_declarations_without_freezing_sources() -> None:
+    from linktools.ai.spec import CapabilityRef
+    source = {"type": "string", "description": "old"}
+    selected = [CapabilityRef("capability", "first", 1)]
+    old = replace(_large_execution().binding, output_schema=source, selected=selected)
+    source["description"] = "new"
+    selected.append(CapabilityRef("capability", "second", 1))
+    current = replace(old, output_schema=source, selected=selected)
+    assert old.output_schema["description"] == "old"
+    assert tuple(ref.id for ref in old.selected) == ("first",)
+    assert current.output_schema["description"] == "new"
+    assert tuple(ref.id for ref in current.selected) == ("first", "second")

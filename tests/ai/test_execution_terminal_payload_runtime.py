@@ -259,7 +259,7 @@ async def test_pending_payloads_and_checkpoint_are_read_from_buffer_before_sourc
                 assert terminal.terminal.result.output.decode() == {"text": answer}
                 assert result.output == {"text": answer}
             assert calls == 1
-            assert objects.writes
+            assert objects.writes == []
         assert set(buffer.acknowledged) == set(buffer.accepted)
 
 

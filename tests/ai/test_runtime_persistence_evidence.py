@@ -373,8 +373,8 @@ async def test_session_runtime_persists_and_reads_terminal_result(
                 ]
             }
 
-            terminal_execution = replace(execution, result=None)
-            next_execution = replace(terminal_execution, result=persisted_result)
+            assert execution.completed_at is not None
+            next_execution = replace(execution, result=persisted_result)
             _encode_persisted_domain(persisted_result)
             _encode_persisted_domain(next_execution)
 

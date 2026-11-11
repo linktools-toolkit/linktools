@@ -14,7 +14,7 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 
 from linktools.ai.capability import AgentContext
 from linktools.ai.runtime import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
+from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import TraceCapability, ExecutionCapability
 from pydantic_ai_harness.step_persistence import StepPersistence
@@ -25,6 +25,7 @@ from linktools.ai.persistence.codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
     decode_domain,
+    decode_envelope,
     encode_domain,
     encode_envelope,
 )
@@ -213,22 +214,12 @@ async def test_current_execution_record_retains_conversation_through_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from linktools.ai.execution import ExecutionRequest
-    from linktools.ai.persistence import _repository_common
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(native_checkpoint(), scope="runtime")
     group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage_path = tmp_path / "runtime"
     storage = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
-    encode = _repository_common._encode_persisted_domain
-    written: list[JsonValue] = []
-
-    def capture_current_record(value: object) -> JsonValue:
-        payload = encode(value)
-        if isinstance(value, ExecutionRecord):
-            assert payload["fields"]["conversation"] is True
-            written.append(payload)
-        return payload
 
     async def interrupted_launch(
         request: ExecutionRequest, execution: ExecutionRecord, **kwargs: object,
@@ -237,13 +228,18 @@ async def test_current_execution_record_retains_conversation_through_recovery(
 
     async with Persistence.open('conversation-feature', storage=storage) as persistence_247, Runtime.attach(persistence=persistence_247, features=model_features(RuntimeUsageModels(), group)) as runtime:
         with monkeypatch.context() as fault:
-            fault.setattr(_repository_common, "_encode_persisted_domain", capture_current_record)
             fault.setattr(runtime._execution_service.runtime_backend(), "launch", interrupted_launch)
             execution = await runtime.agents.get().start("answer", idempotency_key="answer")
-        assert written
-        before = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        repository = persistence_247.execution.executions
+        before = await repository.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert before is not None and before.status is ExecutionStatus.STARTED
         assert before.restart_checkpoints and before.conversation
+        written = await repository.state_store.read(
+            lambda transaction: transaction.get_record(repository.execution_record_key(execution.execution_id))
+        )
+        assert written is not None
+        assert decode_envelope(written.data).value["payload"]["fields"]["conversation"] is True
+        assert _decode_enveloped_domain(written.data, ExecutionRecord) == before
 
     reopened = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
     async with Persistence.open('conversation-feature', storage=reopened) as persistence_260, Runtime.attach(persistence=persistence_260, features=model_features(RuntimeUsageModels(), group)) as runtime:

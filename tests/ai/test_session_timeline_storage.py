@@ -19,7 +19,7 @@ from linktools.ai.persistence.contracts import (
 )
 from linktools.ai.persistence.state import StoredFact
 
-from .test_session_timeline import _commit_fields, _execution
+from .test_session_timeline import _execution
 
 
 def _session() -> SessionRecord:
@@ -75,7 +75,6 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
                 execution_id="success",
                 start_message_index=0,
                 end_message_index=2,
-                **_commit_fields(_execution("success", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         await state.conversation.sessions.state_store.mutate(commit)
@@ -144,7 +143,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
         )
 
         async def duplicate(transaction) -> None:
-            owner_key = repository._key("session", "session")
+            owner_key = repository._key("session", ("session",))
             owner = await transaction.get_record(owner_key)
             assert owner is not None
             guarded = await transaction.guard_record(
@@ -152,15 +151,15 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
             )
             assert guarded is not None
             sequence = await transaction.next_sequence(
-                repository._timeline_sequence_key("session")
+                repository._timeline_stream("session")
             )
             await transaction.insert_fact(
                 StoredFact(
                     repository._timeline_stream("session"),
                     sequence,
-                    repository._key("session", "session"),
+                    repository._key("session", ("session",)),
                     "session_turn",
-                    repository._timeline_subject("duplicate"),
+                    "duplicate",
                     None,
                     {"version": 1, "execution_id": "duplicate"},
                 )
@@ -176,7 +175,6 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
                 execution_id="duplicate",
                 start_message_index=0,
                 end_message_index=2,
-                **_commit_fields(_execution("duplicate", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         with pytest.raises(AIError) as captured:

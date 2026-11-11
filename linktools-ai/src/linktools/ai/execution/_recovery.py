@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public execution recovery value contracts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 from ..core import Principal, ToolOperationStatus, validate_idempotency_key
@@ -34,7 +34,7 @@ class ResolveToolEffectRequest:
     operation_id: str
     expected_fence: int
     resolution: ToolEffectResolution
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.principal, Principal):
@@ -63,7 +63,6 @@ class ExecutionRecoveryEffect:
     tool_call_id: str
     tool_name: str
     fence: int
-    idempotency_key_digest: str
     replay_safe: bool
     error_code: "str | None"
 
@@ -74,7 +73,6 @@ class ExecutionRecoveryEffect:
             self.agent_run_id,
             self.tool_call_id,
             self.tool_name,
-            self.idempotency_key_digest,
         )
         if any(not isinstance(value, str) or not value.strip() for value in identities):
             raise ValueError("recovery effect identity is invalid")

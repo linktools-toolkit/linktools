@@ -37,7 +37,7 @@ from linktools.ai.migrate import provision_asset_database
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.spec import mcp_tool_selector
-from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy, StorageOverlay
+from linktools.ai.storage import FilesystemObjectStore, StorageOverlay
 from linktools.ai.workspace import LocalWorkspaceBackend
 from pydantic_ai.messages import (
     ModelMessage,
@@ -229,7 +229,6 @@ async def _store(kind: str, root: Path) -> AsyncIterator[AssetStore]:
         backend = SqlAssetBackend(
             engine, namespace="stdio",
             object_store=FilesystemObjectStore(root / "objects") if kind == "sqlite-filesystem" else None,
-            payload_policy=PayloadPolicy(0) if kind == "sqlite-filesystem" else None,
         )
     else:
         raise AssertionError(kind)

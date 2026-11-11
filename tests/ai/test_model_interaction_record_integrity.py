@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.contracts import ModelInteractionRecord
@@ -35,15 +34,15 @@ async def test_interaction_fact_cannot_replace_missing_authoritative_record(
         stream = archive._stream(run.agent_run_id, "interaction")
         fact = StoredFact(
             stream, 1, archive._agent_run_key(run.agent_run_id),
-            "model_interaction", bytes.fromhex(canonical_sha256({"agent_run_id": old.agent_run_id, "model_request_seq": 1})), old.status, _encode_step(old),
+            "model_interaction", "request-1", old.status, _encode_step(old),
         )
 
         async def seed(transaction):
-            owner = await transaction.get_record(fact.owner_key_digest)
+            owner = await transaction.get_record(fact.owner_key)
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
             await transaction.insert_fact(fact)
-            await transaction.reserve_sequence(archive._sequence(run.agent_run_id, "interaction"), 1)
+            await transaction.reserve_sequence(archive._stream(run.agent_run_id, "interaction"), 1)
 
         await store.mutate(seed)
         with pytest.raises(AIError) as missing:
@@ -72,6 +71,6 @@ async def test_interaction_fact_cannot_replace_missing_authoritative_record(
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, facts=facts, operations=(), aliases=(),
-                sequences={archive._sequence(run.agent_run_id, "interaction"): 1},
+                sequences={archive._stream(run.agent_run_id, "interaction"): 1},
             )
         assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

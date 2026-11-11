@@ -36,7 +36,6 @@ from ..core import (
     ToolOperationStatus,
     UsageMetrics,
     canonical_sha256,
-    idempotency_key_digest,
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -701,9 +700,7 @@ class _RecoveryCoordinator:
                 "scope": "execution.tool_effect.resolve",
                 "tenant_id": self._port.tenant_id,
                 "execution_id": execution_id,
-                "idempotency_key_digest": idempotency_key_digest(
-                    request.idempotency_key
-                ),
+                "idempotency_key": request.idempotency_key,
             }
         )
         result_digest = canonical_sha256(

@@ -11,6 +11,11 @@ Runtime.open(namespace, storage=..., features=...)
     -> runtime.history: retained readback
 ```
 
+The [entry-point and handle guide](docs/runtime-entrypoints.md) gives the return-type matrix,
+principal and lifecycle rules, and a complete offline start/result/cancel/recovery example.
+The [storage layout](docs/storage-layout.md) documents database bodies, file attachments,
+table ownership and the remaining cost boundaries.
+
 The main ownership rules are:
 
 - `Runtime.open` owns application composition and closes its bound domains before its Persistence. Advanced callers can use `Runtime.attach(persistence=...)` to borrow an independently opened Persistence without closing it. Neither requires a filesystem Workspace.
@@ -1842,6 +1847,21 @@ while LinkTools remains the durable owner of plans, Memory records and mutation
 receipts, execution history, and the raw transcript. Memory content continues to
 persist through `MemoryRepositories` and `ObjectStore`. Compaction only rewrites the
 request context projection; it never rewrites the raw transcript.
+
+State aliases are scoped binary addresses. The `tool_call` alias contains
+namespace, tenant, domain, relation, agent-run ID and tool-call ID, each encoded
+as a two-byte big-endian UTF-8 byte length followed by the exact UTF-8 bytes.
+The scope remains explicit because public repositories can share one bare or
+custom StateStore across namespaces and tenants. Tool run and call IDs retain
+their 128-byte limits; with a 256-byte namespace, 128-byte tenant, `checkpoint`
+domain and `tool_call` relation, the alias can reach 671 bytes. Generic State
+alias addresses allow 1–1024 bytes. SQL stores the alias as binary data and
+indexes both uniqueness and target cleanup within its store. Snapshot and codec
+transport uses canonical lowercase hex without changing the binary address.
+The representation removes alias JSON serialization and SHA-256 hashing without
+an extra query or mapping table. Repeating scope costs bytes and preserves the
+shared-store isolation contract; it is not a storage or speed improvement claim.
+
 
 ### Workspace relocation
 

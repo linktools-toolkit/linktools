@@ -60,7 +60,7 @@ async def test_native_checkpoint_roundtrip_keeps_retry_occurrences_and_tombstone
     original = await _manifest(objects, reference)
     backup = original["native_checkpoints"][0]
     assert len(backup["events"]) == 2
-    assert backup["events"][0]["key_digest"] != backup["events"][1]["key_digest"]
+    assert all(row["idempotency_key"] is None for row in backup["events"])
     if content != "empty":
         assert [row["pruned"] for row in backup["snapshots"]] == [True, False]
     entry_count, _ = _storage_snapshot_usage(original)

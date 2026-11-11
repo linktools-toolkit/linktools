@@ -350,22 +350,22 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
             records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
         )
         omitted = next(record for record in records
-                       if record.kind == "history_association" and record.sort_key != "coverage:event")
+                       if record.kind == "history_association" and record.sort_key != b"coverage:event")
         with pytest.raises(AIError) as missing:
             validate_snapshot_domain(
                 namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=tuple(record for record in records if record.key_digest != omitted.key_digest),
+                records=tuple(record for record in records if record.key != omitted.key),
                 aliases=aliases, facts=facts, operations=operations, sequences=sequences,
             )
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-        assert sum(record.kind == "history_association" and record.sort_key != "coverage:event"
+        assert sum(record.kind == "history_association" and record.sort_key != b"coverage:event"
                    for record in records) == 2
         with pytest.raises(AIError) as uncovered:
             validate_snapshot_domain(
                 namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=tuple(record for record in records
-                              if record.key_digest != omitted.key_digest and record.sort_key != "coverage:event"),
+                              if record.key != omitted.key and record.sort_key != b"coverage:event"),
                 aliases=aliases, facts=facts, operations=operations, sequences=sequences,
             )
         assert uncovered.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

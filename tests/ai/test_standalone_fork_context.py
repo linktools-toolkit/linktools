@@ -148,7 +148,7 @@ async def _damage_fork_context(store, damage: str) -> None:
         if damage == "absent":
             records = await transaction.scan_records()
             run = next(record for record in records if record.kind == "agent_run")
-            await transaction.delete_records((run.key_digest,))
+            await transaction.delete_records((run.key,))
         else:
             facts = await transaction.scan_facts()
             fact = next(fact for fact in facts if fact.kind == "step_checkpoint")
@@ -161,9 +161,9 @@ async def _damage_fork_context(store, damage: str) -> None:
                           "transcript_message_count": 1}
                 field = "projection" if damage == "projection_digest" else damage
                 data = _encode_step(replace(checkpoint, **{field: values[field]}))
-            owner = await transaction.get_record(fact.owner_key_digest)
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
-            await transaction.delete_fact_streams(fact.owner_key_digest)
+            owner = await transaction.get_record(fact.owner_key)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
+            await transaction.delete_fact_streams(fact.owner_key)
             await transaction.insert_fact(replace(fact, data=data))
 
     await store.mutate(damage_context)

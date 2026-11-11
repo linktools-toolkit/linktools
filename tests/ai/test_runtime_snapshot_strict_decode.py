@@ -4,6 +4,7 @@
 
 import hashlib
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -27,7 +28,7 @@ from linktools.ai.snapshot import _snapshot as runtime_snapshot_module
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence import snapshots as runtime_storage_snapshot_module
-from linktools.ai.persistence import codec as runtime_storage_codec
+from linktools.ai.persistence import captures as capture_contracts
 from linktools.ai.persistence.codec import (
     _encode_persisted_domain,
     encode_envelope,
@@ -50,12 +51,10 @@ from linktools.ai.persistence.state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    alias_digest,
+    alias_key,
     operation_key,
-    scope_digest,
-    sequence_key,
-    sortable_identity,
-    stream_digest,
+    scope_key,
+    stream_key,
 )
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 from linktools.ai.workspace import Workspace
@@ -152,55 +151,55 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     ("format_version", "corruption", "expected_code"),
     (
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION + 1,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION + 1,
             "valid",
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
         ),
         (True, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (2.0, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "missing_array",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "wrong_kind",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "unexpected_field",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_task",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_schema",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "duplicate_task",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "duplicate_expander",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            capture_contracts.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_expander",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
     ),
 )
-def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
+def test_snapshot_task_capture_state_rejects_invalid_manifests(
     format_version: object,
     corruption: str,
     expected_code: ErrorCode,
@@ -256,21 +255,13 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
         del manifest["expanders"]
     elif corruption == "unexpected_field":
         manifest["roots"] = {}
-    payload = canonical_json_bytes(manifest)
-    reference = ObjectRef(
-        "runtime",
-        "v1/task-graph-binding-capture/capture",
-        "a" * 64,
-        len(payload),
-    )
+    key = capture_contracts.task_graph_binding_capture_key("runtime", "tenant", "graph", "a" * 64)
+    record = capture_contracts.capture_record("runtime", "tenant", key, manifest)
 
     with pytest.raises(AIError) as raised:
-        tuple(
-            runtime_storage_codec.iter_runtime_object_dependencies(
-                reference,
-                payload,
-                default_domain=PersistenceDomain.TASK,
-            )
+        validate_snapshot_domain(
+            namespace="runtime", tenant_id="tenant", domain=PersistenceDomain.TASK,
+            records=(record,), aliases=(), facts=(), operations=(), sequences={},
         )
 
     assert raised.value.code is expected_code
@@ -429,17 +420,17 @@ async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_bef
     )
     record = StoredRecord(
         b"x" * 32,
-        scope_digest(
+        scope_key(
             namespace,
             tenant_id,
             "conversation",
             "session",
             "owner",
-            session.owner_principal_id,
+            (session.owner_principal_id,),
         ),
         None,
         "session",
-        sortable_identity(session.session_id),
+        b"x" * 32,
         session.status.value,
         0,
         None,
@@ -496,7 +487,6 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         execution_id="execution",
         agent_run_id="run",
         tool_call_id="call",
-        idempotency_key_digest=canonical_sha256({"idempotency": 1}),
         tool_name="tool",
         arguments_digest=canonical_sha256({"arguments": 1}),
         binding_digest=canonical_sha256({"binding": 1}),
@@ -513,7 +503,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         tenant_id="tenant",
         domain=PersistenceDomain.CHECKPOINT,
         kind="tool_operation",
-        identity=operation.tool_operation_id,
+        identity=(operation.tool_operation_id,),
         value=operation,
         state=operation.status.value,
     )
@@ -527,15 +517,28 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         operations=(),
     )
 
-    expected_alias = alias_digest(
-        "runtime",
-        "tenant",
-        PersistenceDomain.CHECKPOINT.value,
-        "tool_call",
+    expected_alias = alias_key(
+        "runtime", "tenant", "checkpoint", "tool_call",
         [operation.agent_run_id, operation.tool_call_id],
     )
-    assert aliases == (StoredAlias(expected_alias, record.key_digest),)
+    assert aliases == (StoredAlias(expected_alias, record.key),)
     assert sequences == {}
+
+    for field in ("agent_run_id", "tool_call_id"):
+        data = dict(record.data)
+        envelope_value = dict(data["value"])
+        payload = dict(envelope_value["payload"])
+        fields = dict(payload["fields"])
+        fields[field] = "é" * 65
+        payload["fields"] = fields
+        envelope_value["payload"] = payload
+        data["value"] = envelope_value
+        with pytest.raises(AIError) as rejected:
+            canonical_snapshot_indexes(
+                namespace="runtime", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+                records=(replace(record, data=data),), facts=(), operations=(),
+            )
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
     validate_snapshot_domain(
         namespace="runtime",
@@ -553,7 +556,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
             tenant_id="tenant",
             domain=PersistenceDomain.CHECKPOINT,
             records=(record,),
-            aliases=(StoredAlias(b"x" * 32, record.key_digest),),
+            aliases=(StoredAlias(b"x" * 32, record.key),),
             facts=(),
             operations=(),
             sequences=sequences,
@@ -580,13 +583,8 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
         updated_at=now,
     )
     stored = StoredOperation(
-        operation_key(
-            "runtime",
-            "tenant",
-            PersistenceDomain.CONVERSATION.value,
-            operation.operation_id,
-        ),
-        stream_digest(
+        operation_key("runtime", "tenant", "conversation", operation.operation_id),
+        stream_key(
             "runtime",
             "tenant",
             PersistenceDomain.CONVERSATION.value,
@@ -610,7 +608,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
 
     assert aliases == ()
     assert sequences == {
-        sequence_key(
+        stream_key(
             "runtime",
             "tenant",
             PersistenceDomain.CONVERSATION.value,
@@ -630,12 +628,12 @@ def _execution_stub(*, event_seq: int) -> ExecutionRecord:
 
 def _execution_fact(owner_key: bytes, sequence: int = 1) -> StoredFact:
     return StoredFact(
-        stream_digest(
+        stream_key(
             "runtime",
             "tenant",
             PersistenceDomain.EXECUTION.value,
             "execution",
-            "execution",
+            ("execution",),
         ),
         sequence,
         owner_key,
@@ -669,7 +667,7 @@ def test_snapshot_rejects_truncated_execution_event_stream() -> None:
         None,
         None,
         "execution",
-        "execution",
+        b'execution',
         None,
         0,
         None,
@@ -719,3 +717,47 @@ def test_snapshot_object_refs_reject_malformed_known_fields(codec, change) -> No
     with pytest.raises(AIError) as raised:
         codec._object_ref_from_payload(wire)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("raw", ({"alias_key": "AA", "record_key": "77" * 32},
+                                {"alias_key": "aa" * 1025, "record_key": "77" * 32},
+                                {"alias_key": "aa", "record_key": "77" * 1153},
+                                {"alias_key": "aa", "record_key": ""},
+                                {"alias_key": "aa"}))
+def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None:
+    with pytest.raises(AIError) as rejected:
+        runtime_storage_snapshot_module._decode_snapshot_aliases([raw])
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_snapshot_alias_binary_transport_roundtrips() -> None:
+    key = alias_key("runtime", "tenant", "checkpoint", "tool_call", ("é", "e\u0301"))
+    raw = {"alias_key": key.hex(), "record_key": "77" * 32}
+    assert runtime_storage_snapshot_module._decode_snapshot_aliases([raw]) == (StoredAlias(key, b"w" * 32),)
+    with pytest.raises(AIError) as rejected:
+        runtime_storage_snapshot_module._decode_snapshot_aliases([raw, raw])
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("family", ("memory_scope", "graph_parent"))
+def test_snapshot_oversized_relation_owners_report_integrity_errors(family: str) -> None:
+    from linktools.ai.persistence.contracts import MemoryRecord
+    from linktools.ai.storage import StoredPayload
+    from linktools.ai.task import TaskGraphView, TaskStatus
+
+    oversized = "x" * 1024
+    if family == "memory_scope":
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        value = MemoryRecord("memory", "scope", StoredPayload.inline_text("body"), {"path": "memory"}, 0, now, now)
+        object.__setattr__(value, "memory_scope", oversized)
+        domain, kind, identity = PersistenceDomain.MEMORY, "memory", "memory"
+    else:
+        value = TaskGraphView("graph", TaskStatus.PENDING, ())
+        object.__setattr__(value, "graph_id", oversized)
+        domain, kind, identity = PersistenceDomain.TASK, "task_graph", oversized
+    record = project_record(namespace="namespace", tenant_id="tenant", domain=domain,
+                            kind=kind, identity=(identity,), value=value, scope=b"s" * 32)
+    with pytest.raises(AIError) as error:
+        validate_snapshot_domain(namespace="namespace", tenant_id="tenant", domain=domain,
+                                 records=(record,), aliases=(), facts=(), operations=(), sequences={})
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

@@ -24,7 +24,7 @@ from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence.contracts import ToolBoundaryReceipt
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, tool_run_context
 from .test_history_projection_conformance import _record
@@ -346,7 +346,7 @@ async def test_budgeted_bridge_cannot_reuse_a_claimed_dispatch_receipt(admission
     bridge = RuntimeToolOperationBridge(
         state.checkpoint.tools, InMemoryObjectStore(), namespace="budget-admission", tenant_id="tenant",
         execution_id="execution", agent_run_id="run", binding_digest="b" * 64, owner="worker",
-        background_tasks=set(), payload_policy=PayloadPolicy(), terminal_commands=_commands(state),
+        background_tasks=set(),  terminal_commands=_commands(state),
         producer_generation=1, budget_scope_id="shared",
     )
     ctx, call, definition = tool_run_context(), ToolCallPart("work", {}, tool_call_id="call"), ToolDefinition(name="work")

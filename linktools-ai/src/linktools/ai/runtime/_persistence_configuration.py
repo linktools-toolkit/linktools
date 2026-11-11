@@ -8,7 +8,7 @@ from pydantic_ai_harness.step_persistence import StepPersistence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
 from ..errors import AIError, ErrorCode
-from ..core import CommitPolicy
+from ..core import CommitPolicy, validate_capability_id
 from ..capability import ExecutionCapability, TraceCapability, StepPersistenceCapability
 from ..persistence import PersistenceDomain
 from ..persistence.capabilities import CapabilityPersistence
@@ -67,8 +67,10 @@ def capability_persistence_ids(
             ):
                 raise ValueError("custom capability must resolve batch timing before registration")
             identity = capability.id or registered_id
-            if not identity:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            try:
+                validate_capability_id(identity)
+            except AIError as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
             if identity in identities:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             identities[identity] = None

@@ -22,13 +22,15 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import OperationQuery, stream_digest
+from linktools.ai.persistence.state import OperationQuery, stream_key
+from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
     TaskNode,
+    TaskSubmissionRef,
 )
 
 
@@ -104,14 +106,26 @@ def _partial_operation(
     )
 
 
-def test_task_admission_freezes_initial_request_digest_without_raw_key() -> None:
-    request = _request("digest", idempotency_key="raw-secret-idempotency-key")
+@pytest.mark.parametrize("key", ("sensitive-operation-key-MUST-NOT-APPEAR-IN-REPR", "限" * 85 + "r"))
+def test_task_admission_preserves_operation_id_and_request_digest(key: str) -> None:
+    request = _request("digest", idempotency_key=key)
     admission = TaskGraphAdmission.from_request(request)
+    submission = TaskSubmissionRef.from_admission("task-test", admission)
 
     assert admission.initial_request_digest == _expected_request_digest(request)
-    assert admission.operation_id != request.idempotency_key
-    assert not hasattr(admission, "idempotency_key")
-    assert request.idempotency_key not in repr(admission)
+    operation = _partial_operation(admission, request.graph, OperationStatus.PENDING)
+    for value in (admission, submission, operation):
+        assert value.operation_id == key
+        assert key not in repr(value)
+        wire = encode_domain(value)
+        assert wire["fields"]["operation_id"] == key
+        assert decode_domain(wire, type(value)) == value
+    for value in (admission, submission):
+        wire = encode_domain(value)
+        wire["fields"]["operation_id"] = "限" * 85 + "rx"
+        with pytest.raises(AIError) as raised:
+            decode_domain(wire, type(value))
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_task_admission_rejects_unsupported_version() -> None:
@@ -137,7 +151,7 @@ async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
     state = Persistence(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
-        request = _request("memory")
+        request = _request("memory", idempotency_key="sensitive-operation-key-MUST-NOT-APPEAR-IN-REPR")
         admission = TaskGraphAdmission.from_request(request)
 
         first = await state.task.admissions.admit(admission, request.graph)
@@ -154,6 +168,8 @@ async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
         assert first == replay
         assert first.status is TaskStatus.PENDING
         assert operation is not None
+        assert operation.operation_id == request.idempotency_key
+        assert request.idempotency_key not in repr(operation)
         assert operation.status is OperationStatus.SUCCEEDED
         assert operation.result_ref == request.graph.graph_id
         assert operation.compactable is False
@@ -264,7 +280,7 @@ async def test_corrupt_occupied_graph_without_its_admission_operation_fails_clos
             tenant_id="tenant",
         )
         assert operation is not None
-        operation_stream = stream_digest(
+        operation_stream = stream_key(
             "task-test",
             "tenant",
             PersistenceDomain.TASK.value,
@@ -274,7 +290,7 @@ async def test_corrupt_occupied_graph_without_its_admission_operation_fails_clos
         deleted = await state.task.operations.state_store.mutate(
             lambda transaction: transaction.delete_operations(
                 OperationQuery(
-                    stream_digest=operation_stream,
+                    stream_key=operation_stream,
                     states=frozenset({OperationStatus.SUCCEEDED.value}),
                     through_sequence=operation.sequence,
                 )

@@ -4,20 +4,19 @@
 
 import base64
 import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Generic, TypeVar
 from linktools.core import environ
 from ..core import (
+    JsonValue,
     OperationKind,
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
     ResourceKind,
     ResourceRef,
-    canonical_json_bytes,
     operation_cas_immutable_matches,
     operation_replay_matches,
 )
@@ -42,7 +41,7 @@ from .contracts import (
     MemoryRecord,
     SessionRecord,
 )
-from ._execution_binding import ExecutionBindingContent
+from ._execution_content import ExecutionContent
 from ._evaluation_records import (
     EvaluationCaseRecord,
     EvaluationDatasetRecord,
@@ -53,19 +52,19 @@ from ._evaluation_records import (
 from ._plan import PersistenceDomain
 from .state import (
     OperationQuery,
+    RECORD_KEY_MAX_BYTES,
+    validate_record_key,
+    validate_sort_key,
     RecordQuery,
     StateStore,
     StateTransaction,
     StoredOperation,
     StoredRecord,
     operation_key,
-    parent_digest,
-    record_key_digest,
-    scope_digest,
-    sequence_key,
-    sortable_identity,
-    stream_digest,
-    subject_digest,
+    parent_key,
+    record_key,
+    scope_key,
+    stream_key,
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
@@ -86,7 +85,7 @@ class _RepositoryBase:
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._domain = domain
-        self._binding_content = ExecutionBindingContent(store, namespace=namespace, tenant_id=tenant_id)
+        self._execution_content = ExecutionContent(store, namespace=namespace, tenant_id=tenant_id)
 
     async def initialize(self) -> None:
         return None
@@ -101,9 +100,9 @@ class _RepositoryBase:
         if self._domain is PersistenceDomain.EXECUTION:
             if deferred:
                 if create:
-                    self._binding_content.enable_sharing()
+                    self._execution_content.enable_sharing()
             else:
-                await self._binding_content.initialize(create=create)
+                await self._execution_content.initialize(create=create)
 
     async def close(self) -> None:
         return None
@@ -120,13 +119,13 @@ class _RepositoryBase:
     def namespace(self) -> str:
         return self._namespace
 
-    def _key(self, kind: str, identity: object) -> bytes:
-        return record_key_digest(
+    def _key(self, kind: str, identity: Sequence[str]) -> bytes:
+        return record_key(
             self._namespace, self._tenant_id, self._domain.value, kind, identity
         )
 
-    def _scope(self, kind: str, relation: str, identity: object) -> bytes:
-        return scope_digest(
+    def _scope(self, kind: str, relation: str, identity: Sequence[str]) -> bytes:
+        return scope_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -135,8 +134,8 @@ class _RepositoryBase:
             identity,
         )
 
-    def _parent(self, kind: str, relation: str, identity: object) -> bytes:
-        return parent_digest(
+    def _parent(self, kind: str, relation: str, identity: Sequence[str]) -> bytes:
+        return parent_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -148,7 +147,7 @@ class _RepositoryBase:
     def _stored(
         self,
         kind: str,
-        identity: object,
+        identity: Sequence[str],
         value: object,
         *,
         scope: bytes | None = None,
@@ -168,15 +167,32 @@ class _RepositoryBase:
         )
 
     async def _stored_content(
-        self, kind: str, identity: object, value: object, *, scope: bytes | None = None,
+        self, kind: str, identity: Sequence[str], value: object, *, scope: bytes | None = None,
         parent: bytes | None = None, state: str | None = None,
+        previous_value: ExecutionRecord | None = None,
     ) -> StoredRecord:
-        return await self._binding_content.compact(self._stored(
-            kind, identity, value, scope=scope, parent=parent, state=state,
-        ))
+        if isinstance(value, ExecutionRecord):
+            previous = None if previous_value is None else self._execution_content.projection(previous_value)
+            encoded = await self._execution_content.encode(value, previous=previous)
+            record = project_record(
+                namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
+                kind=kind, identity=identity, value=value, scope=scope, parent=parent,
+                state=state, encoded=encoded,
+            )
+            self._execution_content.remember_projection(value, record)
+            return record
+        return self._stored(kind, identity, value, scope=scope, parent=parent, state=state)
 
     async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
-        return await self._binding_content.compact(_projected_record(self, current, value), previous=current)
+        if isinstance(value, ExecutionRecord):
+            _require_tenant(value, self._tenant_id)
+            encoded = await self._execution_content.encode(value, previous=current)
+            record = project_record(namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
+                kind=current.kind, identity=(value.execution_id,), value=value, state=_record_state(value),
+                storage_revision=current.storage_revision + 1, encoded=encoded)
+            self._execution_content.remember_projection(value, record)
+            return record
+        return _projected_record(self, current, value)
 
     async def _record(self, key: bytes) -> StoredRecord | None:
         return await self._store.read(lambda transaction: transaction.get_record(key))
@@ -188,7 +204,7 @@ class _RepositoryBase:
         scope: bytes | None = None,
         parent: bytes | None = None,
         states: frozenset[str] | None = None,
-        sort_key_prefix: str | None = None,
+        sort_key_prefix: bytes | None = None,
         cursor: str | None = None,
         limit: int | None = None,
     ) -> tuple[StoredRecord, ...]:
@@ -198,19 +214,19 @@ class _RepositoryBase:
             or not 1 <= limit <= 1001
         ):
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        after_sort_key, after_key_digest = _decode_record_cursor(cursor)
+        after_sort_key, after_key = _decode_record_cursor(cursor)
         query_limit = None if limit is None else min(limit, 1000)
 
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
             records = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
-                    parent_digest=parent,
+                    scope_key=scope,
+                    parent_key=parent,
                     kind=kind,
                     states=states,
                     sort_key_prefix=sort_key_prefix,
                     after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
+                    after_key=after_key,
                     limit=query_limit,
                 )
             )
@@ -219,20 +235,20 @@ class _RepositoryBase:
             last = records[-1]
             probe = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
-                    parent_digest=parent,
+                    scope_key=scope,
+                    parent_key=parent,
                     kind=kind,
                     states=states,
                     sort_key_prefix=sort_key_prefix,
                     after_sort_key=last.sort_key,
-                    after_key_digest=last.key_digest,
+                    after_key=last.key,
                     limit=1,
                 )
             )
             if probe and (
                 probe[0].sort_key,
-                probe[0].key_digest,
-            ) > (last.sort_key, last.key_digest):
+                probe[0].key,
+            ) > (last.sort_key, last.key):
                 return (*records, probe[0])
             return records
 
@@ -245,21 +261,21 @@ class _RepositoryBase:
         scope: bytes | None = None,
         parent: bytes | None = None,
         states: frozenset[str] | None = None,
-        sort_key_prefix: str | None = None,
+        sort_key_prefix: bytes | None = None,
         cursor: str | None = None,
     ) -> bool:
-        after_sort_key, after_key_digest = _decode_record_cursor(cursor)
+        after_sort_key, after_key = _decode_record_cursor(cursor)
 
         async def read(transaction: StateTransaction) -> bool:
             records = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
-                    parent_digest=parent,
+                    scope_key=scope,
+                    parent_key=parent,
                     kind=kind,
                     states=states,
                     sort_key_prefix=sort_key_prefix,
                     after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
+                    after_key=after_key,
                     limit=1,
                 )
             )
@@ -278,21 +294,21 @@ class _RepositoryBase:
         return await self._store.read(lambda transaction: transaction.get_records(keys))
 
     async def _insert(self, record: StoredRecord) -> None:
-        await self._binding_content.prepare(record)
         async def insert(transaction: StateTransaction) -> None:
-            await transaction.insert_record(await self._binding_content.compact(record))
+            await transaction.insert_record(record)
         await self._store.mutate(insert)
 
     async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
         if target is ExecutionRecord:
-            record = await self._binding_content.expand(record)
+            return await self._execution_content.decode(record)
         value = _decode_enveloped_domain(
             record.data,
             target,
             payload_transform=lambda payload: _restore_lease_fields(payload, target),
         )
         if isinstance(value, ToolOperationRecord):
-            if record.subject_digest != subject_digest(value.tool_call_id):
+            if (record.subject_id != value.tool_call_id
+                    or record.key != self._key("tool_operation", (value.tool_operation_id,))):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replace(value, owner=record.lease_owner, fence=record.lease_fence)
         if isinstance(value, TaskNodeView):
@@ -332,17 +348,18 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
     async def initialize(self) -> None:
         await super().initialize()
 
-    def _identity(self, value: object) -> object:
+    def _identity(self, value: object) -> tuple[str, ...]:
         return _canonical_record_identity(self._kind, value)
 
     async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
         value = await super()._decode(record, target)
-        if target is self._value_type and (
-            record.kind != self._kind
-            or record.key_digest != self._key(self._kind, self._identity(value))
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if target is self._value_type:
+            self._validate_record_identity(record, value)
         return value
+
+    def _validate_record_identity(self, record: StoredRecord, value: ValueT) -> None:
+        if record.kind != self._kind or record.key != self._key(self._kind, self._identity(value)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def create(self, value: ValueT) -> ValueT:
         _require_tenant(value, self._tenant_id)
@@ -350,7 +367,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         await self._insert(
             self._stored(self._kind, identity, value, state=_record_state(value))
         )
-        _logger.debug("created Runtime record: kind=%s id=%s", self._kind, identity)
+        _logger.debug("created Runtime record: kind=%s", self._kind)
         return value
 
     async def create_in_transaction(
@@ -371,16 +388,15 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
             await self._stored_content(self._kind, identity, value, state=_record_state(value))
         )
         _logger.debug(
-            "created Runtime record in group: kind=%s id=%s",
+            "created Runtime record in group: kind=%s",
             self._kind,
-            identity,
         )
         return value
 
     async def get(self, identity: str, *, tenant_id: str) -> ValueT | None:
         if tenant_id != self._tenant_id:
             return None
-        key = self._key(self._kind, identity)
+        key = self._key(self._kind, (identity,))
         record = (
             await self._store.read_record(key)
             if self._kind in {"session", "execution"}
@@ -396,13 +412,13 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         tenant_id: str,
     ) -> ValueT | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key(self._kind, identity))
+        record = await transaction.get_record(self._key(self._kind, (identity,)))
         return None if record is None else await self._decode(record, self._value_type)
 
     async def get_fresh(self, identity: str, *, tenant_id: str) -> ValueT | None:
         if tenant_id != self._tenant_id:
             return None
-        key = self._key(self._kind, identity)
+        key = self._key(self._kind, (identity,))
         records = await self._refresh_records((key,))
         record = records.get(key)
         return None if record is None else await self._decode(record, self._value_type)
@@ -434,7 +450,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         _require_tenant(next_record, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> ValueT:
-            current = await transaction.get_record(self._key(self._kind, identity))
+            current = await transaction.get_record(self._key(self._kind, (identity,)))
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             value = await self._decode(current, self._value_type)
@@ -499,29 +515,6 @@ def validate_recovery_operation(
 
 
 class OperationLedgerRepositoryImpl(_RepositoryBase):
-    def _stream(self, value: OperationLedgerInput | OperationLedgerRecord) -> bytes:
-        return stream_digest(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            "operation",
-            [value.resource_kind.value, value.resource_id],
-        )
-
-    def _stored_operation(
-        self, value: OperationLedgerInput, sequence: int
-    ) -> StoredOperation:
-        return StoredOperation(
-            operation_key(
-                self._namespace, self._tenant_id, self._domain.value, value.operation_id
-            ),
-            self._stream(value),
-            sequence,
-            value.status.value,
-            value.compactable,
-            _domain_data(value),
-        )
-
     async def append(self, value: OperationLedgerInput) -> OperationLedgerRecord:
         _require_tenant(value, self._tenant_id)
 
@@ -536,28 +529,21 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         value: OperationLedgerInput,
     ) -> OperationLedgerRecord:
         _require_tenant(value, self._tenant_id)
-        key = operation_key(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            value.operation_id,
-        )
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, value.operation_id)
         existing = await transaction.get_operation(key)
         if existing is not None:
-            current = _decode_operation(existing)
+            current = _decode_operation(existing, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
             if _operation_matches(current, value):
                 return current
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        sequence = await transaction.next_sequence(
-            sequence_key(
-                self._namespace,
-                self._tenant_id,
-                self._domain.value,
-                "operation",
-                [value.resource_kind.value, value.resource_id],
-            )
+        stream = stream_key(
+            self._namespace, self._tenant_id, self._domain.value,
+            "operation", [value.resource_kind.value, value.resource_id],
         )
-        await transaction.insert_operation(self._stored_operation(value, sequence))
+        sequence = await transaction.next_sequence(stream)
+        await transaction.insert_operation(StoredOperation(
+            key, stream, sequence, value.status.value, value.compactable, _domain_data(value),
+        ))
         return _operation_record(value, sequence)
 
     async def get(
@@ -565,13 +551,11 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
     ) -> OperationLedgerRecord | None:
         if tenant_id != self._tenant_id:
             return None
-        key = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, operation_id
-        )
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
         stored = await self._store.read(
             lambda transaction: transaction.get_operation(key)
         )
-        return None if stored is None else _decode_operation(stored)
+        return None if stored is None else _decode_operation(stored, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
 
     async def get_in_transaction(
         self,
@@ -581,11 +565,9 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         tenant_id: str,
     ) -> OperationLedgerRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        key = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, operation_id
-        )
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
         stored = await transaction.get_operation(key)
-        return None if stored is None else _decode_operation(stored)
+        return None if stored is None else _decode_operation(stored, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
 
     async def compare_and_swap(
         self,
@@ -598,9 +580,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
-        key = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, operation_id
-        )
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
 
         async def mutate(transaction: StateTransaction) -> OperationLedgerRecord:
             current = await transaction.get_operation(key)
@@ -617,7 +597,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if not operation_cas_immutable_matches(
-                _decode_operation(current), next_record
+                _decode_operation(current, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain), next_record
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             candidate = _stored_from_operation(next_record, current)
@@ -641,7 +621,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
     ) -> tuple[OperationLedgerRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -651,7 +631,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         values = await self._store.read(
             lambda transaction: transaction.list_operations(
                 OperationQuery(
-                    stream_digest=stream,
+                    stream_key=stream,
                     states=(
                         frozenset({"PENDING", "RUNNING"})
                         if states is None
@@ -662,7 +642,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
                 )
             )
         )
-        return tuple(_decode_operation(value) for value in values)
+        return tuple(_decode_operation(value, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain) for value in values)
 
     async def compact_terminal(
         self,
@@ -671,10 +651,10 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         *,
         tenant_id: str,
         through_sequence: int,
-    ) -> str:
+    ) -> None:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -683,43 +663,30 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         )
         async def compact(
             transaction: StateTransaction,
-        ) -> tuple[StoredOperation, ...]:
+        ) -> None:
             query = OperationQuery(
-                stream_digest=stream,
+                stream_key=stream,
                 states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
                 through_sequence=through_sequence,
                 compactable=True,
             )
             candidates = await transaction.list_operations(query)
             if len(candidates) <= 1:
-                return ()
+                return
             anchor = max(
                 candidates,
-                key=lambda value: (value.sequence, value.key_digest),
+                key=lambda value: (value.sequence, value.key),
             )
-            return await transaction.delete_operations(
+            await transaction.delete_operations(
                 OperationQuery(
-                    stream_digest=stream,
+                    stream_key=stream,
                     states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
                     through_sequence=anchor.sequence - 1,
                     compactable=True,
                 )
             )
 
-        values = await self._store.mutate(compact)
-        return hashlib.sha256(
-            canonical_json_bytes(
-                [
-                    {
-                        "key": value.key_digest.hex(),
-                        "stream": value.stream_digest.hex(),
-                        "sequence": value.sequence,
-                        "data": dict(value.data),
-                    }
-                    for value in values
-                ]
-            )
-        ).hexdigest()
+        await self._store.mutate(compact)
 
 
 def project_record(
@@ -728,13 +695,14 @@ def project_record(
     tenant_id: str,
     domain: PersistenceDomain,
     kind: str,
-    identity: object,
+    identity: Sequence[str],
     value: object,
     scope: bytes | None = None,
     parent: bytes | None = None,
     state: str | None = None,
-    sort_key: str | None = None,
+    sort_key: bytes | None = None,
     storage_revision: int = 0,
+    encoded: JsonValue | None = None,
 ) -> StoredRecord:
     """Project one logical value into its canonical physical Runtime record."""
     if scope is None:
@@ -756,20 +724,34 @@ def project_record(
     if isinstance(value, ExecutionRecord):
         state = _record_state(value)
     lease_owner, lease_fence, lease_expires_at = _record_lease(value)
+    key = record_key(namespace, tenant_id, domain.value, kind, identity)
     return StoredRecord(
-        record_key_digest(namespace, tenant_id, domain.value, kind, identity),
+        key,
         scope,
         parent,
         kind,
-        sortable_identity(identity) if sort_key is None else sort_key,
+        key if sort_key is None else sort_key,
         state,
         storage_revision,
         lease_owner,
         lease_fence,
         lease_expires_at,
-        _domain_data(value),
-        subject_digest=subject_digest(value.tool_call_id) if isinstance(value, ToolOperationRecord) else None,
+        _domain_data(value) if encoded is None else encode_envelope({"type": wire_type_id(value), "payload": encoded}),
+        subject_id=value.tool_call_id if isinstance(value, ToolOperationRecord) else None,
     )
+
+
+def _memory_scope_key(
+    namespace: str,
+    tenant_id: str,
+    memory_scope: str,
+    transient_execution_id: str | None,
+) -> bytes:
+    """Keep Memory's query scope compact so its index can retain full paths."""
+    return hashlib.sha256(scope_key(
+        namespace, tenant_id, PersistenceDomain.MEMORY.value, "memory", "memory_scope",
+        MemoryRecord.scope_components(memory_scope, transient_execution_id),
+    )).digest()
 
 
 def _default_record_scope(
@@ -780,27 +762,27 @@ def _default_record_scope(
     value: object,
 ) -> bytes | None:
     if isinstance(value, EvaluationReport):
-        return scope_digest(namespace, tenant_id, domain.value, kind, "experiment", value.experiment_id)
+        return scope_key(namespace, tenant_id, domain.value, kind, "experiment", (value.experiment_id,))
     if isinstance(value, SessionRecord):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "owner",
-            value.owner_principal_id,
+            (value.owner_principal_id,),
         )
     if isinstance(value, ExecutionRecord) and value.session_id is not None:
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "session",
-            value.session_id,
+            (value.session_id,),
         )
     if isinstance(value, IdempotencyRecord):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
@@ -812,31 +794,24 @@ def _default_record_scope(
         value,
         (ArtifactRecord, ApprovalRecord, ExternalCallRecord),
     ):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "execution",
-            value.execution_id,
+            (value.execution_id,),
         )
     if isinstance(value, MemoryRecord):
-        return scope_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            kind,
-            "memory_scope",
-            value.memory_scope_digest,
-        )
+        return _memory_scope_key(namespace, tenant_id, value.memory_scope, value.transient_execution_id)
     if isinstance(value, ToolOperationRecord):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "agent_run",
-            value.agent_run_id,
+            (value.agent_run_id,),
         )
     return None
 
@@ -849,70 +824,70 @@ def _default_record_parent(
     value: object,
 ) -> bytes | None:
     if isinstance(value, TaskNodeView):
-        return parent_digest(
+        return parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "graph",
-            value.graph_id,
+            (value.graph_id,),
         )
     if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
-        return parent_digest(
+        return parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "execution",
-            value.parent_execution_id,
+            (value.parent_execution_id,),
         )
     if isinstance(value, ToolOperationRecord):
-        return parent_digest(
+        return parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "execution",
-            value.execution_id,
+            (value.execution_id,),
         )
     return None
 
 
-def _canonical_record_identity(kind: str, value: object) -> object:
+def _canonical_record_identity(kind: str, value: object) -> tuple[str, ...]:
     if isinstance(value, IdempotencyRecord):
-        return [value.scope, value.idempotency_key_digest]
+        return (value.scope, value.idempotency_key)
     if isinstance(value, TaskGraphView):
-        return value.graph_id
+        return (value.graph_id,)
     if isinstance(value, TaskNodeView):
-        return [value.graph_id, value.node_id]
+        return (value.graph_id, value.node_id)
     if isinstance(value, ToolOperationRecord):
-        return value.tool_operation_id
+        return (value.tool_operation_id,)
     if isinstance(value, SessionRecord):
-        return value.session_id
+        return (value.session_id,)
     if isinstance(value, ExecutionRecord):
-        return value.execution_id
+        return (value.execution_id,)
     if isinstance(value, MemoryRecord):
-        return value.memory_id
+        return (value.memory_id,)
     if isinstance(value, ArtifactRecord):
-        return value.artifact_id
+        return (value.artifact_id,)
     if isinstance(value, EvaluationRecord):
-        return value.experiment_id
+        return (value.experiment_id,)
     if isinstance(value, (EvaluationTombstone, EvaluationCleanupRecord)):
-        return value.evaluation_id
+        return (value.evaluation_id,)
     if isinstance(value, EvaluationContentTombstone):
-        return [value.kind, value.identity]
+        return (value.kind, *value.record_identity)
     if isinstance(value, EvaluationDatasetRecord):
-        return [value.contract.ref.id, value.contract.ref.revision]
+        return (value.contract.ref.id, str(value.contract.ref.revision))
     if isinstance(value, EvaluationCaseRecord):
-        return [value.contract.ref.dataset_id, value.contract.ref.case_id, value.contract.ref.revision]
+        return (value.contract.ref.dataset_id, value.contract.ref.case_id, str(value.contract.ref.revision))
     if isinstance(value, EvidenceBundle):
-        return value.ref.evidence_id
+        return (value.ref.evidence_id,)
     if isinstance(value, (EvaluationReport, ComparisonReport)):
-        return value.report_id
+        return (value.report_id,)
     if isinstance(value, ApprovalRecord):
-        return value.approval_id
+        return (value.approval_id,)
     if isinstance(value, ExternalCallRecord):
-        return value.call_id
+        return (value.call_id,)
     raise TypeError(f"unsupported record kind: {kind}")
 
 
@@ -1080,20 +1055,15 @@ async def _reserve_operation(
     repository: _RepositoryBase,
     value: OperationLedgerInput,
 ) -> tuple[OperationLedgerRecord | None, bool]:
-    key = operation_key(
-        repository._namespace,
-        repository._tenant_id,
-        repository._domain.value,
-        value.operation_id,
-    )
+    key = operation_key(repository._namespace, repository._tenant_id, repository._domain.value, value.operation_id)
     existing = await transaction.get_operation(key)
     if existing is not None:
-        current = _decode_operation(existing)
+        current = _decode_operation(existing, namespace=repository._namespace, tenant_id=repository._tenant_id, domain=repository._domain)
         if _operation_matches(current, value):
             return current, True
         raise AIError(ErrorCode.STORAGE_CONFLICT)
     sequence = await transaction.next_sequence(
-        sequence_key(
+        stream_key(
             repository._namespace,
             repository._tenant_id,
             repository._domain.value,
@@ -1110,16 +1080,11 @@ async def _insert_operation(
     value: OperationLedgerInput,
     sequence: int,
 ) -> None:
-    key = operation_key(
-        repository._namespace,
-        repository._tenant_id,
-        repository._domain.value,
-        value.operation_id,
-    )
+    key = operation_key(repository._namespace, repository._tenant_id, repository._domain.value, value.operation_id)
     await transaction.insert_operation(
         StoredOperation(
             key,
-            stream_digest(
+            stream_key(
                 repository._namespace,
                 repository._tenant_id,
                 repository._domain.value,
@@ -1134,8 +1099,26 @@ async def _insert_operation(
     )
 
 
-def _decode_operation(value: StoredOperation) -> OperationLedgerRecord:
+def _decode_operation(
+    value: StoredOperation,
+    *,
+    namespace: str,
+    tenant_id: str,
+    domain: PersistenceDomain,
+) -> OperationLedgerRecord:
     candidate = _decode_enveloped_domain(value.data, OperationLedgerInput)
+    try:
+        expected_key = operation_key(namespace, tenant_id, domain.value, candidate.operation_id)
+        expected_stream = stream_key(
+            namespace, tenant_id, domain.value, "operation",
+            (candidate.resource_kind.value, candidate.resource_id),
+        )
+    except (AIError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if (candidate.tenant_id != tenant_id or value.key != expected_key
+            or value.stream_key != expected_stream or value.state != candidate.status.value
+            or value.compactable != candidate.compactable):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _operation_record(candidate, value.sequence)  # type: ignore[arg-type]
 
 
@@ -1206,31 +1189,26 @@ def _operation_matches(
 
 
 def _record_cursor(record: StoredRecord) -> str:
-    payload = {
-        "sort_key": record.sort_key,
-        "key_digest": record.key_digest.hex(),
-    }
-    return base64.urlsafe_b64encode(canonical_json_bytes(payload)).decode("ascii")
+    sort_key = validate_sort_key(record.sort_key)
+    key = validate_record_key(record.key)
+    payload = len(key).to_bytes(2, "big") + key + sort_key
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
 
 
-def _decode_record_cursor(cursor: str | None) -> tuple[str | None, bytes | None]:
+def _decode_record_cursor(cursor: str | None) -> tuple[bytes | None, bytes | None]:
     if cursor is None:
         return None, None
     try:
-        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
-        value = json.loads(raw.decode("utf-8"))
-        sort_key = str(value["sort_key"])
-        key_digest = bytes.fromhex(str(value["key_digest"]))
-        if not sort_key or len(key_digest) != 32:
+        if not isinstance(cursor, str) or not cursor:
+            raise ValueError("cursor length")
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        key_size = int.from_bytes(raw[:2], "big")
+        if not 1 <= key_size <= RECORD_KEY_MAX_BYTES or len(raw) <= 2 + key_size:
             raise ValueError("cursor identity")
-        return sort_key, key_digest
-    except (
-        TypeError,
-        ValueError,
-        KeyError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as error:
+        if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != cursor:
+            raise ValueError("cursor encoding")
+        return validate_sort_key(raw[2 + key_size:]), validate_record_key(raw[2:2 + key_size])
+    except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
@@ -1241,6 +1219,7 @@ decode_operation = _decode_operation
 decode_record_cursor = _decode_record_cursor
 canonical_record_identity = _canonical_record_identity
 domain_data = _domain_data
+memory_scope_key = _memory_scope_key
 insert_operation = _insert_operation
 projected_record = _projected_record
 record_cursor = _record_cursor
@@ -1265,6 +1244,7 @@ __all__ = [
     "decode_record_cursor",
     "canonical_record_identity",
     "domain_data",
+    "memory_scope_key",
     "insert_operation",
     "projected_record",
     "record_cursor",

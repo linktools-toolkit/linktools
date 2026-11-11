@@ -17,8 +17,9 @@ from linktools.ai.storage import SQLiteDialect
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("_server", ("mysql",), indirect=True)
+@pytest.mark.parametrize("cross_namespace", (False, True))
 async def test_mysql_secondary_unique_conflict_cannot_commit_observation_replacement(
-    server_metrics: tuple[Metrics, AsyncEngine, AsyncEngine],
+    server_metrics: tuple[Metrics, AsyncEngine, AsyncEngine], cross_namespace: bool,
 ) -> None:
     from sqlalchemy import text
 
@@ -34,15 +35,22 @@ async def test_mysql_secondary_unique_conflict_cannot_commit_observation_replace
         error_code=None, correlation={}, dimensions={}, measurements=(),
     )
     await metrics.record_observations((observation,))
-    with pytest.raises(AIError, match="STORAGE_CONFLICT"):
-        await metrics.record_observations((replace(observation, observation_id="different"),))
+    target = Metrics.sql(engine, namespace="other") if cross_namespace else metrics
+    conflicting = observation if cross_namespace else replace(observation, observation_id="different")
+    new = replace(observation, observation_id="new", kind="app.other")
+    with pytest.raises(AIError) as caught:
+        await target.record_observations((new, conflicting))
+    assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+    assert "reason" not in caught.value.safe_details
     assert await metrics.get_observation("existing") == observation
-    assert await metrics.get_observation("different") is None
+    assert await target.get_observation(conflicting.observation_id) is None
+    assert await target.get_observation("new") is None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cross_namespace", (False, True))
 async def test_secondary_conflict_readback_preserves_original_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cross_namespace: bool,
 ) -> None:
     from sqlalchemy import text
     from sqlalchemy.dialects.sqlite import insert
@@ -71,11 +79,15 @@ async def test_secondary_conflict_readback_preserves_original_row(
         async with engine.begin() as connection:
             await connection.execute(text("CREATE UNIQUE INDEX uk_kind ON ai_metric_observations (kind)"))
         monkeypatch.setattr(SQLiteDialect, "insert_ignore_conflict_many", insert_with_secondary_conflict)
+        target = Metrics.sql(engine, namespace="other") if cross_namespace else metrics
+        conflicting = observation if cross_namespace else replace(observation, observation_id="different")
+        new = replace(observation, observation_id="new", kind="app.other")
         with pytest.raises(AIError) as caught:
-            await metrics.record_observations((replace(observation, observation_id="different"),))
+            await target.record_observations((new, conflicting))
         assert caught.value.code is ErrorCode.STORAGE_CONFLICT
         assert "reason" not in caught.value.safe_details
         assert await metrics.get_observation("existing") == observation
-        assert await metrics.get_observation("different") is None
+        assert await target.get_observation(conflicting.observation_id) is None
+        assert await target.get_observation("new") is None
     finally:
         await engine.dispose()

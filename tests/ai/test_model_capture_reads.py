@@ -84,7 +84,7 @@ async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
         await _seed(state)
         repository = state.execution.executions
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
-        get, capture = repository.get, archive.capture_history
+        get, capture = repository.get_view, archive.capture_history
         scopes = []
         authorized = False
 
@@ -109,7 +109,7 @@ async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
         def unexpected_object(*args, **kwargs):
             raise AssertionError("cutoff capture must not read object bodies")
 
-        monkeypatch.setattr(repository, "get", tracked_get)
+        monkeypatch.setattr(repository, "get_view", tracked_get)
         monkeypatch.setattr(archive, "capture_history", tracked_capture)
         monkeypatch.setattr(archive, "resolve_model_interactions", unexpected_body)
         monkeypatch.setattr(archive, "read_pending_message", unexpected_body)
@@ -344,7 +344,8 @@ async def test_capture_rejects_failed_authority_before_reading_model_metadata(
     try:
         await _seed(state)
         repository = state.execution.executions
-        get = repository.get
+        get = repository.get_view
+        header = repository.get_header
         authorized = False
         class Authorization:
             async def authorize(self, principal, action, resource):
@@ -358,7 +359,10 @@ async def test_capture_rejects_failed_authority_before_reading_model_metadata(
             raise AssertionError("model metadata must not be read after failed authority")
         class Reader:
             capture_model_interaction_cutoffs = unexpected
-        monkeypatch.setattr(repository, "get", get_after_auth)
+        monkeypatch.setattr(repository, "get_view", get_after_auth)
+        async def header_after_auth(*args, **kwargs):
+            return None if authorized else await header(*args, **kwargs)
+        monkeypatch.setattr(repository, "get_header", header_after_auth)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         monkeypatch.setattr(archive, "capture_history", unexpected)
         service = _service(state, reader=Reader() if custom_reader else None, authorization=Authorization())
@@ -383,9 +387,9 @@ async def test_capture_does_not_scope_custom_owner_io(custom_owner: str) -> None
             async def get_header(self, execution_id, *, tenant_id):
                 assert active_state_scope() is None
                 return await repository.get_header(execution_id, tenant_id=tenant_id)
-            async def get(self, execution_id, *, tenant_id):
+            async def get_view(self, execution_id, *, tenant_id):
                 assert active_state_scope() is None
-                return await repository.get(execution_id, tenant_id=tenant_id)
+                return await repository.get_view(execution_id, tenant_id=tenant_id)
         class Archive:
             async def capture_history(self, run_ids):
                 assert active_state_scope() is None
@@ -421,12 +425,12 @@ async def test_capture_preserves_custom_repository_reader_authority(same_reposit
                 self.authorizing = authorizing
             async def get_header(self, execution_id, *, tenant_id):
                 return await repository.get_header(execution_id, tenant_id=tenant_id)
-            async def get(self, execution_id, *, tenant_id):
+            async def get_view(self, execution_id, *, tenant_id):
                 assert active_state_scope() is None
-                record = await repository.get(execution_id, tenant_id=tenant_id)
+                record = await repository.get_view(execution_id, tenant_id=tenant_id)
                 if self.authorizing:
                     self.authorizing = False
-                    return replace(record, agent_run_seq=1)
+                    return record[0], replace(record[1], agent_run_seq=1)
                 return record
         authorizing = Repository(True)
         reading = authorizing if same_repository else Repository(False)
@@ -459,21 +463,21 @@ async def test_model_reads_keep_requested_execution_as_lookup_scope(
         ))
         await state.run_store.flush_execution_projection(other_run.agent_run_id, execution_id="other")
         await _publish(state, execution_id="other", request_sequence=2)
-        get = repository.get
+        get = repository.get_view
         async def alias_shaped_record(execution_id, *, tenant_id):
             record = await get(execution_id, tenant_id=tenant_id)
-            return None if record is None else replace(record, execution_id="other")
+            return None if record is None else (record[0], replace(record[1], execution_id="other"))
         class Repository:
             async def get_header(self, execution_id, *, tenant_id):
                 return await repository.get_header(execution_id, tenant_id=tenant_id)
-            async def get(self, execution_id, *, tenant_id):
+            async def get_view(self, execution_id, *, tenant_id):
                 return await alias_shaped_record(execution_id, tenant_id=tenant_id)
         class Authorization:
             async def authorize(self, principal, action, resource):
                 assert resource.id == "execution"
         selected = Repository() if custom_repository else repository
         if not custom_repository:
-            monkeypatch.setattr(repository, "get", alias_shaped_record)
+            monkeypatch.setattr(repository, "get_view", alias_shaped_record)
         reader = _reader(state, executions=selected)
         service = _service(state, reader=reader, executions=selected, authorization=Authorization())
         if operation == "metadata":
@@ -507,7 +511,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
         await _seed(state)
         repository = state.execution.executions
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
-        get, rows = repository.get, archive.read_model_interactions_with_run
+        get, rows = repository.get_view, archive.read_model_interactions_with_run
         scopes = []
         authorized = False
         class Authorization:
@@ -526,7 +530,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
             raise AssertionError("metadata rows must not resolve request or response bodies")
         def unexpected_object(*args, **kwargs):
             raise AssertionError("metadata rows must not open object bodies")
-        monkeypatch.setattr(repository, "get", tracked_get)
+        monkeypatch.setattr(repository, "get_view", tracked_get)
         monkeypatch.setattr(archive, "read_model_interactions_with_run", tracked_rows)
         monkeypatch.setattr(archive, "resolve_model_interactions", unexpected_body)
         monkeypatch.setattr(state.object_store(PersistenceDomain.TRACE), "open", unexpected_object)
@@ -623,12 +627,12 @@ async def test_metadata_preserves_custom_repository_reader_authority(same_reposi
                 self.authorizing = authorizing
             async def get_header(self, execution_id, *, tenant_id):
                 return await repository.get_header(execution_id, tenant_id=tenant_id)
-            async def get(self, execution_id, *, tenant_id):
+            async def get_view(self, execution_id, *, tenant_id):
                 assert active_state_scope() is None
-                record = await repository.get(execution_id, tenant_id=tenant_id)
+                record = await repository.get_view(execution_id, tenant_id=tenant_id)
                 if self.authorizing:
                     self.authorizing = False
-                    return replace(record, agent_run_seq=1)
+                    return record[0], replace(record[1], agent_run_seq=1)
                 return record
         authorizing = Repository(True)
         reading = authorizing if same_repository else Repository(False)
@@ -773,7 +777,8 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
     try:
         await _seed(state)
         repository = state.execution.executions
-        get = repository.get
+        get = repository.get_view
+        header = repository.get_header
         authorized = False
         class Authorization:
             async def authorize(self, principal, action, resource):
@@ -784,11 +789,14 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
         async def get_after_auth(*args, **kwargs):
             return None if authorized and phase == "postauth_missing" else await get(*args, **kwargs)
         class MissingReaderRepository:
-            async def get(self, execution_id, *, tenant_id):
+            async def get_view(self, execution_id, *, tenant_id):
                 return None
         async def unexpected(*args, **kwargs):
             raise AssertionError("model rows must not be read before authority and request validation")
-        monkeypatch.setattr(repository, "get", get_after_auth)
+        monkeypatch.setattr(repository, "get_view", get_after_auth)
+        async def header_after_auth(*args, **kwargs):
+            return None if authorized and phase == "postauth_missing" else await header(*args, **kwargs)
+        monkeypatch.setattr(repository, "get_header", header_after_auth)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         monkeypatch.setattr(archive, "get_agent_run", unexpected)
         monkeypatch.setattr(archive, "read_model_interactions_with_run", unexpected)
@@ -839,7 +847,7 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
         assert combined_selects < separate_selects
         print("run/page SELECT separate, batched:", separate_selects, combined_selects)
         # A row beyond the durable sequence boundary must not become visible.
-        await archive.state_store.mutate(lambda transaction: transaction.delete_sequence(archive._sequence(run.agent_run_id, "interaction")))
+        await archive.state_store.mutate(lambda transaction: transaction.delete_sequence(archive._stream(run.agent_run_id, "interaction")))
         with pytest.raises(AIError) as raised:
             await _metadata(_service(state))
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -868,7 +876,6 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
     from .test_model_interaction_lifecycle_paging import _terminal
     from linktools.ai.persistence._step_archive import _encode_step
     from linktools.ai.persistence.state import StoredFact
-    from linktools.ai.core import canonical_sha256
 
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "missing-record-metadata.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
@@ -880,12 +887,12 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
         fact = StoredFact(
             archive._stream(run.agent_run_id, "interaction"), 1,
             archive._agent_run_key(run.agent_run_id), "model_interaction",
-            bytes.fromhex(canonical_sha256({"agent_run_id": terminal.agent_run_id, "model_request_seq": 1})), terminal.status, _encode_step(terminal),
+            "request-1", terminal.status, _encode_step(terminal),
         )
         async def seed(transaction):
-            owner = await transaction.get_record(fact.owner_key_digest)
+            owner = await transaction.get_record(fact.owner_key)
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
             await transaction.delete_record(archive._interaction_key(run.agent_run_id, 1))
             await transaction.insert_fact(fact)
         await archive.state_store.mutate(seed)
@@ -896,7 +903,7 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
         await state.close()
 
 
-async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
+async def test_model_reads_preserve_custom_archive_overrides() -> None:
     from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
 
     state = Persistence(PersistenceStorage.in_memory())
@@ -914,6 +921,9 @@ async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
                 return await super().list_model_interactions(**kwargs)
             async def read_model_interactions_with_run(self, **kwargs):
                 raise AssertionError("custom archive must retain its independent operations")
+            async def resolve_model_interactions(self, interactions, **kwargs):
+                calls.append("resolve")
+                return await super().resolve_model_interactions(interactions, **kwargs)
         custom = CustomArchive(
             archive.state_store, object_store=None, namespace=_NAMESPACE,
             tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
@@ -921,5 +931,16 @@ async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
         page = await _metadata(_service(state, reader=_reader(state, store=custom)))
         assert [item.model_request_seq for item in page] == [1]
         assert calls == ["run", "interactions"]
+        service = _service(state, reader=_reader(state, store=custom))
+        calls.clear()
+        page = await service.model_interactions("execution", principal=_PRINCIPAL, include_content=True)
+        assert len(page.items) == 1 and page.items[0].content_included
+        assert "interactions" in calls and "resolve" in calls
+        calls.clear()
+        items = await service.read_model_interactions(
+            "execution", principal=_PRINCIPAL, identities=((1, 1),), include_content=True,
+        )
+        assert len(items) == 1 and items[0].content_included
+        assert calls == ["run", "interactions", "resolve"]
     finally:
         await state.close()

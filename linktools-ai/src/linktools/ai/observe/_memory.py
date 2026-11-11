@@ -12,7 +12,6 @@ from ..core import Page
 from ..errors import AIError, ErrorCode
 from ._codec import (
     same_definition_contract,
-    observation_digest,
     observation_payload_digest,
 )
 from ._model import MetricDefinition, Observation
@@ -34,7 +33,7 @@ class InMemoryMetricStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._definitions: dict[tuple[str, str, int], MetricDefinition] = {}
-        self._observations: dict[str, _ObservationRecord] = {}
+        self._observations: dict[tuple[str, str], _ObservationRecord] = {}
 
     async def put_definition(
         self,
@@ -80,9 +79,9 @@ class InMemoryMetricStore:
         namespace: str,
         observations: tuple[Observation, ...],
     ) -> None:
-        pending: dict[str, _ObservationRecord] = {}
+        pending: dict[tuple[str, str], _ObservationRecord] = {}
         for observation in observations:
-            identity = observation_digest(namespace, observation.observation_id)
+            identity = (namespace, observation.observation_id)
             payload = observation_payload_digest(namespace, observation)
             candidate = _ObservationRecord(
                 namespace, observation.observation_id, payload,
@@ -115,7 +114,7 @@ class InMemoryMetricStore:
         namespace: str,
         observation_id: str,
     ) -> Observation | None:
-        identity = observation_digest(namespace, observation_id)
+        identity = (namespace, observation_id)
         async with self._lock:
             current = self._observations.get(identity)
             if current is None:
@@ -150,7 +149,7 @@ class InMemoryMetricStore:
         values.sort(
             key=lambda item: (
                 item.occurred_at,
-                observation_digest(namespace, item.observation_id),
+                item.observation_id,
             )
         )
         if after is not None:
@@ -159,7 +158,7 @@ class InMemoryMetricStore:
                 for item in values
                 if (
                     item.occurred_at,
-                    observation_digest(namespace, item.observation_id),
+                    item.observation_id,
                 )
                 > after
             ]
@@ -171,7 +170,7 @@ class InMemoryMetricStore:
             last = items[-1]
             next_cursor = _scan_cursor(
                 last.occurred_at,
-                observation_digest(namespace, last.observation_id),
+                last.observation_id,
             )
         return Page(items, next_cursor)
 

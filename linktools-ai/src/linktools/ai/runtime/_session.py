@@ -616,7 +616,6 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             return None
         pending = await self._runtime_pending_session_execution(header.id, tenant_id=header.tenant_id)
         if (pending is None or pending.session_id != header.id
-                or pending.principal_id != header.owner_principal_id
                 or pending.parent_execution_id is not None
                 or pending.result is not None
                 or pending.status not in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.CANCELLING}):

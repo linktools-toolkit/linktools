@@ -15,7 +15,7 @@ from ..core import (
     PersistenceDomain,
 )
 from ..errors import AIError, ErrorCode
-from ..execution import ExecutionDriver, ExecutionRecord, IdempotencyRecord, ResultRecord
+from ..execution import ExecutionDriver, ExecutionRecord, ExecutionView, IdempotencyRecord, ResultRecord
 from ..storage import ObjectRef, ObjectStore
 from .contracts import ExecutionRepositories
 from ._execution_repositories import ExecutionRepositoryImpl
@@ -75,6 +75,21 @@ class StoredExecutionManagementAdapter:
     async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self.read_source_execution(execution_id, tenant_id=tenant_id)
 
+    async def read_view(
+        self, execution_id: str, *, tenant_id: str, observed: bool = False,
+    ) -> tuple[ResourceRef, ExecutionView] | None:
+        return await self.read_source_view(execution_id, tenant_id=tenant_id)
+
+    async def read_source_view(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> tuple[ResourceRef, ExecutionView] | None:
+        repository = self._repositories.executions
+        if type(repository) is ExecutionRepositoryImpl:
+            return await repository.get_view_fresh(execution_id, tenant_id=tenant_id)
+        return await repository.state_store.read(
+            lambda _transaction: repository.get_view(execution_id, tenant_id=tenant_id)
+        )
+
     async def read_source_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
         repository = self._repositories.executions
         if type(repository) is ExecutionRepositoryImpl:
@@ -106,8 +121,8 @@ class StoredExecutionManagementAdapter:
                               *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
         return await self._repositories.idempotency.list_by_resource(resource_kind, resource_id, tenant_id=tenant_id)
 
-    async def get_idempotency(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None:
-        return await self._repositories.idempotency.get(scope, key_digest, tenant_id=tenant_id)
+    async def get_idempotency(self, scope: str, idempotency_key: str, *, tenant_id: str) -> IdempotencyRecord | None:
+        return await self._repositories.idempotency.get(scope, idempotency_key, tenant_id=tenant_id)
 
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None:
         return await self._repositories.executions.get_result(execution_id, tenant_id=tenant_id)

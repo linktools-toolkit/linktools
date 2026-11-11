@@ -11,7 +11,7 @@ import pytest
 from pydantic_ai.messages import StructuredContent, TextContent
 
 from linktools.ai.core import (ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, Principal, PromptLimits, ResourceKind, WorkspaceFileInput,
-                               canonical_json_bytes, idempotency_key_digest)
+                               canonical_json_bytes)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionRecord, ExecutionRequest, ExecutionStartClaim, IdempotencyRecord, StoredUserInput
 from linktools.ai.inputs import ExecutionInputMaterializer, encode_user_content
@@ -49,7 +49,7 @@ class _ClaimingLauncher(_Launcher):
     ) -> ExecutionRecord:
         return await self._repository.claim_start(ExecutionStartClaim(
             execution.execution_id, execution.revision, execution.event_seq,
-            identity.scope, identity.idempotency_key_digest, identity.request_digest,
+            identity.scope, identity.idempotency_key, identity.request_digest,
             execution.created_at, identity.request_identity_version,
         ))
 
@@ -70,7 +70,7 @@ async def test_new_agent_requests_bind_complete_structured_content(changed: Stru
                 await action(binding.binding_digest, replace(request, user_prompt=(changed,)))
             assert caught.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         identity = await state.execution.idempotency.get(
-            "execution.run", idempotency_key_digest("same"), tenant_id="tenant",
+            "execution.run", "same", tenant_id="tenant",
         )
         assert identity.request_identity_version == 2
         assert backend.calls == 1
@@ -100,14 +100,14 @@ async def test_old_agent_identity_replays_without_rewriting_owner(storage_kind: 
 
         first = await start(old_request)
         owner = await state.execution.idempotency.get(
-            scope, idempotency_key_digest("same"), tenant_id="tenant",
+            scope, "same", tenant_id="tenant",
         )
         wire = encode_domain(owner)
         del wire["fields"]["request_identity_version"]
         legacy = decode_domain(wire, IdempotencyRecord)
         assert legacy.request_identity_version == 1
         await state.execution.idempotency.compare_and_swap(
-            legacy.scope, legacy.idempotency_key_digest, tenant_id="tenant",
+            legacy.scope, legacy.idempotency_key, tenant_id="tenant",
             expected_status=owner.status, next_record=legacy,
         )
         request = replace(old_request, user_prompt=(_structured(),))
@@ -115,7 +115,7 @@ async def test_old_agent_identity_replays_without_rewriting_owner(storage_kind: 
         if not session:
             assert await service.resolve_existing(binding.binding_digest, request) == first
         assert await state.execution.idempotency.get(
-            legacy.scope, legacy.idempotency_key_digest, tenant_id="tenant",
+            legacy.scope, legacy.idempotency_key, tenant_id="tenant",
         ) == legacy
         assert backend.calls == 1
         with pytest.raises(AIError) as caught:
@@ -155,7 +155,7 @@ async def test_agent_rechecks_concurrent_legacy_owner_using_original_request(mon
         result = await service.start(binding.binding_digest, request)
         assert result.execution_id == "legacy-winner"
         assert backend.calls == 1
-        owner = await state.execution.idempotency.get("execution.run", idempotency_key_digest("same"), tenant_id="tenant")
+        owner = await state.execution.idempotency.get("execution.run", "same", tenant_id="tenant")
         assert owner.request_identity_version == 1
 
 
@@ -240,7 +240,7 @@ async def test_legacy_failure_receipt_selects_identity_without_execution_payload
         old_request = replace(request, user_prompt=(TextContent("fixed rendering"),))
         now = datetime.now(timezone.utc)
         owner = IdempotencyRecord(
-            "execution.run", idempotency_key_digest("same"), _digest(old_request, binding.binding_digest),
+            "execution.run", "same", _digest(old_request, binding.binding_digest),
             ResourceKind.EXECUTION, "missing-execution", IdempotencyStatus.FAILED, None,
             ErrorCode.EXECUTION_START_PERSISTENCE_FAILED.value, now, now,
         )

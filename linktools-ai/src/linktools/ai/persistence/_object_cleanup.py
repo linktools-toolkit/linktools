@@ -3,13 +3,13 @@
 """Offline deletion of unreferenced Runtime-owned object candidates."""
 
 import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ..core import JsonValue, validate_page_limit
 from ..errors import AIError, ErrorCode
+from ..model.attachments import read_attachment_payload
 from ..storage import (
     ObjectRef,
     ObjectStat,
@@ -23,15 +23,15 @@ from ._archive_closure import (
     iter_native_message_roots, require_known_retention, validate_native_message_content,
 )
 from ._payload import decode_payload_bytes
+from ._execution_content import expand_retained_execution_content
 from ._sql import SqlStateStorageGroup
 from ._step_schema import build_step_sql_metadata
 from ._step_maintenance import inspect_native_message_tables
 from ._capability_marker import has_capability_partition_marker
 from .codec import iter_runtime_object_dependencies, iter_runtime_object_refs
 from .captures import (
-    input_capture_expiry_key,
-    iter_input_capture_dependencies,
-    validate_input_capture_payload,
+    CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
+    capture_record_key, capture_record_scope, capture_record_value, expand_snapshot_capture, input_capture_expiry_key,
 )
 from ._plan import PersistenceDomain
 from ._snapshot import SnapshotExclusiveGuard
@@ -41,6 +41,7 @@ from .state import (
     RecordScanCursor,
     StateStorageGroup,
     StateStore,
+    StoredRecord,
 )
 
 if TYPE_CHECKING:
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
 
 
 ObjectCandidate = tuple[PersistenceDomain, ObjectRef]
-_MANIFEST_PREFIXES = ("v1/input-capture/", "v1/asset-snapshot/", "v1/task-graph-binding-capture/")
+_MANIFEST_PREFIXES = ("v1/asset-snapshot/",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,100 @@ class ObjectCleanupResult:
     missing: tuple[ObjectCandidate, ...] = ()
     retained: tuple[ObjectCandidate, ...] = ()
     blocked: tuple[ObjectCandidate, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureCleanupResult:
+    deleted: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    retained: tuple[str, ...] = ()
+    blocked: tuple[str, ...] = ()
+
+
+async def _capture_owners(partitions: Mapping[StateStore, PersistenceDomain]) -> tuple[list[tuple[StateStore, StoredRecord]], list[JsonValue]]:
+    records, values = [], []
+    for store in partitions:
+        cursor = None
+        while True:
+            page = await store.read(lambda tx: tx.scan_records_page(after=cursor, limit=1000))
+            for record in page:
+                require_known_retention(None if record.kind == "archive_content" else
+                                        capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
+                                        else record.data, state=record.state)
+                records.append((store, record))
+            if len(page) < 1000:
+                break
+            cursor = RecordScanCursor(page[-1].kind, page[-1].key)
+        cursor = None
+        while True:
+            page = await store.read(lambda tx: tx.scan_facts_page(after=cursor, limit=1000))
+            values.extend(dict(value.data) for value in page)
+            if len(page) < 1000:
+                break
+            cursor = FactScanCursor(page[-1].stream_key, page[-1].sequence)
+        cursor = None
+        while True:
+            page = await store.read(lambda tx: tx.scan_operations_page(after=cursor, limit=1000))
+            values.extend(dict(value.data) for value in page)
+            if len(page) < 1000:
+                break
+            cursor = OperationScanCursor(page[-1].key)
+    return records, values
+
+
+def _capture_closure(records: list[tuple[StateStore, StoredRecord]], values: list[JsonValue], *,
+                     namespace: str, tenant_id: str, excluded_keys: tuple[str, ...] = ()) -> frozenset[str]:
+    locations = {(store, capture_record_key(record)) for store, record in records if record.kind in CAPTURE_RECORD_KINDS}
+    live = {capture_record_key(record) for store, record in records if record.kind in CAPTURE_RECORD_KINDS
+            and (store, input_capture_expiry_key(capture_record_key(record))) not in locations}
+    markers = {capture_record_key(record) for _store, record in records
+               if record.kind == "input_capture" and capture_record_key(record).startswith("v1/input-capture/expired/")}
+    visible = tuple(record for _store, record in records if record.kind not in CAPTURE_RECORD_KINDS
+                    or capture_record_key(record) not in markers
+                    or capture_record_value(record)["capture_key"] not in live)
+    # Identical logical keys may live in isolated physical sources. A marker in
+    # one source cannot revoke the other source's independently retained body.
+    duplicates = {key for key in live if sum(capture_record_key(record) == key for _store, record in records
+                                               if record.kind in CAPTURE_RECORD_KINDS) > 1}
+    roots = (*values, *(capture_retention_value(record) for _store, record in records
+                       if record.kind in CAPTURE_RECORD_KINDS and capture_record_key(record) in duplicates))
+    return capture_state_closure(visible, values=roots, excluded_keys=excluded_keys,
+        namespace=namespace, tenant_id=tenant_id) | markers
+
+
+async def purge_unreferenced_captures(
+    candidates: tuple[str, ...], *, namespace: str, tenant_id: str,
+    stores: Mapping[PersistenceDomain, StateStore], exclusive: SnapshotExclusiveGuard,
+    capability_stores: Mapping[str, StateStore] | None = None, limit: int = 100,
+) -> CaptureCleanupResult:
+    """Delete capture metadata only after its routed state owners release it."""
+    validate_page_limit(limit)
+    selected = tuple(dict.fromkeys(candidates))
+    groups = {store.storage_group: domain for domain, store in stores.items()}
+    if capability_stores or any(not isinstance(group, StateStorageGroup) for group in groups):
+        return CaptureCleanupResult(blocked=selected)
+    async with exclusive.offline_exclusivity():
+        partitions = {store: domain for group, domain in groups.items() for store in await group.scan_stores()}
+        if any([await store.read(has_capability_partition_marker) for store in partitions]):
+            return CaptureCleanupResult(blocked=selected)
+        records, values = await _capture_owners(partitions)
+        closure = _capture_closure(records, values, excluded_keys=selected, namespace=namespace, tenant_id=tenant_id)
+        captures = {capture_record_key(record): (store, record) for store, record in records
+                    if record.kind in CAPTURE_RECORD_KINDS and capture_record_scope(record) == (namespace, tenant_id)}
+        deleted, missing, retained, blocked = [], [], [], []
+        for key in selected:
+            if key in closure:
+                retained.append(key)
+            elif len(deleted) + len(missing) >= limit:
+                blocked.append(key)
+            elif key not in captures:
+                missing.append(key)
+            else:
+                store, record = captures[key]
+                removed = await store.mutate(lambda tx: tx.delete_record(record.key,
+                    expected_storage_revision=record.storage_revision))
+                (deleted if removed else missing).append(key)
+        return CaptureCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
 
 
 async def purge_unreferenced_objects(
@@ -71,8 +166,6 @@ async def purge_unreferenced_objects(
     from ._step_store import SqlStepStore
 
     validate_page_limit(limit)
-    if not candidates:
-        return ObjectCleanupResult()
     groups = {store.storage_group for store in stores.values()}
     async with exclusive.offline_exclusivity():
         try:
@@ -111,8 +204,6 @@ async def _purge_unreferenced_objects(
 
     validate_page_limit(limit)
     selected = tuple(dict.fromkeys(candidates))
-    if not selected:
-        return ObjectCleanupResult()
     if any(not isinstance(store, ObjectStoreInspection) for store in (*object_stores.values(), *archive_objects.values())):
         return ObjectCleanupResult(blocked=selected)
     groups = {}
@@ -144,7 +235,7 @@ async def _purge_unreferenced_objects(
                 records.extend(page)
                 if len(page) < 1000:
                     break
-                cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
+                cursor = RecordScanCursor(page[-1].kind, page[-1].key)
             if scope in archive_closures:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             archive_closures[scope] = ArchiveClosure(scope, records)
@@ -169,9 +260,9 @@ async def _purge_unreferenced_objects(
         closure = NativeMessageClosure(sequences)
         for snapshot in snapshots:
             closure.mark_snapshot(snapshot)
-        bodies = {(row["store_digest"], row["sha256"]): row for row in messages}
+        bodies = {(row["store_key"], row["sha256"]): row for row in messages}
         opened = await group.open_archive()
-        sequence_ids = {(row["store_digest"], row["sha256"]) for row in sequences}
+        sequence_ids = {(row["store_key"], row["sha256"]) for row in sequences}
         native_groups[group] = closure, bodies, domain, None if opened is None else opened[0], sequence_ids
         if opened is not None:
             if opened[0] in native_closures:
@@ -191,8 +282,6 @@ async def _purge_unreferenced_objects(
 
     async def visit(reference: ObjectRef, domain: PersistenceDomain, *, root: bool = True) -> None:
         source = source_for(domain, reference)
-        if reference.key.startswith("v1/input-capture/") and await read_metadata(source, input_capture_expiry_key(reference.key)) is not None:
-            return
         if root:
             protected.add(reference.key)
         identity = id(source), reference.key, reference.digest, reference.size
@@ -201,35 +290,16 @@ async def _purge_unreferenced_objects(
         visited.add(identity)
         payload = await read_object(source, reference.key,
                                     expected_digest=reference.digest, expected_size=reference.size)
-        if reference.key.startswith("v1/input-capture/"):
-            try:
-                value = json.loads(payload)
-            except (ValueError, UnicodeDecodeError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if (isinstance(value, Mapping) and value.get("kind") == "agent"
-                    and isinstance(value.get("input_context"), Mapping)
-                    and value["input_context"].get("kind") == "execution-context"):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            capture_namespace = value.get("namespace", namespace) if isinstance(value, Mapping) else namespace
-            capture_tenant = value.get("tenant_id", tenant_id) if isinstance(value, Mapping) else tenant_id
-            validate_input_capture_payload(reference.key, value,
-                namespace=capture_namespace, tenant_id=capture_tenant)
-            if not reference.key.startswith(("v1/input-capture/result/", "v1/input-capture/expired/")):
-                await collect(value, PersistenceDomain.TASK,
-                              capture_namespace=capture_namespace, capture_tenant=capture_tenant, validate_scope=False, archive_owner=False)
-        else:
-            for nested_domain, nested in iter_runtime_object_dependencies(reference, payload, default_domain=domain):
-                await visit(nested, nested_domain)
+        for nested_domain, nested in iter_runtime_object_dependencies(reference, payload, default_domain=domain):
+            await visit(nested, nested_domain)
 
-    async def collect(value: JsonValue, domain: PersistenceDomain, *,
-                      capture_namespace: str = namespace, capture_tenant: str = tenant_id,
-                      validate_scope: bool = True, archive_owner: bool = True) -> None:
+    async def collect(value: JsonValue, domain: PersistenceDomain, *, archive_owner: bool = True) -> None:
         require_known_retention(value)
         for root in iter_native_message_roots(value) if archive_owner else ():
             closure = native_closures.get(root.group_id)
             if closure is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            closure.mark(root.store_digest, root.slices)
+            closure.mark(root.store_key, root.slices)
         for root in iter_archive_roots(value) if archive_owner else ():
             closure = archive_closures.get(root.scope_id)
             if closure is None:
@@ -242,27 +312,35 @@ async def _purge_unreferenced_objects(
             closure.mark_content(scope, content_scope, identity)
         for source_domain, reference in iter_runtime_object_refs(value, default_domain=domain):
             await visit(reference, source_domain)
-        for key, digest in iter_input_capture_dependencies(value,
-                namespace=capture_namespace, tenant_id=capture_tenant, validate_scope=validate_scope):
-            source = object_stores[PersistenceDomain.TASK]
-            if await read_metadata(source, input_capture_expiry_key(key)) is not None:
-                continue
-            stat = await read_metadata(source, key)
-            if stat is None or stat.digest != digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await visit(ObjectRef(source.store_id, key, digest, stat.size), PersistenceDomain.TASK)
+    capture_records, capture_values = await _capture_owners(partitions)
+    retained_captures = _capture_closure(capture_records, capture_values, namespace=namespace, tenant_id=tenant_id)
+    binding_contents = {key: content for closure in archive_closures.values()
+                        for key, content in closure.binding_contents().items()}
 
     for store, domain in partitions.items():
         record_cursor = None
         while True:
             records = await store.read(lambda tx: tx.scan_records_page(after=record_cursor, limit=1000))
             for record in records:
-                require_known_retention(record.data, state=record.state)
-                if record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
+                require_known_retention(None if record.kind == "archive_content" else
+                                        capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
+                                        else record.data, state=record.state)
+                if record.kind in CAPTURE_RECORD_KINDS:
+                    if capture_record_key(record) in retained_captures:
+                        scope_namespace, scope_tenant = capture_record_scope(record)
+                        semantic = expand_snapshot_capture(record, binding_contents,
+                            namespace=scope_namespace, tenant_id=scope_tenant)
+                        if record.kind == "task_graph_binding_capture":
+                            await collect(capture_retention_value(record), domain)
+                        await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
+                elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
                     await collect(dict(record.data), domain)
+                    if record.kind == "execution":
+                        semantic = expand_retained_execution_content(record, binding_contents)
+                        await collect(dict(semantic.data), domain, archive_owner=False)
             if len(records) < 1000:
                 break
-            record_cursor = RecordScanCursor(records[-1].kind, records[-1].key_digest)
+            record_cursor = RecordScanCursor(records[-1].kind, records[-1].key)
         fact_cursor = None
         while True:
             facts = await store.read(lambda tx: tx.scan_facts_page(after=fact_cursor, limit=1000))
@@ -271,7 +349,7 @@ async def _purge_unreferenced_objects(
                 await collect(dict(fact.data), domain)
             if len(facts) < 1000:
                 break
-            fact_cursor = FactScanCursor(facts[-1].stream_digest, facts[-1].sequence)
+            fact_cursor = FactScanCursor(facts[-1].stream_key, facts[-1].sequence)
         operation_cursor = None
         while True:
             operations = await store.read(lambda tx: tx.scan_operations_page(after=operation_cursor, limit=1000))
@@ -280,7 +358,7 @@ async def _purge_unreferenced_objects(
                 await collect(dict(operation.data), domain)
             if len(operations) < 1000:
                 break
-            operation_cursor = OperationScanCursor(operations[-1].key_digest)
+            operation_cursor = OperationScanCursor(operations[-1].key)
 
     # Captures are public durable handles and need not occur in a state row.
     inspected: set[int] = set()
@@ -298,10 +376,12 @@ async def _purge_unreferenced_objects(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for identity in closure.retained_messages:
             content = validate_native_message_content(bodies[identity], group_id=group_id)
-            reference = content.payload.ref
-            if reference is not None:
-                if group_id is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if content.payload is None:
+                continue
+            if group_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            async def read_native_object(reference: ObjectRef) -> bytes:
                 # A physical SQL group can serve several archive object
                 # routes. Native snapshots have no domain routing slot.
                 sources = {id(source): source for source in archive_objects.values()}
@@ -316,25 +396,34 @@ async def _purge_unreferenced_objects(
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 encoded = await read_object(source, reference.key,
                                             expected_digest=reference.digest, expected_size=reference.size)
-                if len(encoded) != content.payload.size or hashlib.sha256(encoded).hexdigest() != content.payload.digest:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                decode_payload_bytes(encoded, codec=content.compression,
-                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
                 protected.add(reference.key)
+                return encoded
+
+            encoded = await read_attachment_payload(content.payload, read_object=read_native_object)
+            if len(encoded) != content.payload.size or hashlib.sha256(encoded).hexdigest() != content.payload.digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            decode_payload_bytes(encoded, codec=content.compression,
+                                 raw_digest=content.raw_digest, raw_size=content.raw_size)
+
+    for store, record in capture_records:
+        if record.kind in CAPTURE_RECORD_KINDS and capture_record_key(record) not in retained_captures:
+            await store.mutate(lambda tx: tx.delete_record(record.key,
+                expected_storage_revision=record.storage_revision))
 
     for scope, closure in archive_closures.items():
         protected.update(reference.key for reference in closure.object_refs)
         unreachable = closure.unreachable_records
         archive = archive_stores[scope]
         for offset in range(0, len(unreachable), 1000):
-            keys = tuple(record.key_digest for record in unreachable[offset:offset + 1000])
+            keys = tuple(record.key for record in unreachable[offset:offset + 1000])
             await archive.mutate(lambda tx, keys=keys: tx.delete_records(keys))
 
     # Metadata must stop referring to reclaimed bodies before external object
     # deletion. An unknown commit or cancellation leaves objects intact; the
     # outer guard invalidates cached content proofs before admitting writers.
     for group, (closure, bodies, domain, group_id, sequence_ids) in native_groups.items():
-        from sqlalchemy import delete
+        from sqlalchemy import delete, select
+        from ._native_content_index import replace_owner_edges
 
         native_metadata = build_step_sql_metadata()
         unused = (
@@ -347,13 +436,26 @@ async def _purge_unreferenced_objects(
         async def remove_native_content(session: "AsyncSession") -> None:
             for table, identities in unused:
                 by_store: dict[str, list[str]] = {}
-                for store_digest, identity in sorted(identities):
-                    by_store.setdefault(store_digest, []).append(identity)
-                for store_digest, scoped_ids in by_store.items():
+                for store_key, identity in sorted(identities):
+                    by_store.setdefault(store_key, []).append(identity)
+                for store_key, scoped_ids in by_store.items():
                     for offset in range(0, len(scoped_ids), 128):
                         batch = scoped_ids[offset:offset + 128]
+                        target_ids = select(table.c.id).where(
+                            table.c.store_key == store_key, table.c.sha256.in_(batch),
+                        )
+                        if table is native_metadata.tables["ai_step_sequences"]:
+                            await replace_owner_edges(group.context, session, "sequence", target_ids, ())
+                            await replace_owner_edges(group.context, session, "message", target_ids, ())
+                            edge_kinds = ("record", "fact", "operation", "snapshot", "sequence", "candidate_sequence")
+                        else:
+                            edge_kinds = ("message", "candidate_message")
+                        edges = native_metadata.tables["ai_native_content_edges"]
+                        await session.execute(delete(edges).where(
+                            edges.c.edge_kind.in_(edge_kinds), edges.c.target_id.in_(target_ids),
+                        ))
                         removed = await session.execute(delete(table).where(
-                            table.c.store_digest == store_digest, table.c.sha256.in_(batch),
+                            table.c.store_key == store_key, table.c.sha256.in_(batch),
                         ))
                         if removed.rowcount != len(batch):
                             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -374,4 +476,4 @@ async def _purge_unreferenced_objects(
     return ObjectCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
 
 
-__all__ = ["ObjectCleanupResult", "purge_unreferenced_objects"]
+__all__ = ["CaptureCleanupResult", "ObjectCleanupResult", "purge_unreferenced_captures", "purge_unreferenced_objects"]

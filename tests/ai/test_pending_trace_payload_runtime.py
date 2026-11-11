@@ -100,11 +100,13 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
                 monkeypatch.setattr(backend._runtime_commands, "commit_pending_turn", uncertain_commit)
                 monkeypatch.setattr(execution_buffer, "read_batch", forbidden_read)
             transactions = []
+            cleanups = []
             mutation = SqlStorageContext.run_mutation
 
             async def observe_mutation(context, callback, **kwargs):
                 result = await mutation(context, callback, **kwargs)
-                transactions.append(kwargs.get("domain"))
+                domain = kwargs.get("domain")
+                (cleanups if domain == "native.content_cleanup" else transactions).append(domain)
                 return result
 
             monkeypatch.setattr(SqlStorageContext, "run_mutation", observe_mutation)
@@ -120,7 +122,7 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
                     assert bool(execution_buffer.captures) is execution_buffered
                     assert await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
                     assert await trace.get_agent_run(agent_run_id=run_id) is None
-                    assert transactions == []
+                    assert transactions == cleanups == []
             finally:
                 release.set()
             result = (await execution.wait(timeout_seconds=10)).result
@@ -130,6 +132,7 @@ async def test_pending_execution_and_trace_payloads_share_the_terminal_source_bo
                         "source_unknown": ExecutionStatus.SUCCEEDED}[outcome]
             assert result.status is expected
             assert calls == (0 if outcome == "reject_before" else 1) and len(transactions) == 1
+            assert len(cleanups) <= 1
             source = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert source.status is expected
             head = await persistence.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)

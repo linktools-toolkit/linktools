@@ -135,7 +135,7 @@ def _custom_wire_values() -> dict[str, JsonValue]:
     task_wire["schema"] = runtime_codec.CURRENT_DATA_VERSION
     idempotency = IdempotencyTerminalUpdate(
         scope="scope",
-        idempotency_key_digest="a" * 64,
+        idempotency_key="a" * 64,
         expected_status=IdempotencyStatus.STARTED,
         next_status=IdempotencyStatus.COMPLETED,
         request_digest="b" * 64,
@@ -191,7 +191,7 @@ def test_custom_wire_v1_round_trips_current_shape() -> None:
     )
     assert idempotency == IdempotencyTerminalUpdate(
         scope="scope",
-        idempotency_key_digest="a" * 64,
+        idempotency_key="a" * 64,
         expected_status=IdempotencyStatus.STARTED,
         next_status=IdempotencyStatus.COMPLETED,
         request_digest="b" * 64,

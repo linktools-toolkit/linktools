@@ -23,6 +23,7 @@ from linktools.ai.persistence import _transcript_staging as staging_module
 from linktools.ai.model.messages import encode_model_messages
 
 from .test_incremental_projection_boundaries import _storage
+from .test_execution_context_archive import _publish_context
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -94,7 +95,7 @@ async def test_execution_context_preserves_omitted_source_bytes_and_semantic_dig
         )
         context = ExecutionInputContext(_omitted_payload(_messages()), session_metadata={"label": "retained"})
         prepared = await service.prepare(context)
-        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        await _publish_context(state, prepared)
         restored = await service.load(prepared.reference)
         assert restored == context
         assert restored.history == context.history
@@ -217,7 +218,16 @@ async def test_loaded_projection_reuse_digest_describes_original_root_bytes(tmp_
                 projections.append(await repository.prepare_model_projection(group, bundle))
         projection = ContextProjection(tuple(item for part in projections for item in part.items))
         archive = await repository.content_archive()
-        await archive.store.mutate(lambda tx: archive.publish(tx, bundle))
+        from .test_state_group_record_batch import _record
+        from linktools.ai.persistence.codec import encode_domain
+
+        async def publish_projection(transaction):
+            await archive.publish(transaction, bundle)
+            await transaction.insert_record(replace(_record("projection-owner"), data={
+                "projection": encode_domain(projection),
+            }))
+
+        await archive.store.mutate(publish_projection)
         loaded = await repository.load_projected_context("run", projection)
         assert loaded.model_messages() == _messages()
         assert loaded.archive_digest == hashlib.sha256(_omitted_payload(_messages())).hexdigest()
@@ -231,13 +241,13 @@ async def test_loaded_projection_reuse_digest_describes_original_root_bytes(tmp_
             from linktools.ai.persistence import SqlStepStore
 
             assert prepared.archive.scope_id == loaded.archive_root.group_id
-            assert loaded.archive_root.store_digest == SqlStepStore.scope_digest(
+            assert loaded.archive_root.store_key == SqlStepStore.scope_key(
                 namespace="message-defaults-reuse", tenant_id="tenant",
             )
         else:
             assert prepared.archive.scope_id == loaded.archive_root.scope_id
             assert prepared.archive.content_scope == loaded.archive_root.content_scope
-        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        await _publish_context(state, prepared)
         assert await service.load(prepared.reference) == context
         assert prepared.reference.payload.decode()["history"] != loaded.archive_root.to_json()
         assert (await repository.load_projected_context("run", projection)).archive_digest == loaded.archive_digest

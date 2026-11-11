@@ -6,6 +6,22 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ._json import JsonValue
+from ._validation import validate_resource_id
+from ..errors import AIError
+
+
+def validate_budget_scope(value: str) -> str:
+    """Validate an exact custom scope or a built-in resource scope."""
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+        raise ValueError("budget scope must contain 1..256 UTF-8 bytes")
+    for prefix in ("execution:", "graph:"):
+        if value.startswith(prefix):
+            try:
+                validate_resource_id(value[len(prefix):])
+            except AIError as error:
+                raise ValueError("budget scope resource identity is invalid") from error
+            break
+    return value
 
 
 def _nonnegative(value: object, name: str) -> None:
@@ -68,8 +84,7 @@ class BudgetUsage:
     unknown_model_requests: int = 0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scope_id, str) or not self.scope_id:
-            raise ValueError("scope_id is required")
+        validate_budget_scope(self.scope_id)
         if not isinstance(self.limits, RunBudget):
             raise TypeError("limits must be a RunBudget")
         for name in (
@@ -81,4 +96,4 @@ class BudgetUsage:
             raise ValueError("unresolved model usage exceeds admitted requests")
 
 
-__all__ = ["RunBudget", "BudgetUsage"]
+__all__ = ["RunBudget", "BudgetUsage", "validate_budget_scope"]

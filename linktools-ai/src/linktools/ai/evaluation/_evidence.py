@@ -248,7 +248,7 @@ class HumanScoreRequest:
     scorer_slot_id: str
     evidence_ref: EvidenceRef
     score: ScoreBundle
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if not all(isinstance(value, str) and value.strip() for value in (

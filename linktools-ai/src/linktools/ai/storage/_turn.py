@@ -4,11 +4,36 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Literal, Protocol, runtime_checkable
 
+from ..core import validate_persistence_namespace, validate_tenant_id
 from ._lock import Lease
+
+
+@dataclass(frozen=True, slots=True)
+class TurnScopeIdentity:
+    """Exact coordination namespace and bounded purpose within that namespace."""
+
+    namespace: str = field(repr=False)
+    tenant_id: str = field(repr=False)
+    scope: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        validate_persistence_namespace(self.namespace)
+        validate_tenant_id(self.tenant_id)
+        self.validate_scope(self.scope)
+
+    @classmethod
+    def validate_scope(cls, value: str) -> str:
+        """Validate a local scope without changing its exact spelling."""
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+            raise ValueError("turn scope must contain 1..256 UTF-8 bytes")
+        return value
+
+    def as_tuple(self) -> tuple[str, str, str]:
+        return self.namespace, self.tenant_id, self.scope
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +80,7 @@ class TurnScope(Protocol):
 class TurnCoordinationBackend(Protocol):
     """One optional coordination capability; all six methods must be implemented.
 
-    ``scope`` is the caller's opaque tenant-and-Runtime namespace. Session,
+    ``scope`` explicitly identifies the namespace, tenant, and local purpose. Session,
     request, and execution identities are isolated by that scope. A request key
     binds both its session key and request digest while the claim is live.
     Execution IDs identify logical turns; owner IDs identify fresh ownership
@@ -75,7 +100,7 @@ class TurnCoordinationBackend(Protocol):
     """
 
     def enter(
-        self, scope: str, *, session_key: str, request_key: str,
+        self, scope: TurnScopeIdentity, *, session_key: str, request_key: str,
         request_digest: str, execution_id: str, owner_id: str,
     ) -> TurnScope:
         """Create a lifetime using backend-owned lease and renewal policy."""
@@ -83,7 +108,7 @@ class TurnCoordinationBackend(Protocol):
 
     async def claim_turn(
         self,
-        scope: str,
+        scope: TurnScopeIdentity,
         *,
         session_key: str,
         request_key: str,
@@ -97,12 +122,12 @@ class TurnCoordinationBackend(Protocol):
         Return None for a busy session. A retained request with a different
         session or digest raises AIError(IDEMPOTENCY_CONFLICT). Reusing a live
         execution ID for a distinct request raises AIError(STORAGE_CONFLICT).
-        All strings must be nonempty, and lease_seconds must be finite and
+        Identity strings must be nonempty; lease_seconds must be finite and
         positive. A replay ignores the proposed execution and owner identities.
         """
         ...
 
-    async def read_turn(self, scope: str, execution_id: str) -> TurnCoordination | None:
+    async def read_turn(self, scope: TurnScopeIdentity, execution_id: str) -> TurnCoordination | None:
         """Read a live execution without its lease; return None if absent."""
         ...
 
@@ -116,7 +141,7 @@ class TurnCoordinationBackend(Protocol):
         """Release only this live lease; stale, expired, or absent returns False."""
         ...
 
-    async def cancel_turn(self, scope: str, execution_id: str) -> bool:
+    async def cancel_turn(self, scope: TurnScopeIdentity, execution_id: str) -> bool:
         """Cancel the logical execution's current owner; False means absent.
 
         A delayed cancellation also targets a recovered owner of that same
@@ -131,7 +156,7 @@ class TurnAdmissionReader(Protocol):
     """Optional indexed reads of live admissions without claiming ownership."""
 
     async def read_turn_by_request(
-        self, scope: str, request_key: str,
+        self, scope: TurnScopeIdentity, request_key: str,
     ) -> TurnCoordination | None:
         """Return a live request's token-free owner, or None if absent.
 
@@ -146,7 +171,7 @@ class TurnSessionReader(Protocol):
     """Optional authoritative reads of the existing live session admission."""
 
     async def read_turn_by_session(
-        self, scope: str, session_key: str,
+        self, scope: TurnScopeIdentity, session_key: str,
     ) -> TurnCoordination | None:
         """Atomically observe a session's token-free live owner, or its absence.
 
@@ -159,4 +184,4 @@ class TurnSessionReader(Protocol):
         ...
 
 
-__all__ = ["TurnAdmissionReader", "TurnCoordination", "TurnCoordinationBackend", "TurnSessionReader", "TurnScope"]
+__all__ = ["TurnScopeIdentity", "TurnAdmissionReader", "TurnCoordination", "TurnCoordinationBackend", "TurnSessionReader", "TurnScope"]

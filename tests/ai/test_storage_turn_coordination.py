@@ -9,12 +9,15 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (
     InMemoryCacheBackend, TurnAdmissionReader, TurnCoordination,
     TurnCoordinationBackend, TurnSessionReader,
 )
 from linktools.ai.storage import _cache as cache_module
+
+_SCOPE = TurnScopeIdentity("runtime", "tenant", "tenant:runtime")
 
 
 @pytest.fixture
@@ -27,7 +30,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 async def _claim(
     cache: TurnCoordinationBackend,
     *,
-    scope: str = "tenant:runtime",
+    scope: TurnScopeIdentity = _SCOPE,
     session_key: str = "session",
     request_key: str = "request",
     request_digest: str = "digest",
@@ -59,7 +62,7 @@ async def test_duplicate_claims_share_execution_without_transferring_ownership()
         and result.owner_id == owner.owner_id
         for result in results
     )
-    assert await cache.read_turn("tenant:runtime", owner.execution_id) == replace(owner, lease=None)
+    assert await cache.read_turn(_SCOPE, owner.execution_id) == replace(owner, lease=None)
     with pytest.raises(FrozenInstanceError):
         owner.owner_id = "other"  # type: ignore[misc]
 
@@ -85,21 +88,21 @@ async def test_request_reuse_rejects_changed_digest_or_session(changed: dict[str
         await _claim(cache, **changed)
     assert raised.value.code == ErrorCode.IDEMPOTENCY_CONFLICT
     assert owner is not None
-    assert await cache.read_turn("tenant:runtime", "execution") == replace(owner, lease=None)
+    assert await cache.read_turn(_SCOPE, "execution") == replace(owner, lease=None)
 
 
 @pytest.mark.asyncio
 async def test_scopes_isolate_request_session_execution_and_cancellation() -> None:
     cache = InMemoryCacheBackend(max_bytes=1)
-    first = await _claim(cache, scope='tenant:a\0runtime:"b"')
-    second = await _claim(cache, scope='tenant:a\0runtime:"c"', request_digest="other")
+    first = await _claim(cache, scope=TurnScopeIdentity('runtime', "tenant", 'tenant:a\0runtime:"b"'))
+    second = await _claim(cache, scope=TurnScopeIdentity('runtime', "tenant", 'tenant:a\0runtime:"c"'), request_digest="other")
     assert first is not None and second is not None
     assert first.lease is not None and second.lease is not None
     assert first.lease.key != second.lease.key
-    assert await cache.cancel_turn('tenant:a\0runtime:"b"', "execution")
-    assert await cache.read_turn('tenant:a\0runtime:"c"', "execution") == replace(second, lease=None)
-    assert await cache.read_turn("unknown", "execution") is None
-    assert not await cache.cancel_turn("unknown", "execution")
+    assert await cache.cancel_turn(TurnScopeIdentity('runtime', "tenant", 'tenant:a\0runtime:"b"'), "execution")
+    assert await cache.read_turn(TurnScopeIdentity('runtime', "tenant", 'tenant:a\0runtime:"c"'), "execution") == replace(second, lease=None)
+    assert await cache.read_turn(TurnScopeIdentity('runtime', "tenant", "unknown"), "execution") is None
+    assert not await cache.cancel_turn(TurnScopeIdentity('runtime', "tenant", "unknown"), "execution")
 
 
 @pytest.mark.asyncio
@@ -118,13 +121,13 @@ async def test_reads_replays_and_cancellation_never_extend_expiry(clock: list[fl
     owner = await _claim(cache)
     assert owner is not None and owner.lease is not None
     clock[0] = 109.0
-    assert await cache.read_turn("tenant:runtime", "execution") == replace(owner, lease=None)
+    assert await cache.read_turn(_SCOPE, "execution") == replace(owner, lease=None)
     assert await _claim(cache, lease_seconds=1000.0) == replace(owner, lease=None)
-    assert await cache.cancel_turn("tenant:runtime", "execution")
-    assert await cache.cancel_turn("tenant:runtime", "execution")
+    assert await cache.cancel_turn(_SCOPE, "execution")
+    assert await cache.cancel_turn(_SCOPE, "execution")
     clock[0] = 110.0
-    assert await cache.read_turn("tenant:runtime", "execution") is None
-    assert not await cache.cancel_turn("tenant:runtime", "execution")
+    assert await cache.read_turn(_SCOPE, "execution") is None
+    assert not await cache.cancel_turn(_SCOPE, "execution")
     assert await cache.renew_turn(owner.lease, lease_seconds=10.0) is None
     assert not await cache.release_turn(owner.lease)
     replacement = await _claim(cache, execution_id="replacement", owner_id="replacement")
@@ -137,15 +140,15 @@ async def test_renewal_extends_only_its_live_generation_and_returns_cancellation
     cache = InMemoryCacheBackend(max_bytes=1)
     owner = await _claim(cache)
     assert owner is not None and owner.lease is not None
-    assert await cache.cancel_turn("tenant:runtime", "execution")
+    assert await cache.cancel_turn(_SCOPE, "execution")
     clock[0] = 105.0
     renewed = await cache.renew_turn(owner.lease, lease_seconds=10.0)
     assert renewed == replace(owner, cancel_requested=True)
     clock[0] = 110.0
-    assert await cache.read_turn("tenant:runtime", "execution") == replace(renewed, lease=None)
+    assert await cache.read_turn(_SCOPE, "execution") == replace(renewed, lease=None)
     assert await _claim(cache, request_key="other", execution_id="other") is None
     clock[0] = 115.0
-    assert await cache.read_turn("tenant:runtime", "execution") is None
+    assert await cache.read_turn(_SCOPE, "execution") is None
 
 
 @pytest.mark.asyncio
@@ -168,9 +171,9 @@ async def test_stale_owner_and_old_execution_cannot_affect_new_generation(
     assert old.lease.token != new.lease.token
     assert await cache.renew_turn(old.lease, lease_seconds=100.0) is None
     assert not await cache.release_turn(old.lease)
-    assert not await cache.cancel_turn("tenant:runtime", "execution")
-    assert await cache.read_turn("tenant:runtime", "new-execution") == replace(new, lease=None)
-    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(new, lease=None)
+    assert not await cache.cancel_turn(_SCOPE, "execution")
+    assert await cache.read_turn(_SCOPE, "new-execution") == replace(new, lease=None)
+    assert await cache.read_turn_by_session(_SCOPE, "session") == replace(new, lease=None)
     for forged in (
         replace(new.lease, token=old.lease.token),
         replace(new.lease, fence=old.lease.fence),
@@ -178,8 +181,8 @@ async def test_stale_owner_and_old_execution_cannot_affect_new_generation(
         assert await cache.renew_turn(forged, lease_seconds=100.0) is None
         assert not await cache.release_turn(forged)
     assert await cache.release_turn(new.lease)
-    assert await cache.read_turn("tenant:runtime", "new-execution") is None
-    assert await cache.read_turn_by_session("tenant:runtime", "session") is None
+    assert await cache.read_turn(_SCOPE, "new-execution") is None
+    assert await cache.read_turn_by_session(_SCOPE, "session") is None
 
 
 @pytest.mark.asyncio
@@ -189,8 +192,8 @@ async def test_cache_capacity_pressure_cannot_evict_live_turn_ownership() -> Non
     await cache.put("hot", b"x")
     assert await cache.append("writes", "id", "key", b"y", wait=False)
     assert owner is not None
-    assert await cache.read_turn("tenant:runtime", "execution") == replace(owner, lease=None)
-    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(owner, lease=None)
+    assert await cache.read_turn(_SCOPE, "execution") == replace(owner, lease=None)
+    assert await cache.read_turn_by_session(_SCOPE, "session") == replace(owner, lease=None)
     assert await _claim(cache, request_key="other", execution_id="other") is None
     independent = InMemoryCacheBackend(max_bytes=0, max_size=0)
     assert await _claim(independent) is not None
@@ -202,12 +205,12 @@ async def test_invalid_durations_do_not_claim_or_renew(seconds: float) -> None:
     cache = InMemoryCacheBackend(max_bytes=1)
     with pytest.raises(ValueError):
         await _claim(cache, lease_seconds=seconds)
-    assert await cache.read_turn("tenant:runtime", "execution") is None
+    assert await cache.read_turn(_SCOPE, "execution") is None
     owner = await _claim(cache)
     assert owner is not None and owner.lease is not None
     with pytest.raises(ValueError):
         await cache.renew_turn(owner.lease, lease_seconds=seconds)
-    assert await cache.read_turn("tenant:runtime", "execution") == replace(owner, lease=None)
+    assert await cache.read_turn(_SCOPE, "execution") == replace(owner, lease=None)
 
 
 @pytest.mark.asyncio
@@ -216,18 +219,18 @@ async def test_invalid_durations_do_not_claim_or_renew(seconds: float) -> None:
 ))
 async def test_empty_claim_identity_is_rejected(field: str) -> None:
     cache = InMemoryCacheBackend(max_bytes=1)
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError if field == "scope" else ValueError):
         await _claim(cache, **{field: ""})
-    assert await cache.read_turn("tenant:runtime", "execution") is None
+    assert await cache.read_turn(_SCOPE, "execution") is None
 
 
 @pytest.mark.asyncio
 async def test_invalid_lookup_identity_is_rejected() -> None:
     cache = InMemoryCacheBackend(max_bytes=1)
-    for scope, execution_id in (("", "execution"), ("scope", "")):
-        with pytest.raises(ValueError):
+    for scope, execution_id in ((None, "execution"), (TurnScopeIdentity("runtime", "tenant", "scope"), "")):
+        with pytest.raises((TypeError, ValueError)):
             await cache.read_turn(scope, execution_id)
-        with pytest.raises(ValueError):
+        with pytest.raises((TypeError, ValueError)):
             await cache.cancel_turn(scope, execution_id)
 
 
@@ -237,12 +240,12 @@ async def test_request_lookup_is_scoped_token_free_and_does_not_extend_expiry(cl
     owner = await _claim(cache)
     assert owner is not None and owner.lease is not None
     clock[0] += 9
-    assert await cache.read_turn_by_request("tenant:runtime", "request") == replace(owner, lease=None)
-    assert await cache.read_turn_by_request("other", "request") is None
-    assert await cache.read_turn_by_request("tenant:runtime", "missing") is None
+    assert await cache.read_turn_by_request(_SCOPE, "request") == replace(owner, lease=None)
+    assert await cache.read_turn_by_request(TurnScopeIdentity('runtime', "tenant", "other"), "request") is None
+    assert await cache.read_turn_by_request(_SCOPE, "missing") is None
     clock[0] += 2
-    assert await cache.read_turn_by_request("tenant:runtime", "request") is None
-    assert await cache.read_turn("tenant:runtime", "execution") is None
+    assert await cache.read_turn_by_request(_SCOPE, "request") is None
+    assert await cache.read_turn(_SCOPE, "execution") is None
 
 
 @pytest.mark.asyncio
@@ -251,17 +254,19 @@ async def test_released_request_lookup_does_not_retain_old_owner() -> None:
     owner = await _claim(cache)
     assert owner is not None and owner.lease is not None
     assert await cache.release_turn(owner.lease)
-    assert await cache.read_turn_by_request("tenant:runtime", "request") is None
+    assert await cache.read_turn_by_request(_SCOPE, "request") is None
     replacement = await _claim(cache, execution_id="next", owner_id="next-owner")
     assert replacement is not None
-    assert await cache.read_turn_by_request("tenant:runtime", "request") == replace(replacement, lease=None)
+    assert await cache.read_turn_by_request(_SCOPE, "request") == replace(replacement, lease=None)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope,request_key", (("", "request"), ("scope", "")))
 async def test_request_lookup_rejects_invalid_identity(scope: str, request_key: str) -> None:
     cache = InMemoryCacheBackend(max_bytes=1)
-    with pytest.raises(ValueError):
+    if scope:
+        scope = TurnScopeIdentity("runtime", "tenant", scope)
+    with pytest.raises((TypeError, ValueError)):
         await cache.read_turn_by_request(scope, request_key)
 
 
@@ -272,23 +277,25 @@ async def test_session_lookup_is_scoped_token_free_and_never_renews(clock: list[
     owner = await _claim(cache)
     assert owner is not None and owner.lease is not None
     clock[0] = 109.0
-    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(owner, lease=None)
-    assert await cache.read_turn_by_session("other", "session") is None
-    assert await cache.read_turn_by_session("tenant:runtime", "other") is None
-    assert await cache.cancel_turn("tenant:runtime", "execution")
-    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(
+    assert await cache.read_turn_by_session(_SCOPE, "session") == replace(owner, lease=None)
+    assert await cache.read_turn_by_session(TurnScopeIdentity('runtime', "tenant", "other"), "session") is None
+    assert await cache.read_turn_by_session(_SCOPE, "other") is None
+    assert await cache.cancel_turn(_SCOPE, "execution")
+    assert await cache.read_turn_by_session(_SCOPE, "session") == replace(
         owner, lease=None, cancel_requested=True,
     )
     clock[0] = 110.0
-    assert await cache.read_turn_by_session("tenant:runtime", "session") is None
-    assert await cache.read_turn("tenant:runtime", "execution") is None
+    assert await cache.read_turn_by_session(_SCOPE, "session") is None
+    assert await cache.read_turn(_SCOPE, "execution") is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope,session_key", (("", "session"), ("scope", ""), (None, "session"), ("scope", 1)))
 async def test_session_lookup_rejects_invalid_identity(scope: str, session_key: str) -> None:
     cache = InMemoryCacheBackend(max_bytes=1)
-    with pytest.raises(ValueError):
+    if scope:
+        scope = TurnScopeIdentity("runtime", "tenant", scope)
+    with pytest.raises((TypeError, ValueError)):
         await cache.read_turn_by_session(scope, session_key)
 
 
@@ -318,9 +325,9 @@ async def test_session_lookup_is_independent_of_coordination_and_request_readers
     assert not isinstance(backend, TurnSessionReader)
     owner = await _claim(backend)
     assert owner is not None
-    assert await reader.read_turn_by_request("tenant:runtime", "request") == replace(owner, lease=None)
-    assert await backend.read_turn_by_request("tenant:runtime", "request") == replace(owner, lease=None)
-    assert await backend.read_turn("tenant:runtime", "execution") == replace(owner, lease=None)
+    assert await reader.read_turn_by_request(_SCOPE, "request") == replace(owner, lease=None)
+    assert await backend.read_turn_by_request(_SCOPE, "request") == replace(owner, lease=None)
+    assert await backend.read_turn(_SCOPE, "execution") == replace(owner, lease=None)
 
 
 @pytest.mark.asyncio
@@ -336,6 +343,51 @@ async def test_session_lookup_does_not_turn_backend_failure_into_absence(monkeyp
     with monkeypatch.context() as patch:
         patch.setattr(cache_module, "monotonic", unavailable_clock)
         with pytest.raises(AIError) as raised:
-            await cache.read_turn_by_session("tenant:runtime", "session")
+            await cache.read_turn_by_session(_SCOPE, "session")
         assert raised.value is failure
-    assert await cache.read_turn_by_session("tenant:runtime", "session") == replace(owner, lease=None)
+    assert await cache.read_turn_by_session(_SCOPE, "session") == replace(owner, lease=None)
+
+
+def test_scope_identity_is_exact_bounded_frozen_and_private() -> None:
+    scope = TurnScopeIdentity('"' * 256, '"' * 128, "é" * 128)
+    assert scope.as_tuple() == ('"' * 256, '"' * 128, "é" * 128)
+    assert scope != TurnScopeIdentity(scope.namespace, scope.tenant_id, "e\u0301" * 85)
+    assert all(component not in repr(scope) for component in scope.as_tuple())
+    with pytest.raises(FrozenInstanceError):
+        scope.scope = "changed"
+    for invalid in ("", "é" * 128 + "a", "\ud800", None):
+        with pytest.raises((TypeError, ValueError)):
+            TurnScopeIdentity("runtime", "tenant", invalid)
+    for namespace, tenant in (("n" * 257, "tenant"), ("runtime", "t" * 129)):
+        with pytest.raises(AIError):
+            TurnScopeIdentity(namespace, tenant, "scope")
+
+
+@pytest.mark.asyncio
+async def test_shared_cache_turns_isolate_each_scope_component() -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    scopes = (
+        TurnScopeIdentity("runtime", "tenant", "purpose"),
+        TurnScopeIdentity("other-runtime", "tenant", "purpose"),
+        TurnScopeIdentity("runtime", "other-tenant", "purpose"),
+        TurnScopeIdentity("runtime", "tenant", "other-purpose"),
+        TurnScopeIdentity("runtime", "tenant", "é"),
+        TurnScopeIdentity("runtime", "tenant", "e\u0301"),
+    )
+    owners = [await _claim(cache, scope=scope) for scope in scopes]
+    assert len({owner.lease.key for owner in owners}) == len(scopes)
+    for scope, owner in zip(scopes, owners):
+        assert await cache.read_turn_by_request(scope, "request") == replace(owner, lease=None)
+        assert await cache.read_turn_by_session(scope, "session") == replace(owner, lease=None)
+    assert await cache.cancel_turn(scopes[0], "execution")
+    assert not (await cache.read_turn(scopes[1], "execution")).cancel_requested
+    assert await cache.release_turn(owners[0].lease)
+    assert await cache.read_turn(scopes[0], "execution") is None
+    assert await cache.read_turn(scopes[1], "execution") == replace(owners[1], lease=None)
+
+
+@pytest.mark.asyncio
+async def test_turn_scope_requires_explicit_identity() -> None:
+    cache = InMemoryCacheBackend(max_bytes=1)
+    with pytest.raises(TypeError):
+        await _claim(cache, scope='["runtime-pending-turn","runtime","tenant"]')

@@ -86,7 +86,7 @@ async def test_pending_unknown_absent_readback_keeps_admission_until_late_commit
             assert ids and captured.execution.execution_id == execution.execution_id
             assert backend._pending_turns.peek_request(
                 tenant_id=runtime.tenant_id, scope=turn.reservation.idempotency.scope,
-                idempotency_key_digest=turn.reservation.idempotency.idempotency_key_digest,
+                idempotency_key=turn.reservation.idempotency.idempotency_key,
             ) is turn
             with pytest.raises(AIError) as busy:
                 await session.start('next', idempotency_key='next')

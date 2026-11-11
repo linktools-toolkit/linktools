@@ -3,8 +3,6 @@
 """Regression coverage for durable deferred-result replay."""
 
 import asyncio
-import hashlib
-import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -44,7 +42,7 @@ from linktools.ai.persistence.contracts import (
     PendingDeferredCall,
     PendingToolContinuation,
 )
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from linktools.ai.model._tool_return_codec import encode_tool_return_content
@@ -123,7 +121,7 @@ class _ExternalCalls:
         *,
         tenant_id: str,
         expected_status: ExternalCallStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
         resolution_metadata: dict[str, object],
@@ -138,7 +136,7 @@ class _ExternalCalls:
         self.record = replace(
             self.record,
             status=ExternalCallStatus.SUPPLIED,
-            idempotency_key_digest=idempotency_key_digest,
+            idempotency_key=idempotency_key,
             supplied_at=supplied_at,
             resolution_kind=resolution_kind,
             result_payload=result_payload,
@@ -192,7 +190,7 @@ class _Approvals:
         *,
         tenant_id: str,
         expected_status: ApprovalStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         decision: ApprovalDecision,
         principal_id: str,
         decision_digest: str,
@@ -213,7 +211,7 @@ class _Approvals:
                 if decision is ApprovalDecision.APPROVE
                 else ApprovalStatus.DENIED
             ),
-            idempotency_key_digest=idempotency_key_digest,
+            idempotency_key=idempotency_key,
             decision=decision,
             decided_by=principal_id,
             decision_digest=decision_digest,
@@ -241,7 +239,7 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
             call_id=call_id,
             execution_id="execution",
             status=ExternalCallStatus.PENDING,
-            idempotency_key_digest=None,
+            idempotency_key=None,
             created_at=now,
             supplied_at=None,
         )
@@ -253,7 +251,7 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         _AllowAuthorization(),
         objects=InMemoryObjectStore(),
         object_key_factory=object.__new__(ObjectKeyFactory),
-        payload_policy=PayloadPolicy(),
+
     )
     request = ExternalSupplyRequest(
         principal,
@@ -301,7 +299,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
             approval_id=approval_id,
             execution_id="execution",
             status=ApprovalStatus.PENDING,
-            idempotency_key_digest=None,
+            idempotency_key=None,
             decision=None,
             decided_by=None,
             decision_digest=None,
@@ -338,9 +336,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
     )
 
     assert first == second
-    assert approvals.record.idempotency_key_digest == hashlib.sha256(
-        b"approval-key"
-    ).hexdigest()
+    assert approvals.record.idempotency_key == "approval-key"
     assert approvals.record.decided_by == first_principal.principal_id
     assert approvals.record.decision_digest == persisted_digest
 
@@ -384,7 +380,7 @@ async def test_deferred_list_rejects_another_tenant(approvals: bool) -> None:
             object(), executions, TenantAuthorizationPolicy(),
             objects=InMemoryObjectStore(),
             object_key_factory=object.__new__(ObjectKeyFactory),
-            payload_policy=PayloadPolicy(),
+
         )
     with pytest.raises(AIError) as error:
         await service.list("execution", principal=Principal("other", "another-tenant", "service"))
@@ -407,7 +403,7 @@ async def test_deferred_list_respects_custom_authorization(approvals: bool) -> N
     else:
         service = DefaultExternalService(
             object(), executions, Deny(), objects=InMemoryObjectStore(),
-            object_key_factory=object.__new__(ObjectKeyFactory), payload_policy=PayloadPolicy(),
+            object_key_factory=object.__new__(ObjectKeyFactory),
         )
     with pytest.raises(AIError) as error:
         await service.list("execution", principal=Principal("approver", "tenant", "service"))
@@ -419,14 +415,14 @@ def _structured_external_service(*, inline: bool = True):
     call_id = deferred_resource_id('external-call-v1', 'tenant', 'execution', 'step', pending.tool_call_id)
     calls = _ExternalCalls(ExternalCallRecord(
         call_id=call_id, execution_id='execution', status=ExternalCallStatus.PENDING,
-        idempotency_key_digest=None, created_at=datetime.now(timezone.utc), supplied_at=None,
+        idempotency_key=None, created_at=datetime.now(timezone.utc), supplied_at=None,
     ))
     objects = InMemoryObjectStore()
     factory = ObjectKeyFactory('external-replay')
     service = DefaultExternalService(
         calls, _Executions(pending, approvals=False), _AllowAuthorization(),
         objects=objects, object_key_factory=factory,
-        payload_policy=PayloadPolicy(inline_limit_bytes=65536 if inline else 0),
+
     )
     request = ExternalSupplyRequest(
         Principal('workspace', 'tenant', PrincipalKind.LOCAL_TRUSTED.value), call_id, 'supply-key',
@@ -449,7 +445,7 @@ async def _legacy_external_result(objects, factory, *, inline: bool) -> StoredPa
 
 def _supplied_record(record: ExternalCallRecord, payload: StoredPayload) -> ExternalCallRecord:
     return replace(record, status=ExternalCallStatus.SUPPLIED,
-                   idempotency_key_digest=hashlib.sha256(b'supply-key').hexdigest(),
+                   idempotency_key='supply-key',
                    supplied_at=datetime.now(timezone.utc), resolution_kind='succeeded', result_payload=payload)
 
 
@@ -478,17 +474,18 @@ async def test_external_legacy_result_retry_uses_stored_projection_without_rewri
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('inline', [True, False], ids=['inline', 'object'])
 @pytest.mark.parametrize('field,value', [('value', {'count': 2}), ('tag', 'changed'),
                                         ('description', 'changed'), ('metadata', {'changed': True})])
 async def test_external_pending_first_supply_uses_current_structured_identity(
-    inline: bool, field: str, value: object,
+    field: str, value: object,
 ) -> None:
-    service, calls, objects, factory, request = _structured_external_service(inline=inline)
+    service, calls, objects, factory, request = _structured_external_service()
     first = await service.supply('execution', request)
     original = calls.record
     payload = original.result_payload
-    raw = payload.decode() if inline else json.loads(await read_runtime_object(objects, payload.ref))
+    assert payload.kind == "inline"
+    assert not payload.object_refs()
+    raw = payload.decode()
     assert raw['version'] == 2
     assert (await service.supply('execution', request)) == first
     changed = replace(request.resolution.value, **{field: value})
@@ -666,7 +663,7 @@ async def test_external_independent_sqlite_contenders_share_one_result_owner(
         pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}))
         services = [DefaultExternalService(
             Contender(state.checkpoint.external_calls), _Executions(pending, approvals=False), _AllowAuthorization(),
-            objects=objects, object_key_factory=factory, payload_policy=PayloadPolicy(),
+            objects=objects, object_key_factory=factory,
         ) for state in (first, second)]
         other = replace(request, resolution=ExternalCallSucceeded(
             StructuredContent({'count': 2 if changed else 1}, content='fixed rendering', tag='state')))
