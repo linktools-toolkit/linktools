@@ -349,7 +349,8 @@ ContentArchive uses the existing StateStore tables rather than another SQL
 schema. Its `raw_digest` authenticates original content bytes across raw and
 compressed representations. Its content ID is the exact codec plus `:` plus
 that 64-character lowercase checksum, split at the final 65 ASCII characters.
-Codecs retain exact UTF-8 (including colons and slashes), bounded to 64 bytes;
+Codecs retain exact UTF-8 (including colons and slashes), bounded to 64 bytes
+and excluding NUL so JSON links are readable as PostgreSQL text;
 `model-message:<checksum>` is 78 bytes, versus 64 for the former derived hash.
 This removes one redundant hash, not storage bytes. Sequence addresses still
 hash content, count and ordered links to authenticate immutable structure.

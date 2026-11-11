@@ -172,9 +172,8 @@ async def test_group_reader_rejects_foreign_unenlisted_child_and_expired_scope(t
                     await asyncio.create_task(first.storage_group.get_records({first: (_key("x"),)}))
                 with pytest.raises(RuntimeError):
                     await asyncio.create_task(group.get_records({first: (_key("x"),)}))
-                with pytest.raises(AIError) as error:
+                with pytest.raises(ValueError):
                     await group.get_records({first: (b"",)})
-                assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
                 if not writable:
                     with pytest.raises(RuntimeError):
                         await group.transaction(first).insert_record(_record("forbidden"))

@@ -95,7 +95,7 @@ def archive_content_scope(namespace: str, tenant_id: str) -> str:
 
 def _content_codec(value: str) -> str:
     try:
-        if not isinstance(value, str) or not 1 <= len(value.encode("utf-8")) <= 64:
+        if not isinstance(value, str) or "\0" in value or not 1 <= len(value.encode("utf-8")) <= 64:
             raise _integrity()
     except UnicodeError as error:
         raise _integrity() from error

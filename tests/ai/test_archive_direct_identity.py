@@ -74,7 +74,7 @@ def test_archive_content_identity_retains_codec_and_exact_checksum(codec: str) -
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("codec", ("", "x" * 65, "😀" * 17, "\ud800"))
+@pytest.mark.parametrize("codec", ("", "x" * 65, "😀" * 17, "\ud800", "codec\0name"))
 def test_archive_codec_limit_applies_to_current_record_reader(codec: str) -> None:
     with pytest.raises(AIError) as error:
         ContentRecord.from_json({"codec": codec, "raw_digest": "0" * 64,
@@ -175,7 +175,7 @@ async def test_archive_object_paths_keep_maximum_scope_and_hide_reversible_value
             assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
             with pytest.raises(AIError):
                 ArchiveRoot(invalid, archive.content_scope)
-        for codec in ("x" * 65, "😀" * 17):
+        for codec in ("x" * 65, "😀" * 17, "codec\0name"):
             with pytest.raises(AIError) as error:
                 await archive.prepare_content(((codec, b"raw"),), PreparedArchive())
             assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
