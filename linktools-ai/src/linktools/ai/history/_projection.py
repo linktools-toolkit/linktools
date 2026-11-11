@@ -398,7 +398,8 @@ class StepExecutionHistoryReader:
             return store, selected
 
         store, selected = await self._read_model_metadata(
-            self._executions, capture, include_content=include_content and store is self._store,
+            self._executions, capture,
+            include_content=(include_content or include_client_requests) and store is self._store,
         )
         resolved: dict[tuple[int, int], object] = {}
         if include_content or include_client_requests:

@@ -432,3 +432,81 @@ async def test_selected_interaction_content_survives_concurrent_native_collectio
             await asyncio.gather(task, return_exceptions=True)
         await state.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_exact_client_reads_reopen_cold_archive_without_sdk_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = PersistenceStorage.sqlite(tmp_path / "cold-client.db")
+    original = _requests(large=True)
+    storage = Persistence(config)
+    await storage.initialize(namespace="history", tenant_id="tenant")
+    try:
+        await storage.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 1))
+        run = AgentRunRecord(
+            agent_run_id=agent_run_id(
+                namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1,
+            ),
+            agent_conversation_id=agent_conversation_id(
+                namespace="history", tenant_id="tenant", execution_id="execution",
+            ),
+            metadata={"agent_run_seq": "1"},
+        )
+        archive = storage.run_store.read_store(PersistenceDomain.TRACE)
+        bundle = PreparedArchive()
+        records = await archive.prepare_interactions(
+            run, (replace(_staged(original), agent_run_id=run.agent_run_id),),
+            lambda _: b"{}", prepared=bundle,
+        )
+        await archive.sync_projection(
+            run, events=(), checkpoints=(), interactions=records,
+            execution_id="execution", archive=bundle,
+        )
+    finally:
+        await storage.close()
+
+    storage = Persistence(config)
+    await storage.initialize(namespace="history", tenant_id="tenant")
+    try:
+        history = History(DefaultExecutionHistoryService(
+            storage.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(storage),
+        ), tenant_id="tenant")
+        principal = Principal("reader", "tenant")
+        group = storage.execution.executions.state_store.storage_group
+        assert group.opened_archive is None
+
+        async def forbidden_archive(*args, **kwargs):
+            raise AssertionError("metadata-only reads must not open the content archive")
+
+        with monkeypatch.context() as metadata_patch:
+            metadata_patch.setattr(group, "open_archive", forbidden_archive)
+            metadata, = await history.read_model_interactions(
+                "execution", principal=principal, identities=((1, 1),),
+            )
+        assert not metadata.content_included and not metadata.client_requests_included
+        assert metadata.client_requests is None
+        assert group.opened_archive is None
+
+        read_content = ContentArchive._read_content
+        decoded = []
+
+        async def decode_outside_scope(owner, content):
+            assert active_state_scope() is None
+            decoded.append(content.raw_digest)
+            return await read_content(owner, content)
+
+        monkeypatch.setattr(ContentArchive, "_read_content", decode_outside_scope)
+        item, = await history.read_model_interactions(
+            "execution", principal=principal, identities=((1, 1),),
+            include_client_requests=True, include_content=False,
+        )
+        assert item.client_requests_included and item.client_requests == original
+        assert not item.content_included and item.request == {} and item.response is None
+        assert set(decoded) == {
+            hashlib.sha256(body).hexdigest() for request in original
+            for body in (request.body, None if request.response is None else request.response.body)
+            if body is not None
+        }
+    finally:
+        await storage.close()
