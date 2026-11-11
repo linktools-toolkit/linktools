@@ -149,9 +149,27 @@ def test_syntax_error_locations_notes_and_original_state_survive_aliasing(source
 
 
 @pytest.mark.asyncio
-async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reopen(tmp_path: Path) -> None:
+async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     shared = ModelHTTPError(503, "offline", "shared synthetic provider failure")
     calls: list[int] = []
+    captures: list[tuple[ErrorDiagnostics, int]] = []
+    capture = ErrorDiagnostics.from_exception
+
+    def record_source(
+        cls: type[ErrorDiagnostics], error: BaseException, *, content_omission_reason: str | None = None,
+    ) -> ErrorDiagnostics:
+        root_traceback, shared_traceback = error.__traceback__, shared.__traceback__
+        diagnostics = capture(error, content_omission_reason=content_omission_reason)
+        if isinstance(error, ExceptionGroup) and shared in error.exceptions:
+            assert all(child is shared for child in error.exceptions)
+            assert error.__traceback__ is root_traceback and shared.__traceback__ is shared_traceback
+            captures.append((diagnostics, sum(1 for _ in traceback.walk_tb(root_traceback))
+                             + sum(1 for _ in traceback.walk_tb(shared_traceback))))
+        return diagnostics
+
+    monkeypatch.setattr(ErrorDiagnostics, "from_exception", classmethod(record_source))
 
     class Provider(TestModel):
         @asynccontextmanager
@@ -182,12 +200,13 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
         diagnostics = result.error_diagnostics
         aliases = [entry for entry in diagnostics.exception_chain if "same_exception_as" in entry]
         assert len(aliases) == 10
-        assert diagnostics.traceback.count('File "') < 200
-        attempts = result.safe_error_details.get("failed_attempts")
-        if attempts is not None:  # Older supported SDKs do not expose this observation.
-            assert len(attempts) == 11
+        source_frames = next(count for captured, count in captures if captured == diagnostics)
+        assert diagnostics.traceback.count('File "') == source_frames
+        assert diagnostics.traceback.count("raise shared") == len(calls) == 11
+        assert diagnostics.traceback.count("shared synthetic provider failure") == 1
+        assert len(result.safe_error_details["failed_attempts"]) == 11
         events = await runtime.events.list(result.execution_id, principal=runtime.default_principal, limit=100)
-        terminal = next(event for event in events.items if event.event_type == ExecutionEventType.EXECUTION_FAILED)
+        terminal, = [event for event in events.items if event.event_type == ExecutionEventType.EXECUTION_FAILED]
         assert terminal.payload["error_diagnostics"] == diagnostics.to_payload()
         principal = runtime.default_principal
     async with Persistence.open('alias-persistence', storage=storage) as persistence_190, Runtime.attach(persistence=persistence_190, features=features) as runtime:

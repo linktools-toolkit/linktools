@@ -79,7 +79,6 @@ def test_allowlist_is_shared_by_bytes_urls_and_uploaded_handles(content: object)
 @pytest.mark.parametrize("content,reason", (
     (BinaryContent(b"\xff", media_type="text/plain"), "text_input_not_utf8"),
     (UploadedFile("file-id", "anthropic", media_type="application/pdf"), "uploaded_file_provider_mismatch"),
-    (BinaryContent(b"image", media_type="IMAGE/PNG"), "input_encoding_not_supported"),
     (BinaryContent(b"video", media_type="video/mp4"), "input_encoding_not_supported"),
     (DocumentUrl("https://file.invalid/a", media_type="application/x-private"), "input_encoding_not_supported"),
 ))
@@ -155,7 +154,10 @@ async def test_actual_request_revalidates_declarations_before_provider_or_retry(
 
 
 @pytest.mark.asyncio
-async def test_openai_request_uses_reported_text_file_image_and_audio_transports(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("image_mime", ("image/png", "IMAGE/PNG"))
+async def test_openai_request_uses_reported_text_file_image_and_audio_transports(
+    monkeypatch: pytest.MonkeyPatch, image_mime: str,
+) -> None:
     requests: list[dict[str, object]] = []
 
     def respond(request: httpx2.Request) -> httpx2.Response:
@@ -177,16 +179,27 @@ async def test_openai_request_uses_reported_text_file_image_and_audio_transports
         api_key="test-key", base_url="https://file.invalid/v1", max_retries=0,
     )
     contents = [BinaryContent(data, media_type=mime) for mime, data in (
-        ("text/csv", b"a,b\n1,2\n"), ("application/pdf", b"%PDF-1.0"), ("image/png", b"image"), ("audio/wav", b"audio"),
+        ("text/csv", b"a,b\n1,2\n"), ("application/pdf", b"%PDF-1.0"), (image_mime, b"image"), ("audio/wav", b"audio"),
     )]
+    image = contents[2]
+    if not (image.is_image or image.is_document):
+        with pytest.raises(AIError) as raised:
+            validate_model_inputs(binding, image)
+        assert raised.value.safe_details["reason"] == "input_encoding_not_supported"
+        return
     contents.append(UploadedFile("file-csv", "openai", media_type="text/csv"))
     assert validate_model_inputs(binding, contents) is None
     async with binding.materialize() as model:
         await model.request([ModelRequest(parts=[UserPromptPart(contents)])], None, ModelRequestParameters())
     parts = requests[0]["messages"][0]["content"]
-    assert [item["type"] for item in parts] == ["text", "file", "image_url", "input_audio", "file"]
+    assert [item["type"] for item in parts] == [
+        "text", "file", "image_url" if image.is_image else "file", "input_audio", "file",
+    ]
     assert "a,b\n1,2" in parts[0]["text"]
     assert parts[1]["file"]["file_data"].startswith("data:application/pdf;base64,")
+    assert (parts[2]["image_url"]["url"] if image.is_image else parts[2]["file"]["file_data"]) == image.data_uri
+    assert image.data == b"image"
+    assert image.media_type == image_mime
     assert parts[4]["file"]["file_id"] == "file-csv"
 
 

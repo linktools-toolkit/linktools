@@ -6,16 +6,18 @@ import hashlib
 import json
 from dataclasses import fields, replace
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from pathlib import Path
 
+import httpx2
 import pytest
+from openai import DefaultAsyncHttpxClient
 from pydantic_ai import RequestUsage, messages as sdk
+from pydantic_ai.models import ModelRequestParameters
 
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ReferencedContent
+from linktools.ai.model import ReferencedContent, create_model, _openai
 from linktools.ai.model.messages import (
     RetiredReferencedContent, SummaryPromptPart, decode_model_messages,
     encode_model_messages,
@@ -61,23 +63,52 @@ def test_metadata_does_not_supply_model_identity_or_workspace_authority() -> Non
     assert restored.metadata == response.metadata
 
 
-def test_provider_continuation_still_detects_changed_history_after_restore() -> None:
-    # The native decision has no public offline inspection API; no provider is called.
-    from pydantic_ai.models.openai import OpenAIResponsesModel, _history_hasher, _with_history_digest
+@pytest.mark.asyncio
+async def test_provider_continuation_still_detects_changed_history_after_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, object]] = []
 
-    original = [sdk.ModelRequest(parts=[sdk.UserPromptPart("original", timestamp=_STAMP)])]
-    altered = [sdk.ModelRequest(parts=[sdk.UserPromptPart("redacted", timestamp=_STAMP)])]
-    import inspect
-    options = {"with_instructions": False} if "with_instructions" in inspect.signature(_history_hasher).parameters else {}
-    response = _with_history_digest(
-        replace(_response(), provider_response_id="response-fixed"),
-        _history_hasher(original, None, **options),
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(json.loads(request.content))
+        return httpx2.Response(200, json={
+            "id": "response-fixed", "object": "response", "created_at": 1,
+            "model": "gpt-5", "status": "completed", "store": True,
+            "output": [{"type": "message", "id": "message-fixed", "role": "assistant",
+                        "status": "completed", "content": [
+                            {"type": "output_text", "text": "answer", "annotations": []},
+                        ]}],
+        })
+
+    def client(**kwargs: object) -> httpx2.AsyncClient:
+        return DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
+    binding = create_model(
+        api="openai-responses", model="gpt-5", api_key="test-key",
+        base_url="https://continuation.invalid/v1", max_retries=0,
+        model_settings={"openai_previous_response_id": "auto"},
     )
-    owner = SimpleNamespace(_history_digest_key=None)
-    restored, = decode_model_messages(encode_model_messages((response,)))
-    assert not OpenAIResponsesModel._history_changed(owner, restored, original)
-    assert OpenAIResponsesModel._history_changed(owner, restored, altered)
-    assert restored.provider_response_id == response.provider_response_id
+    original = [sdk.ModelRequest(parts=[sdk.UserPromptPart("original", timestamp=_STAMP)])]
+    parameters = ModelRequestParameters()
+    async with binding.materialize() as model:
+        response = await model.request(original, None, parameters)
+    restored = list(decode_model_messages(encode_model_messages((*original, response))))
+    assert restored[-1].history_digest == response.history_digest is not None
+    assert restored[-1].provider_response_id == response.provider_response_id
+    followup = sdk.ModelRequest(parts=[sdk.UserPromptPart("follow up", timestamp=_STAMP)])
+    async with binding.materialize() as model:
+        await model.request([*restored, followup], None, parameters)
+        altered = [replace(restored[0], parts=[sdk.UserPromptPart("redacted", timestamp=_STAMP)]),
+                   restored[1], followup]
+        await model.request(altered, None, parameters)
+    assert requests[1]["previous_response_id"] == "response-fixed"
+    assert requests[1]["input"] == [{"role": "user", "content": "follow up"}]
+    assert requests[2].get("previous_response_id") is None
+    assert [item["content"] for item in requests[2]["input"] if item.get("role") == "user"] == [
+        "redacted", "follow up",
+    ]
+    assert any(item.get("role") == "assistant" for item in requests[2]["input"])
 
 
 def test_summary_reference_retirement_and_tool_values_keep_host_provenance() -> None:
