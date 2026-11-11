@@ -5,19 +5,20 @@
 This component does not provision schemas, publish owner roots, or register GC
 roots. Its caller must retain roots in the actual Snapshot/Trace/Conversation
 owner and include those roots and payload ObjectRefs in maintenance/export.
-A native adapter supplies its existing store digest and physical SQL context;
-there is no alternative namespace/tenant digest here.
+A native adapter supplies its existing raw store key and physical SQL context;
+there is no alternative namespace/tenant identity here.
 """
 
 import hashlib
-import json
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from weakref import WeakSet
+from weakref import WeakKeyDictionary, WeakSet
 
 from ..core import canonical_json_bytes
+from ..steps import validate_native_store_key
+from ..model.attachments import read_attachment_payload, validate_attachment_payload
 from ..errors import AIError
 from ..storage import ObjectRef, SqlStorageContext, StoredPayload
 from ._archive import ContentRecord, ImmutableSequenceNode, PreparedArchive
@@ -29,7 +30,7 @@ from .state import SqlStateTransaction, StateTransaction
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
     from sqlalchemy.sql import Select
 
 
@@ -65,28 +66,36 @@ class PreparedMessagePayload:
 
     identity: str
     raw_size: int
-    body: str
+    content: ContentRecord
 
-    def __init__(self, raw: bytes, *, encoded: bytes, compression: str, payload: StoredPayload) -> None:
+    def __init__(self, raw: bytes, *, encoded: bytes, compression: str, payload: StoredPayload | None) -> None:
         if type(raw) is not bytes or type(encoded) is not bytes:
             raise TypeError("native messages require frozen bytes")
         identity = hashlib.sha256(raw).hexdigest()
-        if (payload.digest != hashlib.sha256(encoded).hexdigest() or payload.size != len(encoded)
-                or decode_payload_bytes(encoded, codec=compression, raw_digest=identity, raw_size=len(raw)) != raw):
-            raise ValueError("prepared native message payload does not match canonical bytes")
-        content = ContentRecord("model-message", identity, len(raw), compression, payload)
+        if payload is not None and payload.encoding == "json-attachments":
+            validate_attachment_payload(raw, payload)
+            if compression != "raw" or encoded != raw:
+                raise ValueError("attachment payload requires the original message bytes")
+        else:
+            if decode_payload_bytes(encoded, codec=compression, raw_digest=identity, raw_size=len(raw)) != raw:
+                raise ValueError("prepared native message payload does not match canonical bytes")
+            if payload is not None:
+                raise ValueError("ordinary native message bytes must remain in the database")
+        content = ContentRecord("model-message", identity, len(raw), compression, payload,
+                                encoded if payload is None else None)
         object.__setattr__(self, "identity", identity)
         object.__setattr__(self, "raw_size", len(raw))
-        object.__setattr__(self, "body", canonical_json_bytes(content.to_json()).decode("utf-8"))
+        object.__setattr__(self, "content", content)
 
 
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
 class PreparedNativeMessages:
     root: NativeMessageSequence
     frontier: tuple[ImmutableSequenceNode, ...]
-    messages: tuple[tuple[str, str], ...]
+    messages: tuple[tuple[str, ContentRecord], ...]
     nodes: tuple[tuple[str, ImmutableSequenceNode], ...]
     generation: int
+    cold: bool = False
 
 
 @dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
@@ -99,6 +108,22 @@ class NativeMessageReceipt:
     """
 
     prepared: PreparedNativeMessages | None
+    _transaction: "AsyncSessionTransaction | None" = None
+    _store_key: bytes | None = field(default=None, repr=False)
+    _root_targets: tuple[tuple[str, int], ...] = ()
+
+    def publication_targets(
+        self, session: "AsyncSession", *, store_key: bytes, roots: Sequence[str],
+    ) -> tuple[int, ...]:
+        """Reuse physical IDs only inside this exact live publication transaction."""
+        from ._native_content_index import PublicationTargetsUnavailable
+
+        if (self.prepared is None or self._transaction is None
+                or (session.get_nested_transaction() or session.get_transaction()) is not self._transaction or not self._transaction.is_active
+                or store_key != self._store_key
+                or tuple(sorted(set(roots))) != tuple(root for root, _ in self._root_targets)):
+            raise PublicationTargetsUnavailable("native publication targets require their active transaction, store, and roots")
+        return tuple(target for _, target in self._root_targets)
 
     @property
     def root(self) -> NativeMessageSequence | None:
@@ -157,7 +182,7 @@ class NativeRangeQuery:
 class NativeMessageContent:
     """One native content owner, borrowing the existing adapter's SQL scope.
 
-    The native adapter supplies its public storage_context/store_digest.
+    The native adapter supplies its public storage_context/store_key.
     Standalone snapshot sequences use that row's existing scope. Cross-owner
     references require bind_group with the actual durable group ID; publication
     additionally checks the physical SQL context. No synthetic group is minted.
@@ -169,12 +194,12 @@ class NativeMessageContent:
     """
 
     def __init__(
-        self, context: SqlStorageContext, *, store_digest: str, group_id: str | None = None,
+        self, context: SqlStorageContext, *, store_key: bytes, group_id: str | None = None,
         max_cached_messages: int = 256, max_cached_bytes: int = 1024 * 1024,
         max_cached_nodes: int = 1024,
     ) -> None:
         self._empty = NativeMessageSequence()
-        self._store_digest = _digest(store_digest)
+        self._store_key = validate_native_store_key(store_key)
         self._group_id: str | None = None
         if group_id is not None:
             self.bind_group(group_id)
@@ -188,10 +213,12 @@ class NativeMessageContent:
         self._nodes = metadata.tables["ai_step_sequences"]
         self._generation = 0
         self._prepared: WeakSet[PreparedNativeMessages] = WeakSet()
+        self._replacements: WeakKeyDictionary[PreparedNativeMessages, PreparedNativeMessages] = WeakKeyDictionary()
+        self._recoveries: WeakKeyDictionary[PreparedNativeMessages, Callable[[], Awaitable[None]]] = WeakKeyDictionary()
         self._receipts: WeakSet[NativeMessageReceipt] = WeakSet()
         self._proofs: WeakSet[CommittedNativeMessages] = WeakSet()
         self._readbacks: WeakSet[NativeMessageReadback] = WeakSet()
-        self._known_messages: OrderedDict[str, str] = OrderedDict()
+        self._known_messages: OrderedDict[str, int] = OrderedDict()
         self._known_nodes: OrderedDict[str, None] = OrderedDict()
         self._cache_bytes = 0
         self._max_messages, self._max_bytes, self._max_nodes = (
@@ -230,7 +257,7 @@ class NativeMessageContent:
             raise TypeError("native message reference requires an internal sequence")
         if self._group_id is None:
             raise ValueError("native message group must be bound before cross-owner reference")
-        return NativeMessageRoot(self._group_id, self._store_digest, sequence.slices)
+        return NativeMessageRoot(self._group_id, self._store_key, sequence.slices)
 
     def validate_root(self, root: NativeMessageSequence | NativeMessageRoot) -> None:
         """Check the physical owner before interpreting a cross-owner sequence."""
@@ -240,7 +267,7 @@ class NativeMessageContent:
         if isinstance(root, NativeMessageSequence):
             return
         if (not isinstance(root, NativeMessageRoot) or self._group_id is None
-                or (root.group_id, root.store_digest) != (self._group_id, self._store_digest)):
+                or (root.group_id, root.store_key) != (self._group_id, self._store_key)):
             raise ValueError("native message root belongs to another persistence scope")
 
     def _proof(self, proof: CommittedNativeMessages) -> None:
@@ -262,6 +289,7 @@ class NativeMessageContent:
         base: CommittedNativeMessages | None = None,
         archive: PreparedArchive | None = None,
         reuse_payload: Callable[[bytes, ContentRecord], Awaitable[PreparedMessagePayload]] | None = None,
+        use_cache: bool = True,
     ) -> PreparedNativeMessages:
         """Prepare O(delta) bodies/nodes plus O(log n + r) frontier/descriptors.
 
@@ -295,11 +323,11 @@ class NativeMessageContent:
             if generation != self._generation:
                 candidates = {}
         additions: dict[str, ContentRecord] = {}
-        messages: dict[str, str] = {}
+        messages: dict[str, ContentRecord] = {}
         nodes: dict[str, ImmutableSequenceNode] = {}
         for raw in delta.encoded_payloads():
             identity = hashlib.sha256(raw).hexdigest()
-            if identity not in messages and identity not in self._known_messages:
+            if identity not in messages and (not use_cache or identity not in self._known_messages):
                 candidate = candidates.get(identity)
                 if candidate is not None and (candidate.codec != "model-message"
                         or candidate.raw_digest != identity or candidate.raw_size != len(raw)):
@@ -308,9 +336,9 @@ class NativeMessageContent:
                            if candidate is not None and reuse_payload is not None else await prepare_payload(raw))
                 if not isinstance(payload, PreparedMessagePayload) or (payload.identity, payload.raw_size) != (identity, len(raw)):
                     raise ValueError("native message payload factory changed canonical content")
-                messages[identity] = payload.body
+                messages[identity] = payload.content
                 if archive is not None and reuse_payload is not None:
-                    additions[identity] = ContentRecord.from_json(json.loads(payload.body))
+                    additions[identity] = payload.content
             first = frontier[0] if frontier else None
             second = frontier[1] if len(frontier) > 1 else None
             node = ImmutableSequenceNode.extend(identity, first, second)
@@ -318,20 +346,30 @@ class NativeMessageContent:
                 frontier.popleft()
                 frontier.popleft()
             frontier.appendleft(node)
-            if node.identity not in self._known_nodes:
+            if not use_cache or node.identity not in self._known_nodes:
                 nodes[node.identity] = node
             count = _count(count + 1)
         if len(delta):
             slices.append(NativeMessageSlice(frontier[0].identity, count, 0, count))
         prepared = PreparedNativeMessages(
             NativeMessageSequence(tuple(slices)), tuple(frontier),
-            tuple(messages.items()), tuple(nodes.items()), self._generation,
+            tuple(messages.items()), tuple(nodes.items()), self._generation, not use_cache,
         )
         self._prepared.add(prepared)
         if archive is not None and reuse_payload is not None:
             candidates.update(additions)
             archive.native_payloads[self] = self._generation, candidates
         return prepared
+
+    def bind_recovery(
+        self, prepared: PreparedNativeMessages, recover: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._recoveries[prepared] = recover
+
+    def replace_prepared(self, previous: PreparedNativeMessages, replacement: PreparedNativeMessages) -> None:
+        if previous.root != replacement.root or replacement not in self._prepared:
+            raise ValueError("Cold native materialization changed the owner's root")
+        self._replacements[previous] = replacement
 
     async def publish(
         self, transaction: StateTransaction, prepared: PreparedNativeMessages, *,
@@ -375,7 +413,12 @@ class NativeMessageContent:
         owner_written: bool, confirmed_content: CommittedNativeMessages | None,
     ) -> NativeMessageReceipt:
         from sqlalchemy.ext.asyncio import AsyncConnection
+        from ._native_content_index import index_nodes, note_publication, register_publication_targets, register_recovery
 
+        recovery = self._recoveries.get(prepared)
+        if recovery is not None:
+            register_recovery(session, recovery)
+        prepared = self._replacements.get(prepared, prepared)
         if prepared not in self._prepared or prepared.generation != self._generation:
             raise ValueError("native publication requires this owner's prepared content")
         if type(owner_written) is not bool:
@@ -391,18 +434,33 @@ class NativeMessageContent:
         if not owner_written:
             receipt = NativeMessageReceipt(None)
         else:
-            if confirmed_content is None:
+            if confirmed_content is None or prepared.cold:
                 await self._insert_rows(session, self._messages, [
-                    {"store_digest": self._store_digest, "sha256": identity, "message": body}
-                    for identity, body in prepared.messages if identity not in self._known_messages
+                    {"store_key": self._store_key, "sha256": identity, **body.to_native_values()}
+                    for identity, body in prepared.messages if prepared.cold or identity not in self._known_messages
                 ])
                 await self._insert_rows(session, self._nodes, [
-                    {"store_digest": self._store_digest, "sha256": identity,
+                    {"store_key": self._store_key, "sha256": identity,
                      "message_sha256": node.content_id, "tree_count": node.tree_count,
                      "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
-                    for identity, node in prepared.nodes if identity not in self._known_nodes
+                    for identity, node in prepared.nodes if prepared.cold or identity not in self._known_nodes
                 ])
-            receipt = NativeMessageReceipt(prepared)
+            resolved = await index_nodes(self._context, session, self._store_key, [
+                {"sha256": identity, "message_sha256": node.content_id,
+                 "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
+                for identity, node in prepared.nodes
+            ])
+            targets = await note_publication(
+                session, self._store_key, tuple(span.first for span in prepared.root.slices), resolved=resolved,
+            )
+            receipt = NativeMessageReceipt(
+                prepared, session.get_nested_transaction() or session.get_transaction(),
+                self._store_key, tuple(sorted(targets.items())),
+            )
+            register_publication_targets(
+                session, self._store_key, tuple(span.first for span in prepared.root.slices),
+                receipt.publication_targets,
+            )
         self._receipts.add(receipt)
         return receipt
 
@@ -413,22 +471,21 @@ class NativeMessageContent:
         batch: list[Mapping[str, object]] = []
         size = 0
         for row in rows:
-            _digest(row["store_digest"])
+            validate_native_store_key(row["store_key"])
             _digest(row["sha256"])
             if table is self._messages:
-                body = row["message"]
-                if not isinstance(body, str) or len(body.encode("utf-8")) > (1 << 32) - 1:
-                    raise ValueError("native message exceeds canonical LONGTEXT bounds")
+                ContentRecord.from_native_row(row)
             else:
-                node = ImmutableSequenceNode(row["message_sha256"], _count(row["tree_count"]),
+                node = ImmutableSequenceNode(_digest(row["message_sha256"]), _count(row["tree_count"]),
                                              row["left_sha256"], row["right_sha256"], row["next_sha256"])
                 if node.identity != row["sha256"]:
                     raise ValueError("native message sequence identity is invalid")
-            row_size = sum(len(value.encode("utf-8")) for value in row.values() if isinstance(value, str))
+            row_size = sum(len(value.encode("utf-8")) if isinstance(value, str) else len(value)
+                           for value in row.values() if isinstance(value, (str, bytes)))
             if batch and (len(batch) >= 64 or size + row_size > 256 * 1024):
                 await self._context.dialect.insert_immutable_many(
                     session, table=table, rows=batch,
-                    index_elements=("store_digest", "sha256"), conflict_column="id",
+                    index_elements=("store_key", "sha256"), conflict_column="id",
                 )
                 batch, size = [], 0
             batch.append(row)
@@ -436,7 +493,7 @@ class NativeMessageContent:
         if batch:
             await self._context.dialect.insert_immutable_many(
                 session, table=table, rows=batch,
-                index_elements=("store_digest", "sha256"), conflict_column="id",
+                index_elements=("store_key", "sha256"), conflict_column="id",
             )
 
     def confirm_current(self, receipt: NativeMessageReceipt) -> CommittedNativeMessages | None:
@@ -464,11 +521,12 @@ class NativeMessageContent:
         prepared = receipt.prepared
         for identity, body in prepared.messages:
             if identity not in self._known_messages and self._max_messages and self._max_bytes:
-                self._known_messages[identity] = body
-                self._cache_bytes += len(body.encode("utf-8"))
+                size = len(body.body) if body.body is not None else len(canonical_json_bytes(body.payload.to_json()))
+                self._known_messages[identity] = size
+                self._cache_bytes += size
         while len(self._known_messages) > self._max_messages or self._cache_bytes > self._max_bytes:
             _, body = self._known_messages.popitem(last=False)
-            self._cache_bytes -= len(body.encode("utf-8"))
+            self._cache_bytes -= body
         for identity, _ in prepared.nodes:
             self._known_nodes[identity] = None
         while len(self._known_nodes) > self._max_nodes:
@@ -535,7 +593,7 @@ class NativeMessageContent:
         integer = lambda value: cast(literal_column(str(value)), BigInteger)
         true = literal_column("1 = 1")
         nodes, messages = self._nodes, self._messages
-        store = bindparam("native_store_digest", self._store_digest, type_=nodes.c.store_digest.type)
+        store = bindparam("native_store_key", self._store_key, type_=nodes.c.store_key.type)
         seeds = []
         depth = path_units = 0
         inputs, _ = self._range_inputs(roots)
@@ -545,10 +603,10 @@ class NativeMessageContent:
             statement = select(
                 null().label("request"), null().label("span"), integer(0).label("position"),
                 nodes.c.sha256, nodes.c.message_sha256, nodes.c.tree_count,
-                nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256, messages.c.message,
+                nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ).select_from(nodes.outerjoin(messages, and_(
-                messages.c.store_digest == store, messages.c.sha256 == nodes.c.message_sha256,
-            ))).where(nodes.c.store_digest == store, nodes.c.sha256.in_(
+                messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
+            ))).where(nodes.c.store_key == store, nodes.c.sha256.in_(
                 bindparam("native_singleton_ids", [item.first for _, _, item in inputs], expanding=True),
             ))
             return self._range_plan(statement, depth=0, path_units=len(inputs), budget=budget)
@@ -601,7 +659,7 @@ class NativeMessageContent:
                 case((edges.c.edge == integer(2), integer(1)),
                      (edges.c.edge == integer(3), frontier.c.forest), else_=integer(0)).label("forest"),
             ).select_from(frontier.join(nodes, and_(
-                nodes.c.store_digest == store, nodes.c.sha256 == frontier.c.sha256,
+                nodes.c.store_key == store, nodes.c.sha256 == frontier.c.sha256,
             )).join(edges, true)).where(
                 child.is_not(None), frontier.c.depth < integer(depth),
                 nodes.c.tree_count > integer(0), nodes.c.tree_count <= frontier.c.remaining,
@@ -625,11 +683,11 @@ class NativeMessageContent:
         statement = select(
             closure.c.request, closure.c.span, closure.c.position, nodes.c.sha256,
             nodes.c.message_sha256, nodes.c.tree_count, nodes.c.left_sha256, nodes.c.right_sha256,
-            nodes.c.next_sha256, messages.c.message,
+            nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
         ).select_from(closure.join(nodes, and_(
-            nodes.c.store_digest == store, nodes.c.sha256 == closure.c.sha256,
+            nodes.c.store_key == store, nodes.c.sha256 == closure.c.sha256,
         )).outerjoin(messages, and_(
-            selected, messages.c.store_digest == store, messages.c.sha256 == nodes.c.message_sha256,
+            selected, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
         )))
         return self._range_plan(statement, depth=depth, path_units=path_units, budget=budget)
 
@@ -673,7 +731,7 @@ class NativeMessageContent:
                 raise ValueError("native range returned duplicate or invalid occurrences")
             indexed[key] = row
         bodies: dict[str, bytes] = {}
-        representations: dict[str, str] = {}
+        representations: dict[str, ContentRecord] = {}
         results: list[tuple[bytes, ...]] = []
         consumed: set[tuple[int, int, int]] = set()
         for request, root in enumerate(roots):
@@ -693,7 +751,7 @@ class NativeMessageContent:
                         raise ValueError("native range sequence is incomplete")
                     consumed.add(key)
                     try:
-                        node = ImmutableSequenceNode(row["message_sha256"], row["tree_count"],
+                        node = ImmutableSequenceNode(_digest(row["message_sha256"]), row["tree_count"],
                                                      row["left_sha256"], row["right_sha256"], row["next_sha256"])
                     except AIError as error:
                         raise ValueError("native range sequence is corrupt") from error
@@ -703,39 +761,31 @@ class NativeMessageContent:
                     if forest and ((remaining > expected) != (node.next_forest is not None)):
                         raise ValueError("native range forest is incomplete")
                     if lo <= position < hi:
-                        body = row["message"]
-                        if not isinstance(body, str):
-                            raise ValueError("native selected message is missing or corrupt")
                         try:
-                            content = ContentRecord.from_json(json.loads(body))
+                            content = ContentRecord.from_native_row(row)
                         except (AIError, TypeError, ValueError) as error:
                             raise ValueError("native selected message is missing or corrupt") from error
                         if content.codec != "model-message" or content.raw_digest != node.content_id:
                             raise ValueError("native message codec or identity is corrupt")
-                        previous = representations.setdefault(node.content_id, body)
-                        if previous != body:
+                        previous = representations.setdefault(node.content_id, content)
+                        if previous != content:
                             raise ValueError("native message has conflicting stored representations")
                         if node.content_id not in bodies:
-                            if content.payload.kind == "object":
-                                if read_object is None or content.payload.ref is None:
+                            if content.payload is None:
+                                encoded = content.body
+                            elif content.payload.encoding == "json-attachments":
+                                if read_object is None:
                                     raise ValueError("native message ObjectStore resolver is required")
-                                encoded = await read_object(content.payload.ref)
+                                encoded = await read_attachment_payload(content.payload, read_object=read_object)
                             else:
-                                encoded = content.payload.decode()
-                                if content.payload.encoding == "json":
-                                    encoded = canonical_json_bytes(encoded)
-                                elif isinstance(encoded, str):
-                                    encoded = encoded.encode("utf-8")
-                            if (not isinstance(encoded, bytes) or len(encoded) != content.payload.size
-                                    or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
-                                raise ValueError("native stored message payload is corrupt")
+                                raise ValueError("native message payload is not an attachment manifest")
                             bodies[node.content_id] = decode_payload_bytes(
                                 encoded, codec=content.compression, raw_digest=content.raw_digest, raw_size=content.raw_size,
                             )
                         if len(bodies[node.content_id]) != content.raw_size:
                             raise ValueError("native message size is corrupt")
                         selected[position] = bodies[node.content_id]
-                    elif row["message"] is not None:
+                    elif any(row[name] is not None for name in ("message", "compression", "raw_size", "payload_json")):
                         raise ValueError("native range returned an unselected message body")
                     if expected > 1:
                         half = (expected - 1) // 2
@@ -806,7 +856,7 @@ class NativeMessageContent:
                 position = 0
                 for count in ImmutableSequenceNode.forest_weights(tail.count):
                     row = indexed[(*source, position)]
-                    frontier.append(ImmutableSequenceNode(row["message_sha256"], row["tree_count"],
+                    frontier.append(ImmutableSequenceNode(_digest(row["message_sha256"]), row["tree_count"],
                                                          row["left_sha256"], row["right_sha256"], row["next_sha256"]))
                     position += count
             result = NativeMessageReadback(sequence, values, tuple(frontier), self._generation)

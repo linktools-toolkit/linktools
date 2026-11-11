@@ -19,9 +19,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode
 from ...evaluation import EvaluationPurgeResult
 from ...task import TaskSubmissionCancellation
-from ...storage import ObjectRef, ObjectStore
 from ...persistence.captures import task_graph_binding_capture_key
-from ...persistence import PersistenceDomain
 from ...persistence.snapshots import RuntimeSnapshotOperations, SnapshotExclusiveGuard
 from ...persistence.captures import input_capture_key
 from ...persistence.contracts import EvaluationLaunchIntent, EvaluationRecord
@@ -42,7 +40,7 @@ def require_evaluation_content(record: EvaluationRecord, *, now: datetime) -> No
 
 
 class _HeldExclusive:
-    """Object cleanup shares the offline window already held by retention."""
+    """Cleanup shares the offline window already held by retention."""
 
     def offline_exclusivity(self) -> AbstractAsyncContextManager[None]:
         return nullcontext()
@@ -53,12 +51,11 @@ class EvaluationRetention:
         self, authorization: AuthorizationPolicy,
         cancel_submission: Callable[[EvaluationRecord, EvaluationLaunchIntent, Principal, str], Awaitable[TaskSubmissionCancellation]],
         captures: "InputCaptures",
-        *, tenant_id: str, repository: EvaluationRepository, task_objects: ObjectStore,
+        *, tenant_id: str, repository: EvaluationRepository,
         maintenance: RuntimeSnapshotOperations, release_scopes: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._tenant_id = tenant_id
         self._repository = repository
-        self._task_objects = task_objects
         self._maintenance = maintenance
         self._authorization = authorization
         self._cancel_submission = cancel_submission
@@ -100,7 +97,7 @@ class EvaluationRetention:
 
         async with exclusive.offline_exclusivity():
             for record in ready:
-                objects = []
+                capture_keys = []
                 for intent in record.intents:
                     if intent.confirmed:
                         continue
@@ -110,15 +107,11 @@ class EvaluationRetention:
                         task_graph_binding_capture_key(submission.namespace, submission.tenant_id,
                                                        submission.graph_id, submission.request_digest),
                     )
-                    source = self._task_objects
-                    for key in keys:
-                        stat = await source.stat(key)
-                        if stat is not None:
-                            objects.append((PersistenceDomain.TASK, ObjectRef(source.store_id, key, stat.digest, stat.size)))
+                    capture_keys.extend(keys)
                 if record.owned_input_captures:
-                    references = await self._captures.task_input_objects(record.owned_input_captures, principal=principal)
-                    objects.extend((PersistenceDomain.TASK, reference) for reference in references)
-                await repository.purge(record.experiment_id, now=now, objects=tuple(objects))
+                    capture_keys.extend(await self._captures.task_input_records(record.owned_input_captures, principal=principal))
+                objects = await self._maintenance.capture_objects(tuple(capture_keys))
+                await repository.purge(record.experiment_id, now=now, objects=objects, capture_keys=tuple(capture_keys))
                 purged.append(record.experiment_id)
 
             datasets = await repository.purge_expired_datasets(now=now, owner_principal_id=principal.principal_id, limit=limit)
@@ -127,15 +120,24 @@ class EvaluationRetention:
             for receipt in pending:
                 await self._authorization.authorize(principal, AuthorizationAction.EVALUATION_PURGE,
                     ResourceRef(ResourceKind.EVALUATION, receipt.evaluation_id, principal.tenant_id, receipt.owner_principal_id))
+            expired_objects = await self._maintenance.capture_objects(expired_inputs)
+            captures = await self._maintenance.purge_unreferenced_captures(
+                (*tuple(key for receipt in pending for key in receipt.capture_keys), *expired_inputs),
+                exclusive=_HeldExclusive(), limit=limit)
+            completed_captures = (*captures.deleted, *captures.missing)
+            deleted_inputs = tuple(key for key in completed_captures if key.startswith("v1/input-capture/task/"))
+            if deleted_inputs:
+                await self._captures.expire_task_input_records(deleted_inputs, principal=principal, now=now)
+            for receipt in pending:
+                done = tuple(key for key in receipt.capture_keys if key in completed_captures)
+                if done:
+                    await repository.acknowledge_cleanup(receipt.evaluation_id, capture_keys=done)
             result = await self._maintenance.purge_unreferenced_objects(
-                (*tuple(candidate for receipt in pending for candidate in receipt.objects),
-                 *((PersistenceDomain.TASK, reference) for reference in expired_inputs)),
+                (*tuple(candidate for receipt in pending for candidate in receipt.objects), *expired_objects),
                 exclusive=_HeldExclusive(), limit=limit)
             completed = (*result.deleted, *result.missing)
-            deleted_inputs = tuple(reference for domain, reference in completed
-                if domain is PersistenceDomain.TASK and reference.key.startswith("v1/input-capture/task/"))
-            if deleted_inputs:
-                await self._captures.expire_task_input_objects(deleted_inputs, principal=principal, now=now)
+            if expired_inputs and completed:
+                await self._captures.acknowledge_expired_input_objects(expired_inputs, completed, principal=principal)
             for receipt in pending:
                 done = tuple(candidate for candidate in receipt.objects if candidate in completed)
                 if done:

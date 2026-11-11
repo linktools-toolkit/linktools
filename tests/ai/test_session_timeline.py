@@ -46,18 +46,6 @@ from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRu
 from linktools.ai.storage import StoredPayload
 
 
-def _commit_fields(execution: ExecutionRecord) -> dict[str, object]:
-    return {
-        "stored_user_input": execution.stored_user_input,
-        "output": execution.result.output if execution.result is not None else None,
-        "status": execution.status,
-        "created_at": execution.created_at,
-        "updated_at": execution.updated_at,
-        "error_code": execution.error_code,
-        "safe_error_details": execution.safe_error_details,
-    }
-
-
 async def _commit_empty_turn(state: Persistence, execution: ExecutionRecord) -> None:
     """Publish a terminal turn with no model messages through the current writer."""
     sessions = state.conversation.sessions
@@ -67,7 +55,6 @@ async def _commit_empty_turn(state: Persistence, execution: ExecutionRecord) -> 
             transaction, execution.session_id, tenant_id="tenant",
             execution_id=execution.execution_id,
             start_message_index=0, end_message_index=0,
-            **_commit_fields(execution),
         )
 
     await sessions.state_store.mutate(commit)
@@ -119,7 +106,7 @@ def _execution(
             UsageMetrics(),
             now,
         )
-    return ExecutionRecord(
+    execution = ExecutionRecord(
         execution_id=execution_id,
         session_id="session",
         parent_execution_id=None,
@@ -152,6 +139,7 @@ def _execution(
         ),
         result=result,
     )
+    return execution if result is None else execution.finalize_terminal(result)
 
 
 class _Executions:
@@ -160,7 +148,7 @@ class _Executions:
         self.values = values
         self.get_many_calls = 0
 
-    async def get_many(self, execution_ids, *, tenant_id: str):
+    async def get_timeline_many(self, execution_ids, *, tenant_id: str):
         assert tenant_id == "tenant"
         self.get_many_calls += 1
         return {value: self.values[value] for value in execution_ids}
@@ -274,7 +262,6 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 execution_id="success",
                 start_message_index=0,
                 end_message_index=message_count,
-                **_commit_fields(success),
             )
             await state.conversation.sessions.advance_continuation_in_transaction(
                 transaction,
@@ -406,7 +393,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
         assert "INTERNAL RETRY PROMPT" not in rendered
         assert "stale answer" not in rendered
         assert older.next_cursor is None
-        assert executions.get_many_calls == 0
+        assert executions.get_many_calls == 2
 
         restored = [
             message

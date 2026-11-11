@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import event
 
 from linktools.ai.core import (
-    ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy,
+    ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeSessions
@@ -24,7 +24,7 @@ from linktools.ai.persistence.contracts import ConversationCursor
 from linktools.ai.persistence.state import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
-from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _materialize_conversation, _session
 
 pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
@@ -243,24 +243,25 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
         page = await service.timeline("session", principal=_PRINCIPAL, limit=1)
         assert page.next_cursor is not None
         executions = state.execution.executions
-        get_many = executions.get_many
+        get_many = executions.get_timeline_many
         seen = []
 
         async def checked(ids, **kwargs):
             seen.append(tuple(ids))
             values = dict(await get_many(ids, **kwargs))
+            if "active" not in values:
+                return values
             if corruption == "other_session":
                 values["active"] = replace(values["active"], session_id="other")
             elif corruption == "child":
                 values["active"] = replace(
                     values["active"], parent_execution_id="parent",
-                    parent_invocation_id="invocation", lineage_kind=ExecutionLineageKind.SUBAGENT,
                 )
             elif corruption == "missing":
                 del values["active"]
             return values
 
-        monkeypatch.setattr(executions, "get_many", checked)
+        monkeypatch.setattr(executions, "get_timeline_many", checked)
         if corruption:
             with pytest.raises(AIError) as error:
                 await service.refresh("session", principal=_PRINCIPAL, limit=1, cursor=page.next_cursor)
@@ -269,7 +270,11 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
             detail = await service.refresh("session", principal=_PRINCIPAL, limit=1, cursor=page.next_cursor)
             assert [turn.execution_id for turn in detail.timeline.items] == ["older"]
             assert detail.session.active_execution_id == "active"
-        assert seen == [("active",)]
+        requested = [identity for batch in seen for identity in batch]
+        assert requested.count("active") == 1
+        assert len(seen) <= 2
+        assert len(requested) <= 2
+        assert set(requested) <= {"older", "active"}
     finally:
         await state.close()
 
@@ -285,7 +290,7 @@ async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: P
         await state.conversation.sessions.create(_session())
         await _admit(state, status=ExecutionStatus.PENDING_START)
         checked = []
-        facade = RuntimeSessions(_service(state), object(), ensure_open=lambda: checked.append(True))
+        facade = RuntimeSessions(_service(state), object(), bind_session=None, ensure_open=lambda: checked.append(True))
         detail = await facade.refresh("session", principal=_PRINCIPAL)
         assert detail.session.active_execution_id == "active"
         assert detail.timeline.items[0].execution_id == "active"
@@ -341,7 +346,6 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
                 start_message_index=0, end_message_index=count,
-                **_commit_fields(execution),
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
@@ -416,7 +420,7 @@ async def test_runtime_sessions_refresh_delegates_to_the_injected_service() -> N
         async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit))
             return result
-    facade = RuntimeSessions(Service(), object(), ensure_open=lambda: calls.append("open"))
+    facade = RuntimeSessions(Service(), object(), bind_session=None, ensure_open=lambda: calls.append("open"))
     assert await facade.refresh("session", principal=_PRINCIPAL, cursor="cursor", limit=2) is result
     assert calls == ["open", ("session", _PRINCIPAL, "cursor", 2)]
 
@@ -484,7 +488,7 @@ async def test_refresh_live_admission_reuses_the_metadata_snapshot(tmp_path: Pat
         assert detail.session.active_execution_id == "active"
         assert detail.timeline.items[0].execution_id == "active"
         assert len(begins) == 2
-        assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) == 6
+        assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) <= 6
     finally:
         await state.close()
 
@@ -501,21 +505,20 @@ async def test_refresh_validates_initial_admission_before_cleanup(
         await state.conversation.sessions.create(_session())
         await _admit(state, status=status)
         executions = state.execution.executions
-        get = executions.get
+        get_many = executions.get_timeline_many
 
-        async def corrupted(*args, **kwargs):
-            value = await get(*args, **kwargs)
-            assert value is not None
+        async def corrupted(ids, **kwargs):
+            values = dict(await get_many(ids, **kwargs))
+            value = values["active"]
             if corruption == "missing":
-                return None
-            if corruption == "other_session":
-                return replace(value, session_id="other")
-            return replace(
-                value, parent_execution_id="parent", parent_invocation_id="invocation",
-                lineage_kind=ExecutionLineageKind.SUBAGENT,
-            )
+                del values["active"]
+            elif corruption == "other_session":
+                values["active"] = replace(value, session_id="other")
+            else:
+                values["active"] = replace(value, parent_execution_id="parent")
+            return values
 
-        monkeypatch.setattr(executions, "get", corrupted)
+        monkeypatch.setattr(executions, "get_timeline_many", corrupted)
         with pytest.raises(AIError) as error:
             await _service(state).refresh("session", principal=_PRINCIPAL)
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

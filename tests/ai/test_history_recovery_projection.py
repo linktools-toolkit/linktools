@@ -39,7 +39,6 @@ from linktools.ai.persistence._step_contracts import (
     AgentRunRecord,
 )
 from linktools.ai.persistence.runs import RuntimeAgentRunStore, StagingAgentRunStore
-from linktools.ai.storage import PayloadPolicy
 from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
 
@@ -262,7 +261,7 @@ async def test_trace_reopen_keeps_both_responses_when_native_snapshot_is_older(
             binding_digest=execution.binding_digest,
             owner="replacement-claim",
             background_tasks=set(),
-            payload_policy=PayloadPolicy(),
+
             terminal_commands=commands,
             producer_generation=2,
         )
@@ -279,7 +278,7 @@ async def test_trace_reopen_keeps_both_responses_when_native_snapshot_is_older(
                 binding_digest=execution.binding_digest,
                 owner="replacement-claim",
                 background_tasks=set(),
-                payload_policy=PayloadPolicy(),
+
                 terminal_commands=commands,
                 producer_generation=2,
             )

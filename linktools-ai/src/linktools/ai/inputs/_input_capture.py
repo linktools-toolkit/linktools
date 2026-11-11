@@ -19,7 +19,7 @@ from ..core import (
     canonical_sha256, validate_idempotency_key, principal_identity_payload, validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, ObjectStoreInspection, StoredPayload, read_object
+from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..task import (
     TaskDependencyCapture, TaskDependencyState, TaskGraph,
     TaskGraphAdmission, TaskGraphCaptureRef, TaskGraphTemplate, TaskGraphTemplateRef,
@@ -34,7 +34,8 @@ from ._input import (
 from ..execution import ExecutionInputContext
 from ._context_archive import ExecutionContextArchive
 from ..model import MaterializedUserContent
-from ..persistence.objects import read_runtime_object
+from ..model.attachments import read_attachment_payload
+from ..persistence.objects import read_runtime_object, put_runtime_object
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ..execution import ExecutionResult, ExecutionView
 from ..persistence import Persistence
@@ -42,8 +43,12 @@ from ..persistence.objects import ObjectKeyFactory
 from ..core import PromptLimits
 from ..persistence import PersistenceDomain
 from ..persistence.contracts import ExecutionRepositories, TaskRepositories
-from ..persistence.captures import input_capture_key, input_capture_expiry_key
-from ..persistence.codec import decode_domain, encode_domain
+from ..persistence.captures import (
+    input_capture_key, input_capture_expiry_key, capture_record, capture_record_key, capture_record_value, capture_retention_value,
+    read_capture_record, publish_capture_record, prepare_capture_value, restore_capture_value,
+)
+from ..persistence.codec import decode_domain, encode_domain, iter_runtime_object_refs
+from ..persistence.state import RecordQuery, StateTransaction, scope_key
 from ..execution import StoredUserInput
 
 ExecutionInputCaptureRef: TypeAlias = AgentInputCaptureRef | TaskInvocationInputRef
@@ -141,7 +146,7 @@ class InputCaptures:
         self._execution = execution
         self._materializer = materializer
         self._prepare_pending_capture = prepare_pending_capture
-        self._objects = object_stores[PersistenceDomain.TASK]
+        self._state_store = task_repositories.tasks.state_store
 
     @classmethod
     def from_persistence(
@@ -181,33 +186,25 @@ class InputCaptures:
         return input_capture_key(self._namespace, tenant_id, kind, identity)
 
     async def _put(self, key: str, value: JsonValue) -> str:
-        data = canonical_json_bytes(value)
         digest = canonical_sha256(value)
-
-        async def chunks():
-            yield data
-
-        try:
-            await self._objects.put(key, chunks(), expected_size=len(data), expected_digest=digest)
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
-                raise
-            stat = await self._objects.stat(key)
-            if stat is None or stat.digest != digest:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+        stored = await prepare_capture_value(key, value, write_object=lambda raw: put_runtime_object(
+            self._object_stores[PersistenceDomain.TASK], ObjectKeyFactory(self._namespace),
+            PersistenceDomain.TASK, self._tenant_id, raw))
+        await publish_capture_record(self._state_store, namespace=self._namespace,
+            tenant_id=self._tenant_id, key=key, value=stored,
+            source_digest=digest if stored != value else None)
         return digest
 
     async def _get(self, key: str, digest: str | None = None) -> JsonValue | None:
-        stat = await self._objects.stat(key)
-        if stat is None:
+        record = await read_capture_record(self._state_store, namespace=self._namespace,
+                                           tenant_id=self._tenant_id, key=key)
+        if record is None:
             return None
-        if digest is not None and stat.digest != digest:
+        value = await restore_capture_value(record, read_object=lambda ref: read_runtime_object(
+            self._object_stores[PersistenceDomain.TASK], ref))
+        if digest is not None and canonical_sha256(value) != digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw = await read_object(self._objects, key, expected_digest=stat.digest, expected_size=stat.size)
-        try:
-            return json.loads(raw)
-        except (UnicodeDecodeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return value
 
     async def _authorize(self, principal: Principal, kind: ResourceKind, id: str, action: AuthorizationAction,
                          owner_principal_id: str | None = None) -> None:
@@ -237,7 +234,7 @@ class InputCaptures:
                        *, expires_at: datetime | None = None) -> tuple[str, str]:
         identity, value = self._publication(kind, principal, key, payload, expires_at=expires_at)
         object_key = self._key(principal.tenant_id, kind, identity)
-        if await self._objects.stat(input_capture_expiry_key(object_key)) is not None:
+        if await self._get(input_capture_expiry_key(object_key)) is not None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         try:
             digest = await self._put(object_key, value)
@@ -287,7 +284,7 @@ class InputCaptures:
         await self._authorize(principal, ResourceKind.TASK_GRAPH if graph else ResourceKind.EXECUTION,
                               reference.capture_id, AuthorizationAction.TASK_CAPTURE_GRAPH if graph else AuthorizationAction.EXECUTION_CAPTURE_INPUT)
         key = self._key(principal.tenant_id, kind, reference.capture_id)
-        if await self._objects.stat(input_capture_expiry_key(key)) is not None:
+        if await self._get(input_capture_expiry_key(key)) is not None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         value = await self._get(key, reference.digest)
         if value is None:
@@ -342,86 +339,147 @@ class InputCaptures:
         identity, digest = await self._publish("agent", principal, idempotency_key, payload, expires_at=expires_at)
         return AgentInputCaptureRef(self._namespace, principal.tenant_id, identity, digest, None)
 
-    async def expire_inputs(self, *, principal: Principal, now: datetime, limit: int = 100) -> tuple[ObjectRef, ...]:
+    async def expire_inputs(self, *, principal: Principal, now: datetime, limit: int = 100) -> tuple[str, ...]:
         """Tombstone owned captures at their explicit deletion deadline."""
         validate_page_limit(limit)
         if now.tzinfo is None:
             raise ValueError("capture expiry time must be timezone-aware")
         await self._authorize(principal, ResourceKind.EVALUATION, "retention", AuthorizationAction.EVALUATION_PURGE)
-        if not isinstance(self._objects, ObjectStoreInspection):
-            raise AIError(ErrorCode.EVALUATION_POLICY_UNSUPPORTED)
+        owner_scope = scope_key(self._namespace, principal.tenant_id, "task", "input_capture",
+                                   "owner", (principal.principal_id,))
         candidates = []
-        expirations = []
-        async for stat in self._objects.list_objects():
-            if not stat.key.startswith(("v1/input-capture/agent/", "v1/input-capture/template/")):
-                continue
-            value = await self._get(stat.key, stat.digest)
-            if not isinstance(value, Mapping) or value.get("namespace") != self._namespace or value.get("tenant_id") != principal.tenant_id:
-                continue
-            owner = value.get("principal")
-            if not isinstance(owner, Mapping) or owner.get("principal_id") != principal.principal_id or value.get("expires_at") is None:
-                continue
-            try:
-                expires_at = datetime.fromisoformat(value["expires_at"])
-                if expires_at.tzinfo is None:
-                    raise ValueError("capture expiry must be aware")
-            except (ValueError, TypeError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if expires_at > now:
-                continue
-            await self._authorize(principal, ResourceKind.EVALUATION, stat.key,
-                                  AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
-            expirations.append((stat.key, expires_at))
-            candidates.append(ObjectRef(self._objects.store_id, stat.key, stat.digest, stat.size))
-            if len(candidates) >= limit:
-                break
-        for key, expires_at in expirations:
-            await self._put(input_capture_expiry_key(key), {"namespace": self._namespace,
-                "tenant_id": principal.tenant_id, "capture_key": key, "expired_at": expires_at.isoformat()})
+        for kind in ("expired", "agent", "template"):
+            cursor = None
+            while len(candidates) < limit:
+                query = RecordQuery(kind="input_capture", scope_key=owner_scope,
+                    sort_key_prefix=f"v1/input-capture/{kind}/".encode("ascii"), limit=1000,
+                    after_sort_key=None if cursor is None else cursor.sort_key,
+                    after_key=None if cursor is None else cursor.key)
+                records = await self._state_store.read(lambda transaction: transaction.list_records(query))
+                for record in records:
+                    value = capture_record_value(record)
+                    if (not isinstance(value, Mapping) or value.get("namespace") != self._namespace
+                            or value.get("tenant_id") != principal.tenant_id
+                            or not isinstance(value.get("principal"), Mapping)
+                            or value["principal"].get("principal_id") != principal.principal_id
+                            or value["principal"].get("tenant_id") != principal.tenant_id):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if kind == "expired":
+                        key = value["capture_key"]
+                        if value.get("cleanup_objects") is not None and key not in candidates:
+                            candidates.append(key)
+                            if len(candidates) == limit:
+                                break
+                        continue
+                    if value.get("expires_at") is None:
+                        continue
+                    try:
+                        expires_at = datetime.fromisoformat(value["expires_at"])
+                        if expires_at.tzinfo is None:
+                            raise ValueError("capture expiry must be aware")
+                    except (ValueError, TypeError) as error:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    if expires_at > now:
+                        continue
+                    key = capture_record_key(record)
+                    await self._authorize(principal, ResourceKind.EVALUATION, key,
+                                          AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
+                    expiry_key = input_capture_expiry_key(key)
+                    if await self._get(expiry_key) is None:
+                        cleanup_objects = tuple(iter_runtime_object_refs(capture_retention_value(record), default_domain=PersistenceDomain.TASK))
+                        expired = {"namespace": self._namespace, "tenant_id": principal.tenant_id,
+                            "capture_key": key, "expired_at": expires_at.isoformat(),
+                            "principal": principal_identity_payload(principal)}
+                        if cleanup_objects:
+                            expired["cleanup_objects"] = encode_domain(cleanup_objects)
+                        await self._put(expiry_key, expired)
+                    if key not in candidates:
+                        candidates.append(key)
+                    if len(candidates) == limit:
+                        break
+                if len(records) < 1000:
+                    break
+                cursor = records[-1]
         return tuple(candidates)
 
-    async def task_input_objects(
+    async def acknowledge_expired_input_objects(
+        self, keys: tuple[str, ...], objects: tuple[tuple[PersistenceDomain, ObjectRef], ...], *, principal: Principal,
+    ) -> None:
+        """Retain expiry fences while acknowledging durably recorded attachment cleanup."""
+        if not objects:
+            return
+        await self._authorize(principal, ResourceKind.EVALUATION, "retention", AuthorizationAction.EVALUATION_PURGE)
+        for key in keys:
+            expiry_key = input_capture_expiry_key(key)
+            identity = capture_record(self._namespace, principal.tenant_id, expiry_key, None).key
+
+            async def acknowledge(transaction: StateTransaction) -> None:
+                record = await transaction.get_record(identity)
+                if record is None:
+                    return
+                value = capture_record_value(record)
+                if not isinstance(value, Mapping) or value.get("cleanup_objects") is None:
+                    return
+                owner = value.get("principal")
+                if not isinstance(owner, Mapping) or owner.get("principal_id") != principal.principal_id:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                pending = decode_domain(value["cleanup_objects"], tuple[tuple[PersistenceDomain, ObjectRef], ...])
+                remaining = tuple(item for item in pending if item not in objects)
+                if remaining == pending:
+                    return
+                updated = dict(value)
+                if remaining:
+                    updated["cleanup_objects"] = encode_domain(remaining)
+                else:
+                    updated.pop("cleanup_objects")
+                replacement = capture_record(self._namespace, principal.tenant_id, expiry_key, updated,
+                                             storage_revision=record.storage_revision + 1)
+                if not await transaction.replace_record(replacement, expected_storage_revision=record.storage_revision):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            await self._state_store.mutate(acknowledge)
+
+    async def task_input_records(
         self, references: tuple[TaskInvocationInputRef, ...], *, principal: Principal,
-    ) -> tuple[ObjectRef, ...]:
-        """Resolve owned derivations for cleanup without revoking other retained references."""
+    ) -> tuple[str, ...]:
+        """Resolve owned derivations for cleanup without revoking retained references."""
         candidates = []
         for reference in references:
             if reference.namespace != self._namespace or reference.tenant_id != principal.tenant_id:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorize(principal, ResourceKind.EVALUATION, reference.capture_id,
+                                  AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
             key = self._key(principal.tenant_id, "task", reference.capture_id)
-            stat = await self._objects.stat(key)
-            owner_principal_id = principal.principal_id
-            if stat is not None:
-                value = await self._get(key, reference.digest)
+            value = await self._get(key, reference.digest)
+            if value is not None:
                 if (not isinstance(value, Mapping) or value.get("kind") != "task"
                         or value.get("namespace") != self._namespace or value.get("tenant_id") != principal.tenant_id
                         or not isinstance(value.get("principal"), Mapping)
                         or not isinstance(value["principal"].get("principal_id"), str)
                         or value["principal"].get("tenant_id") != principal.tenant_id):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                owner_principal_id = value["principal"]["principal_id"]
-            await self._authorize(principal, ResourceKind.EVALUATION, reference.capture_id,
-                                  AuthorizationAction.EVALUATION_PURGE, owner_principal_id)
-            candidates.append(ObjectRef(self._objects.store_id, key, reference.digest, 0 if stat is None else stat.size))
+                await self._authorize(principal, ResourceKind.EVALUATION, reference.capture_id,
+                                      AuthorizationAction.EVALUATION_PURGE, value["principal"]["principal_id"])
+            candidates.append(key)
         return tuple(candidates)
 
-    async def expire_task_input_objects(
-        self, references: tuple[ObjectRef, ...], *, principal: Principal, now: datetime,
+    async def expire_task_input_records(
+        self, keys: tuple[str, ...], *, principal: Principal, now: datetime,
     ) -> None:
-        """Fence deleted or missing inputs from authorized cleanup receipts under offline exclusivity."""
+        """Fence deleted or missing inputs from authorized receipts under offline exclusivity."""
         if now.tzinfo is None:
             raise ValueError("capture expiry time must be timezone-aware")
-        for reference in references:
-            if not reference.key.startswith("v1/input-capture/task/"):
+        for key in keys:
+            if not key.startswith("v1/input-capture/task/"):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._authorize(principal, ResourceKind.EVALUATION, reference.key,
+            await self._authorize(principal, ResourceKind.EVALUATION, key,
                                   AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
-            if await self._objects.stat(reference.key) is not None:
+            if await self._get(key) is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "input_capture_still_retained"})
-            expiry_key = input_capture_expiry_key(reference.key)
-            if await self._objects.stat(expiry_key) is None:
+            expiry_key = input_capture_expiry_key(key)
+            if await self._get(expiry_key) is None:
                 await self._put(expiry_key, {"namespace": self._namespace,
-                    "tenant_id": principal.tenant_id, "capture_key": reference.key, "expired_at": now.isoformat()})
+                    "tenant_id": principal.tenant_id, "capture_key": key, "expired_at": now.isoformat()})
 
     async def record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
         state = await self._task_repositories.tasks.graph_state(invocation.graph_id, tenant_id=invocation.principal.tenant_id)
@@ -454,11 +512,15 @@ class InputCaptures:
     async def _payload(
         self, payload: StoredPayload, domain: PersistenceDomain, *, text: bool = False,
     ) -> JsonValue:
-        if payload.kind == "inline":
+        if payload.encoding == "json-attachments":
+            raw = await read_attachment_payload(payload,
+                read_object=lambda ref: read_runtime_object(self._object_stores[domain], ref))
+        elif payload.kind == "inline":
             return payload.decode()
-        if payload.ref is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw = await read_runtime_object(self._object_stores[domain], payload.ref)
+        else:
+            if payload.ref is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raw = await read_runtime_object(self._object_stores[domain], payload.ref)
         try:
             return raw.decode("utf-8") if text else json.loads(raw)
         except (UnicodeDecodeError, ValueError) as error:
@@ -568,7 +630,7 @@ class InputCaptures:
             admission = await self._task_repositories.admissions.get(invocation["graph_id"], tenant_id=principal.tenant_id)
             if admission is None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
-            bindings = await TaskGraphBindingCaptureStore(self._namespace, self._objects).load(admission)
+            bindings = await TaskGraphBindingCaptureStore(self._namespace, self._state_store).load(admission)
             declaration = bindings.tasks.get((node.task.id, node.task.revision))
             if declaration is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -657,9 +719,9 @@ class InputCaptures:
         if item.state.status is not TaskStatus.SUCCEEDED:
             raise AIError(ErrorCode.TASK_DEPENDENCY_FAILED)
         key = self._key(principal.tenant_id, "result", item.body_digest)
-        if await self._objects.stat(key) is None:
-            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         value = await self._get(key, item.body_digest)
+        if value is None:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         if canonical_sha256(value) != item.body_digest:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         return value
@@ -795,7 +857,7 @@ class InputCaptures:
                 nodes = state.nodes
             else:
                 nodes = decode_domain(original, TaskGraphTemplate).nodes
-        bindings = await TaskGraphBindingCaptureStore(self._namespace, self._objects).load(admission)
+        bindings = await TaskGraphBindingCaptureStore(self._namespace, self._state_store).load(admission)
         selected = {node.node_id for node in nodes}
         sources = {item.node_id: item.execution_id for item in state.node_states}
         captured_nodes = []

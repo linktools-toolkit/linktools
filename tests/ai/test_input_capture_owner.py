@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Input capture composition borrows persistence without constructing Runtime."""
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -16,7 +15,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import InputCaptures
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceStorage, PersistenceDomain
-from linktools.ai.persistence.captures import input_capture_key
+from linktools.ai.persistence.captures import input_capture_key, read_capture_record, capture_record_value, capture_retention_value
+from linktools.ai.persistence.codec import iter_runtime_object_refs
 from linktools.ai.storage import FilesystemObjectStore, read_object
 from linktools.ai.task import TaskGraphTemplate, TaskNode, TaskRef
 
@@ -67,11 +67,18 @@ async def test_input_capture_owner_borrows_storage_and_roundtrips_v1(
             assert value.source_execution_id is None
             objects = persistence.object_store(PersistenceDomain.TASK)
             key = input_capture_key("captures", "tenant", "agent", reference.capture_id)
-            stat = await objects.stat(key)
-            assert stat is not None
-            payload = json.loads(await read_object(
-                objects, key, expected_digest=stat.digest, expected_size=stat.size,
-            ))
+            assert await objects.stat(key) is None
+            record = await read_capture_record(
+                persistence.task.tasks.state_store, namespace="captures", tenant_id="tenant", key=key,
+            )
+            assert record is not None
+            payload = capture_record_value(record)
+            refs = tuple(iter_runtime_object_refs(capture_retention_value(record), default_domain=PersistenceDomain.TASK))
+            assert len(refs) == 1
+            domain, attachment = refs[0]
+            assert domain is PersistenceDomain.TASK
+            assert await read_object(objects, attachment.key, expected_digest=attachment.digest,
+                                     expected_size=attachment.size) == image.data
             assert payload["version"] == 1
             template = TaskGraphTemplate((TaskNode("node", task=TaskRef("task", 1)),))
             graph = await captures.create_graph_template(template, principal=principal, idempotency_key="graph")

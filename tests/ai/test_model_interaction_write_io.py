@@ -131,8 +131,14 @@ async def test_invalid_execution_interaction_preserves_errors_and_rolls_back(
     async with _archive(tmp_path, backend) as (state, archive, run):
         invalid = (
             object() if invalid_kind == "type"
-            else replace(_running(), agent_run_id="other" if invalid_kind == "foreign_owner" else object())
+            else replace(_running(), agent_run_id="other") if invalid_kind == "foreign_owner"
+            else _running()
         )
+        if invalid_kind == "unencodable_owner":
+            with pytest.raises(ValueError, match="model interaction owner identity is invalid"):
+                replace(invalid, agent_run_id=object())
+            # Bypass authoring validation to exercise the transactional corruption boundary.
+            object.__setattr__(invalid, "agent_run_id", object())
         repository = state.execution.executions
         before = await repository.get("execution", tenant_id="tenant")
         error_type = TypeError if invalid_kind == "type" and backend == "memory" else AIError

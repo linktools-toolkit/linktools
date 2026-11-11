@@ -319,7 +319,7 @@ async def test_budget_snapshot_validates_reservation_projection(budget_storage):
     aliases, sequences = canonical_snapshot_indexes(**args)
     validate_snapshot_domain(**args, aliases=aliases, sequences=sequences)
     usage = await budgets.read("scope")
-    corrupt = budgets._stored("budget_scope", "scope", replace(usage, total_tokens=6))
+    corrupt = budgets._stored("budget_scope", ("scope",), replace(usage, total_tokens=6))
     args["records"] = tuple(corrupt if row.kind == "budget_scope" else row for row in rows)
     with pytest.raises(AIError) as integrity:
         validate_snapshot_domain(**args, aliases=aliases, sequences=sequences)

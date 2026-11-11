@@ -29,6 +29,7 @@ from pydantic_ai.settings import ModelSettings
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelStreamAttempt
+from ..persistence import MessageArchive, MessageSnapshot
 from ..persistence.runs import StagedTranscript
 from ..observe.journal import (
     DURATION_NS_METADATA_KEY,
@@ -77,6 +78,7 @@ class AgentRunRecorder:
         initial_attachments: Sequence[Mapping[str, JsonValue]] = (),
         history_boundary: Callable[[], Awaitable[None]] | None = None,
         checkpoint_sink: Callable[[AgentRunCheckpoint], Awaitable[None]] | None = None,
+        checkpoint_sink_accepts_frozen: bool = False,
     ) -> None:
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise ValueError("agent_run_id is required")
@@ -85,6 +87,7 @@ class AgentRunRecorder:
         self._execution_id = execution_id
         self._history_boundary = history_boundary
         self._checkpoint_sink = checkpoint_sink
+        self._checkpoint_sink_accepts_frozen = checkpoint_sink_accepts_frozen
         self._agent_run_id = agent_run_id
         initial_request = initial_messages[-1] if initial_messages else None
         self._initial_request = (
@@ -107,7 +110,8 @@ class AgentRunRecorder:
         self.model_interactions = ModelInteractionCapture(
             cast(TraceStagingPort, store), agent_run_id, self.context_projection, initial_attachments,
         )
-        self._transcript_messages: list[ModelMessage] = []
+        self._message_archive = MessageArchive()
+        self._transcript_messages = self._message_archive.snapshot(())
         self._pending_parts: dict[str, ModelMessage] = {}
         self._stream_position: dict[str, JsonValue] = {}
         self._last_response_position: tuple[int, int] | None = None
@@ -154,14 +158,14 @@ class AgentRunRecorder:
                     and self._store.execution_persistence(record.agent_run_id)[1]
                     else await self.latest_checkpoint(include_interrupted=True))
         if previous is not None:
-            self._transcript_messages = list(freeze_model_messages(previous.messages))
+            self._transcript_messages = self._message_archive.snapshot(previous.messages)
         observed = (
             self._store.staged_transcript(record.agent_run_id)
             if isinstance(self._store, (RuntimeAgentRunStore, StagingAgentRunStore))
             else None
         )
         if observed is not None:
-            self._transcript_messages = list(freeze_model_messages(observed.messages))
+            self._transcript_messages = self._message_archive.snapshot(observed.messages)
             if observed.pending is not None:
                 self._restored_pending = True
                 if len(observed.pending.parts) != len(observed.pending_keys):
@@ -299,6 +303,11 @@ class AgentRunRecorder:
     async def save_checkpoint(self, checkpoint: AgentRunCheckpoint) -> None:
         if checkpoint.agent_run_id != self._agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        accepts_frozen = (self._checkpoint_sink_accepts_frozen if self._checkpoint_sink is not None
+                          else type(self._store) in (RuntimeAgentRunStore, StagingAgentRunStore))
+        if not accepts_frozen:
+            checkpoint = replace(checkpoint, messages=list(checkpoint.messages), context_messages=(
+                None if checkpoint.context_messages is None else list(checkpoint.context_messages)))
         if self._checkpoint_sink is not None:
             await self._checkpoint_sink(checkpoint)
         else:
@@ -376,12 +385,12 @@ class AgentRunRecorder:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 self._tool_results[part.tool_call_id] = part
         local_index = len(self._transcript_messages)
-        self._transcript_messages.append(frozen)
+        self._transcript_messages = self._message_archive.append(self._transcript_messages, (frozen,))
         self.context_projection.append_source(frozen, local_index)
         self._pending_parts.clear()
         self._restored_pending = False
         self._stage_transcript()
-        return frozen
+        return self._transcript_messages[-1]
 
     def stage_response_part(
         self, part: ModelResponsePart, part_index: int, *, complete: bool = True,
@@ -553,7 +562,7 @@ class AgentRunRecorder:
             )
         self._staging_store.stage_transcript(
             self._agent_run_id,
-            StagedTranscript(tuple(self._transcript_messages), pending, keys),
+            StagedTranscript(self._transcript_messages, pending, keys),
         )
 
     def finish_transcript(self, *, interrupted: bool = False) -> None:
@@ -588,8 +597,9 @@ class AgentRunRecorder:
                     and not self._is_interrupted_tool_placeholder(part)
                 )
 
-    def transcript_messages(self) -> tuple[ModelMessage, ...]:
-        return tuple(self._transcript_messages)
+    def transcript_messages(self) -> MessageSnapshot:
+        """Expose owned immutable history; SDK values read from it are detached."""
+        return self._transcript_messages
 
     def remember_context_projection(
         self,

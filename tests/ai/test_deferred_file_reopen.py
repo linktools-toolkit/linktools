@@ -139,6 +139,8 @@ async def test_completed_file_return_survives_deferred_reopen(tmp_path: Path, ch
         assert retained.status == result.status and retained.output == result.output
         history = await runtime.executions.history(execution_id, principal=principal, include_content=True)
         assert history.next_cursor is None
-        assert any(item.item_kind == 'tool_result' and item.tool_call_id == 'source-read'
-                   and 'fixed synthetic source' in str(item.content) for item in history.items)
+        source_results = [item for item in history.items
+                          if item.item_kind == 'tool_result' and item.tool_call_id == 'source-read']
+        assert len(source_results) == 1
+        assert 'fixed synthetic source' in str(source_results[0].content)
         assert len(calls) == 2 and len(builds) == 1

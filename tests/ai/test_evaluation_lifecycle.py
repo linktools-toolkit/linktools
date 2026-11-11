@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import TaskStatus, idempotency_key_digest
+from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
@@ -83,7 +83,7 @@ async def test_closed_evaluations_reject_control_without_persisting(
         assert not raised.value.retryable
         assert await repository.state_store.read(
             lambda transaction: transaction.list_records(RecordQuery(kind="evaluation"))) == before
-        assert await persistence_34.evaluation.idempotency.get("evaluation.run", idempotency_key_digest(key),
+        assert await persistence_34.evaluation.idempotency.get("evaluation.run", key,
                                                        tenant_id=PRINCIPAL.tenant_id) is None
         reopened = await evaluations.get(run.experiment_id, principal=PRINCIPAL)
         assert (await reopened.inspect()).completion == "running"
@@ -156,7 +156,7 @@ async def test_close_waits_for_unwatched_admission_settlement(
         await asyncio.wait_for(retry, 10)
         assert persistence.ready
         assert await persistence.evaluation.idempotency.get(
-            "evaluation.run", idempotency_key_digest("start"), tenant_id=PRINCIPAL.tenant_id,
+            "evaluation.run", "start", tenant_id=PRINCIPAL.tenant_id,
         ) is not None
         evaluations.preflight_handoff()
         await evaluations.close()

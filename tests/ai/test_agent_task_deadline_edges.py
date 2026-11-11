@@ -57,7 +57,7 @@ def _view(started_at: datetime, terminal_at: datetime | None = None) -> Executio
     return ExecutionView(
         "execution", "agent",
         ExecutionStatus.STARTED if terminal_at is None else ExecutionStatus.SUCCEEDED,
-        ExecutionLineageKind.RUN, None, "execution", None,
+        ExecutionLineageKind.RUN, None, "execution", None, agent_run_seq=1, created_at=started_at,
         started_at=started_at, terminal_at=terminal_at,
     )
 

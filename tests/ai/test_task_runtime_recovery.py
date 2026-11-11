@@ -17,15 +17,13 @@ from linktools.ai.core import (
     ResourceRef,
     TaskStatus,
     TenantAuthorizationPolicy,
-    canonical_json_bytes,
-    canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.task.engine import TaskEngine
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.inputs import TaskGraphBindingCaptureStore
 from linktools.ai.task import (
     Task,
     TaskGraph,
@@ -83,51 +81,8 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
             admission,
             graph,
         )
-        snapshot_manifest: dict[str, JsonValue] = {
-            "kind": "task-graph-binding-capture",
-            "format_version": 1,
-            "namespace": "default",
-            "tenant_id": admission.principal.tenant_id,
-            "graph_id": admission.graph_id,
-            "request_digest": admission.initial_request_digest,
-            "tasks": [
-                {
-                    "version": 1,
-                    "id": "test.recovery",
-                    "revision": 1,
-                    "type": "function",
-                    "effect_policy": "none",
-                    "output_contract": {"kind": "json"},
-                    "cancel": False,
-                    "reconcile": False,
-                }
-            ],
-            "expanders": [],
-        }
-        snapshot_payload = canonical_json_bytes(snapshot_manifest)
-        snapshot_digest = canonical_sha256(snapshot_manifest)
-        snapshot_key = (
-            "v1/task-graph-binding-capture/"
-            + canonical_sha256(
-                {
-                    "version": 1,
-                    "namespace": "default",
-                    "tenant_id": admission.principal.tenant_id,
-                    "graph_id": admission.graph_id,
-                    "request_digest": admission.initial_request_digest,
-                }
-            )
-        )
-
-        async def snapshot_chunks():
-            yield snapshot_payload
-
-        await state.object_store(PersistenceDomain.TASK).put(
-            snapshot_key,
-            snapshot_chunks(),
-            expected_size=len(snapshot_payload),
-            expected_digest=snapshot_digest,
-        )
+        captures = TaskGraphBindingCaptureStore(state.namespace, state.task.tasks.state_store)
+        await captures.capture(admission, graph, tasks=(handler,))
         await state.task.tasks.claim(
             graph.graph_id,
             "root",

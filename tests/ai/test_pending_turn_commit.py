@@ -135,11 +135,11 @@ def _stores(state: _TurnState) -> tuple[StateStore, ...]:
 async def _snapshot(state: _TurnState) -> tuple[object, ...]:
     async def read(transaction: StateTransaction) -> tuple[object, ...]:
         return (
-            tuple(sorted(await transaction.scan_records(), key=lambda value: value.key_digest)),
-            tuple(sorted(await transaction.scan_facts(), key=lambda value: (value.stream_digest, value.sequence))),
+            tuple(sorted(await transaction.scan_records(), key=lambda value: value.key)),
+            tuple(sorted(await transaction.scan_facts(), key=lambda value: (value.stream_key, value.sequence))),
             dict(await transaction.scan_sequences()),
-            tuple(sorted(await transaction.scan_aliases(), key=lambda value: value.alias_digest)),
-            tuple(sorted(await transaction.scan_operations(), key=lambda value: value.key_digest)),
+            tuple(sorted(await transaction.scan_aliases(), key=lambda value: value.alias_key)),
+            tuple(sorted(await transaction.scan_operations(), key=lambda value: value.key)),
         )
     return tuple([await store.read(read) for store in dict.fromkeys(state.storage._stores.values())])
 
@@ -160,6 +160,7 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert result.execution == replace(
         turn.commit.execution, revision=4 + len(turn.audit_events),
         event_seq=2 + len(turn.audit_events), result=turn.commit.result, retention_closed=True,
+        completed_at=turn.commit.result.created_at,
         recovery=ExecutionRecoveryDetail(agent_run_id=agent_run_id(
             namespace=_NAMESPACE, tenant_id="tenant", execution_id=execution_id, agent_run_seq=1,
         )),
@@ -167,7 +168,7 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert result.result == turn.commit.result
     assert await storage.execution.executions.get(execution_id, tenant_id="tenant") == result.execution
     identity = turn.reservation.idempotency
-    committed_identity = await storage.execution.idempotency.get(identity.scope, identity.idempotency_key_digest, tenant_id="tenant")
+    committed_identity = await storage.execution.idempotency.get(identity.scope, identity.idempotency_key, tenant_id="tenant")
     assert committed_identity is not None
     assert committed_identity.status is IdempotencyStatus.COMPLETED
     assert committed_identity.resource_id == execution_id

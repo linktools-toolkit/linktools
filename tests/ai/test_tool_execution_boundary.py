@@ -29,7 +29,7 @@ def _commands(state: Persistence) -> StateCommands:
 
 
 def _request() -> ToolOperationAdmission:
-    return ToolOperationAdmission("execution", "operation", "run", None, "call", canonical_sha256({"call": 1}),
+    return ToolOperationAdmission("execution", "operation", "run", None, "call",
                                   "tool", canonical_sha256({}), canonical_sha256({"binding": 1}),
                                   True, "worker", producer_generation=1)
 

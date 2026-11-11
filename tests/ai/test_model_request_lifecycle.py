@@ -1289,6 +1289,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
 
                 archive = runtime._run_store.read_store(PersistenceDomain.TRACE)
                 original_list = archive.list_model_interactions
+                original_capture = archive.capture_model_interactions
                 archive_read_started = asyncio.Event()
                 archive_snapshot: list[object] = []
 
@@ -1303,14 +1304,26 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                         after_model_request_seq=after_model_request_seq,
                         limit=limit,
                     )
-                    # Pause the captured page, not persistence reads needed to finish it.
                     if asyncio.current_task() is continuation and after_model_request_seq == 1:
                         archive_snapshot.extend(values)
-                        archive_read_started.set()
-                        await allow_archive_read_to_return.wait()
                     return values
 
+                async def delayed_content_capture(*args, **kwargs):
+                    load = await original_capture(*args, **kwargs)
+
+                    async def hydrate():
+                        from linktools.ai.persistence.state import active_state_scope
+
+                        assert active_state_scope() is None
+                        if asyncio.current_task() is continuation:
+                            archive_read_started.set()
+                            await allow_archive_read_to_return.wait()
+                        return await load()
+
+                    return hydrate
+
                 monkeypatch.setattr(archive, "list_model_interactions", delayed_archive_read)
+                monkeypatch.setattr(archive, "capture_model_interactions", delayed_content_capture)
                 continuation = asyncio.create_task(
                     execution.model_interactions(
                         cursor=first.next_cursor,

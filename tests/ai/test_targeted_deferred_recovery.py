@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolRetu
 from linktools.ai.capability import AgentContext
 from linktools.ai.core import (
     ApprovalDecision, AuthorizationAction, ExecutionStatus, OperationStatus, Principal,
-    ResourceRef, TenantAuthorizationPolicy, idempotency_key_digest,
+    ResourceRef, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ApprovalDecisionRequest, ExternalCallSucceeded, ExternalSupplyRequest
@@ -86,7 +86,7 @@ async def test_targeted_deferred_recovery_waits_retries_and_preserves_identity(
             assert await persistence.execution.executions.get(selected.execution_id, tenant_id="default") == before
             assert len(entered) == 2 and returned == []
         if key is not None:
-            assert await persistence.execution.operations.get(idempotency_key_digest(key), tenant_id="default") is None
+            assert await persistence.execution.operations.get(key, tenant_id="default") is None
 
         async def stop_before_reconciliation(*_args, **_kwargs):
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
@@ -124,7 +124,7 @@ async def test_targeted_deferred_recovery_waits_retries_and_preserves_identity(
         assert current.producer_generation > before.producer_generation
         assert await persistence.execution.executions.get(unrelated.execution_id, tenant_id="default") == other_before
         if key is not None:
-            receipt = await persistence.execution.operations.get(idempotency_key_digest(key), tenant_id="default")
+            receipt = await persistence.execution.operations.get(key, tenant_id="default")
             assert receipt.status is OperationStatus.SUCCEEDED
             assert receipt.result_ref == current.producer_claim_id
             await runtime.executions.recover(selected.execution_id, principal=actor, idempotency_key=key)
@@ -203,7 +203,7 @@ async def test_concurrent_keyed_deferred_recovery_has_one_durable_producer(
             await asyncio.wait_for(started.wait(), 5)
             persistence = runtimes[0]._state
             current = await persistence.execution.executions.get(execution.execution_id, tenant_id="default")
-            receipt = await persistence.execution.operations.get(idempotency_key_digest(winning_key), tenant_id="default")
+            receipt = await persistence.execution.operations.get(winning_key, tenant_id="default")
             assert current.agent_run_seq == waiting.agent_run_seq + 1
             assert receipt.status is OperationStatus.SUCCEEDED
             assert receipt.result_ref == current.producer_claim_id
@@ -230,7 +230,7 @@ async def test_deferred_claim_atomically_replays_operation_and_rejects_stale_cla
     persistence, commands, execution, _, continuation = await _enter_waiting("targeted-claim")
     now = datetime.now(timezone.utc)
     operation = OperationLedgerInput(
-        idempotency_key_digest("recovery"), "tenant", ResourceKind.EXECUTION,
+        "recovery", "tenant", ResourceKind.EXECUTION,
         execution.execution_id, execution.execution_id, OperationKind.EXECUTION_RECOVER,
         OperationStatus.RUNNING, "a" * 64, "producer-token", None, None, False, now, now,
     )
@@ -266,7 +266,7 @@ async def test_deferred_claim_atomically_replays_operation_and_rejects_stale_cla
         assert resumed.agent_run_seq == execution.agent_run_seq + 1
         assert await claim(replace(operation, result_ref="another-token")) == resumed
         with pytest.raises(AIError) as stale:
-            await claim(replace(operation, operation_id=idempotency_key_digest("different"), result_ref="another-token"))
+            await claim(replace(operation, operation_id="different", result_ref="another-token"))
         assert stale.value.code is ErrorCode.STORAGE_CONFLICT
         with pytest.raises(AIError) as collision:
             await claim(replace(operation, request_digest="b" * 64))

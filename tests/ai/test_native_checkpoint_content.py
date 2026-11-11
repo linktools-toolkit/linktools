@@ -149,3 +149,23 @@ def test_native_checkpoint_adapter_allows_ordinary_extra_native_fields() -> None
     }}}
     restored = native_checkpoint_messages([ModelRequest(parts=[UserPromptPart([TextContent('stored', metadata={'linktools-content': marker})])])], restore=True)
     assert restored[0].parts[0].content[0].content == 'text'
+
+
+@pytest.mark.asyncio
+async def test_captured_boundary_preserves_sdk_store_message_contract(store: StepStore) -> None:
+    from linktools.ai.persistence import NativeCheckpoint
+
+    writer = RuntimeStepStore(store, InMemoryStepStore(), output_retries_used=lambda: 2)
+    messages = [ModelRequest(parts=[UserPromptPart([_item('reference')])])]
+    captured = writer.capture_snapshot(ContinuableSnapshot(
+        run_id='captured', step_index=1, idempotency_key='boundary', messages=messages,
+    ))
+    await writer.commit_step(run=RunRecord(run_id='captured'), snapshot=captured)
+    raw = await store.latest_snapshot(run_id='captured')
+    restored = NativeCheckpoint.decode(raw)
+    assert restored.output_retries_used == 2
+    assert _wire(native_checkpoint_messages(restored.messages, restore=True)) == _wire(messages)
+    if not isinstance(store, SqlStepStore):
+        # File/SQLite serialize directly; memory must expose the same SDK list API.
+        assert isinstance(raw.messages, list)
+        ModelMessagesTypeAdapter.dump_json(raw.messages)

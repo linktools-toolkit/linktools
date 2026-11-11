@@ -142,7 +142,7 @@ async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preser
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         await evaluations.close()
         source = await storage.evaluation.records.get(source_id, tenant_id=PRINCIPAL.tenant_id)
-        source_key = storage.evaluation.records._key("evaluation", source_id).hex()
+        source_key = storage.evaluation.records._key("evaluation", (source_id,))
         statements = []
 
         def capture(_connection, _cursor, sql, parameters, _context, _many):

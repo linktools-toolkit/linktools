@@ -47,7 +47,7 @@ async def test_available_guard_preserves_exact_owner_and_all_lease_fields(tmp_pa
 
         async def retire(tx):
             guarded = await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition("guard_available", owner, 9),
             )
             assert guarded is not None
@@ -58,10 +58,10 @@ async def test_available_guard_preserves_exact_owner_and_all_lease_fields(tmp_pa
             return retired
 
         retired = await store.mutate(retire)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == retired
+        assert await store.read(lambda tx: tx.get_record(record.key)) == retired
         with pytest.raises(StateTransactionNestingError):
             await store.read(lambda tx: tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=retired.storage_revision,
+                record.key, expected_storage_revision=retired.storage_revision,
                 transition=RecordLeaseTransition("guard_available", owner, 9),
             ))
 
@@ -80,10 +80,10 @@ async def test_available_guard_rejects_wrong_or_live_generation(tmp_path, monkey
             await store.mutate(lambda tx: tx.insert_record(record))
         _clock(monkeypatch, store, backend, lambda: _STAMP)
         assert await store.mutate(lambda tx: tx.transition_record_lease(
-            record.key_digest, expected_storage_revision=record.storage_revision + (condition == "revision"),
+            record.key, expected_storage_revision=record.storage_revision + (condition == "revision"),
             transition=RecordLeaseTransition("guard_available", expected_owner, 9 + (condition == "fence")),
         )) is None
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == (
+        assert await store.read(lambda tx: tx.get_record(record.key)) == (
             None if condition == "missing" else record
         )
 
@@ -111,7 +111,7 @@ async def test_sql_available_guard_checks_fresh_clock_after_cas_and_aborts_caugh
                 patch.setattr(_SqlTransaction, "guard_record", delayed_guard)
                 with pytest.raises(AIError) as caught:
                     await tx.transition_record_lease(
-                        record.key_digest, expected_storage_revision=current.storage_revision,
+                        record.key, expected_storage_revision=current.storage_revision,
                         transition=RecordLeaseTransition("guard_available", "old", 9),
                     )
             assert caught.value.code is ErrorCode.STORAGE_CONFLICT
@@ -141,7 +141,7 @@ async def test_available_guard_cancel_after_cas_aborts_even_when_callback_catche
         async def callback(tx):
             try:
                 await tx.transition_record_lease(
-                    record.key_digest, expected_storage_revision=record.storage_revision,
+                    record.key, expected_storage_revision=record.storage_revision,
                     transition=RecordLeaseTransition("guard_available", "old", 9),
                 )
             except asyncio.CancelledError:
@@ -189,7 +189,7 @@ async def test_available_guard_unknown_commit_never_replays_or_reassigns_lease(t
             nonlocal attempted
             attempted += 1
             return await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition("guard_available", "old", 9),
             )
         with monkeypatch.context() as patch:
@@ -199,7 +199,7 @@ async def test_available_guard_unknown_commit_never_replays_or_reassigns_lease(t
                 await store.mutate(callback)
         assert caught.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         assert attempted == 1
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == replace(
+        assert await store.read(lambda tx: tx.get_record(record.key)) == replace(
             record, storage_revision=record.storage_revision + 1,
         )
 
@@ -214,17 +214,17 @@ async def test_fractional_lease_duration_roundtrips_without_whole_second_inflati
         await store.mutate(lambda tx: tx.insert_record(record))
         _clock(monkeypatch, store, backend, lambda: _STAMP)
         acquired = await store.mutate(lambda tx: tx.transition_record_lease(
-            record.key_digest, expected_storage_revision=record.storage_revision,
+            record.key, expected_storage_revision=record.storage_revision,
             transition=RecordLeaseTransition("acquire", "owner", 0, seconds),
         ))
         assert acquired.lease_expires_at == _STAMP + timedelta(seconds=seconds)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == acquired
+        assert await store.read(lambda tx: tx.get_record(record.key)) == acquired
         renewed = await store.mutate(lambda tx: tx.transition_record_lease(
-            record.key_digest, expected_storage_revision=acquired.storage_revision,
+            record.key, expected_storage_revision=acquired.storage_revision,
             transition=RecordLeaseTransition("renew", "owner", 1, seconds * 2),
         ))
         assert renewed.lease_expires_at == _STAMP + timedelta(seconds=seconds * 2)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == renewed
+        assert await store.read(lambda tx: tx.get_record(record.key)) == renewed
 
 
 @pytest.mark.parametrize("seconds", (None, False, 0, -1, float("nan"), float("inf"), 1e-10, 1e100, "1"))

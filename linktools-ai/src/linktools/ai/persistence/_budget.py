@@ -143,7 +143,7 @@ class BudgetRepositoryImpl(RepositoryBase):
     async def _scope_record(
         self, transaction: StateTransaction, scope_id: str,
     ) -> tuple[StoredRecord, BudgetUsage]:
-        row = await transaction.get_record(self._key("budget_scope", scope_id))
+        row = await transaction.get_record(self._key("budget_scope", (scope_id,)))
         return await self._decode_scope_record(scope_id, row)
 
     async def _decode_scope_record(
@@ -160,13 +160,13 @@ class BudgetRepositoryImpl(RepositoryBase):
     async def _replace_usage(
         self, transaction: StateTransaction, row: StoredRecord, usage: BudgetUsage,
     ) -> None:
-        candidate = self._stored("budget_scope", usage.scope_id, usage)
+        candidate = self._stored("budget_scope", (usage.scope_id,), usage)
         await replace_checked(transaction, replace(candidate, storage_revision=row.storage_revision + 1),
                               row.storage_revision)
 
     async def ensure(self, scope_id: str, limits: RunBudget) -> BudgetUsage:
         async def readback() -> BudgetUsage | None:
-            row = await self._record(self._key("budget_scope", scope_id))
+            row = await self._record(self._key("budget_scope", (scope_id,)))
             if row is None:
                 return None
             value = await self._decode(row, BudgetUsage)
@@ -182,7 +182,7 @@ class BudgetRepositoryImpl(RepositoryBase):
     async def ensure_in_transaction(
         self, transaction: StateTransaction, scope_id: str, limits: RunBudget,
     ) -> BudgetUsage:
-        row = await transaction.get_record(self._key("budget_scope", scope_id))
+        row = await transaction.get_record(self._key("budget_scope", (scope_id,)))
         if row is not None:
             value = await self._decode(row, BudgetUsage)
             if value.scope_id != scope_id:
@@ -192,7 +192,7 @@ class BudgetRepositoryImpl(RepositoryBase):
                               safe_details={"reason": "budget_limits_changed"})
             return value
         initial = BudgetUsage(scope_id, limits)
-        await transaction.insert_record(self._stored("budget_scope", scope_id, initial))
+        await transaction.insert_record(self._stored("budget_scope", (scope_id,), initial))
         return initial
 
     async def read(self, scope_id: str) -> BudgetUsage:
@@ -238,7 +238,7 @@ class BudgetRepositoryImpl(RepositoryBase):
             self._reject(usage.scope_id, "total_tokens", "unknown_usage")
         if usage.in_flight_model_requests:
             rows = await transaction.list_records(RecordQuery(
-                kind="budget_model", scope_digest=self._scope("budget_model", "budget", usage.scope_id),
+                kind="budget_model", scope_key=self._scope("budget_model", "budget", (usage.scope_id,)),
                 states=frozenset({"in_flight"}),
             ))
             if len(rows) != usage.in_flight_model_requests:
@@ -264,7 +264,7 @@ class BudgetRepositoryImpl(RepositoryBase):
         active = (scope_id, request_id, reservation.admission_id)
 
         async def write(transaction: StateTransaction) -> BudgetUsage:
-            scope_key = self._key("budget_scope", scope_id)
+            scope_key = self._key("budget_scope", (scope_id,))
             reservation_key = self._key("budget_model", identity)
             records = await transaction.get_records((scope_key, reservation_key))
             row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
@@ -275,7 +275,7 @@ class BudgetRepositoryImpl(RepositoryBase):
                               in_flight_model_requests=usage.in_flight_model_requests + 1)
             await transaction.insert_record(self._stored(
                 "budget_model", identity, reservation,
-                scope=self._scope("budget_model", "budget", scope_id), state="in_flight",
+                scope=self._scope("budget_model", "budget", (scope_id,)), state="in_flight",
             ))
             await self._replace_usage(transaction, row, updated)
             return updated
@@ -312,7 +312,7 @@ class BudgetRepositoryImpl(RepositoryBase):
         status = "unknown" if total_tokens is None else "settled"
 
         async def write(transaction: StateTransaction) -> BudgetUsage:
-            scope_key = self._key("budget_scope", scope_id)
+            scope_key = self._key("budget_scope", (scope_id,))
             reservation_key = self._key("budget_model", identity)
             records = await transaction.get_records((scope_key, reservation_key))
             scope_row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
@@ -334,9 +334,9 @@ class BudgetRepositoryImpl(RepositoryBase):
             )
             candidate = self._stored(
                 "budget_model", identity, replace(reservation, status=status, total_tokens=total_tokens),
-                scope=self._scope("budget_model", "budget", scope_id), state=status,
+                scope=self._scope("budget_model", "budget", (scope_id,)), state=status,
             )
-            scope_candidate = self._stored("budget_scope", scope_id, updated)
+            scope_candidate = self._stored("budget_scope", (scope_id,), updated)
             await transaction.replace_records((
                 RecordReplacement(replace(candidate, storage_revision=row.storage_revision + 1),
                                   row.storage_revision),
@@ -370,7 +370,7 @@ class BudgetRepositoryImpl(RepositoryBase):
         """Reserve one dispatch inside its caller's atomic admission boundary."""
         reservation = BudgetToolReservation(scope_id, call_id, admission_id)
         identity = [scope_id, call_id]
-        scope_key = self._key("budget_scope", scope_id)
+        scope_key = self._key("budget_scope", (scope_id,))
         reservation_key = self._key("budget_tool", identity)
         records = await transaction.get_records((scope_key, reservation_key))
         row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
@@ -393,7 +393,7 @@ class BudgetRepositoryImpl(RepositoryBase):
     ) -> BudgetUsage | None:
         """Confirm this command's immutable reservation after an uncertain commit."""
         async def read(transaction: StateTransaction) -> BudgetUsage | None:
-            row = await transaction.get_record(self._key("budget_tool", [scope_id, call_id]))
+            row = await transaction.get_record(self._key("budget_tool", (scope_id, call_id)))
             if row is None:
                 return None
             value = await self._decode(row, BudgetToolReservation)

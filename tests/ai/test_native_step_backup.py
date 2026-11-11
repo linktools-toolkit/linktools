@@ -12,6 +12,7 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot, InMemorySt
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.steps import native_store_key, encode_native_replay_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_backup import NativeStepBackup
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
@@ -46,7 +47,8 @@ async def test_raw_backup_preserves_occurrences_order_and_pruned_identities(tmp_
             backup = await store.capture_backup(_Reader(session))
         assert backup.snapshots[0]["pruned"] is True
         assert backup.snapshots[0]["messages"] == "{}"
-        assert backup.events[0]["key_digest"] != backup.events[1]["key_digest"]
+        assert len(backup.events) == 2
+        assert all(row["idempotency_key"] is None for row in backup.events)
         assert [row["step_index"] for row in backup.snapshots] == [7, 2]
         wire = backup.to_json()
         assert NativeStepBackup.from_json(wire).to_json() == wire
@@ -90,7 +92,7 @@ async def test_raw_backup_rejects_corruption_instead_of_skipping_rows(tmp_path: 
                 await connection.execute(text("UPDATE ai_step_snapshots SET messages = :value"),
                                          {"value": json.dumps(value)})
             elif damage == "occurrence":
-                await connection.execute(text("UPDATE ai_step_events SET key_digest = 'invalid'"))
+                await connection.execute(text("UPDATE ai_step_events SET idempotency_key = 'invalid'"))
             elif damage == "tombstone":
                 await connection.execute(text("UPDATE ai_step_snapshots SET pruned = 1"))
             else:
@@ -132,12 +134,12 @@ def test_message_closure_enumerates_ordered_ranges_and_repeated_occurrences() ->
     from linktools.ai.persistence._archive_closure import NativeMessageClosure
     from linktools.ai.persistence._message_root import NativeMessageSlice
 
-    scope = "0" * 64
+    scope = native_store_key("0", "tenant")
     first = ImmutableSequenceNode("1" * 64)
     second = ImmutableSequenceNode("2" * 64)
     third = ImmutableSequenceNode("3" * 64, 3, second.identity, first.identity)
     fourth = ImmutableSequenceNode("4" * 64, next_forest=third.identity)
-    rows = [{"store_digest": scope, "sha256": node.identity, "message_sha256": node.content_id,
+    rows = [{"store_key": scope, "sha256": node.identity, "message_sha256": node.content_id,
              "tree_count": node.tree_count, "left_sha256": node.left, "right_sha256": node.right,
              "next_sha256": node.next_forest} for node in (first, second, third, fourth)]
     closure = NativeMessageClosure(rows)
@@ -158,7 +160,7 @@ def test_backup_snapshot_decodes_retry_binding_without_store_or_database() -> No
     encoded = NativeCheckpoint.encode(snapshot, output_retries_used=3)
     row = {"run_id": snapshot.run_id, "step_index": snapshot.step_index,
            "timestamp": snapshot.timestamp.isoformat(), "state": snapshot.state,
-           "idempotency_key": snapshot.idempotency_key, "sequence_root": None,
+           "idempotency_key": encode_native_replay_key(snapshot.idempotency_key), "sequence_root": None,
            "messages": json.dumps({"stored_messages": 0, "checkpoint": {
                "output_retries_used": 3,
                "message_sha256": hashlib.sha256(encode_model_messages(encoded.messages[-1:])).hexdigest(),
@@ -180,7 +182,7 @@ def test_checkpoint_tail_validation_preserves_empty_and_nonempty_retry_binding(c
     encoded = NativeCheckpoint.encode(snapshot, output_retries_used=3)
     row = {"run_id": snapshot.run_id, "step_index": snapshot.step_index,
            "timestamp": snapshot.timestamp.isoformat(), "state": snapshot.state,
-           "idempotency_key": snapshot.idempotency_key, "sequence_root": None if count == 0 else "1" * 64,
+           "idempotency_key": encode_native_replay_key(snapshot.idempotency_key), "sequence_root": None if count == 0 else "1" * 64,
            "messages": json.dumps({"stored_messages": count, "checkpoint": {
                "output_retries_used": 3,
                "message_sha256": hashlib.sha256(encode_model_messages(encoded.messages[-1:])).hexdigest(),

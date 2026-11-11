@@ -59,7 +59,7 @@ async def test_local_native_factory_joins_control_commit_rollback_and_backup(tmp
                 await state.mutate(abort)
             assert failure.value.code is ErrorCode.INTERNAL_ERROR
             assert isinstance(failure.value.__cause__, RuntimeError)
-            assert await state.read(lambda tx: tx.get_record(control.key_digest)) is None
+            assert await state.read(lambda tx: tx.get_record(control.key)) is None
             assert await native.get_run(run_id=run.run_id) is None
             assert await native.latest_snapshot(run_id=run.run_id) is None
             receipt = await state.mutate(write)
@@ -81,7 +81,7 @@ async def test_local_native_factory_joins_control_commit_rollback_and_backup(tmp
         native = await restored.create_step_store()
         try:
             state = restored.execution.executions.state_store
-            assert await state.read(lambda tx: tx.get_record(control.key_digest)) == control
+            assert await state.read(lambda tx: tx.get_record(control.key)) == control
             assert await native.get_run(run_id=run.run_id) == run
             assert await native.list_events(run_id=run.run_id) == events
             assert await native.latest_snapshot(run_id=run.run_id) == snapshot

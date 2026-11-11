@@ -16,7 +16,7 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStorageGroup, SqlStateStore
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import StateGroupTransaction, StoredRecord
+from linktools.ai.persistence.state import STATE_GROUP_METADATA_KEY, StateGroupTransaction, StoredRecord, record_key
 from linktools.ai.storage import create_sql_storage_context
 
 pytestmark = pytest.mark.asyncio
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.asyncio
 
 def _record(label: str) -> StoredRecord:
     return StoredRecord(
-        hashlib.sha256(label.encode()).digest(), None, None, "probe", label,
+        hashlib.sha256(label.encode()).digest(), None, None, "probe", (label).encode("ascii"),
         None, 0, None, 0, None, {"label": label},
     )
 
@@ -62,8 +62,8 @@ async def test_group_archive_isolated_identity_and_atomic_publication(backend: s
         with pytest.raises(AIError) as error:
             await group.mutate((store,), abort)
         assert error.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await store.read(lambda tx: tx.get_record(owner_record.key_digest)) is None
-        assert await archive.read(lambda tx: tx.get_record(archive_record.key_digest)) is None
+        assert await store.read(lambda tx: tx.get_record(owner_record.key)) is None
+        assert await archive.read(lambda tx: tx.get_record(archive_record.key)) is None
         await group.mutate((store,), publish)
         scanned = await group.scan_stores()
         labels = []
@@ -125,7 +125,7 @@ async def test_group_archive_sql_shared_identity_and_unopened_partition_scan(tmp
             second.storage_group.open_archive(create=True),
         )
         assert results[0][0] == results[1][0]
-        hidden = SqlStateStore(engine, group=first._storage_group, store_digest=hashlib.sha256(b"hidden").digest())
+        hidden = SqlStateStore(engine, group=first._storage_group, store_key=hashlib.sha256(b"hidden").digest())
         await hidden.initialize()
         await hidden.mutate(lambda tx: tx.insert_record(_record("hidden")))
         await hidden.close()
@@ -159,7 +159,7 @@ async def test_group_archive_resource_scope_survives_reduced_routes(tmp_path: Pa
     first = await StorageResourceScope.open(requests, namespace="namespace", tenant_id="tenant")
     stores = tuple(SqlStateStore(
         resource.context.engine, context=resource.context, metadata=resource.metadata,
-        group=resource.group, store_digest=hashlib.sha256(request.name.encode()).digest(),
+        group=resource.group, store_key=hashlib.sha256(request.name.encode()).digest(),
     ) for request, resource in zip(requests, first.resources))
     for store in stores:
         await store.initialize()
@@ -172,7 +172,7 @@ async def test_group_archive_resource_scope_survives_reduced_routes(tmp_path: Pa
     second = await StorageResourceScope.open(requests[:1], namespace="namespace", tenant_id="tenant", read_only=True)
     resource = second.resources[0]
     store = SqlStateStore(resource.context.engine, context=resource.context, metadata=resource.metadata,
-                          group=resource.group, store_digest=hashlib.sha256(b"owner").digest())
+                          group=resource.group, store_key=hashlib.sha256(b"owner").digest())
     await store.initialize()
     try:
         assert (await store.storage_group.open_archive())[0] == scope
@@ -196,7 +196,7 @@ async def test_group_archive_object_resource_survives_route_reduction(tmp_path: 
     context = create_sql_storage_context(engine)
     first = SqlStateStore(engine, context=context)
     hidden = SqlStateStore(engine, context=context, group=first.storage_group,
-                           store_digest=hashlib.sha256(b"hidden").digest())
+                           store_key=hashlib.sha256(b"hidden").digest())
     route = StorageRoute.sqlite(path)
     plan = PersistencePlan(conversation=route, execution=route)
     domains = (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
@@ -241,11 +241,11 @@ async def test_sql_archive_rejects_missing_identity_with_existing_content(tmp_pa
         await archive.mutate(lambda tx: tx.insert_record(_record("content")))
         metadata = None
         for store in await owner.storage_group.scan_stores():
-            if await store.read(lambda tx: tx.get_record(hashlib.sha256(b"archive_scope_id").digest())) is not None:
+            if await store.read(lambda tx: tx.get_record(record_key("", "", "archive", "archive_scope", ("archive_scope_id",)))) is not None:
                 metadata = store
                 break
         assert metadata is not None
-        await metadata.mutate(lambda tx: tx.delete_record(hashlib.sha256(b"archive_scope_id").digest()))
+        await metadata.mutate(lambda tx: tx.delete_record(record_key("", "", "archive", "archive_scope", ("archive_scope_id",))))
         for create in (False, True):
             with pytest.raises(AIError) as error:
                 await owner.storage_group.open_archive(create=create)
@@ -265,7 +265,7 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
     value = _record("owned-archive")
     await archive.mutate(lambda tx: tx.insert_record(value))
     await first.close()
-    assert await archive.read_record(value.key_digest) == value
+    assert await archive.read_record(value.key) == value
     assert await second.read(lambda tx: tx.scan_records()) == ()
 
     entered, release = asyncio.Event(), asyncio.Event()
@@ -274,7 +274,7 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
         entered.set()
         await release.wait()
         # Closing admission must not revoke the already-bound transaction.
-        return await archive.read_record(value.key_digest)
+        return await archive.read_record(value.key)
 
     read = asyncio.create_task(archive.read(accepted_read))
     await entered.wait()
@@ -291,7 +291,7 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
     release.set()
     assert await read == value
     await closing
-    for operation in (lambda: archive.read_record(value.key_digest), group.scan_stores):
+    for operation in (lambda: archive.read_record(value.key), group.scan_stores):
         with pytest.raises(AIError) as error:
             await operation()
         assert error.value.code is ErrorCode.STORAGE_CLOSED
@@ -330,7 +330,7 @@ async def test_sql_first_owner_write_establishes_scope_in_the_same_commit(tmp_pa
         with pytest.raises(AIError):
             await owner.mutate(abort)
         assert await group.open_archive() is None
-        assert await owner.read_record(value.key_digest) is None
+        assert await owner.read_record(value.key) is None
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
             await owner.mutate(lambda tx: tx.insert_record(value))
@@ -339,7 +339,7 @@ async def test_sql_first_owner_write_establishes_scope_in_the_same_commit(tmp_pa
         assert len(transactions) == 1 and None not in transactions
         opened = await group.open_archive()
         assert opened is not None
-        assert await owner.read_record(value.key_digest) == value
+        assert await owner.read_record(value.key) == value
     finally:
         await owner.close()
         await group.close()
@@ -362,7 +362,7 @@ async def test_sql_concurrent_first_owner_writes_keep_one_scope(tmp_path: Path) 
         assert all(item is not None for item in opened)
         assert opened[0][0] == opened[1][0]
         for index in range(2):
-            assert await stores[0].read_record(_record(f"owner-{index}").key_digest) == _record(f"owner-{index}")
+            assert await stores[0].read_record(_record(f"owner-{index}").key) == _record(f"owner-{index}")
     finally:
         for store in stores:
             await store.close()
@@ -399,13 +399,13 @@ async def test_sql_first_owner_write_rejects_orphan_archive_without_repair(tmp_p
         table = owner.storage_group.metadata.tables["ai_state_records"]
         async with engine.begin() as connection:
             await connection.execute(delete(table).where(
-                table.c.store_digest == hashlib.sha256(b"linktools-ai:state-group-metadata").hexdigest(),
+                table.c.store_key == STATE_GROUP_METADATA_KEY,
             ))
         await reopened.initialize()
         with pytest.raises(AIError) as error:
             await reopened.mutate(lambda tx: tx.insert_record(_record("rejected-owner")))
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        assert await reopened.read_record(_record("rejected-owner").key_digest) is None
+        assert await reopened.read_record(_record("rejected-owner").key) is None
         with pytest.raises(AIError) as error:
             await reopened.storage_group.open_archive()
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -477,7 +477,7 @@ async def test_sql_first_archive_owner_unknown_commit_keeps_scope_with_owner_tru
             with pytest.raises(AIError) as error:
                 await owner.mutate(lambda tx: tx.insert_record(value))
             assert error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
-        assert await owner.read_record(value.key_digest) == (value if committed else None)
+        assert await owner.read_record(value.key) == (value if committed else None)
         opened = await group.open_archive()
         assert (opened is not None) is committed
         await owner.mutate(lambda tx: tx.insert_record(_record("later-owner")))

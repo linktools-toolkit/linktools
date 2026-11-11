@@ -49,8 +49,8 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                 async def snapshot():
                     async def read(tx):
                         return (
-                            tuple(sorted(await tx.scan_records(), key=lambda value: value.key_digest)),
-                            tuple(sorted(await tx.scan_facts(), key=lambda value: (value.stream_digest, value.sequence))),
+                            tuple(sorted(await tx.scan_records(), key=lambda value: value.key)),
+                            tuple(sorted(await tx.scan_facts(), key=lambda value: (value.stream_key, value.sequence))),
                             dict(await tx.scan_sequences()),
                         )
                     stores = dict.fromkeys(runtime._state._stores.values())
@@ -83,8 +83,8 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                     # A competing physical revision must defeat the later CAS even
                     # when the transaction has already captured the previous row.
                     await tx._execute(update(table).where(
-                        table.c.store_digest == store.store_digest.hex(),
-                        table.c.key_digest == record.key_digest.hex(),
+                        table.c.store_key == store.store_key,
+                        table.c.key == record.key,
                     ).values(storage_revision=record.storage_revision + 1))
                     return result
 
@@ -97,11 +97,11 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                         # A cold publisher must compare the immutable winner before
                         # its owner references can commit in this same transaction.
                         changed = await session.execute(update(table).where(
-                            table.c.store_digest == candidate["store_digest"],
+                            table.c.store_key == candidate["store_key"],
                             table.c.sha256 == candidate["sha256"],
-                        ).values(message='{"corrupt":true}'))
+                        ).values(message=b'{"corrupt":true}'))
                         if changed.rowcount == 0:
-                            await session.execute(table.insert().values(dict(candidate, message='{"corrupt":true}')))
+                            await session.execute(table.insert().values(dict(candidate, message=b'{"corrupt":true}')))
                         else:
                             assert changed.rowcount == 1
                     return await original_insert(self, session, table, rows)

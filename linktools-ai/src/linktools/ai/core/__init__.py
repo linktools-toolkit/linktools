@@ -5,7 +5,7 @@
 from ._execution_context import ExecutionContext
 from ._commit_policy import CommitPolicy
 from ._write_buffer import WriteBufferBackend, WriteBufferEntry
-from ._budget import BudgetUsage, RunBudget
+from ._budget import BudgetUsage, RunBudget, validate_budget_scope
 from ._correlation import (
     CorrelationData,
     CorrelationValue,
@@ -17,7 +17,6 @@ from ._ids import (
     RUNTIME_OBJECT_STORE_ID,
     canonical_sha256,
     deterministic_id,
-    idempotency_key_digest,
     principal_identity_payload,
     agent_conversation_id,
     agent_run_id,
@@ -51,9 +50,13 @@ from ._redaction import (
 )
 from ._usage import UsageMetrics
 from ._validation import (
+    RESOURCE_ID_MAX_BYTES,
     validate_agent_id,
     validate_asset_kind,
     validate_asset_namespace,
+    validate_capability_id,
+    validate_capability_revision,
+    validate_capability_write_key,
     validate_capability_provider,
     validate_enum,
     validate_external_payload,
@@ -111,6 +114,7 @@ from ._domain import PersistenceDomain
 from ._token_seed import token_seed
 
 __all__ = [
+    "RESOURCE_ID_MAX_BYTES",
     "token_seed",
     "ExecutionContext",
     "PersistenceDomain",
@@ -124,6 +128,7 @@ __all__ = [
     "WriteBufferBackend",
     "WriteBufferEntry",
     "BudgetUsage",
+    "validate_budget_scope",
     "RunBudget",
     "ApprovalDecision",
     "ApprovalStatus",
@@ -175,7 +180,6 @@ __all__ = [
     "canonical_sha256",
     "canonical_string_tuple",
     "deterministic_id",
-    "idempotency_key_digest",
     "normalize_execution_mode",
     "normalize_json_value",
     "normalize_correlation",
@@ -191,6 +195,9 @@ __all__ = [
     "validate_agent_id",
     "validate_asset_kind",
     "validate_asset_namespace",
+    "validate_capability_id",
+    "validate_capability_revision",
+    "validate_capability_write_key",
     "validate_capability_provider",
     "validate_enum",
     "validate_external_payload",

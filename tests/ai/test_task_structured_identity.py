@@ -48,9 +48,9 @@ async def _seed_legacy(state: Persistence) -> TaskGraphSubmission:
     submission = _legacy()
     repository = state.task.admissions
     records = (
-        replace(repository._stored("task_submission", submission.graph.graph_id, submission.ref, state="prepared"),
+        replace(repository._stored("task_submission", (submission.graph.graph_id,), submission.ref, state="prepared"),
                 data=fixture["ref_record"]),
-        replace(repository._stored("task_submission_payload", submission.graph.graph_id, submission),
+        replace(repository._stored("task_submission_payload", (submission.graph.graph_id,), submission),
                 data=fixture["prepared_record"]),
     )
     await repository.state_store.mutate(lambda transaction: transaction.insert_records(records))
@@ -144,8 +144,8 @@ async def test_generic_business_json_is_not_rewritten_by_request_version(version
         submission = TaskGraphSubmission(state.namespace, admission, request.graph)
         repository = state.task.admissions
         await repository.state_store.mutate(lambda transaction: transaction.insert_records((
-            repository._stored("task_submission", "structured", submission.ref, state="prepared"),
-            repository._stored("task_submission_payload", "structured", submission),
+            repository._stored("task_submission", ("structured",), submission.ref, state="prepared"),
+            repository._stored("task_submission_payload", ("structured",), submission),
         )))
         assert (await _service(state).prepare_submission(request)).admission == admission
         with pytest.raises(AIError) as caught:
@@ -361,7 +361,7 @@ async def test_submission_lookup_rejects_version_disagreement_with_admission(pha
 
         async def corrupt(transaction: StateTransaction) -> None:
             record = await transaction.get_record(repository._submission_key("structured"))
-            changed = repository._stored("task_submission", "structured", replace(prepared.ref, request_identity_version=2))
+            changed = repository._stored("task_submission", ("structured",), replace(prepared.ref, request_identity_version=2))
             assert await transaction.replace_record(
                 replace(record, data=changed.data, storage_revision=record.storage_revision + 1),
                 expected_storage_revision=record.storage_revision,

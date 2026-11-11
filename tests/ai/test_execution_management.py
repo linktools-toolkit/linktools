@@ -12,7 +12,7 @@ from linktools.ai.core import (
     ResourceKind, ResourceRef, StopReason, TenantAuthorizationPolicy, UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import ExecutionManager, IdempotencyRecord, ResultRecord
+from linktools.ai.execution import ExecutionManager, IdempotencyRecord, ResultRecord, project_execution_view
 from linktools.ai.storage import StoredPayload
 
 from .test_runtime_persistence_evidence import _execution
@@ -32,6 +32,12 @@ class _ReadPort:
         self.reads.append(("execution", execution_id, tenant_id))
         return self.execution
 
+    async def read_view(self, execution_id, *, tenant_id, observed=False):
+        if self.execution is None:
+            return None
+        return (ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, self.execution.principal_id),
+                project_execution_view(self.execution))
+
     async def read_source_execution(self, execution_id, *, tenant_id):
         self.reads.append(("source_execution", execution_id, tenant_id))
         return self.execution
@@ -43,7 +49,7 @@ class _ReadPort:
     async def read_header(self, execution_id, *, tenant_id):
         return await self.read_source_header(execution_id, tenant_id=tenant_id)
 
-    async def get_idempotency(self, scope, key_digest, *, tenant_id):
+    async def get_idempotency(self, scope, idempotency_key, *, tenant_id):
         return self.identity
 
     async def result_record(self, execution, *, tenant_id):
@@ -206,14 +212,14 @@ async def test_admission_reuses_observed_identity_without_bypassing_validation(
     elif mismatch == "scope":
         identity = replace(identity, scope="other")
     elif mismatch == "key":
-        identity = replace(identity, idempotency_key_digest="other")
+        identity = replace(identity, idempotency_key="other")
     elif mismatch == "kind":
         identity = replace(identity, resource_kind=ResourceKind.SESSION)
     elif mismatch == "owner":
         record = replace(record, principal_id="other")
 
     class ObservedPort(_ReadPort):
-        async def get_idempotency(self, scope, key_digest, *, tenant_id):
+        async def get_idempotency(self, scope, idempotency_key, *, tenant_id):
             raise AssertionError("Admission must reuse the observed source identity")
 
     port = ObservedPort(record)

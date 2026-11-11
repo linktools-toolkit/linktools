@@ -118,7 +118,7 @@ async def test_call_lookup_rejects_invalid_recovery_sources(tmp_path: Path, back
         await tools.admit(replace(request, agent_run_id="run", recovery_agent_run_id="source"))
         other = await tools.admit(replace(_request(), tool_operation_id="other", agent_run_id="other", tool_call_id="other"))
         records = await tools.state_store.read(lambda tx: tx.scan_records())
-        wrong_call = next(record for record in records if record.key_digest == tools._tool_key(other.tool_operation_id))
+        wrong_call = next(record for record in records if record.key == tools._tool_key(other.tool_operation_id))
 
         def transform(records):
             if damage == "missing":

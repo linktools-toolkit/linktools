@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.messages import BinaryImage, ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
 from linktools.ai.persistence import Persistence
@@ -42,7 +42,8 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     await storage.initialize(
         namespace="close-projection", tenant_id="tenant",
     )
-    message = ModelRequest(parts=[UserPromptPart("external transcript " * 4096)])
+    message = ModelRequest(parts=[UserPromptPart(["external transcript " * 4096,
+        BinaryImage(b"external attachment", media_type="image/png")])])
     try:
         execution = replace(_execution(), revision=1, producer_generation=1, producer_claim_id="owner-claim")
         repository = storage.execution.executions

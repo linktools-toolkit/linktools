@@ -38,7 +38,7 @@ def _backend():
         failure=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR), uncertain=False,
         committing=False, committed=None, reconcile=None, coordination=object(),
         boundary=asyncio.Lock(), session=None,
-        reservation=SimpleNamespace(idempotency=SimpleNamespace(scope="scope", idempotency_key_digest="request")),
+        reservation=SimpleNamespace(idempotency=SimpleNamespace(scope="scope", idempotency_key="request")),
     )
     turn.reservation.execution = turn.execution
     backend._pending_turns._executions["tenant", "old"] = turn

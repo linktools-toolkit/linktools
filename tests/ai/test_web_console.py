@@ -103,6 +103,73 @@ async def test_local_boundary_blocks_cross_site_fetches_and_unmarked_mutations()
 
 
 @pytest.mark.asyncio
+async def test_session_creation_returns_public_view_and_replays_without_duplicates() -> None:
+    features = model_features(RuntimeUsageModels(), RuntimeFeatures("web-session-create"))
+    async with Persistence.open("web-session-create", storage=PersistenceStorage.in_memory()) as persistence:
+        async with Runtime.attach(persistence=persistence, features=features) as runtime:
+            async with client(create_app(runtime=runtime)) as http:
+                request = {"session_id": "created", "request_id": "create", "title": "New session"}
+                created = await http.post("/api/sessions", json=request, headers=_HEADERS)
+                assert created.status_code == 201, created.text
+                view = created.json()
+                assert view == {
+                    "session_id": "created", "agent_id": "default", "status": "OPEN",
+                    "revision": 0, "cwd": None, "active_execution_id": None,
+                    "metadata": {"title": "New session"}, "history_quality": "complete",
+                }
+                repeated = await http.post("/api/sessions", json=request, headers=_HEADERS)
+                assert repeated.status_code == 201, repeated.text
+                assert repeated.json() == view
+                listed = await http.get("/api/sessions")
+                assert listed.status_code == 200, listed.text
+                assert listed.json()["items"] == [view]
+                inspected = await http.get("/api/session?session_id=created&include_timeline=false")
+                assert inspected.status_code == 200, inspected.text
+                assert inspected.json()["session"] == view
+
+
+@pytest.mark.asyncio
+async def test_session_creation_does_not_require_session_read_authority() -> None:
+    from linktools.ai.core import AuthorizationAction, Principal, ResourceRef, TenantAuthorizationPolicy
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.execution import CreateSessionRequest
+    from linktools.ai.runtime import Session
+
+    class CreateOnlyAuthorization(TenantAuthorizationPolicy):
+        async def authorize(self, principal: Principal, action: AuthorizationAction, resource: ResourceRef) -> None:
+            if action is not AuthorizationAction.SESSION_CREATE:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await super().authorize(principal, action, resource)
+
+    features = model_features(RuntimeUsageModels(), RuntimeFeatures("web-create-only"))
+    async with Runtime.open(
+        "web-create-only", storage=PersistenceStorage.in_memory(), features=features,
+        authorization=CreateOnlyAuthorization(),
+    ) as runtime:
+        async with client(create_app(runtime=runtime)) as http:
+            request = {"session_id": "created", "request_id": "create", "title": "Create only"}
+            created = await http.post("/api/sessions", json=request, headers=_HEADERS)
+            assert created.status_code == 201, created.text
+            assert created.json() == {
+                "session_id": "created", "agent_id": "default", "status": "OPEN",
+                "revision": 0, "cwd": None, "active_execution_id": None,
+                "metadata": {"title": "Create only"}, "history_quality": "complete",
+            }
+            repeated = await http.post("/api/sessions", json=request, headers=_HEADERS)
+            assert repeated.status_code == 201, repeated.text
+            assert repeated.json() == created.json()
+            detail = await http.get("/api/session?session_id=created&include_timeline=false")
+            assert detail.status_code == 404, detail.text
+        session = await runtime.sessions.create(
+            "default", CreateSessionRequest(runtime.default_principal, "handle", "create-handle"),
+        )
+        assert isinstance(session, Session)
+        with pytest.raises(AIError) as denied:
+            await session.inspect()
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+@pytest.mark.asyncio
 async def test_session_execution_history_trace_result_and_metrics_use_runtime() -> None:
     metrics = Metrics.in_memory()
     features = RuntimeFeatures("web-test")

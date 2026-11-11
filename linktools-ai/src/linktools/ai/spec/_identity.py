@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue, canonical_sha256, validate_capability_id, validate_capability_revision
 from ..errors import AIError, ErrorCode
 from ._schema import canonicalize_json_schema
 
@@ -29,7 +29,14 @@ class CapabilityRef:
             or not self.id.strip()
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _positive_int(self.revision)
+        if self.kind == "capability":
+            try:
+                validate_capability_id(self.id)
+                validate_capability_revision(self.revision)
+            except AIError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        else:
+            _positive_int(self.revision)
 
     def to_payload(self) -> "dict[str, JsonValue]":
         return {"kind": self.kind, "id": self.id, "revision": self.revision}

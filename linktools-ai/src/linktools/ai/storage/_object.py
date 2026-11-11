@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
@@ -15,12 +15,13 @@ from ..errors import AIError, ErrorCode
 _CHUNK_SIZE = 1024 * 1024
 _TaskT = TypeVar("_TaskT")
 _STORE_ID_MAX_LENGTH = 128
+_OBJECT_KEY_MAX_BYTES = 1024
 
 
 @dataclass(frozen=True, slots=True)
 class ObjectRef:
     store_id: str
-    key: str
+    key: str = field(repr=False)
     digest: str
     size: int
 
@@ -34,12 +35,14 @@ class ObjectRef:
 
 @dataclass(frozen=True, slots=True)
 class ObjectStat:
-    key: str
+    key: str = field(repr=False)
     digest: str
     size: int
 
 
 class ObjectStore(Protocol):
+    """Immutable bytes addressed by exact opaque keys of at most 1024 UTF-8 bytes."""
+
     @property
     def store_id(self) -> str: ...
 
@@ -165,12 +168,6 @@ def _track_object_task(
     task.add_done_callback(tasks.discard)
 
 
-def _key_digest(store_id: str, key: str) -> bytes:
-    return hashlib.sha256(
-        store_id.encode("utf-8") + b"\0" + key.encode("utf-8")
-    ).digest()
-
-
 def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -192,6 +189,12 @@ def _validate_store_id(value: str) -> None:
 def _validate_key(value: str) -> None:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError("object key is invalid")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError("object key is invalid") from error
+    if size > _OBJECT_KEY_MAX_BYTES:
+        raise ValueError("object key exceeds 1024 UTF-8 bytes")
 
 
 def _validate_digest(value: str) -> None:

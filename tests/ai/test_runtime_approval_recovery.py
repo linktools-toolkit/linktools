@@ -15,7 +15,6 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     canonical_sha256,
-    idempotency_key_digest,
 )
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence import PersistenceStorage
@@ -127,7 +126,7 @@ def _approval(
         ),
         execution_id=execution.execution_id,
         status=ApprovalStatus.PENDING,
-        idempotency_key_digest=None,
+        idempotency_key=None,
         decision=None,
         decided_by=None,
         decision_digest=None,
@@ -244,7 +243,7 @@ async def test_deferred_resume_retains_source_frontier_and_advances_attempt_once
             approval_id,
             tenant_id="tenant",
             expected_status=ApprovalStatus.PENDING,
-            idempotency_key_digest=idempotency_key_digest("decision"),
+            idempotency_key="decision",
             decision=ApprovalDecision.APPROVE,
             principal_id="approver",
             decision_digest=canonical_sha256({"decision": "approve"}),

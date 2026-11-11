@@ -38,7 +38,7 @@ from linktools.ai.persistence.contracts import (
     StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import InMemoryObjectStore, ObjectStat, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 
 def _binding_contract() -> AgentBindingContract:
@@ -183,41 +183,29 @@ def _backend() -> LocalExecutionBackend:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("object_output", (False, True))
-async def test_success_observes_authority_after_output_persistence(
-    monkeypatch: pytest.MonkeyPatch, object_output: bool,
+async def test_text_output_keeps_terminal_authority_without_object_storage(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = _backend()
     current = backend._execution.executions.record
     objects = InMemoryObjectStore()
     backend._execution_objects = objects
-    backend._payload_policy = PayloadPolicy(inline_limit_bytes=0 if object_output else 65536)
-    changed = replace(current, status=ExecutionStatus.CANCELLING, revision=current.revision + 1)
-    original_put = objects.put
 
-    async def write_output(
-        key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str,
-    ) -> ObjectStat:
-        stored = await original_put(
-            key, chunks, expected_size=expected_size, expected_digest=expected_digest,
-        )
-        await asyncio.sleep(0)
-        backend._execution.executions.record = changed
-        return stored
+    async def reject_object_write(*args, **kwargs):
+        pytest.fail("ordinary execution output must remain with its state owner")
 
     async def observe_terminal_authority(
         execution: ExecutionRecord, *, producer_generation: int | None = None,
         tool_operations: object | None = None,
     ) -> ExecutionRecord:
-        del producer_generation, tool_operations
         return execution
 
-    monkeypatch.setattr(objects, "put", write_output)
+    monkeypatch.setattr(objects, "put", reject_object_write)
     monkeypatch.setattr(backend, "_check_reconcile_tool_effects", observe_terminal_authority)
     observed = await backend._commit_success(
-        current, _binding(), "answer", UsageMetrics(), "agent-run",
+        current, _binding(), "answer" * 20000, UsageMetrics(), "agent-run",
     )
-    assert observed == (changed if object_output else current)
+    assert observed == current
 
 
 @pytest.mark.asyncio
@@ -261,7 +249,7 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy(
         assert started.revision == execution.revision + 1
         assert started.event_seq == execution.event_seq + 1
         claimed = await state.execution.idempotency.get(
-            identity.scope, identity.idempotency_key_digest, tenant_id="tenant",
+            identity.scope, identity.idempotency_key, tenant_id="tenant",
         )
         assert claimed is not None
         assert claimed.resource_id == execution.execution_id
@@ -413,7 +401,6 @@ def _tool_operation(
         execution_id="execution",
         agent_run_id="agent-run",
         tool_call_id="tool-call",
-        idempotency_key_digest="key-digest",
         tool_name="tool",
         replay_safe=replay_safe,
         status=status,
@@ -544,7 +531,7 @@ async def _tool_cancel_state(
         await commands.commit_tool_admission(ToolOperationAdmission(
             execution_id="execution", tool_operation_id="tool-operation",
             agent_run_id="agent-run", recovery_agent_run_id=None,
-            tool_call_id="tool-call", idempotency_key_digest="a" * 64,
+            tool_call_id="tool-call",
             tool_name="tool", arguments_digest="b" * 64, binding_digest="c" * 64,
             replay_safe=replay_safe, owner="owner", producer_generation=1,
         ))

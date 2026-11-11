@@ -24,7 +24,7 @@ def storage(request: pytest.FixtureRequest, tmp_path: Path) -> PersistenceStorag
 def _record(resource_kind: ResourceKind) -> IdempotencyRecord:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return IdempotencyRecord(
-        scope="run", idempotency_key_digest="a" * 64, request_digest="1" * 64,
+        scope="run", idempotency_key="a" * 64, request_digest="1" * 64,
         resource_kind=resource_kind, resource_id="target",
         status=IdempotencyStatus.RESERVED, result_digest=None, error_code=None,
         created_at=now, updated_at=now,
@@ -44,7 +44,7 @@ async def test_idempotency_compare_and_swap_cannot_redirect_target(
         other = replace(
             target,
             scope="other" if identity_component == "scope" else target.scope,
-            idempotency_key_digest="b" * 64 if identity_component == "key" else target.idempotency_key_digest,
+            idempotency_key="b" * 64 if identity_component == "key" else target.idempotency_key,
             resource_id="other", status=IdempotencyStatus.FAILED,
         )
         await repository.reserve(target)
@@ -52,14 +52,14 @@ async def test_idempotency_compare_and_swap_cannot_redirect_target(
 
         with pytest.raises(AIError) as error:
             await repository.compare_and_swap(
-                target.scope, target.idempotency_key_digest, tenant_id="tenant",
+                target.scope, target.idempotency_key, tenant_id="tenant",
                 expected_status=IdempotencyStatus.RESERVED,
                 next_record=replace(other, status=IdempotencyStatus.STARTED),
             )
 
         assert error.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await repository.get(target.scope, target.idempotency_key_digest, tenant_id="tenant") == target
-        assert await repository.get(other.scope, other.idempotency_key_digest, tenant_id="tenant") == other
+        assert await repository.get(target.scope, target.idempotency_key, tenant_id="tenant") == target
+        assert await repository.get(other.scope, other.idempotency_key, tenant_id="tenant") == other
 
 
 @pytest.mark.asyncio
@@ -78,12 +78,12 @@ async def test_idempotency_compare_and_swap_updates_matching_target(
         )
 
         actual = await repository.compare_and_swap(
-            target.scope, target.idempotency_key_digest, tenant_id="tenant",
+            target.scope, target.idempotency_key, tenant_id="tenant",
             expected_status=IdempotencyStatus.RESERVED, next_record=candidate,
         )
 
         assert actual == candidate
-        assert await repository.get(target.scope, target.idempotency_key_digest, tenant_id="tenant") == candidate
+        assert await repository.get(target.scope, target.idempotency_key, tenant_id="tenant") == candidate
 
 
 @pytest.mark.asyncio
@@ -112,9 +112,9 @@ async def test_idempotency_compare_and_swap_preserves_existing_preconditions(
 
         with pytest.raises(AIError) as error:
             await repository.compare_and_swap(
-                target.scope, target.idempotency_key_digest, tenant_id=tenant_id,
+                target.scope, target.idempotency_key, tenant_id=tenant_id,
                 expected_status=expected_status, next_record=candidate,
             )
 
         assert error.value.code is expected_error
-        assert await repository.get(target.scope, target.idempotency_key_digest, tenant_id="tenant") == target
+        assert await repository.get(target.scope, target.idempotency_key, tenant_id="tenant") == target

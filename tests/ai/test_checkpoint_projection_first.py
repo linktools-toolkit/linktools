@@ -4,11 +4,10 @@
 
 import asyncio
 import hashlib
-import random
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import BinaryImage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.model.messages import SummaryPromptPart, encode_model_messages
@@ -73,7 +72,7 @@ async def test_cancel_between_projection_and_chunks_leaves_no_owner_publication_
     await state.initialize(namespace="projection-first", tenant_id="tenant")
     archive = await _trace_archive(state)
     run = AgentRunRecord("run")
-    body = "".join(random.Random(43).choices("abcdefghijklmnopqrstuvwxyz0123456789", k=32768))
+    body = [BinaryImage(data=b"projection attachment" * 2048, media_type="image/png")]
     message = ModelRequest(parts=[UserPromptPart(body, timestamp=run.started_at)])
     checkpoint = AgentRunCheckpoint("run", 1, [message], timestamp=run.started_at, transcript_message_count_before=0)
     try:

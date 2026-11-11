@@ -47,15 +47,20 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
         return result
 
     monkeypatch.setattr(ContentArchive, "_read_content", read_content)
-    original_native_read = SqlStepStore.read_message_roots
+    original_native_capture = SqlStepStore.capture_message_roots
 
-    async def read_native(self, roots):
-        result = await original_native_read(self, roots)
-        if active:
-            bodies.extend(len(body) for group in result for body in group)
-        return result
+    async def capture_native(self, roots, **kwargs):
+        load = await original_native_capture(self, roots, **kwargs)
 
-    monkeypatch.setattr(SqlStepStore, "read_message_roots", read_native)
+        async def read_native():
+            result = await load()
+            if active:
+                bodies.extend(len(body) for group in result for body in group)
+            return result
+
+        return read_native
+
+    monkeypatch.setattr(SqlStepStore, "capture_message_roots", capture_native)
     original = ConversationPersistence.load_committed_conversation_context
 
     async def load(self, **kwargs):

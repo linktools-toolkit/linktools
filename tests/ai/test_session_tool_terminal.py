@@ -22,7 +22,6 @@ from linktools.ai.core import (
     ResourceKind,
     SessionStatus,
     ToolOperationStatus,
-    idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
@@ -45,7 +44,6 @@ from linktools.ai.persistence._step_contracts import (
     AgentRunRecord,
 )
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
-from linktools.ai.storage import PayloadPolicy
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -914,7 +912,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                 return page.items
 
             intent = await runtime._state.execution.operations.get(
-                idempotency_key_digest(cancel_key),
+                cancel_key,
                 tenant_id=principal.tenant_id,
             )
             assert intent is not None
@@ -924,7 +922,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                 await execution.cancel(idempotency_key=cancel_key, force=True)
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             assert await runtime._state.execution.operations.get(
-                idempotency_key_digest(cancel_key),
+                cancel_key,
                 tenant_id=principal.tenant_id,
             ) == intent
             assert await runtime._state.execution.executions.get(
@@ -974,7 +972,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                     expected_version: int,
                 ) -> None:
                     guarded = await transaction.guard_record(
-                        candidate.key_digest,
+                        candidate.key,
                         expected_storage_revision=expected_version,
                     )
                     if guarded is None:
@@ -1013,7 +1011,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
             assert replay_error is None
             assert replayed is False
             assert await runtime._state.execution.operations.get(
-                idempotency_key_digest(cancel_key),
+                cancel_key,
                 tenant_id=principal.tenant_id,
             ) == intent
             assert await runtime._state.execution.executions.get(
@@ -1041,7 +1039,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
             assert after_new_intent.revision == before_new_intent.revision + 1
             assert after_new_intent.event_seq == before_new_intent.event_seq + 1
             new_intent = await runtime._state.execution.operations.get(
-                idempotency_key_digest(new_key),
+                new_key,
                 tenant_id=principal.tenant_id,
             )
             assert new_intent is not None
@@ -1079,7 +1077,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
             assert after_unreadable.revision == after_new_intent.revision + 1
             assert after_unreadable.event_seq == after_new_intent.event_seq + 1
             unreadable_intent = await original_get(
-                idempotency_key_digest(unknown_key),
+                unknown_key,
                 tenant_id=principal.tenant_id,
             )
             assert unreadable_intent is not None
@@ -1120,7 +1118,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                 tenant_id=principal.tenant_id,
             ) == before_partial
             partial_intent = await original_get(
-                idempotency_key_digest(partial_key),
+                partial_key,
                 tenant_id=principal.tenant_id,
             )
             assert partial_intent is not None
@@ -1307,7 +1305,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
                 )
                 assert interactions_after == durable_interaction_count
                 operation = await runtime._state.execution.operations.get(
-                    idempotency_key_digest(cancel_key),
+                    cancel_key,
                     tenant_id=runtime.default_principal.tenant_id,
                 )
                 assert operation is not None
@@ -1376,7 +1374,7 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
             assert recovery_required is not None
             assert recovery_required.status is ExecutionStatus.RECOVERY_REQUIRED
             operation = await runtime._state.execution.operations.get(
-                idempotency_key_digest(cancel_key),
+                cancel_key,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert operation is not None
@@ -1403,7 +1401,7 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
             assert calls == ["lookup"]
             assert effect_log.read_text().splitlines() == [execution.execution_id]
             settled = await runtime._state.execution.operations.get(
-                idempotency_key_digest(cancel_key),
+                cancel_key,
                 tenant_id=runtime.default_principal.tenant_id,
             )
             assert settled is not None
@@ -1859,7 +1857,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             binding_digest="a" * 64,
             owner="worker-1",
             background_tasks=set(),
-            payload_policy=PayloadPolicy(),
+
         )
         context = RunContext(
             deps=None,
@@ -1899,7 +1897,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             binding_digest="a" * 64,
             owner="worker-2",
             background_tasks=set(),
-            payload_policy=PayloadPolicy(),
+
         )
         replay_context = RunContext(
             deps=None,

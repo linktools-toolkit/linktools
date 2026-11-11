@@ -83,13 +83,13 @@ async def test_deferred_readback_does_not_claim_resumed_terminal(
             for approval in approvals:
                 await state.checkpoint.approvals.decide(
                     approval.approval_id, tenant_id="tenant", expected_status=ApprovalStatus.PENDING,
-                    idempotency_key_digest="a" * 64, decision=ApprovalDecision.APPROVE,
+                    idempotency_key="a" * 64, decision=ApprovalDecision.APPROVE,
                     principal_id="owner", decision_digest="b" * 64, decided_at=now,
                 )
             for call in calls:
                 await state.checkpoint.external_calls.supply(
                     call.call_id, tenant_id="tenant", expected_status=ExternalCallStatus.PENDING,
-                    idempotency_key_digest="c" * 64, resolution_kind="succeeded",
+                    idempotency_key="c" * 64, resolution_kind="succeeded",
                     result_payload=StoredPayload.inline_text("result"), resolution_metadata={}, supplied_at=now,
                 )
             resumed = await commands.claim_deferred_resume_checkpoint(

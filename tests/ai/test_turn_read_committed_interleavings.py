@@ -21,8 +21,10 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.turns import StateTurnCoordination
+from linktools.ai.storage import TurnScopeIdentity
 
 _Value = TypeVar("_Value")
+_SCOPE = TurnScopeIdentity("turn-reader-fixture", "tenant", "scope")
 
 
 class _StatementReads:
@@ -98,7 +100,7 @@ class _StatementReads:
 
 async def _claim(writer: StateTurnCoordination) -> Lease:
     result = await writer.claim_turn(
-        "scope",
+        _SCOPE,
         session_key="session",
         request_key="request",
         request_digest="digest",
@@ -113,7 +115,7 @@ async def _claim(writer: StateTurnCoordination) -> Lease:
 @pytest.mark.asyncio
 async def test_release_after_initial_admission_read_allows_new_claim() -> None:
     async with Persistence.open(
-        "turn-reader-fixture", storage=PersistenceStorage.in_memory()
+        "turn-reader-fixture", tenant_id="tenant", storage=PersistenceStorage.in_memory()
     ) as persistence:
         store = persistence.execution.executions.state_store
         writer = StateTurnCoordination(
@@ -130,7 +132,7 @@ async def test_release_after_initial_admission_read_allows_new_claim() -> None:
             sampled, namespace=persistence.namespace, tenant_id=persistence.tenant_id
         )
         replacement = await contender.claim_turn(
-            "scope",
+            _SCOPE,
             session_key="session",
             request_key="replacement-request",
             request_digest="replacement-digest",
@@ -139,23 +141,23 @@ async def test_release_after_initial_admission_read_allows_new_claim() -> None:
             lease_seconds=120,
         )
         assert replacement is not None and replacement.lease is not None
-        assert await writer.read_turn("scope", "execution") is None
+        assert await writer.read_turn(_SCOPE, "execution") is None
         assert await writer.release_turn(replacement.lease)
 
 
 async def _observe(reader: StateTurnCoordination, kind: str) -> TurnCoordination | None:
     if kind == "turn_session":
-        return await reader.read_turn_by_session("scope", "session")
+        return await reader.read_turn_by_session(_SCOPE, "session")
     if kind == "turn_request":
-        return await reader.read_turn_by_request("scope", "request")
-    return await reader.read_turn("scope", "execution")
+        return await reader.read_turn_by_request(_SCOPE, "request")
+    return await reader.read_turn(_SCOPE, "execution")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["turn_session", "turn_request", "turn_execution"])
 async def test_release_between_anchor_and_peers_is_observed_as_idle(kind: str) -> None:
     async with Persistence.open(
-        "turn-reader-fixture", storage=PersistenceStorage.in_memory()
+        "turn-reader-fixture", tenant_id="tenant", storage=PersistenceStorage.in_memory()
     ) as persistence:
         store = persistence.execution.executions.state_store
         writer = StateTurnCoordination(
@@ -173,7 +175,7 @@ async def test_release_between_anchor_and_peers_is_observed_as_idle(kind: str) -
             sampled, namespace=persistence.namespace, tenant_id=persistence.tenant_id
         )
         assert await _observe(reader, kind) is None
-        assert await writer.read_turn_by_session("scope", "session") is None
+        assert await writer.read_turn_by_session(_SCOPE, "session") is None
 
 
 @pytest.mark.asyncio
@@ -189,7 +191,7 @@ async def test_unchanged_anchor_keeps_real_integrity_errors(
     kind: str, corrupt: str
 ) -> None:
     async with Persistence.open(
-        "turn-reader-fixture", storage=PersistenceStorage.in_memory()
+        "turn-reader-fixture", tenant_id="tenant", storage=PersistenceStorage.in_memory()
     ) as persistence:
         store = persistence.execution.executions.state_store
         writer = StateTurnCoordination(
@@ -204,7 +206,7 @@ async def test_unchanged_anchor_keeps_real_integrity_errors(
         with pytest.raises(AIError) as failure:
             await _observe(reader, kind)
         assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        assert await writer.read_turn_by_session("scope", "session") is not None
+        assert await writer.read_turn_by_session(_SCOPE, "session") is not None
         assert await writer.release_turn(lease)
 
 
@@ -214,7 +216,7 @@ async def test_release_before_mutation_validation_preserves_released_authority(
     operation: str,
 ) -> None:
     async with Persistence.open(
-        "turn-reader-fixture", storage=PersistenceStorage.in_memory()
+        "turn-reader-fixture", tenant_id="tenant", storage=PersistenceStorage.in_memory()
     ) as persistence:
         store = persistence.execution.executions.state_store
         writer = StateTurnCoordination(
@@ -234,12 +236,12 @@ async def test_release_before_mutation_validation_preserves_released_authority(
         if operation == "renew":
             assert await contender.renew_turn(lease, lease_seconds=120) is None
         elif operation == "cancel":
-            assert await contender.cancel_turn("scope", "execution") is False
+            assert await contender.cancel_turn(_SCOPE, "execution") is False
         else:
             assert await contender.release_turn(lease) is False
-        assert await writer.read_turn_by_session("scope", "session") is None
+        assert await writer.read_turn_by_session(_SCOPE, "session") is None
         replacement = await writer.claim_turn(
-            "scope",
+            _SCOPE,
             session_key="session",
             request_key="replacement-request",
             request_digest="replacement-digest",
@@ -254,7 +256,7 @@ async def test_release_before_mutation_validation_preserves_released_authority(
 @pytest.mark.asyncio
 async def test_continuously_advancing_anchor_exhausts_bounded_conflict_retry() -> None:
     async with Persistence.open(
-        "turn-reader-fixture", storage=PersistenceStorage.in_memory()
+        "turn-reader-fixture", tenant_id="tenant", storage=PersistenceStorage.in_memory()
     ) as persistence:
         store = persistence.execution.executions.state_store
         writer = StateTurnCoordination(
@@ -272,7 +274,7 @@ async def test_continuously_advancing_anchor_exhausts_bounded_conflict_retry() -
             sampled, namespace=persistence.namespace, tenant_id=persistence.tenant_id
         )
         with pytest.raises(AIError) as failure:
-            await reader.read_turn_by_session("scope", "session")
+            await reader.read_turn_by_session(_SCOPE, "session")
         assert failure.value.code is ErrorCode.STORAGE_CONFLICT
         assert 1 <= sampled.advances <= 3
         assert await writer.release_turn(lease)

@@ -9,10 +9,14 @@ import pytest
 
 from linktools.ai.core import (
     ExecutionStatus,
+    ExecutionLineageKind,
+    ResourceKind,
+    ResourceRef,
     HmacCursorSigner,
     agent_conversation_id as make_agent_conversation_id,
     agent_run_id as make_agent_run_id,
 )
+from linktools.ai.execution import ExecutionView
 from linktools.ai.history._projection import StepExecutionHistoryReader
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.contracts import (
@@ -91,6 +95,24 @@ class _Executions:
             return self.record
         return None
 
+    async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+        record = await self.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            return None
+        return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id), ExecutionView(
+            execution_id=record.execution_id,
+            agent_id=record.agent_id,
+            status=record.status,
+            lineage_kind=record.lineage_kind,
+            parent_execution_id=record.parent_execution_id,
+            root_execution_id=record.root_execution_id,
+            parent_invocation_id=record.parent_invocation_id,
+            agent_run_seq=record.agent_run_seq,
+            created_at=record.created_at,
+            durable_trace=record.durable_trace,
+            binding_kind=record.binding_kind,
+        )
+
 
 class _Store:
     def __init__(self, run: AgentRunRecord, interactions: list[ModelInteractionRecord]) -> None:
@@ -156,6 +178,12 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
     )
     record = SimpleNamespace(
         execution_id=execution_id,
+        agent_id="default",
+        lineage_kind=ExecutionLineageKind.RUN,
+        parent_execution_id=None,
+        root_execution_id=execution_id,
+        parent_invocation_id=None,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         durable_trace=True,
         status=ExecutionStatus.STARTED,
         binding_kind="agent",
@@ -247,6 +275,12 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
     )
     record = SimpleNamespace(
         execution_id=execution_id,
+        agent_id="default",
+        lineage_kind=ExecutionLineageKind.RUN,
+        parent_execution_id=None,
+        root_execution_id=execution_id,
+        parent_invocation_id=None,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         durable_trace=True,
         status=ExecutionStatus.STARTED,
         binding_kind="agent",

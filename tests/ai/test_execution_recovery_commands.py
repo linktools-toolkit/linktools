@@ -80,7 +80,6 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
         execution_id="execution",
         agent_run_id="agent-run",
         tool_call_id=f"call:{operation_id}",
-        idempotency_key_digest=canonical_sha256({"operation": operation_id}),
         tool_name="tool",
         arguments_digest=canonical_sha256({"args": operation_id}),
         binding_digest="a" * 64,
@@ -329,7 +328,7 @@ async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
         claimed = await state.checkpoint.tools.admit(ToolOperationAdmission(
             execution_id=resolved.execution_id, tool_operation_id=resolved.tool_operation_id,
             agent_run_id=resolved.agent_run_id, recovery_agent_run_id=None,
-            tool_call_id=resolved.tool_call_id, idempotency_key_digest=resolved.idempotency_key_digest,
+            tool_call_id=resolved.tool_call_id,
             tool_name=resolved.tool_name, arguments_digest=resolved.arguments_digest,
             binding_digest=resolved.binding_digest, replay_safe=resolved.replay_safe, owner="next-worker",
         ))
@@ -535,14 +534,14 @@ async def test_producer_guard_reuses_execution_without_history_control(
         async def guard(transaction):
             original = transaction.get_record
             async def execution_only(key):
-                assert key != repository._key("execution_history_head", "execution")
+                assert key != repository._key("execution_history_head", ("execution",))
                 return await original(key)
             with monkeypatch.context() as patch:
                 patch.setattr(transaction, "get_record", execution_only)
                 result = await repository.require_execution_producer_in_transaction(
                     transaction, "execution", expected_producer_generation=admitted.producer_generation,
                 )
-                assert await transaction.get_record(repository._key("execution", "execution")) == result[1]
+                assert await transaction.get_record(repository._key("execution", ("execution",))) == result[1]
                 return result[0]
         assert await repository.state_store.mutate(guard) == admitted
     finally:
@@ -582,7 +581,7 @@ async def test_producer_guard_batch_preserves_fail_closed_checks(
                 next_record=replace(execution, revision=execution.revision + 1,
                     status=ExecutionStatus.CANCELLING if failure == "cancelled" else ExecutionStatus.SUCCEEDED),
             )
-        execution_key = repository._key("execution", "execution")
+        execution_key = repository._key("execution", ("execution",))
         if failure in ("missing_execution", "stale_generation_missing_execution"):
             await repository.state_store.mutate(lambda transaction: transaction.delete_record(
                 execution_key,

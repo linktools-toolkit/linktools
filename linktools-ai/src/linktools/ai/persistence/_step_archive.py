@@ -69,7 +69,7 @@ from ._history import (
     TranscriptCapture,
     TranscriptRepository,
 )
-from ._model_client import prepare_client_requests, resolve_client_requests
+from ._model_client import capture_client_requests, prepare_client_requests, resolve_client_requests
 from ._native_event_reference import NativeEventReferences
 from ._native_run_reference import NativeRunReferences, is_native_run_reference
 from ._sql import SqlStateStore
@@ -96,17 +96,17 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
+    RECORD_KEY_MAX_BYTES,
     active_state_scope,
     active_state_transaction,
     enter_run_history_lock,
     exit_run_history_lock,
-    parent_digest,
-    record_key_digest,
+    parent_key,
+    record_key,
     require_no_run_history_lock,
-    scope_digest,
-    sequence_key,
+    scope_key,
     sortable_timestamp,
-    stream_digest,
+    stream_key,
 )
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
@@ -426,7 +426,8 @@ class _CheckpointSnapshot(Sequence[AgentRunCheckpoint]):
     def __getitem__(self, index: int | slice) -> "AgentRunCheckpoint | _CheckpointSnapshot":
         if isinstance(index, slice):
             return _CheckpointSnapshot(self._values[index])
-        return self._values[index].materialize()
+        # Internal publication retains frozen contents; public reads materialize SDK lists.
+        return replace(self._values[index].value)
 
 
 class StagingAgentRunStore(AgentRunStore):
@@ -1187,7 +1188,7 @@ class StateStepArchive(AgentRunStore):
     def bind_native_run_store(self, native: SqlStepStore) -> None:
         if (type(native) is SqlStepStore and isinstance(self._store, SqlStateStore)
                 and native.storage_context.engine is self._store.context.engine
-                and native.store_digest == SqlStepStore.scope_digest(
+                and native.store_key == SqlStepStore.scope_key(
                     namespace=self._namespace, tenant_id=self._tenant_id,
                 )):
             self._history.bind_native_message_store(native)
@@ -1234,7 +1235,7 @@ class StateStepArchive(AgentRunStore):
         if self._native_events is not None:
             return await self._native_events.read(transaction, query=query, sequences=sequences, full_source=full_source)
         if sequences is not None and isinstance(transaction, FactReader):
-            return await transaction.get_facts(query.stream_digest, sequences)
+            return await transaction.get_facts(query.stream_key, sequences)
         return await transaction.list_facts(query)
 
     def confirm_native_run(self, record: RunRecord) -> None:
@@ -1251,7 +1252,7 @@ class StateStepArchive(AgentRunStore):
         """Read DTO projections without replacing the transaction's raw records."""
         if self._native_runs is None:
             return await transaction.get_records(keys)
-        return {record.key_digest: record for record in await self._native_runs.read(transaction, keys=keys)}
+        return {record.key: record for record in await self._native_runs.read(transaction, keys=keys)}
 
     @property
     def runtime_domain(self) -> PersistenceDomain:
@@ -1342,9 +1343,9 @@ class StateStepArchive(AgentRunStore):
             key
             for agent_run_id in unique_agent_run_ids
             for key in (
-                self._sequence(agent_run_id, "event"),
-                self._sequence(agent_run_id, "checkpoint"),
-                self._sequence(agent_run_id, "interaction"),
+                self._stream(agent_run_id, "event"),
+                self._stream(agent_run_id, "checkpoint"),
+                self._stream(agent_run_id, "interaction"),
             )
         )
         run_keys = tuple(self._agent_run_key(agent_run_id) for agent_run_id in unique_agent_run_ids)
@@ -1367,10 +1368,10 @@ class StateStepArchive(AgentRunStore):
             agent_run_record = records.get(self._agent_run_key(agent_run_id))
             head_record = records.get(self._history.head_key(agent_run_id))
             projection_record = records.get(self._history.projection_key(agent_run_id))
-            event_count = sequences.get(self._sequence(agent_run_id, "event"), 0)
-            checkpoint_count = sequences.get(self._sequence(agent_run_id, "checkpoint"), 0)
+            event_count = sequences.get(self._stream(agent_run_id, "event"), 0)
+            checkpoint_count = sequences.get(self._stream(agent_run_id, "checkpoint"), 0)
             interaction_count = sequences.get(
-                self._sequence(agent_run_id, "interaction"), 0
+                self._stream(agent_run_id, "interaction"), 0
             )
             if head_record is None:
                 if (
@@ -1438,12 +1439,9 @@ class StateStepArchive(AgentRunStore):
                 replace(
                     interaction,
                     request_context=None if request is None else await archived_context(request),
-                    request_envelope=None if envelope is None else await self._prepare_inline_payload(
-                        interaction.agent_run_id,
-                        RuntimePayloadRef(
-                            StoredPayload.inline_bytes(envelope),
-                            self._runtime_domain,
-                        ),
+                    request_envelope=None if envelope is None else RuntimePayloadRef(
+                        StoredPayload.inline_json(json.loads(envelope)),
+                        self._runtime_domain,
                     ),
                     response_context=(
                         None
@@ -1454,7 +1452,7 @@ class StateStepArchive(AgentRunStore):
                         else await archived_context(response)
                     ),
                     client_requests=await prepare_client_requests(
-                        client_requests, self._runtime_domain, self._history,
+                        client_requests, self._runtime_domain, self._history, prepared=prepared,
                     ),
                     stream_attempts=None if interaction.stream_attempts is None else tuple([
                         replace(attempt, response_context=(
@@ -1516,12 +1514,26 @@ class StateStepArchive(AgentRunStore):
         include_client_requests: bool = False,
         include_content: bool = True,
     ) -> list[object]:
+        load = await self._history.read_content(lambda: self.capture_model_interactions(
+            interactions, include_client_requests=include_client_requests, include_content=include_content,
+        ))
+        return await load()
+
+    async def capture_model_interactions(
+        self,
+        interactions: Sequence[object],
+        *,
+        include_client_requests: bool = False,
+        include_content: bool = True,
+    ) -> Callable[[], Awaitable[list[object]]]:
         require_no_run_history_lock(
             "StateStepArchive.resolve_model_interactions"
         )
         values = tuple(interactions)
         if not values:
-            return []
+            async def empty() -> list[object]:
+                return []
+            return empty
         if any(not isinstance(value, ModelInteractionRecord) for value in values):
             raise TypeError("model interaction is invalid")
         records = tuple(value for value in values if isinstance(value, ModelInteractionRecord))
@@ -1541,49 +1553,61 @@ class StateStepArchive(AgentRunStore):
                   if attempt.response_context is not None),
             )
         )
-        contexts = await self._history.load_projected_contexts(
-            records[0].agent_run_id,
-            projections,
-        ) if include_content else ()
-        envelopes: dict[str, bytes] = {}
-        result: list[object] = []
-        context_index = 0
-        for record in records:
-            client_requests = await resolve_client_requests(
-                record.client_requests, self._runtime_domain, self._history,
-            ) if include_client_requests else None
-            if not include_content:
-                result.append((None, None, None, client_requests,
-                               None if record.stream_attempts is None else tuple(None for _ in record.stream_attempts)))
-                continue
-            request = None
-            if record.request_context is not None:
-                request = contexts[context_index].model_messages()
-                context_index += 1
-            response = None
-            if record.response_context is not None:
-                response = contexts[context_index].model_messages()
-                context_index += 1
-            envelope = None
-            if record.request_envelope is not None:
-                digest = record.request_envelope.payload.digest
-                if digest not in envelopes:
-                    envelopes[digest] = await self._history.read_payload(
-                        record.request_envelope.payload
-                    )
-                envelope = envelopes[digest]
-            stream_responses = None
-            if record.stream_attempts is not None:
-                partials = []
-                for attempt in record.stream_attempts:
-                    partial = None
-                    if attempt.response_context is not None:
-                        partial = contexts[context_index].model_messages()
-                        context_index += 1
-                    partials.append(partial)
-                stream_responses = tuple(partials)
-            result.append((request, response, envelope, client_requests, stream_responses))
-        return result
+        load_contexts = await self._history.capture_projected_contexts(
+            records[0].agent_run_id, projections,
+        ) if include_content else None
+
+        client_loader = await capture_client_requests(
+            tuple(request for record in records for request in record.client_requests or ()),
+            self._runtime_domain, self._history,
+        ) if include_client_requests else None
+
+        async def load() -> list[object]:
+            contexts = await load_contexts() if load_contexts is not None else ()
+            envelopes: dict[str, bytes] = {}
+            result: list[object] = []
+            context_index = client_index = 0
+            clients = await client_loader() if client_loader is not None else ()
+            for record in records:
+                client_requests = None
+                if include_client_requests and record.client_requests is not None:
+                    count = len(record.client_requests)
+                    client_requests = clients[client_index:client_index + count]
+                    client_index += count
+                if not include_content:
+                    result.append((None, None, None, client_requests,
+                                   None if record.stream_attempts is None else tuple(None for _ in record.stream_attempts)))
+                    continue
+                request = None
+                if record.request_context is not None:
+                    request = contexts[context_index].model_messages()
+                    context_index += 1
+                response = None
+                if record.response_context is not None:
+                    response = contexts[context_index].model_messages()
+                    context_index += 1
+                envelope = None
+                if record.request_envelope is not None:
+                    digest = record.request_envelope.payload.digest
+                    if digest not in envelopes:
+                        envelopes[digest] = await self._history.read_payload(
+                            record.request_envelope.payload
+                        )
+                    envelope = envelopes[digest]
+                stream_responses = None
+                if record.stream_attempts is not None:
+                    partials = []
+                    for attempt in record.stream_attempts:
+                        partial = None
+                        if attempt.response_context is not None:
+                            partial = contexts[context_index].model_messages()
+                            context_index += 1
+                        partials.append(partial)
+                    stream_responses = tuple(partials)
+                result.append((request, response, envelope, client_requests, stream_responses))
+            return result
+
+        return load
 
     async def prepare_interactions(
         self,
@@ -1707,12 +1731,9 @@ class StateStepArchive(AgentRunStore):
                 staged.request_context, extend=True,
                 stored=None if previous is None else previous.request_context,
             )
-            request_envelope = None if staged.request_envelope_digest is None else await self._prepare_inline_payload(
-                run.agent_run_id,
-                RuntimePayloadRef(
-                    StoredPayload.inline_bytes(payload(staged.request_envelope_digest)),
-                    self._runtime_domain,
-                ),
+            request_envelope = None if staged.request_envelope_digest is None else RuntimePayloadRef(
+                StoredPayload.inline_json(json.loads(payload(staged.request_envelope_digest))),
+                self._runtime_domain,
             )
             response_context = None if staged.response_context is None else await prepare_context(
                 staged.response_context, extend=False,
@@ -1737,7 +1758,7 @@ class StateStepArchive(AgentRunStore):
                     staged.finished_at,
                     staged.attachments,
                     await prepare_client_requests(
-                        staged.client_requests, self._runtime_domain, self._history,
+                        staged.client_requests, self._runtime_domain, self._history, prepared=prepared,
                     ),
                     None if staged.stream_attempts is None else tuple([
                         attempt.to_durable(
@@ -1750,23 +1771,9 @@ class StateStepArchive(AgentRunStore):
             )
         return tuple(result)
 
-    async def _prepare_inline_payload(
-        self,
-        agent_run_id: str,
-        content: RuntimePayloadRef,
-    ) -> RuntimePayloadRef:
-        projection = await self._history.prepare_projection(
-            agent_run_id,
-            ContextProjection((InlineContextBlock(content),)),
-        )
-        item = projection.items[0]
-        if not isinstance(item, InlineContextBlock):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return item.content
-
     async def checkpoint_count(self, *, agent_run_id: str) -> int:
         require_no_run_history_lock("StateStepArchive.checkpoint_count")
-        key = self._sequence(agent_run_id, "checkpoint")
+        key = self._stream(agent_run_id, "checkpoint")
         return (await self._store.read(lambda transaction: transaction.get_sequences((key,)))).get(key, 0)
 
     async def verify_checkpoint_range(
@@ -1922,8 +1929,8 @@ class StateStepArchive(AgentRunStore):
                         or set(observed_records) != {self._store, content.store}
                         or not owner_keys.issubset(observed_records[self._store])
                         or (content.store is not self._store and set(observed_records[self._store]) != owner_keys)
-                        or any(not isinstance(key, bytes) or len(key) != 32
-                               or (record is not None and record.key_digest != key)
+                        or any(not isinstance(key, bytes) or not 1 <= len(key) <= RECORD_KEY_MAX_BYTES
+                               or (record is not None and record.key != key)
                                for values in observed_records.values() for key, record in values.items())):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 captured = {store: {key: value for key, value in values.items() if value is not None}
@@ -2050,13 +2057,10 @@ class StateStepArchive(AgentRunStore):
         self._context_cache_keys.clear()
 
     def _agent_run_key(self, agent_run_id: str) -> bytes:
-        return record_key_digest(self._namespace, self._tenant_id, self._runtime_domain.value, "agent_run", agent_run_id)
+        return record_key(self._namespace, self._tenant_id, self._runtime_domain.value, "agent_run", (agent_run_id,))
 
     def _stream(self, agent_run_id: str, family: str) -> bytes:
-        return stream_digest(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
-
-    def _sequence(self, agent_run_id: str, family: str) -> bytes:
-        return sequence_key(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
+        return stream_key(self._namespace, self._tenant_id, self._runtime_domain.value, family, (agent_run_id,))
 
     async def register_agent_run(
         self,
@@ -2081,30 +2085,31 @@ class StateStepArchive(AgentRunStore):
         await self._mutate(mutate)
 
     def _stored_agent_run(self, record: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None) -> StoredRecord:
+        key = self._agent_run_key(record.agent_run_id)
         return StoredRecord(
-            self._agent_run_key(record.agent_run_id),
+            key,
             None
             if record.agent_conversation_id is None
-            else scope_digest(
+            else scope_key(
                 self._namespace,
                 self._tenant_id,
                 self._runtime_domain.value,
                 "agent_run",
                 "conversation",
-                record.agent_conversation_id,
+                (record.agent_conversation_id,),
             ),
             None
             if record.parent_agent_run_id is None
-            else parent_digest(
+            else parent_key(
                 self._namespace,
                 self._tenant_id,
                 self._runtime_domain.value,
                 "agent_run",
                 "parent",
-                record.parent_agent_run_id,
+                (record.parent_agent_run_id,),
             ),
             "agent_run",
-            sortable_timestamp(record.started_at, record.agent_run_id),
+            sortable_timestamp(record.started_at, key),
             None,
             0,
             None,
@@ -2127,25 +2132,25 @@ class StateStepArchive(AgentRunStore):
         if parent_agent_run_id is not None:
             query = RecordQuery(
                 kind="agent_run",
-                parent_digest=parent_digest(
+                parent_key=parent_key(
                     self._namespace,
                     self._tenant_id,
                     self._runtime_domain.value,
                     "agent_run",
                     "parent",
-                    parent_agent_run_id,
+                    (parent_agent_run_id,),
                 )
             )
         elif agent_conversation_id is not None:
             query = RecordQuery(
                 kind="agent_run",
-                scope_digest=scope_digest(
+                scope_key=scope_key(
                     self._namespace,
                     self._tenant_id,
                     self._runtime_domain.value,
                     "agent_run",
                     "conversation",
-                    agent_conversation_id,
+                    (agent_conversation_id,),
                 )
             )
         else:
@@ -2389,7 +2394,7 @@ class StateStepArchive(AgentRunStore):
                         or execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
                         or record.storage_revision != 0
                         or (producer_generation is not None and execution.producer_generation != producer_generation)
-                        or await core_transaction.get_record(record.key_digest) != record):
+                        or await core_transaction.get_record(record.key) != record):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return execution_guard
             if (execution.execution_id != execution_id or execution.history_seal_digest is not None
@@ -2438,27 +2443,9 @@ class StateStepArchive(AgentRunStore):
                 and terminal_execution.recovery_state is not ExecutionRecoveryState.HANDOFF
                 and terminal_execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
             return
-        async def read(_transaction: StateTransaction) -> None:
-            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
-            if execution is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if execution.producer_generation > producer_generation:
-                return
-            if (execution.producer_generation == producer_generation
-                    and execution.status is ExecutionStatus.RECOVERY_REQUIRED):
-                return
-            if (execution.producer_generation < producer_generation
-                    or execution.status not in {
-                        ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-                    }):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if not execution.durable_trace:
-                return
-            seal = await repository.get_history_seal(execution_id, tenant_id=self._tenant_id)
-            if seal is None or seal.seal_digest != execution.history_seal_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        await repository.state_store.read(read)
+        await repository.require_revoked_producer(
+            execution_id, tenant_id=self._tenant_id, producer_generation=producer_generation,
+        )
 
     async def sync_projection(
         self,
@@ -2607,24 +2594,24 @@ class StateStepArchive(AgentRunStore):
             grouped[family].append(value)
             kinds[family].append(kind)
         stored_facts: list[StoredFact] = []
-        reservation_requests = {
-            self._sequence(run.agent_run_id, family): len(grouped[family])
-            for family in ("event", "checkpoint")
-            if grouped[family]
+        streams = {
+            family: self._stream(run.agent_run_id, family)
+            for family in ("event", "checkpoint") if grouped[family]
         }
-        high_waters = await transaction.reserve_sequences(reservation_requests)
+        high_waters = await transaction.reserve_sequences({
+            stream: len(grouped[family]) for family, stream in streams.items()
+        })
         for family in ("event", "checkpoint"):
             values = grouped[family]
             if not values:
                 continue
-            sequence_key_value = self._sequence(run.agent_run_id, family)
-            final = high_waters[sequence_key_value]
+            stream = streams[family]
+            final = high_waters[stream]
             sequences = tuple(range(final - len(values) + 1, final + 1))
             if family == "event":
                 await self.index_history_events_in_transaction(
                     transaction, run, tuple(zip(sequences, events)),
                 )
-            stream = self._stream(run.agent_run_id, family)
             fact_kind = {
                 "event": "step_event",
                 "checkpoint": "step_checkpoint",
@@ -2750,7 +2737,7 @@ class StateStepArchive(AgentRunStore):
             await self._history.append_checkpoint(
                 transaction, checkpoint.owner_id, checkpoint.chunks,
                 checkpoint.projection, checkpoint.history_quality,
-                checkpoint_fact=(self._sequence(run.agent_run_id, "checkpoint"), checkpoint_fact),
+                checkpoint_fact=checkpoint_fact,
             )
         else:
             await self._history.append_checkpoint(
@@ -2764,7 +2751,7 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if not batch_new_owner:
             sequence = (await _reserve_sequences(
-                transaction, self._sequence(run.agent_run_id, "checkpoint"), 1,
+                transaction, stream, 1,
             ))[0]
             await _insert_facts(transaction, (replace(checkpoint_fact, sequence=sequence),))
         else:
@@ -2924,7 +2911,7 @@ class StateStepArchive(AgentRunStore):
 
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         require_no_run_history_lock("StateStepArchive.model_interaction_count")
-        key = self._sequence(agent_run_id, "interaction")
+        key = self._stream(agent_run_id, "interaction")
         return (await self._store.read(lambda transaction: transaction.get_sequences((key,)))).get(key, 0)
 
     async def iter_messages(self, *, agent_run_id: str) -> AsyncIterator[object]:
@@ -3144,13 +3131,7 @@ class StateStepArchive(AgentRunStore):
         while len(self._context_cache_keys) > 4096:
             self._context_cache_keys.popitem(last=False)
 
-    async def _cached_session_context(self, key: str, projection: ContextProjection) -> LoadedModelContext | None:
-        if self._context_cache is None:
-            return None
-        try:
-            content = await self._context_cache.get(key)
-        except Exception:
-            return None
+    async def _cached_session_context(self, content: bytes | None, projection: ContextProjection) -> LoadedModelContext | None:
         if content is None:
             return None
         try:
@@ -3162,7 +3143,7 @@ class StateStepArchive(AgentRunStore):
             messages = decode_model_messages(raw)
             block = ArchivedContextBlock(root, value["digest"], len(raw))
             archive = await self._history.content_archive()
-            valid_scope = ((root.group_id == archive.scope_id and root.store_digest == SqlStepStore.scope_digest(
+            valid_scope = ((root.group_id == archive.scope_id and root.store_key == SqlStepStore.scope_key(
                 namespace=self._namespace, tenant_id=self._tenant_id)) if isinstance(root, NativeMessageRoot)
                 else root.scope_id == archive.scope_id and root.content_scope == archive.content_scope)
             if (not valid_scope
@@ -3193,28 +3174,39 @@ class StateStepArchive(AgentRunStore):
         if (isinstance(checkpoint_sequence, bool) or not isinstance(checkpoint_sequence, int)
                 or checkpoint_sequence < 1):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stored = await self.checkpoint_at_sequence(
-            agent_run_id=agent_run_id, checkpoint_sequence=checkpoint_sequence,
-        )
-        if stored.state != "complete":
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        if stored.projection_digest != projection_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = None
+        cached_bytes = None
+        if include_content and self._context_cache is not None:
+            key = await self._session_context_cache_key(agent_run_id, checkpoint_sequence, projection_digest)
+            try:
+                cached_bytes = await self._context_cache.get(key)
+            except Exception:
+                pass
+
+        async def capture(*, use_cache: bool = True):
+            stored = await self.checkpoint_at_sequence(
+                agent_run_id=agent_run_id, checkpoint_sequence=checkpoint_sequence,
+            )
+            if stored.state != "complete":
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            if stored.projection_digest != projection_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            load = None
+            if include_content and (not use_cache or cached_bytes is None):
+                load = await self._history.capture_projected_contexts(agent_run_id, (stored.projection,))
+            return stored, load
+
+        stored, load = await self._history.read_content(capture)
         if not include_content:
             return LoadedModelContext(())
-        key = None
-        if self._context_cache is not None:
-            key = await self._session_context_cache_key(
-                agent_run_id, checkpoint_sequence, projection_digest,
-            )
-            cached = await self._cached_session_context(key, stored.projection)
+        if cached_bytes is not None:
+            cached = await self._cached_session_context(cached_bytes, stored.projection)
             if cached is not None:
                 return cached
-        # The authorized Session cursor owns the branch's committed message cutoff.
-        # Fact transcript counts are local to their source branch, including on a fork;
-        # a mutable current head cannot redefine this selected context revision.
-        context = await self._history.load_projected_context(agent_run_id, stored.projection)
-        # A cold read observes an already committed immutable fact, never the mutable latest index.
+            stored, load = await self._history.read_content(lambda: capture(use_cache=False))
+        # The selected immutable fact and native rows share one read snapshot;
+        # no mutable latest head can redefine this committed context revision.
+        context = (await load())[0]
         if key is not None and all(message.source is None for message in context.messages):
             await self._remember_session_context(key, agent_run_id, MessageArchive().snapshot(context.model_messages()), context)
         return context
@@ -3228,22 +3220,29 @@ class StateStepArchive(AgentRunStore):
         require_no_run_history_lock(
             "StateStepArchive.verify_checkpoint_projection"
         )
-        values = await self._facts(agent_run_id, "checkpoint", latest=True)
-        if not values:
+        async def capture():
+            values = await self._facts(agent_run_id, "checkpoint", latest=True)
+            if not values:
+                return None
+            stored = _decode_step(values[0].data)
+            if not isinstance(stored, StoredAgentRunCheckpoint):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            run = await self.get_agent_run(agent_run_id=agent_run_id)
+            if run is None:
+                return None
+            owner_id = (
+                self._history_id(run)
+                if self._runtime_domain is PersistenceDomain.CONVERSATION
+                else agent_run_id
+            )
+            return stored, await self._history.capture_projected_contexts(owner_id, (stored.projection,))
+
+        captured = await self._history.read_content(capture)
+        if captured is None:
             return False
-        stored = _decode_step(values[0].data)
-        if not isinstance(stored, StoredAgentRunCheckpoint):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run = await self.get_agent_run(agent_run_id=agent_run_id)
-        if run is None:
-            return False
-        owner_id = (
-            self._history_id(run)
-            if self._runtime_domain is PersistenceDomain.CONVERSATION
-            else agent_run_id
-        )
+        stored, load = captured
         with runtime_object_source_reads():
-            context = await self._history.load_projected_context(owner_id, stored.projection)
+            context = (await load())[0]
         expected_messages = (
             checkpoint.messages
             if checkpoint.context_messages is None
@@ -3281,25 +3280,32 @@ class StateStepArchive(AgentRunStore):
 
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         require_no_run_history_lock("StateStepArchive.latest_checkpoint")
-        values = await self._facts(agent_run_id, "checkpoint", latest=True)
-        if not values:
-            return None
-        latest = _decode_step(values[0].data)
-        if not isinstance(latest, StoredAgentRunCheckpoint):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run = await self.get_agent_run(agent_run_id=agent_run_id)
-        if run is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        owner_id = (
-            self._history_id(run)
-            if self._runtime_domain is PersistenceDomain.CONVERSATION
-            else agent_run_id
-        )
-        with runtime_object_source_reads():
-            messages = (await self._history.load_projected_context(owner_id, latest.projection)).model_messages()
-            raw_messages = await self._history.load_message_span(
-                owner_id, 0, latest.transcript_message_count,
+        async def capture():
+            values = await self._facts(agent_run_id, "checkpoint", latest=True)
+            if not values:
+                return None
+            latest = _decode_step(values[0].data)
+            if not isinstance(latest, StoredAgentRunCheckpoint):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            run = await self.get_agent_run(agent_run_id=agent_run_id)
+            if run is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            owner_id = (
+                self._history_id(run)
+                if self._runtime_domain is PersistenceDomain.CONVERSATION
+                else agent_run_id
             )
+            load_context = await self._history.capture_projected_contexts(owner_id, (latest.projection,))
+            load_messages = await self._history.capture_message_spans(owner_id, ((0, latest.transcript_message_count),))
+            return latest, run, load_context, load_messages
+
+        captured = await self._history.read_content(capture)
+        if captured is None:
+            return None
+        latest, run, load_context, load_messages = captured
+        with runtime_object_source_reads():
+            messages = (await load_context())[0].model_messages()
+            raw_messages = (await load_messages())[0]
         if not raw_messages and not latest.has_context_projection:
             raw_messages = tuple(messages)
         context_messages = (
@@ -3344,15 +3350,15 @@ class StateStepArchive(AgentRunStore):
                 None,
             )
             interactions = await transaction.list_records(RecordQuery(
-                parent_digest=self._agent_run_key(agent_run_id),
+                parent_key=self._agent_run_key(agent_run_id),
             ))
             await transaction.delete_records((
-                *(interaction.key_digest for interaction in interactions),
+                *(interaction.key for interaction in interactions),
                 self._agent_run_key(agent_run_id),
             ))
             await transaction.delete_sequences(
                 tuple(
-                    self._sequence(agent_run_id, family)
+                    self._stream(agent_run_id, family)
                     for family in ("event", "checkpoint", "interaction")
                 )
             )
@@ -3398,7 +3404,7 @@ class StateStepArchive(AgentRunStore):
                 expected_storage_revision=owner_record.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            sequence = await transaction.next_sequence(self._sequence(agent_run_id, family))
+            sequence = await transaction.next_sequence(stream)
             await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, None, kind, data))
             if isinstance(value, StepEvent):
                 run = _decode_step(owner_record.data)
@@ -3413,7 +3419,7 @@ class StateStepArchive(AgentRunStore):
         agent_run_id: str,
         family: str,
         *,
-        subject: bytes | None = None,
+        subject: str | None = None,
         latest: bool = False,
         latest_per_subject: bool = False,
     ) -> tuple[StoredFact, ...]:
@@ -3423,16 +3429,16 @@ class StateStepArchive(AgentRunStore):
         return await self._store.read(
             lambda transaction: (self.read_event_facts if family == "event" else lambda tx, query: tx.list_facts(query))(
                 transaction, FactQuery(
-                    self._stream(agent_run_id, family), subject_digest=subject,
+                    self._stream(agent_run_id, family), subject_id=subject,
                     latest=latest, latest_per_subject=latest_per_subject,
                 ),
             )
         )
 
     def _history_association_key(self, agent_run_id: str, family: str, identity: str) -> bytes:
-        return record_key_digest(
+        return record_key(
             self._namespace, self._tenant_id, self._runtime_domain.value,
-            "history_association", [agent_run_id, family, identity],
+            "history_association", (agent_run_id, family, identity),
         )
 
     def _history_association_records(
@@ -3460,7 +3466,7 @@ class StateStepArchive(AgentRunStore):
                 record = StoredRecord(
                     key, None, self._agent_run_key(agent_run_id), "history_association",
                     (f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
-                     if family == "trace" else f"{sequence:020d}"),
+                     if family == "trace" else f"{sequence:020d}").encode("ascii"),
                     None, 1, None, 0, None, {"sequence": sequence},
                 )
                 previous = derived.get(key)
@@ -3473,9 +3479,9 @@ class StateStepArchive(AgentRunStore):
         if record is None:
             return 0
         sequence = record.data.get("sequence")
-        if (record.key_digest != self._history_association_key(agent_run_id, "coverage", "event")
-                or record.kind != "history_association" or record.sort_key != "coverage:event"
-                or record.parent_digest != self._agent_run_key(agent_run_id)
+        if (record.key != self._history_association_key(agent_run_id, "coverage", "event")
+                or record.kind != "history_association" or record.sort_key != b"coverage:event"
+                or record.parent_key != self._agent_run_key(agent_run_id)
                 or set(record.data) != {"sequence"} or isinstance(sequence, bool)
                 or not isinstance(sequence, int) or sequence < 1):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3506,7 +3512,7 @@ class StateStepArchive(AgentRunStore):
         if coverage_record is None:
             inserts.append(StoredRecord(
                 coverage_key, None, self._agent_run_key(run.agent_run_id), "history_association",
-                "coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
+                b"coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
             ))
         elif not await transaction.replace_record(
             replace(coverage_record, storage_revision=coverage_record.storage_revision + 1,
@@ -3638,7 +3644,7 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.CURSOR_INVALID)
         after_sort_key = (
             None if after_timestamp is None else
-            f"trace:{after_timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{after_sequence:020d}"
+            f"trace:{after_timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{after_sequence:020d}".encode("ascii")
         )
 
         if event_high_water == 0:
@@ -3662,10 +3668,10 @@ class StateStepArchive(AgentRunStore):
             events = await self._captured_history_events(transaction, agent_run_id, event_high_water)
             expected = self._history_association_records(agent_run_id, events)
             records = await transaction.get_records(tuple(
-                key for key, record in expected.items() if record.sort_key.startswith("trace:")
+                key for key, record in expected.items() if record.sort_key.startswith(b"trace:")
             ))
             for key, record in expected.items():
-                if record.sort_key.startswith("trace:") and records.get(key) != record:
+                if record.sort_key.startswith(b"trace:") and records.get(key) != record:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result: list[tuple[int, StepEvent]] = []
             for sequence, event in events:
@@ -3684,9 +3690,8 @@ class StateStepArchive(AgentRunStore):
             if filtered:
                 return await scan_captured(transaction)
             records = await transaction.list_records(RecordQuery(
-                parent_digest=self._agent_run_key(agent_run_id), kind="history_association",
-                sort_key_prefix="trace:", after_sort_key=after_sort_key,
-                after_key_digest=None if after_sort_key is None else bytes([255]) * 32,
+                parent_key=self._agent_run_key(agent_run_id), kind="history_association",
+                sort_key_prefix=b"trace:", after_sort_key=after_sort_key,
                 limit=limit,
             ))
             sequences: list[int] = []
@@ -3717,7 +3722,7 @@ class StateStepArchive(AgentRunStore):
                     record, fact = records[index], selected[sequence]
                     event = _decode_step(fact.data)
                     if (not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id
-                            or record.sort_key != f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
+                            or record.sort_key != f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}".encode("ascii")
                             or not matches(sequence, event)):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     result.append((sequence, event))
@@ -3742,8 +3747,10 @@ class StateStepArchive(AgentRunStore):
             self._agent_run_key(run_id), self._history.head_key(run_id),
         ))
         sequence_keys = tuple(key for run_id in run_ids for key in (
-            self._sequence(run_id, "event"), self._sequence(run_id, "interaction"),
+            self._stream(run_id, "event"), self._stream(run_id, "interaction"),
         ))
+
+        pending_loaders = {}
 
         async def read(transaction: StateTransaction) -> Mapping[str, AgentRunHistoryCapture]:
             records = await self.read_run_records(transaction, keys)
@@ -3752,8 +3759,8 @@ class StateStepArchive(AgentRunStore):
             for run_id in run_ids:
                 owner = records.get(self._agent_run_key(run_id))
                 head_record = records.get(self._history.head_key(run_id))
-                event_count = sequences.get(self._sequence(run_id, "event"), 0)
-                interaction_count = sequences.get(self._sequence(run_id, "interaction"), 0)
+                event_count = sequences.get(self._stream(run_id, "event"), 0)
+                interaction_count = sequences.get(self._stream(run_id, "interaction"), 0)
                 if owner is None:
                     if head_record is not None or event_count or interaction_count:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3771,15 +3778,19 @@ class StateStepArchive(AgentRunStore):
                     run, event_count, head.message_count, interaction_count,
                     head.pending, pending_keys, pending_parts,
                 )
+                if include_pending and head.pending is not None:
+                    pending_loaders[run_id] = await self._history.capture_pending_message(head.pending, pending_parts)
             return captured
 
-        return await self._store.read(read)
+        captured = await self._history.read_content(lambda: self._store.read(read)) if include_pending else await self._store.read(read)
+        return {run_id: (replace(value, pending_message=await pending_loaders[run_id]())
+                         if run_id in pending_loaders else value) for run_id, value in captured.items()}
 
     async def read_pending_message(self, capture: AgentRunHistoryCapture) -> ModelMessage | None:
         """Resolve the immutable tail body retained by a committed capture."""
         require_no_run_history_lock("StateStepArchive.read_pending_message")
-        if capture.pending is None:
-            return None
+        if capture.pending_message is not None or capture.pending is None:
+            return capture.pending_message
         return await self._history.read_pending_message(capture.pending, capture.pending_parts)
 
     async def list_event_range(
@@ -3864,6 +3875,9 @@ async def _sync_projection(
     *,
     execution_id: str | None = None,
 ) -> None:
+    if type(target) is not StateStepArchive:
+        checkpoints = tuple(replace(value, messages=list(value.messages), context_messages=(
+            None if value.context_messages is None else list(value.context_messages))) for value in checkpoints)
     if isinstance(target, _StepArchiveBatch):
         await target.sync_projection(
             run,
@@ -3903,6 +3917,9 @@ async def _materialize_checkpoint(
     *,
     execution_id: str | None = None,
 ) -> None:
+    if type(target) is not StateStepArchive:
+        checkpoint = replace(checkpoint, messages=list(checkpoint.messages), context_messages=(
+            None if checkpoint.context_messages is None else list(checkpoint.context_messages)))
     if isinstance(target, _StepArchiveBatch):
         await target.materialize_checkpoint(
             run,

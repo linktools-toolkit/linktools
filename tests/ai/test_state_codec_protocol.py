@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from linktools.ai.steps import native_store_key
 from linktools.ai.core import ExecutionStatus, BudgetUsage, IdempotencyStatus, OperationStatus, RunBudget, UsageMetrics
 from linktools.ai.evaluation import CaseRef
 from linktools.ai.errors import AIError, ErrorCode
@@ -27,13 +28,16 @@ from linktools.ai.persistence.codec import (
     decode_fact,
     decode_operation,
     decode_record,
+    encode_alias,
     encode_domain,
+    encode_operation,
     encode_record,
     parse_envelope,
     wire_type_id,
 )
 from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
+from linktools.ai.persistence.state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, StoredAlias, alias_key, operation_key, parent_key, scope_key
 from linktools.ai.task import TaskBindingContract
 from linktools.ai.steps import NativeStepSource
 from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
@@ -58,9 +62,9 @@ def test_current_wire_registry_matches_golden_manifest() -> None:
 
 
 @pytest.mark.parametrize("value", (
-    NativeStepSource("a" * 32, "b" * 64),
+    NativeStepSource("a" * 32, native_store_key("b", "tenant")),
     NativeMessageSlice("c" * 64, 7, 2, 5),
-    NativeMessageRoot("a" * 32, "b" * 64, (NativeMessageSlice("c" * 64, 7, 2, 5),)),
+    NativeMessageRoot("a" * 32, native_store_key("b", "tenant"), (NativeMessageSlice("c" * 64, 7, 2, 5),)),
 ))
 def test_native_owner_wire_values_roundtrip(value: object) -> None:
     payload = _encode_persisted_domain(value)
@@ -94,11 +98,17 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     primitives = fixture["stored_primitives"]
     record = decode_record(primitives["record"])
     assert record.kind == "golden"
+    assert record.scope_key == scope_key("namespace", "tenant", "execution", "golden", "owner", ("principal",))
+    assert record.parent_key == parent_key("namespace", "tenant", "execution", "golden", "graph", ("graph",))
     assert record.storage_revision == primitives["record"]["storage_revision"]
-    assert encode_record(record) == primitives["record"]
+    assert record.payload_bytes is None
+    assert encode_record(record) == {**primitives["record"], "payload_bytes": None}
+    assert decode_record(encode_record(record)) == record
     assert decode_fact(primitives["fact"]).sequence == 1
     assert decode_operation(primitives["operation"]).sequence == 1
-    assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(
+    assert decode_operation(primitives["operation"]).key == operation_key("golden", "tenant", "conversation", "operation")
+    assert decode_alias(primitives["alias"]).alias_key == alias_key("golden", "tenant", "checkpoint", "tool_call", ("run", "call"))
+    assert decode_alias(primitives["alias"]).record_key == bytes.fromhex(
         "77" * 32
     )
 
@@ -129,7 +139,7 @@ def test_registered_enum_wire_values_round_trip(
             IdempotencyStatus.COMPLETED, "b" * 64, None, None,
         ),
         {
-            "scope": "scope", "idempotency_key_digest": "a" * 64,
+            "scope": "scope", "idempotency_key": "a" * 64,
             "expected_status": {"$enum": "idempotency_status", "value": "STARTED"},
             "next_status": {"$enum": "idempotency_status", "value": "COMPLETED"},
             "request_digest": "b" * 64, "result_digest": None, "error_code": None,
@@ -427,3 +437,65 @@ def test_checkpoint_boundary_rejects_invalid_explicit_values(value: object) -> N
     with pytest.raises(AIError) as raised:
         _decode_domain(payload, StoredAgentRunCheckpoint, _CURRENT_CODEC, persisted=True)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * OPERATION_KEY_MAX_BYTES,
+                                 operation_key("界" * 85 + "x", "é" * 64, "conversation", "界" * 85 + "x")))
+def test_operation_wire_roundtrips_bounded_binary_addresses(key: bytes) -> None:
+    from linktools.ai.persistence.state import OperationScanCursor, StoredOperation
+    value = StoredOperation(key, b"s" * 32, 1, "pending", True, {})
+    assert decode_operation(encode_operation(value)) == value
+    assert OperationScanCursor(key).key == key
+
+
+@pytest.mark.parametrize("key", ("", "ab" * (OPERATION_KEY_MAX_BYTES + 1), "AB", "aa bb", "a", "zz"))
+def test_operation_wire_rejects_noncanonical_or_unbounded_addresses(key: str) -> None:
+    value = {**_fixture()["stored_primitives"]["operation"], "key": key}
+    with pytest.raises(AIError) as error:
+        decode_operation(value)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("key", (b"", b"x" * (OPERATION_KEY_MAX_BYTES + 1), "not-bytes"))
+def test_operation_primitives_reject_out_of_contract_addresses(key: object) -> None:
+    from linktools.ai.persistence.state import OperationScanCursor, StoredOperation
+    with pytest.raises(ValueError):
+        StoredOperation(key, b"s" * 32, 1, "pending", False, {})
+    with pytest.raises(ValueError):
+        OperationScanCursor(key)
+
+
+def test_alias_tuple_is_injective_and_bounds_encoded_bytes() -> None:
+    assert alias_key("namespace", "tenant", "checkpoint", "tool_call", ("a:b", "c")) != alias_key("namespace", "tenant", "checkpoint", "tool_call", ("a", "b:c"))
+    assert alias_key("namespace", "tenant", "checkpoint", "a", ("b", "c")) != alias_key("namespace", "tenant", "checkpoint", "a", ("bc",))
+    assert len(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("r" * 128, "界" * 42 + "ab"))) == 302
+    assert len(alias_key("namespace", "tenant", "checkpoint", "r", ("界" * 329 + "a",))) == ALIAS_KEY_MAX_BYTES
+    with pytest.raises(ValueError):
+        alias_key("namespace", "tenant", "checkpoint", "r", ("界" * 329 + "ab",))
+    with pytest.raises(ValueError):
+        alias_key("namespace", "tenant", "checkpoint", "r", ("x" * 65536,))
+    assert len(operation_key("n" * 256, "t" * 128, "conversation", "o" * 256)) == 661
+    assert len(alias_key("n" * 256, "t" * 128, "checkpoint", "tool_call", ("r" * 128, "c" * 128))) == 671
+
+
+@pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * ALIAS_KEY_MAX_BYTES,
+                                  alias_key("namespace", "tenant", "checkpoint", "tool_call", ("é", "e\u0301"))))
+def test_alias_binary_address_roundtrips_without_repr_disclosure(key: bytes) -> None:
+    alias = StoredAlias(key, b"r" * 32)
+    wire = encode_alias(alias)
+    assert wire["alias"] == key.hex()
+    assert decode_alias(wire) == alias
+    assert "alias_key=" not in repr(alias)
+
+
+@pytest.mark.parametrize("wire", ("", "AB", "aa ", "a", "gg", "aa" * (ALIAS_KEY_MAX_BYTES + 1), 1))
+def test_alias_wire_rejects_noncanonical_or_oversized_addresses(wire: object) -> None:
+    with pytest.raises(AIError) as rejected:
+        decode_alias({"alias": wire, "record": "77" * 32})
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("key", (b"", b"x" * (ALIAS_KEY_MAX_BYTES + 1), bytearray(b"x"), "x"))
+def test_alias_physical_address_rejects_invalid_bounds_and_types(key: object) -> None:
+    with pytest.raises(ValueError):
+        StoredAlias(key, b"r" * 32)

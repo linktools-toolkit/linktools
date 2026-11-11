@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from linktools.ai.persistence import Persistence
-"""Canonical conversation turns survive independent execution retention."""
-from ._runtime_test_helpers import model_features
-
-from linktools.ai.persistence import Persistence
+"""Conversation receipts project canonical terminal data from Execution."""
 import asyncio
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -18,16 +15,19 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
+from linktools.ai.model import StoredUserInput
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.inputs import ExecutionInputMaterializer
 from linktools.ai.persistence import PersistenceDomain, PersistencePlan
-from linktools.ai.persistence.codec import _encode_persisted_domain, iter_runtime_object_refs
+from linktools.ai.persistence.codec import (
+    _encode_persisted_domain, encode_session_turn_commit, iter_runtime_object_refs,
+)
 from linktools.ai.persistence.state import OperationQuery, StateTransaction
-from linktools.ai.storage import FilesystemObjectStore, InMemoryCacheBackend, StorageRoute, read_object
+from linktools.ai.storage import FilesystemObjectStore, InMemoryCacheBackend, StorageRoute, StoredPayload, read_object
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_evaluation_retention import Offline
 
 pytestmark = pytest.mark.asyncio
@@ -58,21 +58,15 @@ def _storage(
 
 
 async def _erase_domain(storage: Persistence, domain: PersistenceDomain) -> None:
-    """Physically prune records and facts, rather than fake a missing repository read."""
+    """Remove domain roots for corruption and object-reachability tests."""
     async def erase(transaction: StateTransaction) -> None:
         records = await transaction.scan_records()
         facts = await transaction.scan_facts()
-        for owner in {fact.owner_key_digest for fact in facts}:
+        for owner in {fact.owner_key for fact in facts}:
             await transaction.delete_fact_streams(owner)
-        await transaction.delete_records(tuple(record.key_digest for record in records))
+        await transaction.delete_records(tuple(record.key for record in records))
         await transaction.delete_operations(OperationQuery())
     await storage._stores[domain].mutate(erase)
-
-
-async def _erase_execution_owners(storage: Persistence) -> None:
-    for domain in PersistenceDomain:
-        if domain is not PersistenceDomain.CONVERSATION:
-            await _erase_domain(storage, domain)
 
 
 def _canonical_output(monkeypatch: pytest.MonkeyPatch, output: object) -> None:
@@ -86,7 +80,7 @@ def _canonical_output(monkeypatch: pytest.MonkeyPatch, output: object) -> None:
 
 @pytest.mark.parametrize("backend", ("sqlite", "local_sqlite"))
 @pytest.mark.parametrize("output", ({"answer": ["canonical", 42]}, None))
-async def test_completed_output_is_canonical_after_actual_prune_and_reopen(
+async def test_completed_output_uses_execution_owner_after_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, output: object,
 ) -> None:
     _canonical_output(monkeypatch, output)
@@ -103,16 +97,13 @@ async def test_completed_output_is_canonical_after_actual_prune_and_reopen(
         commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
         )
-        assert commits[0].output is not None
-        assert commits[0].output.decode() == output
-    storage = _storage(tmp_path, backend)
-    storage = Persistence(storage)
-    await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        await _erase_execution_owners(storage)
-        assert await storage.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id) is None
-    finally:
-        await storage.close()
+        assert len(commits) == 1 and commits[0].execution_id == result.execution_id
+        encoded = encode_session_turn_commit(commits[0])
+        assert not {"stored_user_input", "output", "status", "created_at", "updated_at",
+                    "error_code", "safe_error_details"}.intersection(encoded)
+        owner = await runtime._state.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
+        assert owner is not None and owner.result.output.decode() == output
+        assert owner.stored_user_input.payload.decode() == "original user input"
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), tenant_id="default", read_only=True) as history_persistence_115, History.open(persistence=history_persistence_115) as history:
         page = await history.session_timeline("session", principal=principal)
         assert page.items == live
@@ -123,6 +114,103 @@ async def test_completed_output_is_canonical_after_actual_prune_and_reopen(
         with pytest.raises(AIError) as foreign:
             await history.session_timeline("session", principal=Principal(principal.principal_id, "foreign-tenant"))
         assert foreign.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+async def test_missing_execution_owner_never_falls_back_to_conversation_payloads(tmp_path: Path) -> None:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
+        principal = runtime.default_principal
+        session = await runtime.agents.get().create_session("session")
+        await session.run("canonical input", timeout_seconds=5)
+        assert len((await session.timeline()).items) == 1
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence:
+        await _erase_domain(persistence, PersistenceDomain.EXECUTION)
+        assert len(await persistence.conversation.sessions.list_timeline_commits(
+            "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
+        )) == 1
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), read_only=True) as persistence, History.open(persistence=persistence) as history:
+        with pytest.raises(AIError) as missing:
+            await history.session_timeline("session", principal=principal)
+        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("mismatch", ("session", "principal", "parent", "nonterminal"))
+async def test_committed_turn_validates_membership_independently_of_actor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str,
+) -> None:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
+        principal = runtime.default_principal
+        session = await runtime.agents.get().create_session("session")
+        execution = (await session.run("owned input", timeout_seconds=5)).result
+        repository = persistence.execution.executions
+        original_read = repository.get_timeline_many
+
+        async def invalid_owner(execution_ids, *, tenant_id):
+            records = dict(await original_read(execution_ids, tenant_id=tenant_id))
+            owner = records[execution.execution_id]
+            changes = {
+                "session": {"session_id": "different-session"},
+                "principal": {"principal_id": "different-owner"},
+                "parent": {"parent_execution_id": "parent-execution"},
+                "nonterminal": {"status": ExecutionStatus.STARTED, "completed_at": None, "result": None},
+            }[mismatch]
+            records[execution.execution_id] = replace(owner, **changes)
+            return records
+
+        monkeypatch.setattr(repository, "get_timeline_many", invalid_owner)
+        if mismatch == "principal":
+            # Session authorization and the admitted execution actor are independent.
+            timeline = await session.timeline()
+            assert len(timeline.items) == 1
+            assert timeline.items[0].execution_id == execution.execution_id
+        else:
+            with pytest.raises(AIError) as invalid:
+                await session.timeline()
+            assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("backend", ("sqlite", "local_sqlite"))
+async def test_terminal_execution_facts_are_immutable_but_control_updates_preserve_timeline(
+    tmp_path: Path, backend: str,
+) -> None:
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
+        principal = runtime.default_principal
+        session = await runtime.agents.get().create_session("session")
+        execution = (await session.run("original input", timeout_seconds=5)).result
+        repository = persistence.execution.executions
+        owner = await repository.get(execution.execution_id, tenant_id=principal.tenant_id)
+        timeline = (await session.timeline()).items
+        assert owner.completed_at is not None
+        assert timeline[0].updated_at == owner.completed_at
+        changes = (
+            {"session_id": "different-session"},
+            {"principal_id": "different-owner"},
+            {"status": ExecutionStatus.FAILED, "result": replace(owner.result, output=None)},
+            {"stored_user_input": StoredUserInput("text", StoredPayload.inline_text("rewritten input"))},
+            {"result": replace(owner.result, output=StoredPayload.inline_json("rewritten output"))},
+            {"created_at": owner.created_at + timedelta(seconds=1)},
+            {"completed_at": owner.completed_at + timedelta(seconds=1)},
+            {"error_code": ErrorCode.MODEL_UNAVAILABLE.value},
+            {"safe_error_details": {"rewritten": True}},
+        )
+        for changed in changes:
+            with pytest.raises(AIError) as conflict:
+                await repository.compare_and_swap(
+                    owner.execution_id, tenant_id=principal.tenant_id,
+                    expected_revision=owner.revision,
+                    next_record=replace(owner, revision=owner.revision + 1, **changed),
+                )
+            assert conflict.value.code is ErrorCode.EXECUTION_RESULT_CONFLICT
+        assert await repository.get(owner.execution_id, tenant_id=principal.tenant_id) == owner
+        updated = await repository.compare_and_swap(
+            owner.execution_id, tenant_id=principal.tenant_id,
+            expected_revision=owner.revision,
+            next_record=replace(owner, revision=owner.revision + 1,
+                                updated_at=owner.updated_at + timedelta(seconds=5)),
+        )
+        assert updated.completed_at == owner.completed_at
+        assert (await session.timeline()).items == timeline
+    async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path, backend), read_only=True) as persistence, History.open(persistence=persistence) as history:
+        assert (await history.session_timeline("session", principal=principal)).items == timeline
 
 
 async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
@@ -140,35 +228,41 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
             attachment, media_type="text/plain", identifier="retained-file",
         )), timeout_seconds=5)).result
         record = await runtime._state.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
-        assert record.result.output.kind == "object"
-        assert record.stored_user_input.payload.kind == "object"
-        originals = tuple(set(iter_runtime_object_refs(
+        assert record.result.output.kind == "inline"
+        assert record.result.output.decode() == output
+        assert record.result.output.object_refs() == ()
+        assert record.stored_user_input.payload.kind == "inline"
+        assert record.stored_user_input.payload.encoding == "json-attachments"
+        references = tuple(set(iter_runtime_object_refs(
             _encode_persisted_domain(record), default_domain=PersistenceDomain.EXECUTION,
         )))
         live = (await session.timeline()).items
         commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
         )
-        references = tuple(set(iter_runtime_object_refs(
-            _encode_persisted_domain(commits[0]), default_domain=PersistenceDomain.CONVERSATION,
-        )))
-        assert len(references) >= 2, "retained output and binary input must be discoverable GC roots"
+        assert tuple(iter_runtime_object_refs(
+            encode_session_turn_commit(commits[0]), default_domain=PersistenceDomain.CONVERSATION,
+        )) == ()
+        assert references == tuple(
+            (PersistenceDomain.EXECUTION, ref)
+            for ref in record.stored_user_input.payload.object_refs()
+        )
+        assert len(references) == 1, "binary input must remain a discoverable GC root"
+        assert all(domain is PersistenceDomain.EXECUTION for domain, _ in references)
     for _, ref in references:
         assert await objects.stat(ref.key) is not None
     storage = _storage(tmp_path, objects=objects)
     storage = Persistence(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
-        await _erase_execution_owners(storage)
-        await storage.purge_unreferenced_objects(originals, exclusive=Offline())
         retained = await storage.purge_unreferenced_objects(references, exclusive=Offline())
         assert set(retained.retained) == set(references)
         for domain, ref in references:
             await read_object(storage.object_store(domain), ref.key,
                               expected_digest=ref.digest, expected_size=ref.size)
         restored = await ExecutionInputMaterializer(
-            None, PromptLimits(), object_store=storage.object_store(PersistenceDomain.CONVERSATION),
-        ).restore(commits[0].stored_user_input)
+            None, PromptLimits(), object_store=storage.object_store(PersistenceDomain.EXECUTION),
+        ).restore(record.stored_user_input)
         binaries = [part for part in restored if isinstance(part, BinaryContent)]
         assert len(binaries) == 1 and binaries[0].data == attachment
     finally:
@@ -180,9 +274,11 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_domain(storage, PersistenceDomain.CONVERSATION)
-        all_references = tuple(set((*references, *originals)))
-        released = await storage.purge_unreferenced_objects(all_references, exclusive=Offline())
-        assert set((*released.deleted, *released.missing)) == set(all_references)
+        retained = await storage.purge_unreferenced_objects(references, exclusive=Offline())
+        assert set(retained.retained) == set(references)
+        await _erase_domain(storage, PersistenceDomain.EXECUTION)
+        released = await storage.purge_unreferenced_objects(references, exclusive=Offline())
+        assert set((*released.deleted, *released.missing)) == set(references)
         assert not released.retained
     finally:
         await storage.close()
@@ -210,13 +306,6 @@ async def test_fork_retains_only_selected_history_and_independent_turn_outputs(
         live = (await child.timeline()).items
         assert [item.output for item in live] == [{"turn": 1}, {"turn": 3}]
         assert [item.user_input["prompt"]["text"] for item in live] == ["first", "child only"]
-    storage = _storage(tmp_path)
-    storage = Persistence(storage)
-    await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        await _erase_execution_owners(storage)
-    finally:
-        await storage.close()
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_219, History.open(persistence=history_persistence_219) as history:
         assert (await history.session_timeline("child", principal=principal)).items == live
         newest = await history.session_timeline("child", principal=principal, limit=1)
@@ -271,15 +360,8 @@ async def test_zero_message_failure_keeps_input_and_never_reuses_prior_output(
         commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=4,
         )
-        assert len(commits) == 3 and commits[1].output is None
+        assert len(commits) == 3 and commits[1].execution_id == failed.execution_id
         assert commits[1].start_message_index == commits[1].end_message_index
-    storage = _storage(tmp_path)
-    storage = Persistence(storage)
-    await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        await _erase_execution_owners(storage)
-    finally:
-        await storage.close()
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_282, History.open(persistence=history_persistence_282) as history:
         assert (await history.session_timeline("session", principal=principal)).items == live
 
@@ -305,13 +387,6 @@ async def test_cancelled_turn_retains_original_input_without_completed_output(tm
         assert len(live) == 1 and live[0].status is ExecutionStatus.CANCELLED
         assert live[0].output is None
         assert live[0].user_input["prompt"]["text"] == "cancelled original input"
-    storage = _storage(tmp_path)
-    storage = Persistence(storage)
-    await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        await _erase_execution_owners(storage)
-    finally:
-        await storage.close()
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_314, History.open(persistence=history_persistence_314) as history:
         assert (await history.session_timeline("session", principal=principal)).items == live
 
@@ -371,18 +446,11 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
         assert (await session.timeline()).items == live
         monkeypatch.setattr(type(group), "mutate", original_mutate)
         monkeypatch.setattr(type(group), "read_many", original_read)
-    storage = _storage(tmp_path)
-    storage = Persistence(storage)
-    await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        await _erase_execution_owners(storage)
-    finally:
-        await storage.close()
     async with Persistence.open(_NAMESPACE, storage=_storage(tmp_path), tenant_id="default", read_only=True) as history_persistence_380, History.open(persistence=history_persistence_380) as history:
         assert (await history.session_timeline("session", principal=principal)).items == live
 
 
-async def test_completed_display_cache_uses_retained_envelope_after_execution_prune(
+async def test_completed_display_cache_avoids_full_execution_and_transcript_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = {"canonical": "cached retained result"}
@@ -396,10 +464,9 @@ async def test_completed_display_cache_uses_retained_envelope_after_execution_pr
         await session.run("retained cached input", timeout_seconds=5)
         cold = await runtime.sessions.refresh("session", principal=principal, max_age=60)
         assert cold.timeline.items[0].output == output
-        await _erase_domain(runtime._state, PersistenceDomain.EXECUTION)
 
         async def execution_read(*args, **kwargs):
-            pytest.fail("completed display retention must not depend on an Execution row")
+            pytest.fail("completed display must not expand the full Execution binding")
 
         async def transcript_read(*args, **kwargs):
             pytest.fail("a valid retained display cache must not reload transcript bodies")
@@ -476,13 +543,6 @@ async def test_split_route_never_publishes_completed_output_before_execution_ter
         assert (await session.timeline()).items == live
         monkeypatch.setattr(executions, "commit_terminal_in_transaction", original_terminal)
         monkeypatch.setattr(sessions.state_store, "mutate", original_mutate)
-    storage = PersistenceStorage.from_plan(plan)
-    storage = Persistence(storage)
-    await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        await _erase_execution_owners(storage)
-    finally:
-        await storage.close()
     async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as history_persistence_485, History.open(persistence=history_persistence_485) as history:
         assert (await history.session_timeline("session", principal=principal)).items == live
 
@@ -517,7 +577,7 @@ async def test_display_cache_five_refresh_measurement(tmp_path: Path) -> None:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
 
 
-async def test_split_object_stores_copy_result_and_binary_input_before_source_deletion(
+async def test_split_object_stores_read_canonical_result_and_binary_input_after_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = {"canonical": "y" * (80 * 1024)}
@@ -527,42 +587,41 @@ async def test_split_object_stores_copy_result_and_binary_input_before_source_de
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )
-    storage = PersistenceStorage.from_plan(plan)
-    async with Persistence.open(_NAMESPACE, storage=storage) as persistence_529, Runtime.attach(persistence=persistence_529, features=model_features(_models(), _features())) as runtime:
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan)) as persistence, Runtime.attach(persistence=persistence, features=model_features(_models(), _features())) as runtime:
         principal = runtime.default_principal
-        assert runtime._state.object_store(PersistenceDomain.EXECUTION) is not runtime._state.object_store(PersistenceDomain.CONVERSATION)
+        source = persistence.object_store(PersistenceDomain.EXECUTION)
+        conversation_objects = persistence.object_store(PersistenceDomain.CONVERSATION)
+        assert source is not conversation_objects
         session = await runtime.agents.get().create_session("session")
         result = (await session.run(("keep binary", BinaryContent(
             attachment, media_type="text/plain", identifier="separate-store-file",
         )), timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
-        record = await runtime._state.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
-        source_refs = (record.result.output.ref, record.stored_user_input.payload.ref)
-        assert all(ref is not None for ref in source_refs)
-        live = (await session.timeline()).items
-    storage = PersistenceStorage.from_plan(plan)
-    storage = Persistence(storage)
-    await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
-    try:
-        await _erase_execution_owners(storage)
-        source = storage.object_store(PersistenceDomain.EXECUTION)
-        destination = storage.object_store(PersistenceDomain.CONVERSATION)
-        assert source is not destination
-        for ref in source_refs:
-            assert await source.delete_object(ref.key, expected_digest=ref.digest)
-            assert await source.stat(ref.key) is None
-        commits = await storage.conversation.sessions.list_timeline_commits(
+        owner = await persistence.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
+        assert owner.result.output.kind == "inline"
+        assert owner.result.output.decode() == output
+        assert owner.result.output.object_refs() == ()
+        assert owner.stored_user_input.payload.encoding == "json-attachments"
+        source_refs = owner.stored_user_input.payload.object_refs()
+        assert len(source_refs) == 1
+        commits = await persistence.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
         )
-        restored = await ExecutionInputMaterializer(
-            None, PromptLimits(), object_store=destination,
-        ).restore(commits[0].stored_user_input)
-        assert [item.data for item in restored if isinstance(item, BinaryContent)] == [attachment]
-    finally:
-        await storage.close()
-    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as history_persistence_562, History.open(persistence=history_persistence_562) as history:
+        assert tuple(iter_runtime_object_refs(
+            encode_session_turn_commit(commits[0]), default_domain=PersistenceDomain.CONVERSATION,
+        )) == ()
+        for ref in source_refs:
+            assert await source.stat(ref.key) is not None
+            assert await conversation_objects.stat(ref.key) is None
+        live = (await session.timeline()).items
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.from_plan(plan), tenant_id="default", read_only=True) as persistence, History.open(persistence=persistence) as history:
         page = await history.session_timeline("session", principal=principal)
         assert page.items == live and page.items[0].output == output
+        owner = await persistence.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
+        restored = await ExecutionInputMaterializer(
+            None, PromptLimits(), object_store=persistence.object_store(PersistenceDomain.EXECUTION),
+        ).restore(owner.stored_user_input)
+        assert [item.data for item in restored if isinstance(item, BinaryContent)] == [attachment]
 
 
 async def test_split_terminal_without_conversation_receipt_requires_recovery(

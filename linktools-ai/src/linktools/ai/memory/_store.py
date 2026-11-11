@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import uuid
@@ -28,13 +27,12 @@ from ..core import (
     OperationStatus,
     ResourceKind,
     canonical_sha256,
-    validate_memory_scope,
     validate_tenant_id,
+    validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
-from ..persistence import PersistenceDomain
+from ..storage import ObjectStore, StoredPayload
+from ..persistence.objects import read_runtime_object
 from ..persistence.contracts import MemoryRecord, MemoryRepositories
 
 _logger = environ.get_logger("ai.memory")
@@ -143,34 +141,31 @@ class PersistentMemoryStore:
         execution_id: str,
         memory_scope: str,
         transient: bool = False,
-        payload_policy: PayloadPolicy | None = None,
     ) -> None:
         try:
             validate_tenant_id(tenant_id)
-            validate_memory_scope(memory_scope)
+            if transient:
+                validate_resource_id(execution_id)
+            MemoryRecord.scope_components(memory_scope, execution_id if transient else None)
         except AIError as error:
             raise ValueError("memory store identity is invalid") from error
         self._state = state
         self._object_store = object_store
         self._namespace = namespace
         self._tenant_id = tenant_id
-        self._payload_policy = payload_policy or PayloadPolicy()
-        scope_digest = canonical_sha256(memory_scope)
-        self._memory_scope_digest = (
-            canonical_sha256(
-                {"execution_id": execution_id, "memory_scope_digest": scope_digest}
-            )
-            if transient
-            else scope_digest
-        )
+        self._memory_scope = memory_scope
+        self._transient_execution_id = execution_id if transient else None
 
     async def capture(self) -> Mapping[str, JsonValue]:
         """Read a consistent scope view, preserving each file's version."""
-        records = await self._state.records.capture_scope(tenant_id=self._tenant_id, memory_scope_digest=self._memory_scope_digest)
+        records = await self._state.records.capture_scope(
+            tenant_id=self._tenant_id, memory_scope=self._memory_scope,
+            transient_execution_id=self._transient_execution_id,
+        )
         result: dict[str, JsonValue] = {}
         for record in records:
             path = record.metadata["path"]
-            _validate_record(record, path, self._memory_scope_digest)
+            _validate_record(record, path, self._memory_scope, self._transient_execution_id)
             result[path] = {"content": await self._content(record), "version": _record_version(record)}
         return result
 
@@ -195,12 +190,22 @@ class PersistentMemoryStore:
                 receipt.require_target(path, "write")
                 continue
             now = datetime.now(timezone.utc)
-            memory_id = _memory_id(self._memory_scope_digest, path)
-            record = MemoryRecord(memory_id, self._memory_scope_digest, StoredPayload.inline_text(content),
-                {"path": path, "version": version, "operation_id": _operation_id(self._memory_scope_digest, operation.id)}, 0, now, now)
-            await self._state.records.apply_write(record, expected_revision=None,
-                operation=_operation_input(operation, self._memory_scope_digest, self._tenant_id,
-                    _MutationReceipt(path, version, False, "write"), OperationKind.MEMORY_WRITE, memory_id))
+            memory_id = _memory_id(self._memory_scope, path, self._transient_execution_id)
+            record = MemoryRecord(
+                memory_id, self._memory_scope, StoredPayload.inline_text(content),
+                {"path": path, "version": version, "operation_id": _operation_id(
+                    self._memory_scope, operation.id, self._transient_execution_id,
+                )},
+                0, now, now, transient_execution_id=self._transient_execution_id,
+            )
+            await self._state.records.apply_write(
+                record, expected_revision=None,
+                operation=_operation_input(
+                    operation, self._memory_scope, self._tenant_id,
+                    _MutationReceipt(path, version, False, "write"), OperationKind.MEMORY_WRITE, memory_id,
+                    transient_execution_id=self._transient_execution_id,
+                ),
+            )
 
     async def read(self, path: str, *, max_chars: int) -> MemoryFile | None:
         logical_path = _normalize_path(path)
@@ -253,36 +258,30 @@ class PersistentMemoryStore:
         version = _version_token(
             self._namespace,
             self._tenant_id,
-            self._memory_scope_digest,
+            self._memory_scope,
             logical_path,
             operation.id,
+            transient_execution_id=self._transient_execution_id,
         )
         stored_content = StoredPayload.inline_text(content)
-        if not payload_fits_inline(stored_content, self._payload_policy):
-            reference = await put_runtime_object(
-                self._object_store,
-                ObjectKeyFactory(self._namespace),
-                PersistenceDomain.MEMORY,
-                self._tenant_id,
-                content.encode("utf-8"),
-            )
-            stored_content = StoredPayload.object(reference)
         now = datetime.now(timezone.utc)
         next_record = MemoryRecord(
-            _memory_id(self._memory_scope_digest, logical_path),
-            self._memory_scope_digest,
+            _memory_id(self._memory_scope, logical_path, self._transient_execution_id),
+            self._memory_scope,
             stored_content,
             {
                 "path": logical_path,
                 "version": version,
                 "operation_id": _operation_id(
-                    self._memory_scope_digest,
+                    self._memory_scope,
                     operation.id,
+                    self._transient_execution_id,
                 ),
             },
             0,
             now if current is None else current.created_at,
             now,
+            transient_execution_id=self._transient_execution_id,
         )
         receipt = _MutationReceipt(
             logical_path,
@@ -296,11 +295,12 @@ class PersistentMemoryStore:
                 expected_revision=None if current is None else current.revision,
                 operation=_operation_input(
                     operation,
-                    self._memory_scope_digest,
+                    self._memory_scope,
                     self._tenant_id,
                     receipt,
                     OperationKind.MEMORY_WRITE,
                     next_record.memory_id,
+                    transient_execution_id=self._transient_execution_id,
                 ),
             )
         except AIError as error:
@@ -314,8 +314,7 @@ class PersistentMemoryStore:
         if stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.debug(
-            "memory write committed: scope=%s path=%s",
-            self._memory_scope_digest,
+            "memory write committed: path=%s",
             logical_path,
         )
         return receipt.mutation(replayed=False)
@@ -345,16 +344,17 @@ class PersistentMemoryStore:
         )
         try:
             deleted, replayed = await self._state.records.apply_delete(
-                _memory_id(self._memory_scope_digest, logical_path),
+                _memory_id(self._memory_scope, logical_path, self._transient_execution_id),
                 tenant_id=self._tenant_id,
                 expected_revision=0 if current is None else current.revision,
                 operation=_operation_input(
                     operation,
-                    self._memory_scope_digest,
+                    self._memory_scope,
                     self._tenant_id,
                     receipt,
                     OperationKind.MEMORY_DELETE,
-                    _memory_id(self._memory_scope_digest, logical_path),
+                    _memory_id(self._memory_scope, logical_path, self._transient_execution_id),
+                    transient_execution_id=self._transient_execution_id,
                 ),
             )
         except AIError as error:
@@ -368,8 +368,7 @@ class PersistentMemoryStore:
         if deleted != (current is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.debug(
-            "memory delete committed: scope=%s path=%s",
-            self._memory_scope_digest,
+            "memory delete committed: path=%s",
             logical_path,
         )
         return receipt.mutation(replayed=False)
@@ -383,7 +382,8 @@ class PersistentMemoryStore:
         while len(paths) < limit:
             page = await self._state.records.list(
                 tenant_id=self._tenant_id,
-                memory_scope_digest=self._memory_scope_digest,
+                memory_scope=self._memory_scope,
+                transient_execution_id=self._transient_execution_id,
                 prefix=normalized_prefix,
                 cursor=cursor,
                 limit=min(1000, limit - len(paths)),
@@ -404,7 +404,7 @@ class PersistentMemoryStore:
         captured_version: str | None = None,
     ) -> _MutationReceipt | None:
         _validate_operation(operation)
-        operation_id = _operation_id(self._memory_scope_digest, operation.id)
+        operation_id = _operation_id(self._memory_scope, operation.id, self._transient_execution_id)
         record = await self._state.operations.get(
             operation_id,
             tenant_id=self._tenant_id,
@@ -436,16 +436,17 @@ class PersistentMemoryStore:
             else OperationKind.MEMORY_DELETE
         )
         if (
-            record.resource_id != _memory_id(self._memory_scope_digest, receipt.path)
+            record.resource_id != _memory_id(self._memory_scope, receipt.path, self._transient_execution_id)
             or record.operation_kind is not expected_kind
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if receipt.version is not None and receipt.version != (captured_version or _version_token(
             self._namespace,
             self._tenant_id,
-            self._memory_scope_digest,
+            self._memory_scope,
             receipt.path,
             operation.id,
+            transient_execution_id=self._transient_execution_id,
         )):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return receipt
@@ -458,7 +459,7 @@ class PersistentMemoryStore:
         if error.code is not ErrorCode.STORAGE_CONFLICT:
             return error
         existing = await self._state.operations.get(
-            _operation_id(self._memory_scope_digest, operation.id),
+            _operation_id(self._memory_scope, operation.id, self._transient_execution_id),
             tenant_id=self._tenant_id,
         )
         if existing is not None:
@@ -469,14 +470,15 @@ class PersistentMemoryStore:
 
     async def _record(self, logical_path: str) -> MemoryRecord | None:
         record = await self._state.records.get(
-            _memory_id(self._memory_scope_digest, logical_path),
+            _memory_id(self._memory_scope, logical_path, self._transient_execution_id),
             tenant_id=self._tenant_id,
         )
         if record is not None:
             _validate_record(
                 record,
                 logical_path,
-                self._memory_scope_digest,
+                self._memory_scope,
+                self._transient_execution_id,
             )
         return record
 
@@ -537,6 +539,8 @@ def _normalize_path(path: str) -> str:
 def _normalize_prefix(prefix: str) -> str:
     if prefix == "":
         return ""
+    if not isinstance(prefix, str):
+        raise ValueError("memory prefix is invalid")
     _normalize_path(prefix.removesuffix("/"))
     return prefix
 
@@ -591,11 +595,13 @@ def _record_version(record: MemoryRecord) -> str | None:
 def _validate_record(
     record: MemoryRecord,
     logical_path: str,
-    scope_digest: str,
+    memory_scope: str,
+    transient_execution_id: str | None = None,
 ) -> None:
     if (
-        record.memory_id != _memory_id(scope_digest, logical_path)
-        or record.memory_scope_digest != scope_digest
+        record.memory_id != _memory_id(memory_scope, logical_path, transient_execution_id)
+        or record.memory_scope != memory_scope
+        or record.transient_execution_id != transient_execution_id
         or not isinstance(record.revision, int)
         or isinstance(record.revision, bool)
         or record.revision < 1
@@ -610,40 +616,59 @@ def _validate_record(
 def _version_token(
     namespace: str,
     tenant_id: str,
-    scope_digest: str,
+    memory_scope: str,
     path: str,
     identity: str,
+    *,
+    transient_execution_id: str | None = None,
 ) -> str:
     return "m1:" + canonical_sha256(
         {
             "namespace": namespace,
             "tenant_id": tenant_id,
-            "scope": scope_digest,
+            "scope": memory_scope,
+            "transient_execution_id": transient_execution_id,
             "path": path,
-            "identity": canonical_sha256(identity),
+            "identity": identity,
         }
     )
 
 
-def _memory_id(scope_digest: str, logical_path: str) -> str:
-    return hashlib.sha256(f"{scope_digest}\0{logical_path}".encode()).hexdigest()
+def _memory_id(
+    memory_scope: str, logical_path: str, transient_execution_id: str | None = None,
+) -> str:
+    # Full-length paths and scopes do not fit the bounded record address together.
+    return canonical_sha256({
+        "memory_scope": memory_scope,
+        "transient_execution_id": transient_execution_id,
+        "path": logical_path,
+    })
 
 
-def _operation_id(scope_digest: str, operation_id: str) -> str:
-    return hashlib.sha256(f"{scope_digest}\0{operation_id}".encode()).hexdigest()
+def _operation_id(
+    memory_scope: str, operation_id: str, transient_execution_id: str | None = None,
+) -> str:
+    # Capture operation IDs include the full path, beyond ordinary caller ID bounds.
+    return canonical_sha256({
+        "memory_scope": memory_scope,
+        "transient_execution_id": transient_execution_id,
+        "operation_id": operation_id,
+    })
 
 
 def _operation_input(
     operation: MemoryOperation,
-    scope_digest: str,
+    memory_scope: str,
     tenant_id: str,
     receipt: _MutationReceipt,
     kind: OperationKind,
     resource_id: str,
+    *,
+    transient_execution_id: str | None = None,
 ) -> OperationLedgerInput:
     now = datetime.now(timezone.utc)
     return OperationLedgerInput(
-        _operation_id(scope_digest, operation.id),
+        _operation_id(memory_scope, operation.id, transient_execution_id),
         tenant_id,
         ResourceKind.MEMORY,
         resource_id,

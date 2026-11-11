@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from linktools.ai.core import OperationStatus, idempotency_key_digest
+from linktools.ai.core import OperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.session import CloseSessionRequest, UpdateSessionRequest
@@ -23,7 +23,7 @@ async def test_session_request_identity_close_receipt_survives_closed_update(sto
         await state.conversation.sessions.create(_session())
         request = CloseSessionRequest(_PRINCIPAL, "close")
         closed = await manager.close("session", request)
-        receipt = await state.conversation.operations.get(idempotency_key_digest("close"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("close", tenant_id="tenant")
         updated = await manager.update("agent", "session", UpdateSessionRequest(
             _PRINCIPAL, closed.revision, "update-closed", {"legal": True}))
         assert await manager.close("session", request) == updated
@@ -41,7 +41,7 @@ async def test_session_request_identity_close_rejects_malformed_receipt(storage:
         await state.conversation.sessions.create(_session())
         request = CloseSessionRequest(_PRINCIPAL, "close")
         await manager.close("session", request)
-        receipt = await state.conversation.operations.get(idempotency_key_digest("close"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("close", tenant_id="tenant")
         await state.conversation.operations.compare_and_swap(
             receipt.operation_id, tenant_id="tenant", expected_status=receipt.status,
             next_record=replace(receipt, result_digest=digest))

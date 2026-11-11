@@ -21,7 +21,7 @@ import stat
 import tempfile
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 from typing import Protocol, TypeAlias, runtime_checkable
@@ -30,7 +30,7 @@ from uuid import uuid4
 from ..errors import AIError, ErrorCode
 from ._files import sync_directory
 from ._lock import FilesystemMutationLock, Lease
-from ._turn import TurnCoordination, TurnScope
+from ._turn import TurnCoordination, TurnScope, TurnScopeIdentity
 from ._turn_scope import RenewingTurnScope
 from ..core import WriteBufferEntry
 
@@ -97,13 +97,13 @@ async def contains_many(
 
 @dataclass(slots=True)
 class _MemoryTurn:
-    scope: str
-    session_key: str
-    request_key: str
+    scope: TurnScopeIdentity = field(repr=False)
+    session_key: str = field(repr=False)
+    request_key: str = field(repr=False)
     request_digest: str
-    execution_id: str
-    owner_id: str
-    lease: Lease
+    execution_id: str = field(repr=False)
+    owner_id: str = field(repr=False)
+    lease: Lease = field(repr=False)
     expires_at: float
     cancel_requested: bool = False
 
@@ -162,8 +162,8 @@ class InMemoryCacheBackend:
         self._pending_size = 0
         self._pending_count = 0
         self._turns: dict[str, _MemoryTurn] = {}
-        self._turn_requests: dict[tuple[str, str], str] = {}
-        self._turn_executions: dict[tuple[str, str], str] = {}
+        self._turn_requests: dict[tuple[TurnScopeIdentity, str], str] = {}
+        self._turn_executions: dict[tuple[TurnScopeIdentity, str], str] = {}
         self._turn_fence = 0
 
     async def get(self, key: ContentCacheKey) -> "bytes | None":
@@ -285,7 +285,7 @@ class InMemoryCacheBackend:
 
 
     def enter(
-        self, scope: str, *, session_key: str, request_key: str,
+        self, scope: TurnScopeIdentity, *, session_key: str, request_key: str,
         request_digest: str, execution_id: str, owner_id: str,
     ) -> TurnScope:
         return RenewingTurnScope(
@@ -295,7 +295,7 @@ class InMemoryCacheBackend:
 
     async def claim_turn(
         self,
-        scope: str,
+        scope: TurnScopeIdentity,
         *,
         session_key: str,
         request_key: str,
@@ -305,8 +305,10 @@ class InMemoryCacheBackend:
         lease_seconds: float,
     ) -> "TurnCoordination | None":
         """Atomically acquire a live turn or return its token-free replay."""
+        if not isinstance(scope, TurnScopeIdentity):
+            raise TypeError("turn scope must be a TurnScopeIdentity")
         for name, value in (
-            ("scope", scope), ("session_key", session_key),
+            ("session_key", session_key),
             ("request_key", request_key), ("request_digest", request_digest),
             ("execution_id", execution_id), ("owner_id", owner_id),
         ):
@@ -323,7 +325,7 @@ class InMemoryCacheBackend:
                 return previous.coordination()
             if (scope, execution_id) in self._turn_executions:
                 raise AIError(ErrorCode.STORAGE_CONFLICT, "execution ID already owns a live turn")
-            key = json.dumps(("turn", scope, session_key), separators=(",", ":"))
+            key = json.dumps(("turn", *scope.as_tuple(), session_key), separators=(",", ":"))
             if key in self._turns:
                 return None
             self._turn_fence += 1
@@ -337,31 +339,34 @@ class InMemoryCacheBackend:
             self._turn_executions[scope, execution_id] = key
             return turn.coordination(owned=True)
 
-    async def read_turn(self, scope: str, execution_id: str) -> "TurnCoordination | None":
+    async def read_turn(self, scope: TurnScopeIdentity, execution_id: str) -> "TurnCoordination | None":
         """Read live execution ownership without extending or exposing its lease."""
-        _require_turn_text(scope, "scope")
+        if not isinstance(scope, TurnScopeIdentity):
+            raise TypeError("turn scope must be a TurnScopeIdentity")
         _require_turn_text(execution_id, "execution_id")
         async with self._lock:
             self._expire_turns(monotonic())
             key = self._turn_executions.get((scope, execution_id))
             return None if key is None else self._turns[key].coordination()
 
-    async def read_turn_by_request(self, scope: str, request_key: str) -> "TurnCoordination | None":
+    async def read_turn_by_request(self, scope: TurnScopeIdentity, request_key: str) -> "TurnCoordination | None":
         """Read the existing request index without extending its live claim."""
-        _require_turn_text(scope, "scope")
+        if not isinstance(scope, TurnScopeIdentity):
+            raise TypeError("turn scope must be a TurnScopeIdentity")
         _require_turn_text(request_key, "request_key")
         async with self._lock:
             self._expire_turns(monotonic())
             key = self._turn_requests.get((scope, request_key))
             return None if key is None else self._turns[key].coordination()
 
-    async def read_turn_by_session(self, scope: str, session_key: str) -> "TurnCoordination | None":
+    async def read_turn_by_session(self, scope: TurnScopeIdentity, session_key: str) -> "TurnCoordination | None":
         """Read the authoritative session claim without extending its lifetime."""
-        _require_turn_text(scope, "scope")
+        if not isinstance(scope, TurnScopeIdentity):
+            raise TypeError("turn scope must be a TurnScopeIdentity")
         _require_turn_text(session_key, "session_key")
         async with self._lock:
             self._expire_turns(monotonic())
-            key = json.dumps(("turn", scope, session_key), separators=(",", ":"))
+            key = json.dumps(("turn", *scope.as_tuple(), session_key), separators=(",", ":"))
             turn = self._turns.get(key)
             return None if turn is None else turn.coordination()
 
@@ -389,9 +394,10 @@ class InMemoryCacheBackend:
             self._discard_turn(turn)
             return True
 
-    async def cancel_turn(self, scope: str, execution_id: str) -> bool:
+    async def cancel_turn(self, scope: TurnScopeIdentity, execution_id: str) -> bool:
         """Request cancellation of this execution without extending its lease."""
-        _require_turn_text(scope, "scope")
+        if not isinstance(scope, TurnScopeIdentity):
+            raise TypeError("turn scope must be a TurnScopeIdentity")
         _require_turn_text(execution_id, "execution_id")
         async with self._lock:
             self._expire_turns(monotonic())

@@ -22,11 +22,13 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot, InMemoryStepStore, RunRecord, SqliteStepStore,
     StepEvent, StepPersistence, StepStore, ToolEffectRecord, continue_run,
 )
-from sqlalchemy import event, text
-from sqlalchemy.dialects import mysql
+from sqlalchemy import Text, UniqueConstraint, event, text
+from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 
+from linktools.ai.core import RESOURCE_ID_MAX_BYTES, validate_resource_id
+from linktools.ai.errors import AIError
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_store import SqlStepStore
 
@@ -64,6 +66,47 @@ async def test_run_lineage_filters_sort_by_instant_and_keep_original_records(sto
     assert await store.list_runs(parent_run_id="parent", conversation_id="conversation") == [records[1], records[0]]
     with pytest.raises((ValueError, sqlite3.IntegrityError)):
         await store.register_run(records[0])
+
+
+@pytest.mark.asyncio
+async def test_sql_lineage_filters_preserve_bounded_exact_identifiers_under_padded_comparisons(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lineage.db'}")
+    metadata = build_step_sql_metadata()
+    runs = metadata.tables["ai_step_runs"]
+    # SQLite RTRIM models MySQL PAD SPACE comparisons for the accepted IDs.
+    for name in ("run_id", "conversation_id", "parent_run_id"):
+        runs.c[name].type = Text(collation="RTRIM")
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    other = SqlStepStore(engine, namespace="steps", tenant_id="two")
+    prefix = "共同前缀" + "x" * (RESOURCE_ID_MAX_BYTES - len("共同前缀".encode()) - 1)
+    records = [
+        RunRecord(run_id="exact", conversation_id=prefix + "a", parent_run_id=prefix + "a"),
+        RunRecord(run_id="other-parent", conversation_id=prefix + "a", parent_run_id=prefix + "b"),
+        RunRecord(run_id="other-conversation", conversation_id=prefix + "b", parent_run_id=prefix + "a"),
+        RunRecord(run_id="missing"),
+    ]
+    try:
+        for record in records:
+            await store.register_run(record)
+        await other.register_run(records[0])
+        assert await store.list_runs(conversation_id=prefix + "a", parent_run_id=prefix + "a") == records[:1]
+        assert {record.run_id for record in await store.list_runs(conversation_id=prefix + "a")} == {"exact", "other-parent"}
+        assert {record.run_id for record in await store.list_runs(parent_run_id=prefix + "a")} == {"exact", "other-conversation"}
+        assert await other.list_runs() == records[:1]
+        assert len(await store.list_runs()) == len(records)
+        for field in ("run_id", "conversation_id", "parent_run_id"):
+            with pytest.raises(AIError):
+                await store.register_run(replace(records[0], **{field: "padded "}))
+        with pytest.raises(AIError):
+            await store.list_runs(conversation_id="padded ")
+        with pytest.raises(AIError):
+            await store.list_runs(parent_run_id="padded ")
+    finally:
+        await store.close()
+        await other.close()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -134,13 +177,14 @@ async def test_snapshot_preserves_native_messages_and_official_continue_run(stor
 
 @pytest.mark.asyncio
 async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> None:
+    run_id = "run-" + "x" * (RESOURCE_ID_MAX_BYTES - 4)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scopes.db'}")
     stores = [SqlStepStore(engine, namespace=namespace, tenant_id=tenant, tool_effect_store=InMemoryStepStore())
               for namespace, tenant in [("one", "a"), ("one", "b"), ("two", "a")]]
     try:
         await stores[0].initialize(local=True)
         for index, item in enumerate(stores):
-            await item.register_run(RunRecord(run_id="run-" + "x" * 1024, metadata={"scope": str(index)}))
+            await item.register_run(RunRecord(run_id=run_id, metadata={"scope": str(index)}))
             await item.save_snapshot(ContinuableSnapshot(run_id="same", step_index=0,
                 messages=[ModelRequest(parts=[UserPromptPart(str(index))])], idempotency_key="same"))
         await stores[0].register_run(RunRecord(run_id="offset", parent_run_id="parent",
@@ -149,7 +193,7 @@ async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> No
             started_at=datetime.fromisoformat("2026-01-01T01:00:00+00:00")))
         assert [run.run_id for run in await stores[0].list_runs(parent_run_id="parent")] == ["offset", "utc"]
         for index, item in enumerate(stores):
-            assert (await item.get_run(run_id="run-" + "x" * 1024)).metadata == {"scope": str(index)}
+            assert (await item.get_run(run_id=run_id)).metadata == {"scope": str(index)}
             snapshot = await item.latest_snapshot(run_id="same")
             assert snapshot.messages[0].parts[0].content == str(index)
     finally:
@@ -205,8 +249,8 @@ async def test_snapshot_pruning_and_body_lookup_stay_in_their_partition(tmp_path
         assert await stores[1].latest_snapshot(run_id="run") == first
         await stores[1].save_snapshot(second)
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_digest = :scope"),
-                                     {"scope": stores[0]._store_digest})
+            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_key = :scope"),
+                                     {"scope": stores[0]._store_key})
         with pytest.raises(ValueError, match="missing or corrupt"):
             await stores[0].latest_snapshot(run_id="run")
         assert await stores[1].latest_snapshot(run_id="run") == second
@@ -347,8 +391,10 @@ async def test_sql_cold_store_continues_official_capability_after_settled_tool(t
 
     try:
         with pytest.raises(RuntimeError, match="model failed after tool"):
-            await agent.run("question", conversation_id="conversation")
+            await agent.run("question")
         original = (await store.list_runs())[0]
+        for generated in (original.run_id, original.conversation_id):
+            assert validate_resource_id(generated) == generated
         await store.close()
         cold = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=effects)
         history = await continue_run(cold, run_id=original.run_id)
@@ -392,6 +438,45 @@ async def test_sql_effect_binding_borrows_partition_without_owning_its_lifetime(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("dialect", (mysql.dialect(), postgresql.dialect(), sqlite.dialect()))
+def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
+    metadata = build_step_sql_metadata()
+    kind = "mysql" if dialect.name == "mysql" else "portable"
+    expected = {
+        "runs": {("store_key", "run_id"): True,
+                 ("store_key", "conversation_id"): False, ("store_key", "parent_run_id"): False},
+        "events": {("store_key", "run_id", "idempotency_key"): True, ("store_key", "run_id"): False},
+        "snapshots": {("store_key", "run_id", "pruned"): False,
+                      ("store_key", "run_id", "idempotency_key"): True},
+    }
+    for name, lookups in expected.items():
+        table = metadata.tables["ai_step_" + name]
+        for column in ("run_id", "conversation_id", "parent_run_id"):
+            assert table.c[column].type.length == RESOURCE_ID_MAX_BYTES
+            assert "VARCHAR(128)" in str(table.c[column].type.compile(dialect=dialect))
+        indexes = {tuple(column.name for column in index.columns): index for index in table.indexes
+                   if index.info.get("ddl_dialect") == kind}
+        for columns, unique in lookups.items():
+            if unique and dialect.name != "mysql":
+                assert columns in {tuple(column.name for column in constraint.columns)
+                                   for constraint in table.constraints if isinstance(constraint, UniqueConstraint)}
+                ddl = str(CreateTable(table).compile(dialect=dialect))
+            else:
+                index = indexes[columns]
+                assert index.unique is unique
+                ddl = str(CreateIndex(index).compile(dialect=dialect))
+            assert "(" + ", ".join(columns) + ")" in ddl
+            if dialect.name == "mysql":
+                # MySQL budgets declared characters, not the application's byte limit.
+                from sqlalchemy import LargeBinary
+
+                key_bytes = sum(column.type.length * (1 if isinstance(column.type, LargeBinary) else 4)
+                                if getattr(column.type, "length", None) else 1
+                                for column in (table.c[name] for name in columns))
+                assert key_bytes == (1426 if "idempotency_key" in columns else 915 if "pruned" in columns else 914)
+                assert key_bytes <= 3072
+
+
 def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy() -> None:
     metadata = build_step_sql_metadata()
     dialect = mysql.dialect()
@@ -411,7 +496,13 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
         for index in indexes:
             assert len(index.columns) <= 3
             if index.unique:
-                assert all(not column.nullable for column in index.columns)
+                nullable = {column.name for column in index.columns if column.nullable}
+                if (table.name in {"ai_step_events", "ai_step_snapshots"}
+                        and "idempotency_key" in index.columns):
+                    # NULL replay keys append independent occurrences; non-NULL keys deduplicate.
+                    assert nullable == {"idempotency_key"}
+                else:
+                    assert not nullable
             else:
                 assert not any(column.primary_key for column in index.columns)
             assert index.name == ("uk_" if index.unique else "ix_") + "_".join(column.name for column in index.columns)
@@ -429,19 +520,32 @@ def test_step_development_ddl_and_complete_metadata_match_canonical_schema() -> 
     complete = build_sql_schema_metadata()
     migration = (Path(__file__).resolve().parents[2] / "linktools-ai" / "migrations" / "init_schema.sql").read_text()
     compact = " ".join(migration.split())
+
+    def normalize_nullable_columns(sql: str) -> str:
+        # MySQL's implicit nullable default and explicit NULL are equivalent.
+        # Preserve NOT NULL, defaults, and the complete quoted comment text.
+        chunks = re.split(r"('(?:[^']|'')*')", sql)
+        return " ".join("".join(
+            re.sub(r"(?<!NOT )(?<!DEFAULT )\bNULL\s+(?=COMMENT\s*$)", "", chunk) if index % 2 == 0 else chunk
+            for index, chunk in enumerate(chunks)
+        ).split())
+    column = "value TEXT COMMENT 'literal NULL COMMENT ''nested''; data'"
+    assert normalize_nullable_columns(column.replace("TEXT COMMENT", "TEXT NULL COMMENT")) == column
+    for declaration in ("NOT NULL", "DEFAULT NULL"):
+        assert normalize_nullable_columns(column.replace("TEXT COMMENT", f"TEXT {declaration} COMMENT")) != column
     dialect = mysql.dialect()
     for name, table in metadata.tables.items():
         assert list(complete.tables[name].c.keys()) == list(table.c.keys())
         ddl = str(CreateTable(table).compile(dialect=dialect))
         # MySQL's independent table options may be emitted in any order.
         columns = ddl.rsplit(")", 1)[0]
-        statement = re.search(rf"CREATE TABLE {re.escape(name)} \(.*?;", compact)
+        statement = re.search(rf"CREATE TABLE {re.escape(name)} \((?:[^;']|'(?:[^']|'')*')*;", compact)
         assert statement is not None
         actual_columns = re.sub(
             r", (?:UNIQUE )?(?:KEY|INDEX) \w+ \((?:[^()]|\([^()]*\))+\)",
             "",
             statement.group(),
         ).rsplit(")", 1)[0]
-        assert " ".join(columns.split()) == " ".join(actual_columns.split())
+        assert normalize_nullable_columns(columns) == normalize_nullable_columns(actual_columns)
         assert f"COMMENT='{table.comment}'" in compact
     assert all(line == line.rstrip() for line in migration.splitlines())

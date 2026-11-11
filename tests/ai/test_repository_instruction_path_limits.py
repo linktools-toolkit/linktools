@@ -54,7 +54,7 @@ async def test_real_io_failure_remains_storage_failure(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("budget", [0, 1])
-@pytest.mark.parametrize("path_kind", ["component", "nested"])
+@pytest.mark.parametrize("path_kind", ["component", "missing_nested"])
 async def test_model_corrects_path_using_original_tool_retry_budget(
     tmp_path: Path, budget: int, path_kind: str
 ) -> None:

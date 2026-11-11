@@ -391,9 +391,9 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
                     else:
                         owner = await transaction.get_record(owner_key)
                         owned_facts = [fact for fact in await transaction.scan_facts()
-                                       if fact.owner_key_digest == owner_key]
+                                       if fact.owner_key == owner_key]
                         events = sorted((fact for fact in owned_facts
-                                         if fact.stream_digest == trace._stream(damaged_run_id, "event")),
+                                         if fact.stream_key == trace._stream(damaged_run_id, "event")),
                                         key=lambda fact: fact.sequence)
                         assert len(events) == 2
                         terminal = _decode_step(events[-1].data)

@@ -34,7 +34,7 @@ async def test_live_lease_guard_preserves_lease_and_authorizes_following_cas(tmp
 
         async def cancel(tx):
             guarded = await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition("guard", "owner", 7),
             )
             assert guarded == replace(record, storage_revision=record.storage_revision + 1)
@@ -44,13 +44,13 @@ async def test_live_lease_guard_preserves_lease_and_authorizes_following_cas(tmp
             return cancelled
 
         cancelled = await store.mutate(cancel)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == cancelled
+        assert await store.read(lambda tx: tx.get_record(record.key)) == cancelled
         with pytest.raises(StateTransactionNestingError):
             await store.read(lambda tx: tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=cancelled.storage_revision,
+                record.key, expected_storage_revision=cancelled.storage_revision,
                 transition=RecordLeaseTransition("guard", "owner", 7),
             ))
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == cancelled
+        assert await store.read(lambda tx: tx.get_record(record.key)) == cancelled
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
@@ -65,12 +65,12 @@ async def test_rejected_lease_guard_does_not_change_record_or_lease(tmp_path, ba
         if condition != "missing":
             await store.mutate(lambda tx: tx.insert_record(record))
         assert await store.mutate(lambda tx: tx.transition_record_lease(
-            record.key_digest,
+            record.key,
             expected_storage_revision=record.storage_revision + (condition == "revision"),
             transition=RecordLeaseTransition("guard", "other" if condition == "owner" else "owner",
                                              8 if condition == "fence" else 7),
         )) is None
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == (
+        assert await store.read(lambda tx: tx.get_record(record.key)) == (
             None if condition == "missing" else record
         )
 
@@ -102,7 +102,7 @@ async def test_lease_guard_uses_fresh_time_without_replacing_transaction_snapsho
             if at_expiry:
                 sampled = record.lease_expires_at
             guarded = await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition("guard", "owner", 7),
             )
             assert await tx.now() == original_time
@@ -112,7 +112,7 @@ async def test_lease_guard_uses_fresh_time_without_replacing_transaction_snapsho
         assert (result is None) is at_expiry
         if result is not None:
             assert result.lease_expires_at == record.lease_expires_at
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == (record if at_expiry else result)
+        assert await store.read(lambda tx: tx.get_record(record.key)) == (record if at_expiry else result)
 
 
 async def test_sql_guard_expiry_after_cas_aborts_even_when_callback_catches(tmp_path, monkeypatch):
@@ -138,7 +138,7 @@ async def test_sql_guard_expiry_after_cas_aborts_even_when_callback_catches(tmp_
                 patch.setattr(_SqlTransaction, "guard_record", delayed_guard)
                 with pytest.raises(AIError) as caught:
                     await tx.transition_record_lease(
-                        record.key_digest, expected_storage_revision=current.storage_revision,
+                        record.key, expected_storage_revision=current.storage_revision,
                         transition=RecordLeaseTransition("guard", "owner", 7),
                     )
             assert caught.value.code is ErrorCode.STORAGE_CONFLICT
@@ -157,7 +157,7 @@ async def test_lease_guard_rechecks_conditions_for_an_already_guarded_record(tmp
         await store.mutate(lambda tx: tx.insert_record(record))
 
         async def callback(tx):
-            guarded = await tx.guard_record(record.key_digest, expected_storage_revision=record.storage_revision)
+            guarded = await tx.guard_record(record.key, expected_storage_revision=record.storage_revision)
             assert guarded is not None
             for revision, owner, fence in (
                 (record.storage_revision, "owner", 7),
@@ -165,12 +165,12 @@ async def test_lease_guard_rechecks_conditions_for_an_already_guarded_record(tmp
                 (guarded.storage_revision, "owner", 8),
             ):
                 assert await tx.transition_record_lease(
-                    record.key_digest, expected_storage_revision=revision,
+                    record.key, expected_storage_revision=revision,
                     transition=RecordLeaseTransition("guard", owner, fence),
                 ) is None
-                assert await tx.get_record(record.key_digest) == guarded
+                assert await tx.get_record(record.key) == guarded
             result = await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=guarded.storage_revision,
+                record.key, expected_storage_revision=guarded.storage_revision,
                 transition=RecordLeaseTransition("guard", "owner", 7),
             )
             assert result is not None
@@ -178,7 +178,7 @@ async def test_lease_guard_rechecks_conditions_for_an_already_guarded_record(tmp
             return result
 
         result = await store.mutate(callback)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == result
+        assert await store.read(lambda tx: tx.get_record(record.key)) == result
 
 
 async def test_sql_lease_guard_cancellation_after_cas_cannot_be_caught_to_commit(tmp_path, monkeypatch):
@@ -203,7 +203,7 @@ async def test_sql_lease_guard_cancellation_after_cas_cannot_be_caught_to_commit
         async def callback(tx):
             try:
                 await tx.transition_record_lease(
-                    record.key_digest, expected_storage_revision=record.storage_revision,
+                    record.key, expected_storage_revision=record.storage_revision,
                     transition=RecordLeaseTransition("guard", "owner", 7),
                 )
             except asyncio.CancelledError:
@@ -250,7 +250,7 @@ async def test_unknown_guard_commit_keeps_canonical_revision_without_replaying(t
             nonlocal attempted
             attempted += 1
             return await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition("guard", "owner", 7),
             )
         with monkeypatch.context() as patch:
@@ -260,7 +260,7 @@ async def test_unknown_guard_commit_keeps_canonical_revision_without_replaying(t
                 await store.mutate(callback)
         assert caught.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         assert attempted == 1
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == replace(
+        assert await store.read(lambda tx: tx.get_record(record.key)) == replace(
             record, storage_revision=record.storage_revision + 1,
         )
 

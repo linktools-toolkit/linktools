@@ -154,7 +154,7 @@ async def test_inspect_refreshes_stale_source_miss_after_pending_owner_releases(
         await state.execution.executions.create_execution(_terminal(record))
         await coordination._backend.release_turn(owned.lease)
         repository = state.execution.executions
-        get, read = repository.get, repository.state_store.read
+        get, read = repository.get_view, repository.state_store.read
         source_scope = ContextVar("source_scope", default=False)
 
         async def strong_read(callback):
@@ -170,7 +170,7 @@ async def test_inspect_refreshes_stale_source_miss_after_pending_owner_releases(
             return None
 
         monkeypatch.setattr(repository.state_store, "read", strong_read)
-        monkeypatch.setattr(repository, "get", observed_get)
+        monkeypatch.setattr(repository, "get_view", observed_get)
         if principal == _PRINCIPAL:
             view = await service.inspect("execution", principal=principal)
             assert view.status is ExecutionStatus.SUCCEEDED

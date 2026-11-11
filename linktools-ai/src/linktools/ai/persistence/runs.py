@@ -639,19 +639,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         if repository is None or self._tenant_id is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-        execution = (await repository.get_fresh(execution_id, tenant_id=self._tenant_id)
-                     if authoritative and isinstance(repository, ExecutionRepositoryImpl) else
-                     await repository.get(execution_id, tenant_id=self._tenant_id))
-        if execution is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if execution.producer_generation != producer_generation:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if execution.status is ExecutionStatus.CANCELLING and not allow_cancelling:
-            raise AIError(ErrorCode.EXECUTION_CANCELLED)
-        allowed = ({ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
-                   if allow_cancelling else {ExecutionStatus.STARTED})
-        if execution.status not in allowed:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await repository.require_active_producer(
+            execution_id, tenant_id=self._tenant_id, expected_producer_generation=producer_generation,
+            allow_cancelling=allow_cancelling, fresh=authoritative,
+        )
 
 
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
@@ -867,11 +858,26 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if self._staging.get_agent_run_local(agent_run_id) is not None:
                     raise
                 archive = self.read_store(PersistenceDomain.TRACE)
-                archived = await archive.list_model_interactions(
-                    agent_run_id=agent_run_id,
-                    after_model_request_seq=staged[0].model_request_seq - 1,
-                    limit=len(staged),
-                )
+                async def capture_archive():
+                    records = await archive.list_model_interactions(
+                        agent_run_id=agent_run_id,
+                        after_model_request_seq=staged[0].model_request_seq - 1,
+                        limit=len(staged),
+                    )
+                    load = await archive.capture_model_interactions(
+                        records, include_client_requests=include_client_requests, include_content=include_content,
+                    )
+                    return records, load
+
+                load = None
+                if type(archive) is ModelInteractionStateStepArchive:
+                    archived, load = await archive.transcript_repository.read_content(capture_archive)
+                else:
+                    archived = await archive.list_model_interactions(
+                        agent_run_id=agent_run_id,
+                        after_model_request_seq=staged[0].model_request_seq - 1,
+                        limit=len(staged),
+                    )
                 if (
                     len(archived) != len(staged)
                     or any(
@@ -882,9 +888,9 @@ class RuntimeAgentRunStore(AgentRunStore):
                     )
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                resolved = await archive.resolve_model_interactions(
+                resolved = (await load() if load is not None else await archive.resolve_model_interactions(
                     archived, include_client_requests=include_client_requests, include_content=include_content,
-                )
+                ))
                 if len(resolved) != len(staged):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 result: list[object] = []
@@ -2108,6 +2114,15 @@ class RuntimeAgentRunStore(AgentRunStore):
             checkpoint = (await self.checkpoint_persistence.reader.latest_snapshot(run_id=agent_run_id, include_interrupted=True)
                           if self.execution_persistence(agent_run_id)[1]
                           else await self.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True))
+            if checkpoint is None and not self.execution_persistence(agent_run_id)[1]:
+                archive = self._archive_for_run(PersistenceDomain.CONVERSATION, agent_run_id)
+                if archive is not None:
+                    # A prepared handoff may outlive this Runtime's staging.
+                    checkpoint = await archive.latest_checkpoint(
+                        agent_run_id=agent_run_id, include_interrupted=True,
+                    )
+                    if checkpoint is not None and checkpoint.agent_run_id != agent_run_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if checkpoint is None or checkpoint.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

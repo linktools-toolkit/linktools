@@ -57,7 +57,8 @@ async def test_exact_batch_resolves_content_once_per_run_outside_metadata_scope(
     store.interactions[run_id] = [_interaction(run_id, sequence) for sequence in (1, 2)]
     in_scope = False
     resolved = []
-    async def scoped(executions, callback):
+    async def scoped(executions, callback, *, include_content=False):
+        assert include_content
         nonlocal in_scope
         in_scope = True
         try:

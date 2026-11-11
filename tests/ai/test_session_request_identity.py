@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from linktools.ai.core import idempotency_key_digest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.session import ForkSessionRequest, UpdateSessionRequest
@@ -31,13 +30,15 @@ def storage(request: pytest.FixtureRequest, tmp_path: "Path") -> PersistenceStor
             else PersistenceStorage.sqlite(tmp_path / "state.db"))
 
 
-async def test_session_request_identity_update_replays_original_patch(storage: PersistenceStorage) -> None:
+@pytest.mark.parametrize("key", ("update", "é" * 128))
+async def test_session_request_identity_update_replays_original_patch(storage: PersistenceStorage, key: str) -> None:
     async with Persistence.open("session-identity", storage=storage, tenant_id="tenant") as state:
         manager = _manager(state, canonicalize_path=_canonicalize)
         await state.conversation.sessions.create(replace(_session(), cwd="original"))
-        request = UpdateSessionRequest(_PRINCIPAL, 0, "update", {"first": True})
+        request = UpdateSessionRequest(_PRINCIPAL, 0, key, {"first": True})
         first = await manager.update("agent", "session", request)
-        receipt = await state.conversation.operations.get(idempotency_key_digest("update"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get(key, tenant_id="tenant")
+        assert receipt is not None and receipt.operation_id == key
         changed = await manager.update("agent", "session", UpdateSessionRequest(
             _PRINCIPAL, first.revision, "later", {"later": True}, "changed"))
         assert await manager.update("agent", "session", request) == changed
@@ -48,7 +49,7 @@ async def test_session_request_identity_update_replays_original_patch(storage: P
         with pytest.raises(AIError) as revision:
             await manager.update("agent", "session", replace(request, idempotency_key="new"))
         assert revision.value.code is ErrorCode.SESSION_REVISION_CONFLICT
-        assert await state.conversation.operations.get(idempotency_key_digest("new"), tenant_id="tenant") is None
+        assert await state.conversation.operations.get("new", tenant_id="tenant") is None
 
 
 async def test_session_request_identity_fork_replays_without_reinheriting(storage: PersistenceStorage) -> None:
@@ -57,7 +58,7 @@ async def test_session_request_identity_fork_replays_without_reinheriting(storag
         await state.conversation.sessions.create(replace(_session(), cwd="original"))
         request = ForkSessionRequest(_PRINCIPAL, "child", "fork")
         first = await manager.fork("agent", "session", request)
-        receipt = await state.conversation.operations.get(idempotency_key_digest("fork"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("fork", tenant_id="tenant")
         await manager.update("agent", "session", UpdateSessionRequest(
             _PRINCIPAL, 0, "source-change", {"source": True}, "source-new"))
         changed = await manager.update("agent", "child", UpdateSessionRequest(
@@ -79,7 +80,7 @@ async def test_session_request_identity_dispatches_receipt_owner_before_contract
             await manager.update("agent", "session", UpdateSessionRequest(_PRINCIPAL, 0, "shared", {}))
         else:
             await manager.fork("agent", "session", ForkSessionRequest(_PRINCIPAL, "child", "shared"))
-        receipt = await state.conversation.operations.get(idempotency_key_digest("shared"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("shared", tenant_id="tenant")
         with pytest.raises(AIError) as conflict:
             if scenario == "update-fork":
                 await manager.fork("agent", "session", ForkSessionRequest(_PRINCIPAL, "child", "shared"))
@@ -101,7 +102,7 @@ async def test_session_request_identity_marker_cannot_change_under_cas(storage: 
             await manager.update("agent", "session", UpdateSessionRequest(_PRINCIPAL, 0, "request", {}))
         else:
             await manager.fork("agent", "session", ForkSessionRequest(_PRINCIPAL, "child", "request"))
-        receipt = await state.conversation.operations.get(idempotency_key_digest("request"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("request", tenant_id="tenant")
         with pytest.raises(AIError) as conflict:
             await state.conversation.operations.compare_and_swap(
                 receipt.operation_id, tenant_id="tenant", expected_status=receipt.status,
@@ -160,7 +161,7 @@ async def test_session_request_identity_retry_after_committed_response_fault(sto
         with pytest.raises(asyncio.CancelledError if fault == "cancel" else AIError):
             await action("agent", "session", request)
         monkeypatch.setattr(store, "mutate", original)
-        receipt = await state.conversation.operations.get(idempotency_key_digest("request"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("request", tenant_id="tenant")
         assert receipt is not None
         replay = await action("agent", "session", request)
         assert replay.session_id == ("session" if kind == "update" else "child")
@@ -168,10 +169,9 @@ async def test_session_request_identity_retry_after_committed_response_fault(sto
 
 
 @pytest.mark.parametrize("kind", ("update", "fork"))
-async def test_session_request_identity_reads_real_legacy_receipt_without_rewriting(storage: PersistenceStorage, kind: str) -> None:
+async def test_session_request_identity_reads_unmarked_receipt_without_rewriting(storage: PersistenceStorage, kind: str) -> None:
     import json
     from pathlib import Path
-    from linktools.ai.core import PersistenceDomain
     from linktools.ai.persistence.state import operation_key
 
     async with Persistence.open("session-identity", storage=storage, tenant_id="tenant") as state:
@@ -182,8 +182,7 @@ async def test_session_request_identity_reads_real_legacy_receipt_without_rewrit
         action = manager.update if kind == "update" else manager.fork
         first = await action("agent", "session", request)
         data = json.loads((Path(__file__).parent / "fixtures/session_request_v1" / f"{kind}.json").read_text())
-        key = operation_key("session-identity", "tenant", PersistenceDomain.CONVERSATION.value,
-                            idempotency_key_digest("request"))
+        key = operation_key("session-identity", "tenant", "conversation", "request")
         store = state.conversation.sessions.state_store
 
         async def install(transaction):
@@ -191,7 +190,7 @@ async def test_session_request_identity_reads_real_legacy_receipt_without_rewrit
             assert await transaction.replace_operation(replace(stored, data=data), expected_state=stored.state)
 
         await store.mutate(install)
-        receipt = await state.conversation.operations.get(idempotency_key_digest("request"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("request", tenant_id="tenant")
         assert receipt.request_digest_contract is None
         assert await action("agent", "session", request) == first
         current = await state.conversation.sessions.get("session", tenant_id="tenant")
@@ -222,7 +221,7 @@ async def test_session_request_identity_fork_keeps_source_revision_fence(storage
             await manager.fork("agent", "session", ForkSessionRequest(_PRINCIPAL, "child", "fork"))
         assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
         assert await state.conversation.sessions.get("child", tenant_id="tenant") is None
-        assert await state.conversation.operations.get(idempotency_key_digest("fork"), tenant_id="tenant") is None
+        assert await state.conversation.operations.get("fork", tenant_id="tenant") is None
 
 
 @pytest.mark.parametrize("helper", ("result", "failure", "status"))
@@ -234,7 +233,7 @@ async def test_session_request_identity_public_operation_helpers_preserve_contra
         manager = _manager(state)
         await state.conversation.sessions.create(_session())
         await manager.update("agent", "session", UpdateSessionRequest(_PRINCIPAL, 0, "request", {}))
-        receipt = await state.conversation.operations.get(idempotency_key_digest("request"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("request", tenant_id="tenant")
         if helper == "result":
             candidate = operation_result(receipt, receipt.result_ref, receipt.result_digest)
         elif helper == "failure":

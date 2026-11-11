@@ -126,7 +126,7 @@ async def test_owned_runtime_terminal_is_native_with_only_trace_position(
         raw = await _raw_events(archive, run.run_id)
         fact, = [item for item in raw if item.state == projected.event_type]
         assert fact.data["value"] == {"type": "native_event_reference", "payload": {
-            "key": native.event_key_digest(ended), "index": projected.event_index,
+            "run": ended.run_id, "replay": ended.idempotency_key, "index": projected.event_index,
         }}
         assert [item.event_index for item in trace] == list(range(len(trace)))
         assert [item.sequence for item in raw] == list(range(1, len(raw) + 1))

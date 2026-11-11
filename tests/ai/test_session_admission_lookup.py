@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from linktools.ai.core import ExecutionStatus, IdempotencyStatus, Principal, idempotency_key_digest
+from linktools.ai.core import ExecutionStatus, IdempotencyStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
@@ -89,7 +89,7 @@ async def test_uncertain_admission_is_not_absence(tmp_path, monkeypatch, status)
         execution = await session.start("input", idempotency_key="request")
         await execution.wait()
         repo = storage.execution.idempotency
-        original = await repo.get("session.resume", idempotency_key_digest("request"), tenant_id=runtime.tenant_id)
+        original = await repo.get("session.resume", "request", tenant_id=runtime.tenant_id)
         async def uncertain(*args, **kwargs):
             return replace(original, status=status)
         with monkeypatch.context() as patch:
@@ -128,7 +128,7 @@ async def test_broken_admission_is_not_absence(tmp_path, monkeypatch, damage):
         with monkeypatch.context() as patch:
             if damage == "resource_kind":
                 repo = storage.execution.idempotency
-                identity = await repo.get("session.resume", idempotency_key_digest("request"), tenant_id=runtime.tenant_id)
+                identity = await repo.get("session.resume", "request", tenant_id=runtime.tenant_id)
                 async def broken_identity(*args, **kwargs):
                     return replace(identity, resource_kind=ResourceKind.SESSION)
                 patch.setattr(repo, "get", broken_identity)
@@ -222,11 +222,14 @@ async def test_failed_start_retains_known_outcome_instead_of_unknown(tmp_path, m
         service = runtime._execution_service
         record = await service.load_source_execution(execution.execution_id, tenant_id=runtime.tenant_id)
         repo = storage.execution.idempotency
-        identity = await repo.get("session.resume", idempotency_key_digest("request"), tenant_id=runtime.tenant_id)
+        identity = await repo.get("session.resume", "request", tenant_id=runtime.tenant_id)
         async def failed_identity(*args, **kwargs):
             return replace(identity, status=status, error_code=code.value)
         async def failed_execution(*args, **kwargs):
-            return replace(record, started_at=None, status=ExecutionStatus(status.value), error_code=code.value) if has_record else None
+            return replace(
+                record, started_at=None, status=ExecutionStatus(status.value),
+                error_code=code.value, result=None, completed_at=None,
+            ) if has_record else None
         with monkeypatch.context() as patch:
             patch.setattr(repo, "get", failed_identity)
             patch.setattr(service, "load_source_execution", failed_execution)
@@ -242,7 +245,7 @@ async def test_terminal_admission_keeps_result_integrity_check(tmp_path, monkeyp
         execution = await session.start("input", idempotency_key="request")
         await execution.wait()
         repo = storage.execution.idempotency
-        identity = await repo.get("session.resume", idempotency_key_digest("request"), tenant_id=runtime.tenant_id)
+        identity = await repo.get("session.resume", "request", tenant_id=runtime.tenant_id)
         async def damaged(*args, **kwargs):
             return replace(identity, result_digest="0" * 64)
         with monkeypatch.context() as patch:

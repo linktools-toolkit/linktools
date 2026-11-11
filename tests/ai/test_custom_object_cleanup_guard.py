@@ -35,7 +35,7 @@ def _storage(root: Path, objects: ObjectStore, backend: str, *, volatile: bool =
 
 
 def _record(payload: Mapping[str, JsonValue]) -> StoredRecord:
-    return StoredRecord(hashlib.sha256(b'opaque-record').digest(), None, None, 'opaque', 'opaque', 'retained',
+    return StoredRecord(hashlib.sha256(b'opaque-record').digest(), None, None, 'opaque', b'opaque', 'retained',
                         0, None, 0, None, payload)
 
 

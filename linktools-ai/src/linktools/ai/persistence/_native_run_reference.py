@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Trace run projections whose common fields belong to a native registration."""
 
-import hashlib
 import json
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
@@ -14,8 +13,9 @@ from weakref import WeakKeyDictionary
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeStepEvent
 
-from ..core import canonical_json_bytes, canonical_sha256
+from ..core import canonical_json_bytes, canonical_sha256, validate_resource_id
 from ..errors import AIError, ErrorCode
+from ..steps import encode_native_replay_key
 from ._official_step_reader import OfficialStepReader
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 _RUN_ADAPTER = TypeAdapter(RunRecord)
 _TYPE = "native_agent_run_reference"
-_KEYS = frozenset({"run", "run_digest", "registration", "projection_sha256", "metadata", "removed", "started_at"})
+_KEYS = frozenset({"run", "registration", "projection_sha256", "metadata", "removed", "started_at"})
 
 
 def is_native_run_reference(data: Mapping[str, object]) -> bool:
@@ -50,7 +50,7 @@ class NativeRunReferences:
 
     def __init__(self, state: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
         self._state = state
-        self._store_digest = SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
+        self._store_key = SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
         self._native: SqlStepStore | None = None
         self._confirmed: OrderedDict[str, str] = OrderedDict()
         self._projections: WeakKeyDictionary[StateTransaction, dict[bytes, tuple[Mapping[str, object], Mapping[str, object]]]] = WeakKeyDictionary()
@@ -62,7 +62,7 @@ class NativeRunReferences:
 
     def bind(self, native: "SqlStepStore") -> None:
         if (native.storage_context.engine is not self._state.context.engine
-                or native.store_digest != self._store_digest):
+                or native.store_key != self._store_key):
             return
         if self._native is not None and self._native is not native:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -107,7 +107,6 @@ class NativeRunReferences:
         encoded_run = _encode_step_envelope(run)
         reference = encode_envelope({"type": _TYPE, "payload": {
             "run": source.run_id,
-            "run_digest": hashlib.sha256(source.run_id.encode()).hexdigest(),
             "registration": source.registration_id,
             "projection_sha256": canonical_sha256(encoded_run),
             "metadata": {key: value for key, value in run.metadata.items()
@@ -126,14 +125,15 @@ class NativeRunReferences:
         if (set(value) != {"type", "payload"} or value["type"] != _TYPE
                 or not isinstance(payload, Mapping) or set(payload) != _KEYS):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for key in ("run_digest", "projection_sha256"):
-            digest = payload[key]
-            if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if any(not isinstance(payload[key], str) or not payload[key] for key in ("run", "registration")):
+        digest = payload["projection_sha256"]
+        if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if payload["run_digest"] != hashlib.sha256(payload["run"].encode()).hexdigest():
+        if not isinstance(payload["registration"], str) or not payload["registration"]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            validate_resource_id(payload["run"])
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         metadata, removed = payload["metadata"], payload["removed"]
         if (not isinstance(metadata, Mapping) or any(not isinstance(key, str) or not isinstance(value, str)
                                                    for key, value in metadata.items())
@@ -156,16 +156,15 @@ class NativeRunReferences:
         return (reference["run"] == run.agent_run_id
                 and reference["projection_sha256"] == canonical_sha256(_encode_step_envelope(run)))
 
-    def project(self, data: Mapping[str, object], source: RunRecord, *, store_digest: str) -> AgentRunRecord:
-        return self.project_source(data, source, store_digest=store_digest, expected_store_digest=self._store_digest)
+    def project(self, data: Mapping[str, object], source: RunRecord, *, store_key: bytes) -> AgentRunRecord:
+        return self.project_source(data, source, store_key=store_key, expected_store_key=self._store_key)
 
     @classmethod
     def project_source(cls, data: Mapping[str, object], source: RunRecord, *,
-                       store_digest: str, expected_store_digest: str) -> AgentRunRecord:
+                       store_key: bytes, expected_store_key: bytes) -> AgentRunRecord:
         """Verify a detached native registration with the online projection contract."""
         reference = cls.decode_reference(data)
-        if (store_digest != expected_store_digest or reference["run"] != source.run_id
-                or reference["run_digest"] != hashlib.sha256(source.run_id.encode()).hexdigest()
+        if (store_key != expected_store_key or reference["run"] != source.run_id
                 or reference["registration"] != source.registration_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         run = OfficialStepReader.project_run(source)
@@ -185,7 +184,7 @@ class NativeRunReferences:
             return
         if self.encode(run, source_receipt=source_receipt) != record.data:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._projections.setdefault(transaction, {})[record.key_digest] = (record.data, _encode_step_envelope(run))
+        self._projections.setdefault(transaction, {})[record.key] = (record.data, _encode_step_envelope(run))
 
     async def read_physical(self, transaction: StateTransaction, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         """Resolve existing sources in the write prefetch, retaining physical CAS records."""
@@ -198,6 +197,7 @@ class NativeRunReferences:
                   expected_start: NativeStepEvent | None = None,
                   expected_terminal: NativeStepEvent | None = None) -> "Select":
         from sqlalchemy import JSON, and_, bindparam, cast, select, type_coerce
+        from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
 
@@ -206,11 +206,9 @@ class NativeRunReferences:
         payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
         reference = payload["value"]["payload"]
         source_run = reference["run"].as_string()
-        # The physical digest narrows the index, while the original id prevents
-        # treating a colliding lookup digest as a semantic identity.
         run_join = and_(
-            records.c.kind == "agent_run", runs.c.store_digest == self._store_digest,
-            runs.c.run_digest == reference["run_digest"].as_string(), runs.c.run_id == source_run,
+            records.c.kind == "agent_run", runs.c.store_key == self._store_key,
+            runs.c.run_id == source_run,
             runs.c.registration_id == reference["registration"].as_string(),
         )
         source_columns = tuple(column.label("native_" + column.name) for column in runs.c)
@@ -220,46 +218,51 @@ class NativeRunReferences:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             # Inline Run views also require full pending lifecycle proof in
             # this existing SELECT, never a second source read.
-            run_join = and_(records.c.kind == "agent_run", runs.c.store_digest == self._store_digest,
-                            runs.c.run_digest == bindparam("source_run_digest", hashlib.sha256(expected.run_id.encode()).hexdigest()),
+            run_join = and_(records.c.kind == "agent_run", runs.c.store_key == self._store_key,
                             runs.c.run_id == bindparam("source_run_id", expected.run_id))
         joined = records.outerjoin(runs, run_join)
         for prefix, event in (("start", expected_start), ("terminal", expected_terminal)):
             if event is None:
                 continue
             events = self._events if prefix == "start" else self._events.alias("terminal_source")
-            joined = joined.outerjoin(events, and_(events.c.store_digest == runs.c.store_digest,
-                events.c.run_digest == runs.c.run_digest, events.c.run_id == runs.c.run_id,
-                events.c.key_digest == bindparam("source_event_key" if prefix == "start" else "source_terminal_key",
-                                                self._native.event_key_digest(event))))
+            joined = joined.outerjoin(events, and_(events.c.store_key == runs.c.store_key,
+                events.c.run_id == runs.c.run_id,
+                events.c.idempotency_key == bindparam("source_event_key" if prefix == "start" else "source_terminal_key",
+                                                encode_native_replay_key(event.idempotency_key))))
             names = tuple(field.name for field in fields(NativeStepEvent)) + (
-                "outcome", "store_digest", "run_digest", "key_digest", "run_fields", "body_sha256", "fields_sha256",
+                "outcome", "store_key", "run_fields", "body_sha256", "fields_sha256",
             )
             source_columns += tuple(events.c[name].label(prefix + "_" + name) for name in names)
         statement = select(records, *source_columns).select_from(joined)
         # Render typed invariant JOIN literals without consuming the record
         # reader's existing bind budget. Keys and query inputs remain bound.
-        statement = visitors.replacement_traverse(statement, {}, lambda node: (
-            bindparam(None, node.value, type_=node.type, literal_execute=True)
-            if isinstance(node, BindParameter) and node.key not in {"source_run_digest", "source_run_id", "source_event_key", "source_terminal_key"}
-            else None
-        )).where(records.c.store_digest == self._state.store_digest.hex())
+        def inline_constant(node):
+            if not isinstance(node, BindParameter) or node.key in {"source_run_id", "source_event_key", "source_terminal_key"}:
+                return None
+            if isinstance(node.value, bytes):
+                hex_value = node.value.hex()
+                literal = ("E'\\\\x" + hex_value + "'::bytea" if self._state.context.dialect.name == "postgresql"
+                           else "X'" + hex_value + "'")
+                return literal_column(literal, type_=node.type)
+            return bindparam(None, node.value, type_=node.type, literal_execute=True)
+
+        statement = visitors.replacement_traverse(statement, {}, inline_constant).where(records.c.store_key == self._state.store_key)
         if keys is not None:
-            statement = statement.where(records.c.key_digest.in_(tuple(key.hex() for key in keys)))
+            statement = statement.where(records.c.key.in_(tuple(keys)))
         if query is not None:
             statement = statement.where(records.c.kind == "agent_run")
-            if query.scope_digest is not None:
-                statement = statement.where(records.c.scope_digest == query.scope_digest.hex())
-            if query.parent_digest is not None:
-                statement = statement.where(records.c.parent_digest == query.parent_digest.hex())
-            statement = statement.order_by(records.c.sort_key, records.c.key_digest)
+            if query.scope_key is not None:
+                statement = statement.where(records.c.scope_key == query.scope_key)
+            if query.parent_key is not None:
+                statement = statement.where(records.c.parent_key == query.parent_key)
+            statement = statement.order_by(records.c.sort_key, records.c.key)
         if scan is not None:
             after, limit = scan
             if type(limit) is not int or not 1 <= limit <= 1000:
                 raise ValueError("record page limit must be between 1 and 1000")
             if after is not None:
-                statement = statement.where(records.c.key_digest > after.key_digest.hex())
-            statement = statement.order_by(records.c.key_digest).limit(limit)
+                statement = statement.where(records.c.key > after.key)
+            statement = statement.order_by(records.c.key).limit(limit)
         return statement
 
     async def read(
@@ -316,7 +319,7 @@ class NativeRunReferences:
                         source = {key.removeprefix(prefix + "_"): value for key, value in row.items()
                                   if key.startswith(prefix + "_")}
                         actual = SqlStepStore.decode_started_row(source,
-                            expected_store_digest=self._store_digest, run=run_source)
+                            expected_store_key=self._store_key, run=run_source)
                         if actual != event:
                             raise ValueError("lifecycle source differs from its provisional body")
                     run_source["metadata"] = json.loads(run_source["metadata"])
@@ -332,12 +335,12 @@ class NativeRunReferences:
                     native = _RUN_ADAPTER.validate_python(source)
                 except (TypeError, ValueError, KeyError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                run = self.project(record.data, native, store_digest=row["native_store_digest"])
+                run = self.project(record.data, native, store_key=row["native_store_key"])
                 data = _encode_step_envelope(run)
-                projected[record.key_digest] = (record.data, data)
+                projected[record.key] = (record.data, data)
                 record = replace(record, data=data)
             ordered.append(record)
-            values[record.key_digest] = record
+            values[record.key] = record
         return (tuple(ordered) if keys is None else
                 tuple(values[key] for key in dict.fromkeys(keys) if key in values))
 

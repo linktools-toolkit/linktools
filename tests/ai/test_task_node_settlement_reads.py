@@ -146,7 +146,7 @@ async def test_hold_settlement_rejects_missing_or_invalid_target(fault: str) -> 
                     )
                 else:
                     assert await transaction.delete_record(key)
-                    await transaction.insert_record(replace(record, parent_digest=b"x" * 32))
+                    await transaction.insert_record(replace(record, parent_key=b"x" * 32))
 
             await repository.state_store.mutate(damage)
         released = []

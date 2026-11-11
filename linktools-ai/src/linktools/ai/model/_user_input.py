@@ -165,7 +165,7 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class StoredUserInput:
     codec: str
     payload: StoredPayload

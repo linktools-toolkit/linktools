@@ -33,6 +33,7 @@ class StorageResourceRequest:
     route: StorageRoute
     configure_schema: Callable[["MetaData"], None] | None = None
     uses_archive: bool = False
+    native_content_index: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +147,7 @@ class StorageResourceScope:
             group = SqlStateStorageGroup(
                 context, metadata, read_only=read_only,
                 uses_archive=any(requests[index].uses_archive for index in indices),
+                native_content_index=any(requests[index].native_content_index for index in indices),
             )
             self._close_actions.append(group.close)
             resource = SqlResource(group, context, metadata)

@@ -34,7 +34,7 @@ async def test_terminal_payloads_join_source_only_at_completion(tmp_path: Path, 
         scopes = (audit.writer.scope, index.writer.scope)
         for scope in set(scopes):
             entries = await scope.policy.buffer.read_batch(scope.id, limit=10)
-            assert entries and all(isinstance(content, bytes) for _id, _key, content in entries)
+            assert entries and all(isinstance(key, bytes) and isinstance(content, bytes) for _id, key, content in entries)
             for _id, _key, content in entries:
                 assert json.loads(content)["value"]["items"] in ([1], [2])
             # The transport, not this optional in-process view, supplies the write payload.
@@ -110,7 +110,7 @@ async def test_terminal_unknown_append_cannot_fall_back_to_local_payload(tmp_pat
         assert closing.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         assert scope.pending == [write] and buffer.acknowledged == []
         assert opened.probe.writes == []
-        await _Buffer.append(buffer, scope.id, write.id, write.receipt_key.hex(), write.content, wait=False)
+        await _Buffer.append(buffer, scope.id, write.id, write.receipt_key, write.content, wait=False)
         await audit.flush()
         assert len(await opened.probe.facts("audit")) == 1
 

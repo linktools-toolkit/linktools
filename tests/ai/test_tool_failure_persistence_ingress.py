@@ -29,7 +29,6 @@ def _record() -> ToolOperationRecord:
         execution_id="execution",
         agent_run_id="run",
         tool_call_id="call",
-        idempotency_key_digest="b" * 64,
         tool_name="tool",
         arguments_digest="c" * 64,
         binding_digest="a" * 64,

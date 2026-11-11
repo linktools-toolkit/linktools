@@ -38,15 +38,16 @@ async def store(tmp_path: Path) -> AsyncIterator[tuple[SqlStepStore, AsyncEngine
 @pytest.mark.asyncio
 async def test_public_native_scope_identity_matches_physical_store(store) -> None:
     adapter, _ = store
-    assert adapter.store_digest == SqlStepStore.scope_digest(namespace="steps", tenant_id="one")
-    assert adapter.store_digest != SqlStepStore.scope_digest(namespace="steps", tenant_id="other")
-    assert adapter.store_digest != SqlStepStore.scope_digest(namespace="other", tenant_id="one")
+    assert adapter.store_key == SqlStepStore.scope_key(namespace="steps", tenant_id="one")
+    assert adapter.store_key != SqlStepStore.scope_key(namespace="steps", tenant_id="other")
+    assert adapter.store_key != SqlStepStore.scope_key(namespace="other", tenant_id="one")
 
 
 @pytest.mark.parametrize("namespace, tenant_id", [("", "one"), ("steps", ""), (None, "one"), ("steps", 1)])
 def test_native_scope_identity_rejects_invalid_partition(namespace, tenant_id) -> None:
-    with pytest.raises(ValueError, match="must be a non-empty string"):
-        SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
+    with pytest.raises(AIError) as rejected:
+        SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
+    assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 def _records() -> tuple[RunRecord, StepEvent]:
@@ -407,7 +408,7 @@ class _InlineStepStore(SqlStepStore):
         for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
             rows = [self._run_values(item.run_id) | self._event_values(item) for item in group]
             for row in rows:
-                row["key_digest"] = module._replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
+                row["idempotency_key"] = module.encode_native_replay_key(row["idempotency_key"])
             batch_size = module._BATCH_SIZE if keyed else 1
             for offset in range(0, len(rows), batch_size):
                 if not keyed:
@@ -415,7 +416,7 @@ class _InlineStepStore(SqlStepStore):
                 else:
                     await self._context.dialect.insert_ignore_conflict_many(
                         session, table=self._table("events"), rows=rows[offset:offset + batch_size],
-                        index_elements=("key_digest",),
+                        index_elements=("store_key", "run_id", "idempotency_key"),
                     )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
@@ -425,7 +426,9 @@ class _InlineStepStore(SqlStepStore):
             rows = (await self._context.run_statement(session.execute(select(table).where(
                 *self._run_predicates(table, run_id),
             ).order_by(table.c.id)))).mappings().all()
-        return [module._EVENT_ADAPTER.validate_python(dict(row)) for row in rows]
+        return [module._EVENT_ADAPTER.validate_python(dict(row) | {
+            "idempotency_key": module.decode_native_replay_key(row["idempotency_key"]),
+        }) for row in rows]
 
 
 class _TextInlineStepStore(_InlineStepStore):
@@ -437,7 +440,9 @@ class _TextInlineStepStore(_InlineStepStore):
 
     @classmethod
     def _event_values(cls, event):
-        return cls._record_values(event)
+        values = super()._event_values(event)
+        values["metadata"] = json.dumps(values["metadata"])
+        return values
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         await self.initialize()

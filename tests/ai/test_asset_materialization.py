@@ -27,7 +27,7 @@ from linktools.ai.capability import AssetCapability, SkillResource, validate_res
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy, StorageEntryRevision, StorageOverlay
+from linktools.ai.storage import FilesystemObjectStore, StorageEntryRevision, StorageOverlay
 
 
 async def _store() -> AssetStore:
@@ -68,7 +68,6 @@ async def test_materialization_reads_pinned_history_and_owns_files(
         await provision_asset_database(engine)
         backend = SqlAssetBackend(
             engine, namespace="materialization", object_store=FilesystemObjectStore(tmp_path / "objects"),
-            payload_policy=PayloadPolicy(0),
         )
         store = AssetStore(StorageOverlay(backend, writer=backend))
         await store.initialize()

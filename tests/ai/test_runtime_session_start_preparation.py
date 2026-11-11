@@ -37,7 +37,7 @@ async def _answer(messages, info):
 async def _delete_session(state):
     async def remove(transaction):
         records = await transaction.scan_records()
-        await transaction.delete_records(tuple(r.key_digest for r in records if r.kind in {"session", "conversation_history", "transcript_head"}))
+        await transaction.delete_records(tuple(r.key for r in records if r.kind in {"session", "conversation_history", "transcript_head"}))
     await state.conversation.sessions.state_store.mutate(remove)
 
 
