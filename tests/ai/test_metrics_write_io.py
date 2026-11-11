@@ -181,8 +181,8 @@ async def _assert_record_cas(engine: AsyncEngine) -> None:
             assert sum(updates) == len(replacements)
         else:
             assert 1 < sum(updates) < len(replacements)
-        actual = await store.read(lambda transaction: transaction.get_records([r.key_digest for r in records]))
-        assert tuple(actual[r.key_digest] for r in records) == tuple(r.record for r in replacements)
+        actual = await store.read(lambda transaction: transaction.get_records([r.key for r in records]))
+        assert tuple(actual[r.key] for r in records) == tuple(r.record for r in replacements)
 
         injected = False
         def stale_one_version(conn, cursor, sql, params, context, many):
@@ -190,8 +190,8 @@ async def _assert_record_cas(engine: AsyncEngine) -> None:
             if sql.startswith("UPDATE ai_state_records") and not injected:
                 injected = True
                 conn.exec_driver_sql(
-                    "UPDATE ai_state_records SET storage_revision = 2 WHERE key_digest = '"
-                    + records[-1].key_digest.hex() + "'"
+                    "UPDATE ai_state_records SET storage_revision = 2 WHERE key = X'"
+                    + records[-1].key.hex() + "'"
                 )
         event.listen(engine.sync_engine, "before_cursor_execute", stale_one_version)
         try:

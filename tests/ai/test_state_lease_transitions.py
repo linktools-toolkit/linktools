@@ -35,7 +35,7 @@ async def test_lease_transitions_preserve_fencing_and_snapshot_data(
             owner: str, fence: int, seconds: int | None = None,
         ) -> StoredRecord | None:
             return await store.mutate(lambda tx: tx.transition_record_lease(
-                current.key_digest, expected_storage_revision=current.storage_revision,
+                current.key, expected_storage_revision=current.storage_revision,
                 transition=RecordLeaseTransition(operation, owner, fence, seconds),
             ))
 
@@ -46,7 +46,7 @@ async def test_lease_transitions_preserve_fencing_and_snapshot_data(
                                         ("acquire", "other", 1)):
             assert await transition(acquired, operation, owner, fence,
                                     None if operation == "release" else 60) is None
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == acquired
+        assert await store.read(lambda tx: tx.get_record(record.key)) == acquired
         renewed = await transition(acquired, "renew", "first", 1, 120)
         assert renewed is not None and renewed.lease_fence == 1
         assert renewed.lease_expires_at is not None and acquired.lease_expires_at is not None
@@ -57,10 +57,10 @@ async def test_lease_transitions_preserve_fencing_and_snapshot_data(
         successor = await transition(released, "acquire", "second", 1, 60)
         assert successor is not None and successor.lease_fence == 2
         assert await transition(successor, "release", "first", 1) is None
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == successor
+        assert await store.read(lambda tx: tx.get_record(record.key)) == successor
         with pytest.raises(StateTransactionNestingError):
             await store.read(lambda tx: tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=successor.storage_revision,
+                record.key, expected_storage_revision=successor.storage_revision,
                 transition=RecordLeaseTransition("release", "second", 2),
             ))
 
@@ -75,11 +75,11 @@ async def test_expired_lease_cannot_renew_or_release_but_can_be_taken_over(
         await store.mutate(lambda tx: tx.insert_record(record))
         for operation, seconds in (("renew", 60), ("release", None)):
             assert await store.mutate(lambda tx: tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition(operation, "old", 7, seconds),
             )) is None
         acquired = await store.mutate(lambda tx: tx.transition_record_lease(
-            record.key_digest, expected_storage_revision=record.storage_revision,
+            record.key, expected_storage_revision=record.storage_revision,
             transition=RecordLeaseTransition("acquire", "new", 7, 60),
         ))
         assert acquired is not None and acquired.lease_fence == 8
@@ -120,14 +120,14 @@ async def test_sql_lease_resamples_time_after_cas_and_rolls_back_caught_conflict
             if after_wait == 50:
                 with pytest.raises(AIError) as caught:
                     await tx.transition_record_lease(
-                        record.key_digest, expected_storage_revision=record.storage_revision,
+                        record.key, expected_storage_revision=record.storage_revision,
                         transition=RecordLeaseTransition("renew", "owner", 1, 30),
                     )
                 assert caught.value.code is ErrorCode.STORAGE_CONFLICT
                 await tx.insert_record(unrelated)
                 return None
             result = await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition("renew", "owner", 1, 30),
             )
             assert await tx.now() == epoch + timedelta(seconds=35)
@@ -137,14 +137,14 @@ async def test_sql_lease_resamples_time_after_cas_and_rolls_back_caught_conflict
             with pytest.raises(AIError) as caught:
                 await store.mutate(callback)
             assert caught.value.code is ErrorCode.STORAGE_CONFLICT
-            assert await store.read(lambda tx: tx.get_record(record.key_digest)) == record
-            assert await store.read(lambda tx: tx.get_record(unrelated.key_digest)) is None
+            assert await store.read(lambda tx: tx.get_record(record.key)) == record
+            assert await store.read(lambda tx: tx.get_record(unrelated.key)) is None
         else:
             result = await store.mutate(callback)
             assert result is not None
             assert result.lease_expires_at == epoch + timedelta(seconds=67)
             assert result.lease_fence == 1
-            assert await store.read(lambda tx: tx.get_record(record.key_digest)) == result
+            assert await store.read(lambda tx: tx.get_record(record.key)) == result
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
@@ -158,15 +158,15 @@ async def test_guarded_record_still_requires_current_revision_for_lease_transiti
 
         async def callback(tx: StateTransaction) -> StoredRecord:
             guarded = await tx.guard_record(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
             )
             assert guarded is not None
             assert await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
                 transition=RecordLeaseTransition("release", "owner", 1),
             ) is None
-            assert await tx.get_record(record.key_digest) == guarded
+            assert await tx.get_record(record.key) == guarded
             return guarded
 
         guarded = await store.mutate(callback)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == guarded
+        assert await store.read(lambda tx: tx.get_record(record.key)) == guarded

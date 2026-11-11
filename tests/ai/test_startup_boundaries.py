@@ -391,7 +391,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
                 table = transaction._table('ai_state_records')
                 await transaction._execute(update(table).where(
                     table.c.store_digest == transaction._store_hex,
-                    table.c.key_digest == target.record.key_digest.hex(),
+                    table.c.key == target.record.key,
                 ).values(storage_revision=target.expected_storage_revision + 1))
                 conflicts.append(member)
             return await original(transaction, replacements)
@@ -491,7 +491,7 @@ async def test_admission_readback_rejects_real_session_partial(
                     await repository.release_execution('session', tenant_id=runtime.tenant_id, execution_id=admitted.execution_id)
                 else:
                     async def remove(transaction):
-                        key = repository._key('session', 'session')
+                        key = repository._key('session', ('session',))
                         record = await transaction.get_record(key)
                         assert await transaction.delete_record(key, expected_storage_revision=record.storage_revision)
                     await repository.state_store.mutate(remove)

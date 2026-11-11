@@ -367,8 +367,8 @@ async def test_checkpoint_null_boundary_rejects_reads_instead_of_using_current_h
             assert len(facts) == 1
             owner = await transaction.get_record(archive._agent_run_key("run"))
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
-            await transaction.delete_fact_streams(owner.key_digest)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
+            await transaction.delete_fact_streams(owner.key)
             await transaction.insert_fact(replace(facts[0], data=encoded))
 
         await archive.state_store.mutate(corrupt)

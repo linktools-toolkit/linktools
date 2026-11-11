@@ -973,7 +973,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                     expected_version: int,
                 ) -> None:
                     guarded = await transaction.guard_record(
-                        candidate.key_digest,
+                        candidate.key,
                         expected_storage_revision=expected_version,
                     )
                     if guarded is None:

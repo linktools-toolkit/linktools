@@ -76,7 +76,7 @@ async def test_nested_owner_receipts_wait_for_outer_commit(tmp_path: Path, monke
             assert not native._message_proofs
             assert not native._message_inputs
         monkeypatch.setattr(type(state.context), "run_mutation", actual_mutation)
-        assert (await state.read(lambda tx: tx.get_record(owner.key_digest)) is not None) == (outcome in {"commit", "unknown"})
+        assert (await state.read(lambda tx: tx.get_record(owner.key)) is not None) == (outcome in {"commit", "unknown"})
         if outcome == "unknown":
             assert len((await native.read_message_roots((root,)))[0]) == 1
         if outcome in {"rollback", "cancel"}:
@@ -104,7 +104,7 @@ async def test_expired_receipt_cannot_turn_a_committed_owner_into_failure(tmp_pa
             native.invalidate_message_content()
         await state.mutate(write)
         assert not native._message_proofs
-        assert await state.read(lambda tx: tx.get_record(owner.key_digest)) == owner
+        assert await state.read(lambda tx: tx.get_record(owner.key)) == owner
         assert len((await native.read_message_roots((root,)))[0]) == 1
 
 
@@ -193,8 +193,8 @@ async def test_concurrent_rollback_does_not_change_other_owners_confirmed_commit
                 await concurrent.mutate(failed_owner)
             resume.set()
             await asyncio.wait_for(successful_task, 5)
-            assert await state.read(lambda tx: tx.get_record(_record("success").key_digest)) is not None
-            assert await concurrent.read(lambda tx: tx.get_record(_record("failure").key_digest)) is None
+            assert await state.read(lambda tx: tx.get_record(_record("success").key)) is not None
+            assert await concurrent.read(lambda tx: tx.get_record(_record("failure").key)) is None
             assert len((await native.read_message_roots((root,)))[0]) == 1
         finally:
             resume.set()

@@ -152,7 +152,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     expected = {
         "ai_state_records": {
-            "uk_store_digest_key_digest",
+            "uk_store_digest_key",
             "ix_store_digest_kind_sort_key",
             "ix_scope_key_sort_key",
             "ix_scope_key_subject_id",
@@ -162,13 +162,13 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
         },
         "ai_state_aliases": {
             "uk_store_digest_alias_key",
-            "ix_store_digest_record_key_digest",
+            "ix_store_digest_record_key",
             "ix_updated_at",
             "ix_created_at",
         },
         "ai_state_facts": {
             "uk_store_digest_stream_digest_sequence",
-            "ix_owner_key_digest",
+            "ix_owner_key",
             "ix_stream_digest_subject_id_sequence",
             "ix_updated_at",
             "ix_created_at",
@@ -339,7 +339,7 @@ def test_runtime_alias_schema_uses_partitioned_binary_indexes() -> None:
     assert table.c.alias_key.type.compile(dialect=sqlite.dialect()) == "BLOB"
     columns = {tuple(column.name for column in index.columns): index.unique for index in table.indexes}
     assert columns[("store_digest", "alias_key")]
-    assert not columns[("store_digest", "record_key_digest")]
+    assert not columns[("store_digest", "record_key")]
     assert all(len(index.columns) <= 3 for index in table.indexes)
     # CHAR(64) utf8mb4 contributes up to 256 index bytes; the alias is binary.
     assert table.c.store_digest.type.length * 4 + table.c.alias_key.type.length == 1280

@@ -22,7 +22,7 @@ async def test_record_subject_reads_preserve_scope_kind_and_transaction_view(
     subject, scope = "subject", _digest("scope")
     records = tuple(replace(_record(index), subject_id=subject, sort_key=b"equal")
                     for index in (1, 2))
-    expected = tuple(sorted(records, key=lambda record: record.key_digest))
+    expected = tuple(sorted(records, key=lambda record: record.key))
     excluded = (replace(_record(3), subject_id=subject, scope_key=_digest("other")),
                 replace(_record(4), subject_id=subject, kind="other"), _record(5))
     async with _open_store(backend, tmp_path / backend) as store:
@@ -60,10 +60,10 @@ async def test_record_subject_identity_cannot_change(
         if backend == "sql":
             assert raised.value.code is ErrorCode.INTERNAL_ERROR
             assert isinstance(raised.value.__cause__, ValueError)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == record
+        assert await store.read(lambda tx: tx.get_record(record.key)) == record
         valid = replace(record, storage_revision=1, data={"new": True})
         assert await store.mutate(lambda tx: tx.replace_record(valid, expected_storage_revision=0))
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == valid
+        assert await store.read(lambda tx: tx.get_record(record.key)) == valid
 
 
 async def test_sql_subject_reads_bound_parameters_and_globally_order_chunks(tmp_path: Path) -> None:
@@ -186,7 +186,7 @@ async def test_subject_ids_preserve_exact_utf8_and_resource_boundaries(
 
     async with _open_store(backend, tmp_path / backend) as store:
         stream = _digest("subject-events")
-        facts = tuple(StoredFact(stream, index, records[0].key_digest, "probe", identity,
+        facts = tuple(StoredFact(stream, index, records[0].key, "probe", identity,
                                  None, {"value": index})
                       for index, identity in enumerate((*identities, identities[0]), 1))
         for fact in facts:

@@ -52,6 +52,8 @@ from ._plan import PersistenceDomain
 from .state import (
     OperationQuery,
     SORT_KEY_MAX_BYTES,
+    RECORD_KEY_MAX_BYTES,
+    validate_record_key,
     validate_sort_key,
     RecordQuery,
     StateStore,
@@ -60,7 +62,7 @@ from .state import (
     StoredRecord,
     operation_key,
     parent_key,
-    record_key_digest,
+    record_key,
     scope_key,
     stream_digest,
 )
@@ -117,8 +119,8 @@ class _RepositoryBase:
     def namespace(self) -> str:
         return self._namespace
 
-    def _key(self, kind: str, identity: object) -> bytes:
-        return record_key_digest(
+    def _key(self, kind: str, identity: Sequence[str]) -> bytes:
+        return record_key(
             self._namespace, self._tenant_id, self._domain.value, kind, identity
         )
 
@@ -145,7 +147,7 @@ class _RepositoryBase:
     def _stored(
         self,
         kind: str,
-        identity: object,
+        identity: Sequence[str],
         value: object,
         *,
         scope: bytes | None = None,
@@ -165,7 +167,7 @@ class _RepositoryBase:
         )
 
     async def _stored_content(
-        self, kind: str, identity: object, value: object, *, scope: bytes | None = None,
+        self, kind: str, identity: Sequence[str], value: object, *, scope: bytes | None = None,
         parent: bytes | None = None, state: str | None = None,
         previous_value: ExecutionRecord | None = None,
     ) -> StoredRecord:
@@ -186,7 +188,7 @@ class _RepositoryBase:
             _require_tenant(value, self._tenant_id)
             encoded = await self._execution_content.encode(value, previous=current)
             record = project_record(namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
-                kind=current.kind, identity=value.execution_id, value=value, state=_record_state(value),
+                kind=current.kind, identity=(value.execution_id,), value=value, state=_record_state(value),
                 storage_revision=current.storage_revision + 1, encoded=encoded)
             self._execution_content.remember_projection(value, record)
             return record
@@ -212,7 +214,7 @@ class _RepositoryBase:
             or not 1 <= limit <= 1001
         ):
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        after_sort_key, after_key_digest = _decode_record_cursor(cursor)
+        after_sort_key, after_key = _decode_record_cursor(cursor)
         query_limit = None if limit is None else min(limit, 1000)
 
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
@@ -224,7 +226,7 @@ class _RepositoryBase:
                     states=states,
                     sort_key_prefix=sort_key_prefix,
                     after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
+                    after_key=after_key,
                     limit=query_limit,
                 )
             )
@@ -239,14 +241,14 @@ class _RepositoryBase:
                     states=states,
                     sort_key_prefix=sort_key_prefix,
                     after_sort_key=last.sort_key,
-                    after_key_digest=last.key_digest,
+                    after_key=last.key,
                     limit=1,
                 )
             )
             if probe and (
                 probe[0].sort_key,
-                probe[0].key_digest,
-            ) > (last.sort_key, last.key_digest):
+                probe[0].key,
+            ) > (last.sort_key, last.key):
                 return (*records, probe[0])
             return records
 
@@ -262,7 +264,7 @@ class _RepositoryBase:
         sort_key_prefix: bytes | None = None,
         cursor: str | None = None,
     ) -> bool:
-        after_sort_key, after_key_digest = _decode_record_cursor(cursor)
+        after_sort_key, after_key = _decode_record_cursor(cursor)
 
         async def read(transaction: StateTransaction) -> bool:
             records = await transaction.list_records(
@@ -273,7 +275,7 @@ class _RepositoryBase:
                     states=states,
                     sort_key_prefix=sort_key_prefix,
                     after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
+                    after_key=after_key,
                     limit=1,
                 )
             )
@@ -306,7 +308,7 @@ class _RepositoryBase:
         )
         if isinstance(value, ToolOperationRecord):
             if (record.subject_id != value.tool_call_id
-                    or record.key_digest != self._key("tool_operation", value.tool_operation_id)):
+                    or record.key != self._key("tool_operation", (value.tool_operation_id,))):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replace(value, owner=record.lease_owner, fence=record.lease_fence)
         if isinstance(value, TaskNodeView):
@@ -346,7 +348,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
     async def initialize(self) -> None:
         await super().initialize()
 
-    def _identity(self, value: object) -> object:
+    def _identity(self, value: object) -> tuple[str, ...]:
         return _canonical_record_identity(self._kind, value)
 
     async def _decode(self, record: StoredRecord, target: type[ValueT]) -> ValueT:
@@ -356,7 +358,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         return value
 
     def _validate_record_identity(self, record: StoredRecord, value: ValueT) -> None:
-        if record.kind != self._kind or record.key_digest != self._key(self._kind, self._identity(value)):
+        if record.kind != self._kind or record.key != self._key(self._kind, self._identity(value)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def create(self, value: ValueT) -> ValueT:
@@ -395,7 +397,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
     async def get(self, identity: str, *, tenant_id: str) -> ValueT | None:
         if tenant_id != self._tenant_id:
             return None
-        key = self._key(self._kind, identity)
+        key = self._key(self._kind, (identity,))
         record = (
             await self._store.read_record(key)
             if self._kind in {"session", "execution"}
@@ -411,13 +413,13 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         tenant_id: str,
     ) -> ValueT | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key(self._kind, identity))
+        record = await transaction.get_record(self._key(self._kind, (identity,)))
         return None if record is None else await self._decode(record, self._value_type)
 
     async def get_fresh(self, identity: str, *, tenant_id: str) -> ValueT | None:
         if tenant_id != self._tenant_id:
             return None
-        key = self._key(self._kind, identity)
+        key = self._key(self._kind, (identity,))
         records = await self._refresh_records((key,))
         record = records.get(key)
         return None if record is None else await self._decode(record, self._value_type)
@@ -449,7 +451,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         _require_tenant(next_record, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> ValueT:
-            current = await transaction.get_record(self._key(self._kind, identity))
+            current = await transaction.get_record(self._key(self._kind, (identity,)))
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             value = await self._decode(current, self._value_type)
@@ -694,7 +696,7 @@ def project_record(
     tenant_id: str,
     domain: PersistenceDomain,
     kind: str,
-    identity: object,
+    identity: Sequence[str],
     value: object,
     scope: bytes | None = None,
     parent: bytes | None = None,
@@ -723,7 +725,7 @@ def project_record(
     if isinstance(value, ExecutionRecord):
         state = _record_state(value)
     lease_owner, lease_fence, lease_expires_at = _record_lease(value)
-    key = record_key_digest(namespace, tenant_id, domain.value, kind, identity)
+    key = record_key(namespace, tenant_id, domain.value, kind, identity)
     return StoredRecord(
         key,
         scope,
@@ -846,41 +848,41 @@ def _default_record_parent(
     return None
 
 
-def _canonical_record_identity(kind: str, value: object) -> object:
+def _canonical_record_identity(kind: str, value: object) -> tuple[str, ...]:
     if isinstance(value, IdempotencyRecord):
-        return [value.scope, value.idempotency_key_digest]
+        return (value.scope, value.idempotency_key_digest)
     if isinstance(value, TaskGraphView):
-        return value.graph_id
+        return (value.graph_id,)
     if isinstance(value, TaskNodeView):
-        return [value.graph_id, value.node_id]
+        return (value.graph_id, value.node_id)
     if isinstance(value, ToolOperationRecord):
-        return value.tool_operation_id
+        return (value.tool_operation_id,)
     if isinstance(value, SessionRecord):
-        return value.session_id
+        return (value.session_id,)
     if isinstance(value, ExecutionRecord):
-        return value.execution_id
+        return (value.execution_id,)
     if isinstance(value, MemoryRecord):
-        return value.memory_id
+        return (value.memory_id,)
     if isinstance(value, ArtifactRecord):
-        return value.artifact_id
+        return (value.artifact_id,)
     if isinstance(value, EvaluationRecord):
-        return value.experiment_id
+        return (value.experiment_id,)
     if isinstance(value, (EvaluationTombstone, EvaluationCleanupRecord)):
-        return value.evaluation_id
+        return (value.evaluation_id,)
     if isinstance(value, EvaluationContentTombstone):
-        return [value.kind, value.identity]
+        return (value.kind, *value.record_identity)
     if isinstance(value, EvaluationDatasetRecord):
-        return [value.contract.ref.id, value.contract.ref.revision]
+        return (value.contract.ref.id, str(value.contract.ref.revision))
     if isinstance(value, EvaluationCaseRecord):
-        return [value.contract.ref.dataset_id, value.contract.ref.case_id, value.contract.ref.revision]
+        return (value.contract.ref.dataset_id, value.contract.ref.case_id, str(value.contract.ref.revision))
     if isinstance(value, EvidenceBundle):
-        return value.ref.evidence_id
+        return (value.ref.evidence_id,)
     if isinstance(value, (EvaluationReport, ComparisonReport)):
-        return value.report_id
+        return (value.report_id,)
     if isinstance(value, ApprovalRecord):
-        return value.approval_id
+        return (value.approval_id,)
     if isinstance(value, ExternalCallRecord):
-        return value.call_id
+        return (value.call_id,)
     raise TypeError(f"unsupported record kind: {kind}")
 
 
@@ -1184,7 +1186,7 @@ def _operation_matches(
 def _record_cursor(record: StoredRecord) -> str:
     sort_key = validate_sort_key(record.sort_key)
     payload = (len(sort_key).to_bytes(2, "big") + sort_key
-               + len(record.key_digest).to_bytes(2, "big") + record.key_digest)
+               + len(record.key).to_bytes(2, "big") + record.key)
     return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
 
 
@@ -1192,16 +1194,16 @@ def _decode_record_cursor(cursor: str | None) -> tuple[bytes | None, bytes | Non
     if cursor is None:
         return None, None
     try:
-        if not isinstance(cursor, str) or not 1 <= len(cursor) <= ((4 + SORT_KEY_MAX_BYTES + 32 + 2) // 3) * 4:
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= ((4 + SORT_KEY_MAX_BYTES + RECORD_KEY_MAX_BYTES + 2) // 3) * 4:
             raise ValueError("cursor length")
         raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
         size = int.from_bytes(raw[:2], "big")
         key_size = int.from_bytes(raw[2 + size:4 + size], "big")
-        if key_size != 32 or len(raw) != 4 + size + key_size:
+        if not 1 <= key_size <= RECORD_KEY_MAX_BYTES or len(raw) != 4 + size + key_size:
             raise ValueError("cursor identity")
         if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != cursor:
             raise ValueError("cursor encoding")
-        return validate_sort_key(raw[2:2 + size]), raw[4 + size:]
+        return validate_sort_key(raw[2:2 + size]), validate_record_key(raw[4 + size:])
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 

@@ -176,7 +176,7 @@ async def test_dependency_read_rejects_corrupt_result_metadata(tmp_path: Path, b
             assert len(records) == 1
             record = records[0]
             assert await transaction.delete_record(
-                record.key_digest,
+                record.key,
                 expected_storage_revision=record.storage_revision,
             )
             await transaction.insert_record(replace(record, parent_key=b"x" * 32))

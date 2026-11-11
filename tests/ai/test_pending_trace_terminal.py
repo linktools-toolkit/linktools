@@ -188,7 +188,7 @@ async def test_pending_trace_readback_rejects_partial_source_without_repair(tmp_
         repository = state.storage.execution.executions
         archive = state.storage.run_store.read_store(PersistenceDomain.TRACE)
         store = repository.state_store if missing == "seal" else archive.state_store
-        key = (repository._key("execution_history_seal", "execution") if missing == "seal" else
+        key = (repository._key("execution_history_seal", ("execution",)) if missing == "seal" else
                archive.transcript_repository.head_key(turn.run.agent_run_id))
         await store.mutate(lambda transaction: transaction.delete_record(key))
         before = await _snapshot(state)

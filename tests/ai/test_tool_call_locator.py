@@ -16,7 +16,7 @@ from linktools.ai.persistence import Persistence, PersistenceDomain, Persistence
 from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from linktools.ai.persistence.codec import decode_record, encode_record
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import RecordQuery, StateTransaction, StoredAlias, alias_key, record_key_digest
+from linktools.ai.persistence.state import RecordQuery, StateTransaction, StoredAlias, alias_key, record_key
 from linktools.ai.persistence.repositories import ToolRepositoryImpl
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore
 
@@ -183,8 +183,8 @@ async def test_record_subject_survives_shared_cache_codec(tmp_path: Path, monkey
             return await original(callback)
 
         monkeypatch.setattr(store, "read", read)
-        assert await store.read_record(record.key_digest) == record
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
+        assert await store.read_record(record.key) == record
         assert reads == 1
 
 
@@ -262,12 +262,12 @@ async def test_public_tool_repositories_isolate_recovery_aliases_on_one_store(
             assert await repository.get_by_call("recovered", "call", tenant_id=tenant) == source
         for namespace, tenant in scopes[1:]:
             corrupt = StoredAlias(alias_key(namespace, tenant, "checkpoint", "tool_call", ("foreign", "call")),
-                                  record_key_digest("namespace", "tenant", "checkpoint", "tool_operation", "same-operation"))
+                                  record_key("namespace", "tenant", "checkpoint", "tool_operation", ("same-operation",)))
             async def insert_corrupt(transaction: StateTransaction) -> None:
-                target = await transaction.get_record(corrupt.record_key_digest)
+                target = await transaction.get_record(corrupt.record_key)
                 assert target is not None
                 assert await transaction.guard_record(
-                    target.key_digest, expected_storage_revision=target.storage_revision,
+                    target.key, expected_storage_revision=target.storage_revision,
                 )
                 await transaction.insert_alias(corrupt)
 

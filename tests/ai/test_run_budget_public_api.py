@@ -235,7 +235,7 @@ async def test_budget_scope_survives_restart_and_missing_inherited_scope_fails_c
         async def remove_scope(transaction: StateTransaction) -> None:
             records = await transaction.list_records(RecordQuery(kind="budget_scope"))
             assert len(records) == 1
-            assert await transaction.delete_record(records[0].key_digest)
+            assert await transaction.delete_record(records[0].key)
 
         await runtime._state.execution.budgets.state_store.mutate(remove_scope)
         with pytest.raises(AIError) as missing:

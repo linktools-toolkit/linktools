@@ -34,7 +34,7 @@ def _large_execution():
 def _shared_record():
     execution = _large_execution()
     record = project_record(namespace="bindings", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                            kind="execution", identity=execution.execution_id, value=execution)
+                            kind="execution", identity=(execution.execution_id,), value=execution)
     data = record.data
     binding = data["value"]["payload"]["fields"]["binding"]
     raw = canonical_json_bytes(binding)
@@ -135,7 +135,7 @@ async def test_execution_contents_share_content_and_survive_cold_reads(tmp_path:
         inline = replace(execution, execution_id="inline", root_execution_id="inline")
         await bare.create_execution(inline)
         rows = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
-        inline_row = next(row for row in rows if row.key_digest == repository.execution_record_key("inline"))
+        inline_row = next(row for row in rows if row.key == repository.execution_record_key("inline"))
         assert not tuple(iter_archive_content_refs(inline_row.data))
         changed = replace(execution, revision=execution.revision + 1, error_code="diagnostic")
         await repository.compare_and_swap("execution", tenant_id="tenant",
@@ -275,12 +275,12 @@ async def test_archive_handle_without_transaction_enlistment_keeps_binding_inlin
 
 def _binding_manifest(copies: int):
     from linktools.ai.persistence.codec import encode_record
-    from linktools.ai.persistence.state import record_key_digest
+    from linktools.ai.persistence.state import record_key
 
     _, _, compact, content, key = _shared_record()
     archive_record = replace(compact, kind="archive_content", sort_key=key[2].encode("ascii"),
         scope_key=bytes.fromhex(key[1]), data=content.to_json(), payload_bytes=content.body,
-        key_digest=record_key_digest("", "", "archive", "archive_content", [key[1], key[2]]))
+        key=record_key("", "", "archive", "archive_content", [key[1], key[2]]))
     manifest = {
         "kind": "runtime-storage-snapshot", "format_version": 1,
         "namespace": "bindings", "tenant_id": "tenant",
@@ -407,7 +407,7 @@ async def test_small_bindings_stay_inline_without_archive_hydration(tmp_path: Pa
         assert repository.state_store.storage_group.opened_archive is None
         execution = _execution()
         stored = project_record(namespace="bindings", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                                kind="execution", identity=execution.execution_id, value=execution)
+                                kind="execution", identity=(execution.execution_id,), value=execution)
         assert len(canonical_json_bytes(stored.data["value"]["payload"]["fields"]["binding"])) <= PayloadPolicy().inline_limit_bytes
 
         async def reject_archive(*args, **kwargs):

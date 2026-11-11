@@ -13,12 +13,12 @@ from datetime import timedelta
 from typing import TypeVar
 from uuid import uuid4
 
-from ..core import JsonValue, canonical_json_bytes, validate_persistence_namespace, validate_tenant_id
+from ..core import JsonValue, canonical_json_bytes, validate_persistence_namespace, validate_tenant_id, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope
 from .state import (
     RecordLeaseTransition, RecordReplacement, StateStore, StateTransaction, StateTransactionNestingError,
-    StoredRecord, active_state_scope, record_key_digest, scope_key,
+    StoredRecord, active_state_scope, record_key, scope_key,
 )
 
 _Value = TypeVar("_Value")
@@ -62,7 +62,10 @@ class _TurnRecords:
 
     def key(self, scope: str, kind: str, identity: str) -> bytes:
         TurnScopeIdentity.validate_scope(scope)
-        return record_key_digest(self.namespace, self.tenant_id, "execution", kind, [scope, identity])
+        maximum = 393 if kind == "turn_session" else 385 if kind == "turn_request" else 128
+        if not isinstance(identity, str) or not identity or len(identity.encode("utf-8")) > maximum:
+            raise ValueError("turn record identity exceeds its owner byte limit")
+        return record_key(self.namespace, self.tenant_id, "execution", kind, (scope, identity))
 
     def make(self, kind: str, data: Mapping[str, JsonValue], *, state: str) -> StoredRecord:
         scope, identity = TurnScopeIdentity.validate_scope(data["scope"]), _text(data[_IDENTITIES[kind]])
@@ -83,7 +86,7 @@ class _TurnRecords:
                     continue
                 _text(data[key])
             expected = self.make(record.kind, data, state=record.state)
-            if (record.key_digest != expected.key_digest or record.scope_key != expected.scope_key
+            if (record.key != expected.key or record.scope_key != expected.scope_key
                     or record.parent_key is not None or record.sort_key != expected.sort_key):
                 raise _integrity()
             if record.kind == "turn_session":
@@ -368,7 +371,7 @@ class StateTurnCoordination:
                 # The complete graph and acquired lease become visible in one commit.
                 await tx.insert_records((session, execution, request))
                 acquired = await tx.transition_record_lease(
-                    session.key_digest, expected_storage_revision=session.storage_revision,
+                    session.key, expected_storage_revision=session.storage_revision,
                     transition=RecordLeaseTransition("acquire", token, session.lease_fence, duration),
                 )
                 if acquired is None:
@@ -380,13 +383,13 @@ class StateTurnCoordination:
                     graph = await self._anchor(tx, local_scope, kind, _text(anchor.data[_IDENTITIES[kind]]))
                     if graph is None:
                         raise _integrity()
-                    graphs[graph.session.key_digest] = graph
+                    graphs[graph.session.key] = graph
                 elif kind == "turn_request" and anchor is not None:
                     await self._anchor(tx, local_scope, kind, request_key)
             protected: dict[bytes, tuple[StoredRecord, bool]] = {}
             sessions = {key: graph.session for key, graph in graphs.items()}
             if session is not None:
-                sessions[session.key_digest] = session
+                sessions[session.key] = session
             for key, current in sorted(sessions.items()):
                 live = (current.lease_owner is not None and current.lease_expires_at is not None
                         and current.lease_expires_at > await tx.now())
@@ -400,12 +403,12 @@ class StateTurnCoordination:
                 protected[key] = guarded, live
             if request is not None and request.state == "ACTIVE":
                 graph = graphs[self._records.key(local_scope, "turn_session", _text(request.data["session_key"]))]
-                guarded, live = protected[graph.session.key_digest]
+                guarded, live = protected[graph.session.key]
                 if live:
                     if request.data["session_key"] != session_key or request.data["request_digest"] != request_digest:
                         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                     return self._coordination(replace(graph, session=guarded))
-            if session is not None and protected[session.key_digest][1]:
+            if session is not None and protected[session.key][1]:
                 return None
             if proposed is not None:
                 if (proposed.data["session_key"] != session_key
@@ -426,10 +429,10 @@ class StateTurnCoordination:
                     "execution_id": None, "request_key": None,
                 }, state="IDLE")
                 await tx.insert_record(session)
-            elif session.key_digest not in graphs:
-                session = protected[session.key_digest][0]
+            elif session.key not in graphs:
+                session = protected[session.key][0]
             acquired = await tx.transition_record_lease(
-                session.key_digest, expected_storage_revision=session.storage_revision,
+                session.key, expected_storage_revision=session.storage_revision,
                 transition=RecordLeaseTransition("acquire", token, session.lease_fence, duration),
             )
             if acquired is None:
@@ -493,7 +496,7 @@ class StateTurnCoordination:
                 return None if kind == "renew" else False
             graph = await self._graph(tx, execution)
             session = await tx.transition_record_lease(
-                graph.session.key_digest, expected_storage_revision=graph.session.storage_revision,
+                graph.session.key, expected_storage_revision=graph.session.storage_revision,
                 transition=RecordLeaseTransition("guard" if kind in {"cancel", "release"} else kind,
                                                  graph.session.lease_owner, graph.session.lease_fence, duration),
             )
@@ -537,7 +540,7 @@ def validate_turn_records(records: Sequence[StoredRecord], *, namespace: str, te
     """Validate the complete source-owned admission graph in an offline snapshot."""
     codec = _TurnRecords(namespace, tenant_id)
     owned = tuple(record for record in records if record.kind in _KINDS)
-    values = {record.key_digest: codec.validate(record) for record in owned}
+    values = {record.key: codec.validate(record) for record in owned}
     if len(values) != len(owned):
         raise _integrity()
     for record in values.values():

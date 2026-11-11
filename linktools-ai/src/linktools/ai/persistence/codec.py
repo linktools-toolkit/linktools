@@ -217,6 +217,10 @@ from .state import (
     ALIAS_KEY_MAX_BYTES,
     RELATION_KEY_MAX_BYTES,
     validate_relation_key,
+    validate_record_key,
+    validate_parent_key,
+    RECORD_KEY_MAX_BYTES,
+    PARENT_KEY_MAX_BYTES,
     StoredAlias,
     StoredFact,
     StoredOperation,
@@ -1298,7 +1302,7 @@ def decode_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
 
 def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
     return {
-        "key": record.key_digest.hex(),
+        "key": record.key.hex(),
         "scope": None if record.scope_key is None else record.scope_key.hex(),
         "parent": None if record.parent_key is None else record.parent_key.hex(),
         "subject": record.subject_id,
@@ -1354,9 +1358,9 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         record = StoredRecord(
-            _digest_wire(_string(value, "key")),
+            _record_key_wire(_string(value, "key")),
             _optional_relation_key(value["scope"]),
-            _optional_relation_key(value["parent"]),
+            _optional_parent_key(value["parent"]),
             _string(value, "kind"),
             _decode_record_sort(_string(value, "sort")),
             _optional_string(value["state"]),
@@ -1377,7 +1381,7 @@ def encode_fact(fact: StoredFact) -> dict[str, JsonValue]:
     return {
         "stream": fact.stream_digest.hex(),
         "sequence": fact.sequence,
-        "owner": fact.owner_key_digest.hex(),
+        "owner": fact.owner_key.hex(),
         "kind": fact.kind,
         "subject": fact.subject_id,
         "state": fact.state,
@@ -1401,7 +1405,7 @@ def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
         return StoredFact(
             _digest_wire(_string(value, "stream")),
             _integer(value, "sequence"),
-            _digest_wire(_string(value, "owner")),
+            _record_key_wire(_string(value, "owner")),
             _string(value, "kind"),
             _optional_string(value["subject"]),
             _optional_string(value["state"]),
@@ -1448,7 +1452,7 @@ def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
 def encode_alias(alias: StoredAlias) -> dict[str, JsonValue]:
     return {
         "alias": alias.alias_key.hex(),
-        "record": alias.record_key_digest.hex(),
+        "record": alias.record_key.hex(),
     }
 
 
@@ -1459,7 +1463,7 @@ def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
     try:
         return StoredAlias(
             _alias_key_wire(_string(value, "alias")),
-            _digest_wire(_string(value, "record")),
+            _record_key_wire(_string(value, "record")),
         )
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -2755,6 +2759,26 @@ def _digest_wire(value: str) -> bytes:
     if len(result) != 32 or result.hex() != value:
         raise ValueError("digest must be canonical lowercase hex for 32 bytes")
     return result
+
+
+def _record_key_wire(value: str) -> bytes:
+    if not 2 <= len(value) <= 2 * RECORD_KEY_MAX_BYTES:
+        raise ValueError("record key encoding length is invalid")
+    result = bytes.fromhex(value)
+    if result.hex() != value:
+        raise ValueError("record key encoding is not canonical")
+    return validate_record_key(result)
+
+
+def _optional_parent_key(value: object) -> bytes | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not 2 <= len(value) <= 2 * PARENT_KEY_MAX_BYTES:
+        raise ValueError("parent key encoding length is invalid")
+    result = bytes.fromhex(value)
+    if result.hex() != value:
+        raise ValueError("parent key encoding is not canonical")
+    return validate_parent_key(result)
 
 
 def _optional_relation_key(value: object) -> bytes | None:

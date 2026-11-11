@@ -72,11 +72,11 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         )
 
     def history_record_key(self, history_id: str) -> bytes:
-        return self._key("conversation_history", history_id)
+        return self._key("conversation_history", (history_id,))
 
     def history_record_keys(self, history_id: str) -> tuple[bytes, bytes]:
         """Keys for capturing a branch descriptor with its canonical local head."""
-        return self.history_record_key(history_id), self._key("transcript_head", history_id)
+        return self.history_record_key(history_id), self._key("transcript_head", (history_id,))
 
     async def create(
         self, record: ConversationHistoryRecord
@@ -94,8 +94,8 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         record: ConversationHistoryRecord,
     ) -> ConversationHistoryRecord:
         _require_tenant(record, self._tenant_id)
-        history_key = self._key("conversation_history", record.history_id)
-        head_key = self._key("transcript_head", record.history_id)
+        history_key = self._key("conversation_history", (record.history_id,))
+        head_key = self._key("transcript_head", (record.history_id,))
         records = await transaction.get_records((history_key, head_key))
         current = records.get(history_key)
         head = records.get(head_key)
@@ -110,10 +110,10 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         await transaction.insert_records(
             (
-                self._stored("conversation_history", record.history_id, record),
+                self._stored("conversation_history", (record.history_id,), record),
                 self._stored(
                     "transcript_head",
-                    record.history_id,
+                    (record.history_id,),
                     TranscriptHeadRecord(
                         TranscriptOwnerDomain.CONVERSATION,
                         record.history_id,
@@ -138,7 +138,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> ConversationHistoryRecord | None:
         if tenant_id != self._tenant_id:
             return None
-        record = await self._record(self._key("conversation_history", history_id))
+        record = await self._record(self._key("conversation_history", (history_id,)))
         return None if record is None else await self._decode_history(record)
 
     async def get_in_transaction(
@@ -150,7 +150,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> ConversationHistoryRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
         record = await transaction.get_record(
-            self._key("conversation_history", history_id)
+            self._key("conversation_history", (history_id,))
         )
         return None if record is None else await self._decode_history(record)
 
@@ -160,7 +160,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         history_id: str,
     ) -> int:
         """Read one branch's local canonical message count."""
-        record = await transaction.get_record(self._key("transcript_head", history_id))
+        record = await transaction.get_record(self._key("transcript_head", (history_id,)))
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = await self._decode(record, TranscriptHeadRecord)
@@ -221,7 +221,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> ConversationHistoryIndexNodeRecord:
         """Read exactly one skew index node without traversing its children."""
         record = await transaction.get_record(
-            self._key("conversation_index_node", node_id)
+            self._key("conversation_index_node", (node_id,))
         )
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -291,11 +291,11 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         transaction: StateTransaction,
         node: ConversationHistoryIndexNodeRecord,
     ) -> None:
-        key = self._key("conversation_index_node", node.node_id)
+        key = self._key("conversation_index_node", (node.node_id,))
         if await transaction.get_record(key) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         await transaction.insert_record(
-            self._stored("conversation_index_node", node.node_id, node)
+            self._stored("conversation_index_node", (node.node_id,), node)
         )
 
     def fork_projection_record(
@@ -306,12 +306,12 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> StoredRecord | None:
         if source is None:
             return None
-        source_key = self._key("context_projection", source_history_id)
+        source_key = self._key("context_projection", (source_history_id,))
         if (
-            source.key_digest != source_key
+            source.key != source_key
             or source.scope_key is not None
             or source.parent_key
-            != self._key("transcript_head", source_history_id)
+            != self._key("transcript_head", (source_history_id,))
             or source.kind != "context_projection"
             or source.sort_key != source_history_id.encode("ascii")
             or source.state is not None
@@ -321,9 +321,9 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return StoredRecord(
-            self._key("context_projection", child_history_id),
+            self._key("context_projection", (child_history_id,)),
             None,
-            self._key("transcript_head", child_history_id),
+            self._key("transcript_head", (child_history_id,)),
             "context_projection",
             child_history_id.encode("ascii"),
             None,
@@ -383,8 +383,8 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                 prefix_index_head_id=prefix_head,
                 inherited_message_count=inherited_messages,
             )
-            key = self._key("conversation_history", child_history_id)
-            projection_key = self._key("context_projection", source_history_id)
+            key = self._key("conversation_history", (child_history_id,))
+            projection_key = self._key("context_projection", (source_history_id,))
             current, source_projection = (
                 await transaction.get_record(key),
                 await transaction.get_record(projection_key),
@@ -399,7 +399,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                 if projection is None:
                     return
                 existing_projection = await transaction.get_record(
-                    projection.key_digest
+                    projection.key
                 )
                 if existing_projection is None:
                     await transaction.insert_record(projection)
@@ -424,7 +424,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                     replace(
                         self._stored(
                             "conversation_history",
-                            child_history_id,
+                            (child_history_id,),
                             child,
                         ),
                         storage_revision=current.storage_revision + 1,
@@ -464,7 +464,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
     def _timeline_commit_key(self, session_id: str, turn_seq: int) -> bytes:
-        return self._key("session_turn_commit", [session_id, turn_seq])
+        return self._key("session_turn_commit", (session_id, str(turn_seq)))
 
     def _stored_timeline_commit(
         self, value: SessionTurnCommit
@@ -489,7 +489,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> SessionTurnRef:
         if (
             fact.kind != "session_turn"
-            or fact.owner_key_digest != self._key("session", session_id)
+            or fact.owner_key != self._key("session", (session_id,))
             or set(fact.data) != {"version", "execution_id"}
             or fact.data.get("version") != 1
             or not isinstance(fact.data.get("execution_id"), str)
@@ -504,12 +504,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         self, session_id: str, turn_seq: int, record: StoredRecord
     ) -> SessionTurnCommit:
         if (
-            record.key_digest != self._timeline_commit_key(session_id, turn_seq)
+            record.key != self._timeline_commit_key(session_id, turn_seq)
             or record.scope_key
             != self._scope("session_turn_commit", "session", (session_id,))
             or record.parent_key is not None
             or record.kind != "session_turn_commit"
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
             or record.state is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -551,19 +551,19 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 (
                     self._stored(
                         "session",
-                        value.session_id,
+                        (value.session_id,),
                         value,
                         scope=self._scope("session", "owner", (value.owner_principal_id,)),
                         state=value.status.value,
                     ),
                     self._stored(
                         "conversation_history",
-                        value.history_id,
+                        (value.history_id,),
                         _new_session_history(value),
                     ),
                     self._stored(
                         "transcript_head",
-                        value.history_id,
+                        (value.history_id,),
                         _empty_conversation_transcript_head(value.history_id),
                     ),
                 )
@@ -590,7 +590,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             _, replayed = await _append_operation(transaction, self, operation)
             if replayed:
                 current = await transaction.get_record(
-                    self._key("session", record.session_id)
+                    self._key("session", (record.session_id,))
                 )
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -599,7 +599,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 (
                     self._stored(
                         "session",
-                        record.session_id,
+                        (record.session_id,),
                         record,
                         scope=self._scope(
                             "session", "owner", (record.owner_principal_id,)
@@ -608,12 +608,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     ),
                     self._stored(
                         "conversation_history",
-                        record.history_id,
+                        (record.history_id,),
                         _new_session_history(record),
                     ),
                     self._stored(
                         "transcript_head",
-                        record.history_id,
+                        (record.history_id,),
                         _empty_conversation_transcript_head(record.history_id),
                     ),
                 )
@@ -665,7 +665,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     target=target,
                 )
             source_stored = await transaction.get_record(
-                self._key("session", source_session_id)
+                self._key("session", (source_session_id,))
             )
             if source_stored is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -678,7 +678,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if (
                 await transaction.guard_record(
-                    self._key("session", source_session_id),
+                    self._key("session", (source_session_id,)),
                     expected_storage_revision=source_stored.storage_revision,
                 )
                 is None
@@ -687,13 +687,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             child_history_id = target.history_id
             if child_history_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            source_history_key = self._key("conversation_history", source.history_id)
-            target_key = self._key("session", target.session_id)
-            child_history_key = self._key("conversation_history", child_history_id)
-            source_head_key = self._key("transcript_head", source.history_id)
+            source_history_key = self._key("conversation_history", (source.history_id,))
+            target_key = self._key("session", (target.session_id,))
+            child_history_key = self._key("conversation_history", (child_history_id,))
+            source_head_key = self._key("transcript_head", (source.history_id,))
             source_projection_key = self._key(
                 "context_projection",
-                source.history_id,
+                (source.history_id,),
             )
             related = await transaction.get_records(
                 (
@@ -814,7 +814,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             records = [
                 self._stored(
                     "session",
-                    expected_target.session_id,
+                    (expected_target.session_id,),
                     expected_target,
                     scope=self._scope(
                         "session",
@@ -825,12 +825,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 ),
                 self._stored(
                     "conversation_history",
-                    child.history_id,
+                    (child.history_id,),
                     child,
                 ),
                 self._stored(
                     "transcript_head",
-                    child.history_id,
+                    (child.history_id,),
                     _empty_conversation_transcript_head(child.history_id),
                 ),
             ]
@@ -861,10 +861,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         target_history_id = target.history_id
         if target_history_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        source_key = self._key("session", source_session_id)
-        target_key = self._key("session", target.session_id)
-        child_key = self._key("conversation_history", target_history_id)
-        head_key = self._key("transcript_head", target_history_id)
+        source_key = self._key("session", (source_session_id,))
+        target_key = self._key("session", (target.session_id,))
+        child_key = self._key("conversation_history", (target_history_id,))
+        head_key = self._key("transcript_head", (target_history_id,))
         related = await transaction.get_records(
             (source_key, target_key, child_key, head_key)
         )
@@ -1093,13 +1093,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if snapshot is not None and snapshot != generation:
                 raise AIError(ErrorCode.CURSOR_INVALID)
-            after_sort_key, after_key_digest = _decode_record_cursor(cursor)
+            after_sort_key, after_key = _decode_record_cursor(cursor)
             records = await transaction.list_records(
                 RecordQuery(
                     scope_key=scope,
                     kind="session",
                     after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
+                    after_key=after_key,
                     limit=min(limit + 1, 1000),
                 )
             )
@@ -1110,7 +1110,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         scope_key=scope,
                         kind="session",
                         after_sort_key=last.sort_key,
-                        after_key_digest=last.key_digest,
+                        after_key=last.key,
                         limit=1,
                     )
                 )
@@ -1144,7 +1144,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         _require_tenant(operation, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
-            current = await transaction.get_record(self._key("session", session_id))
+            current = await transaction.get_record(self._key("session", (session_id,)))
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             value = await self._decode(current, SessionRecord)
@@ -1182,7 +1182,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         _require_tenant(next_record, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
-            record = await transaction.get_record(self._key("session", session_id))
+            record = await transaction.get_record(self._key("session", (session_id,)))
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = await self._decode(record, SessionRecord)
@@ -1303,7 +1303,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         _require_repository_tenant(tenant_id, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
-            current = await transaction.get_record(self._key("session", session_id))
+            current = await transaction.get_record(self._key("session", (session_id,)))
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             value = await self._decode(current, SessionRecord)
@@ -1363,7 +1363,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     StoredFact(
                         stream,
                         sequence,
-                        self._key("session", session_id),
+                        self._key("session", (session_id,)),
                         "session_turn",
                         execution_id,
                         None,
@@ -1403,7 +1403,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
-            record = await transaction.get_record(self._key("session", session_id))
+            record = await transaction.get_record(self._key("session", (session_id,)))
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = await self._decode(record, SessionRecord)
@@ -1469,7 +1469,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         scopes: tuple[str, ...],
     ) -> SessionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await transaction.get_record(self._key("session", session_id))
+        record = await transaction.get_record(self._key("session", (session_id,)))
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         current = await self._decode(record, SessionRecord)
@@ -1499,7 +1499,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> SessionRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        record = await transaction.get_record(self._key("session", session_id))
+        record = await transaction.get_record(self._key("session", (session_id,)))
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return await self._decode(record, SessionRecord)
@@ -1530,7 +1530,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return committed
 
     def session_record_key(self, session_id: str) -> bytes:
-        return self._key("session", session_id)
+        return self._key("session", (session_id,))
 
     async def commit_pending_turn_in_transaction(
         self, transaction: StateTransaction, *, expected: SessionRecord,
@@ -1539,7 +1539,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         successful: bool,
     ) -> SessionRecord:
         _require_tenant(expected, self._tenant_id)
-        record = await transaction.get_record(self._key("session", expected.session_id))
+        record = await transaction.get_record(self._key("session", (expected.session_id,)))
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         current = await self._decode(record, SessionRecord)
@@ -1561,7 +1561,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         })
         sequence = sequences[stream]
         await transaction.insert_fact(StoredFact(
-            stream, sequence, record.key_digest, "session_turn",
+            stream, sequence, record.key, "session_turn",
             execution_id, None, {"version": 1, "execution_id": execution_id},
         ))
         await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommit(
@@ -1584,7 +1584,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
-        record = await transaction.get_record(self._key("session", session_id))
+        record = await transaction.get_record(self._key("session", (session_id,)))
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         current = await self._decode(record, SessionRecord)

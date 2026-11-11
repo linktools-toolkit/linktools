@@ -463,7 +463,7 @@ async def test_native_winners_are_exact_and_mismatch_poisons_owner_mutation(
             await archive.store.mutate(swallow)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await rows() == corrupted
-        assert await archive.store.read_record(_record("must-roll-back").key_digest) is None
+        assert await archive.store.read_record(_record("must-roll-back").key) is None
         assert not candidate._message_proofs and not candidate._message_content._known_messages
 
 

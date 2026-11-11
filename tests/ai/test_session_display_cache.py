@@ -223,7 +223,7 @@ async def test_display_cache_rechecks_policy_and_deletion_after_authorization(mo
             if mode[0] == "delete":
                 async def remove(transaction):
                     records = await transaction.scan_records()
-                    await transaction.delete_records(tuple(record.key_digest for record in records if record.kind == "session"))
+                    await transaction.delete_records(tuple(record.key for record in records if record.kind == "session"))
                 await state.conversation.sessions.state_store.mutate(remove)
 
     try:
@@ -612,7 +612,7 @@ async def test_display_cache_rechecks_dependency_existence(kind, code):
 
         async def remove(transaction):
             records = await transaction.scan_records()
-            await transaction.delete_records(tuple(record.key_digest for record in records if record.kind == kind))
+            await transaction.delete_records(tuple(record.key for record in records if record.kind == kind))
         await store.mutate(remove)
         assert before.timeline.items
         for max_age in (3, 0):
@@ -640,7 +640,7 @@ async def test_display_cache_independent_body_removal_is_bounded_by_max_age(monk
         assert facts
 
         async def remove(transaction):
-            for owner in {fact.owner_key_digest for fact in facts}:
+            for owner in {fact.owner_key for fact in facts}:
                 await transaction.delete_fact_streams(owner)
         await archive.state_store.mutate(remove)
         assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == first
@@ -704,9 +704,9 @@ async def test_display_cache_forks_and_ancestor_cursor_preserve_fresh_deletion()
         assert cache.writes == 0
 
         # Delete through the actual physical session key selected by its header.
-        from linktools.ai.persistence.state import record_key_digest
+        from linktools.ai.persistence.state import record_key
         from linktools.ai.persistence import PersistenceDomain
-        key = record_key_digest(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, "session", root.session_id)
+        key = record_key(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, "session", (root.session_id,))
         await sessions.state_store.mutate(lambda tx: tx.delete_record(key))
         with pytest.raises(AIError) as error:
             await service.refresh("child", principal=_PRINCIPAL, max_age=3)
@@ -766,7 +766,7 @@ async def test_display_cache_principal_and_page_shapes_do_not_share_entries():
 async def test_display_cache_same_id_recreation_does_not_reuse_old_page():
     from datetime import timedelta
     from linktools.ai.persistence import PersistenceDomain
-    from linktools.ai.persistence.state import record_key_digest
+    from linktools.ai.persistence.state import record_key
 
     state, cache = PersistenceStorage.in_memory(), _Cache()
     state = Persistence(state)
@@ -775,9 +775,9 @@ async def test_display_cache_same_id_recreation_does_not_reuse_old_page():
         service = _service(state, cache)
         await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         sessions = state.conversation.sessions
-        key = record_key_digest(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, "session", "session")
+        key = record_key(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, "session", ("session",))
         history = record.history_id
-        keys = (key,) + tuple(record_key_digest(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, history)
+        keys = (key,) + tuple(record_key(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, (history,))
                               for kind in ("conversation_history", "transcript_head"))
         from linktools.ai.persistence.state import stream_digest
         async def remove(transaction):

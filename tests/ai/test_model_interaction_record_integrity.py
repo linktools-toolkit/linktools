@@ -38,9 +38,9 @@ async def test_interaction_fact_cannot_replace_missing_authoritative_record(
         )
 
         async def seed(transaction):
-            owner = await transaction.get_record(fact.owner_key_digest)
+            owner = await transaction.get_record(fact.owner_key)
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
             await transaction.insert_fact(fact)
             await transaction.reserve_sequence(archive._stream(run.agent_run_id, "interaction"), 1)
 

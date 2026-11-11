@@ -185,7 +185,7 @@ async def test_state_turn_reachable_broken_edges_are_never_idle(tmp_path, backen
         await _claim(authority)
         async def damage(tx):
             record = next(record for record in await tx.scan_records() if record.kind == missing)
-            await tx.delete_record(record.key_digest)
+            await tx.delete_record(record.key)
         await store.mutate(damage)
         reader, identity = ((authority.read_turn_by_request, "r") if missing == "turn_session"
                             else (authority.read_turn_by_session, "s"))
@@ -411,7 +411,7 @@ async def test_state_turn_sql_cross_session_reclamation_with_two_initial_snapsho
         await other.initialize()
         ready = asyncio.Event()
         arrived = set()
-        keys = {record.key_digest for record in await store.read(lambda tx: tx.scan_records())
+        keys = {record.key for record in await store.read(lambda tx: tx.scan_records())
                 if record.kind == "turn_session"}
         read = _SqlTransaction.get_record
         async def initial_snapshot(tx, key):
@@ -606,17 +606,17 @@ async def test_state_turn_sort_reuses_identity_across_pages_and_snapshot(tmp_pat
             assert claim is not None and claim.lease is not None
             assert await authority.read_turn_by_request(_SCOPE, f"r{index}") == replace(claim, lease=None)
         records = await store.read(lambda tx: tx.scan_records())
-        assert all(record.sort_key == record.key_digest for record in records)
+        assert all(record.sort_key == record.key for record in records)
         for kind in ("turn_session", "turn_request", "turn_execution"):
             expected = tuple(sorted((record for record in records if record.kind == kind),
-                                    key=lambda record: record.key_digest))
+                                    key=lambda record: record.key))
             observed = []
             after = None
             while True:
                 page = await store.read(lambda tx: tx.list_records(RecordQuery(
                     kind=kind, limit=1,
                     after_sort_key=None if after is None else after.sort_key,
-                    after_key_digest=None if after is None else after.key_digest,
+                    after_key=None if after is None else after.key,
                 )))
                 if not page:
                     break
@@ -686,7 +686,7 @@ async def test_pending_turn_uses_local_scope_with_maximum_namespace_and_compound
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(tmp_path, backend):
-    from linktools.ai.persistence.state import record_key_digest, scope_key
+    from linktools.ai.persistence.state import record_key, scope_key
 
     async with _open_store(backend, tmp_path / backend) as store:
         authority = _backend(store)
@@ -702,10 +702,10 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
         for record in records:
             identity = record.data[{"turn_session": "session_key", "turn_request": "request_key",
                                     "turn_execution": "execution_id"}[record.kind]]
-            key = record_key_digest(scope.namespace, scope.tenant_id, "execution", record.kind,
+            key = record_key(scope.namespace, scope.tenant_id, "execution", record.kind,
                                     [invalid_scope, identity])
             invalid_records.append(replace(
-                record, key_digest=key, sort_key=key,
+                record, key=key, sort_key=key,
                 scope_key=scope_key(scope.namespace, scope.tenant_id, "execution", "turn", "scope", (invalid_scope,)),
                 data={**record.data, "scope": invalid_scope},
             ))

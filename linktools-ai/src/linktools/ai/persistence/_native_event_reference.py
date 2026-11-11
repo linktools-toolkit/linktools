@@ -22,7 +22,7 @@ from ._step_schema import build_step_sql_metadata
 from ._step_store import PreparedStep, SqlStepStore, StepWriteReceipt
 from ..steps import NativeLifecycleEvent
 from .codec import _encode_step_envelope, decode_envelope, encode_envelope
-from .state import FactQuery, FactScanCursor, SqlStateFactReader, StateTransaction, StoredFact, record_key_digest, stream_digest
+from .state import FactQuery, FactScanCursor, SqlStateFactReader, StateTransaction, StoredFact, record_key, stream_digest
 
 if TYPE_CHECKING:
     from sqlalchemy.sql import Select
@@ -123,7 +123,7 @@ class NativeEventReferences:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if (reference["key"] != row.get("key_digest") or fact.kind != "step_event"
                 or fact.state != event.event_type or fact.subject_id is not None
-                or fact.owner_key_digest != record_key_digest(namespace, tenant_id, "trace", "agent_run", source.run_id)
+                or fact.owner_key != record_key(namespace, tenant_id, "trace", "agent_run", (source.run_id,))
                 or fact.stream_digest != stream_digest(namespace, tenant_id, "trace", "event", source.run_id)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return replace(fact, data=_encode_step_envelope(event))
@@ -397,7 +397,7 @@ class NativeEventReferences:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 if (reference["key"] != row["native_key_digest"] or fact.kind != "step_event"
                         or fact.state != event.event_type or fact.subject_id is not None
-                        or fact.owner_key_digest != record_key_digest(self._namespace, self._tenant_id, "trace", "agent_run", source.run_id)
+                        or fact.owner_key != record_key(self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,))
                         or fact.stream_digest != stream_digest(self._namespace, self._tenant_id, "trace", "event", source.run_id)):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 publication = self._runs_pending.get(source.run_id)

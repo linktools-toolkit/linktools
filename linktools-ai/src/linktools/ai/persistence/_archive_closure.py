@@ -20,7 +20,7 @@ from .codec import (
     encode_domain,
     encode_envelope,
 )
-from .state import StoredRecord, record_key_digest
+from .state import StoredRecord, record_key
 from .captures import task_binding_content_reference
 from .codec import execution_payload_slots, payload_reference, map_execution_payload_slots
 
@@ -343,7 +343,7 @@ class ArchiveClosure(_SequenceClosure):
             except UnicodeError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             identity = scope, record.kind, sort
-            if record.key_digest != record_key_digest("", "", "archive", record.kind, [scope, sort]):
+            if record.key != record_key("", "", "archive", record.kind, (scope, sort)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if identity in self._records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -366,7 +366,7 @@ class ArchiveClosure(_SequenceClosure):
         return self._nodes[key]
 
     def _retain_sequence(self, scope: str, identity: str) -> None:
-        self._retained.add(self._record(scope, "archive_sequence", identity).key_digest)
+        self._retained.add(self._record(scope, "archive_sequence", identity).key)
 
     def _retain_content(self, scope: str, identity: str) -> None:
         self.mark_content(self.scope_id, scope, identity)
@@ -382,7 +382,7 @@ class ArchiveClosure(_SequenceClosure):
         if any(not reference.key.startswith(f"v1/archive/{scope_id}/{content_scope}/")
                for reference in content.object_refs()):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._retained.add(record.key_digest)
+        self._retained.add(record.key)
 
     def mark(self, root: ArchiveRoot) -> None:
         self._has_roots = True
@@ -402,11 +402,11 @@ class ArchiveClosure(_SequenceClosure):
 
     @property
     def retained_records(self) -> tuple[StoredRecord, ...]:
-        return tuple(record for record in self._records.values() if record.key_digest in self._retained)
+        return tuple(record for record in self._records.values() if record.key in self._retained)
 
     @property
     def unreachable_records(self) -> tuple[StoredRecord, ...]:
-        return tuple(record for record in self._records.values() if record.key_digest not in self._retained)
+        return tuple(record for record in self._records.values() if record.key not in self._retained)
 
     @property
     def object_refs(self) -> tuple[ObjectRef, ...]:

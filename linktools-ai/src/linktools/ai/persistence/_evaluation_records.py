@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from ..core import Principal, JsonValue
+from ..core import Principal, JsonValue, validate_resource_id
+from ..errors import AIError
 from ..evaluation import (
-    ScoreBundle, CaseContract, DatasetContract,
+    ScoreBundle, CaseContract, DatasetContract, CaseRef, DatasetRef,
     EvaluationManifest,
     EvidenceRef,
     ScoreAttemptView,
@@ -119,6 +120,38 @@ class EvaluationContentTombstone:
     owner_principal_id: str
     digest: str
     deleted_at: datetime
+
+
+    def __post_init__(self) -> None:
+        self.record_identity
+
+    @property
+    def record_identity(self) -> tuple[str, ...]:
+        """Project this content kind's semantic identity into record fields."""
+        if self.kind == "evaluation_dataset":
+            if not isinstance(self.identity, list) or len(self.identity) != 2:
+                raise ValueError("dataset tombstone identity is invalid")
+            identifier, revision = self.identity
+            if not isinstance(identifier, str) or not isinstance(revision, int):
+                raise ValueError("dataset tombstone identity is invalid")
+            dataset = DatasetRef(identifier, revision)
+            return (dataset.id, str(dataset.revision))
+        if self.kind == "evaluation_case":
+            if not isinstance(self.identity, list) or len(self.identity) != 3:
+                raise ValueError("case tombstone identity is invalid")
+            dataset_id, case_id, revision = self.identity
+            if not isinstance(dataset_id, str) or not isinstance(case_id, str) or not isinstance(revision, int):
+                raise ValueError("case tombstone identity is invalid")
+            case = CaseRef(dataset_id, case_id, revision)
+            return (case.dataset_id, case.case_id, str(case.revision))
+        if self.kind in {"evaluation_evidence", "evaluation_report", "evaluation_comparison"}:
+            if not isinstance(self.identity, str):
+                raise ValueError("evaluation content tombstone identity is invalid")
+            try:
+                return (validate_resource_id(self.identity),)
+            except AIError as error:
+                raise ValueError("evaluation content tombstone identity is invalid") from error
+        raise ValueError("evaluation content tombstone kind is invalid")
 
 
 @dataclass(frozen=True, slots=True)

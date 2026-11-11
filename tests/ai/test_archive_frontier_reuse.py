@@ -157,7 +157,7 @@ async def test_frontier_capture_does_not_load_excluded_bodies_or_escape_failed_r
         assert len(bodies) == 1
         assert frontiers == {}
         missing = next(record for record in initial.records.values() if record.kind == "archive_content")
-        await archive.store.mutate(lambda transaction: transaction.delete_records((missing.key_digest,)))
+        await archive.store.mutate(lambda transaction: transaction.delete_records((missing.key,)))
         with pytest.raises(AIError):
             await archive.read_ranges((root,), codec="bytes", append_frontiers=frontiers)
         assert frontiers == {}

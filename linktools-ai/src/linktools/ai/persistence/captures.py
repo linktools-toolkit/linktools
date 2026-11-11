@@ -18,7 +18,7 @@ from ..model.attachments import store_attachment_payload, read_attachment_payloa
 from ._archive import ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
 from .codec import decode_domain, encode_domain, decode_envelope, encode_envelope
-from .state import StateStore, StoredRecord, record_key_digest, scope_key
+from .state import StateStore, StoredRecord, record_key, scope_key
 
 _CAPTURE_TYPES = {
     "agent_input_capture_ref": (AgentInputCaptureRef, "agent"),
@@ -34,6 +34,8 @@ TASK_BINDING_CODEC = "task-graph-binding"
 
 def capture_record(namespace: str, tenant_id: str, key: str, value: JsonValue, *,
                    storage_revision: int = 0, source_digest: str | None = None) -> StoredRecord:
+    if not isinstance(key, str) or not key or not key.isascii() or len(key) > 512:
+        raise ValueError("capture key must contain 1..512 ASCII bytes")
     kind = "task_graph_binding_capture" if key.startswith("v1/task-graph-binding-capture/") else "input_capture"
     owner = value.get("principal") if isinstance(value, Mapping) else None
     scope = (scope_key(namespace, tenant_id, "task", kind, "owner", (owner["principal_id"],))
@@ -41,7 +43,7 @@ def capture_record(namespace: str, tenant_id: str, key: str, value: JsonValue, *
     payload = {"namespace": namespace, "tenant_id": tenant_id, "key": key, "value": value}
     if source_digest is not None:
         payload["source_digest"] = source_digest
-    return StoredRecord(record_key_digest(namespace, tenant_id, "task", kind, key),
+    return StoredRecord(record_key(namespace, tenant_id, "task", kind, (key,)),
                         scope, None, kind, key.encode("ascii"), None, storage_revision, None, 0, None,
                         encode_envelope({"type": kind, "payload": payload}))
 
@@ -52,7 +54,7 @@ def _capture_record_payload(record: StoredRecord) -> Mapping[str, JsonValue]:
     if (record.kind not in CAPTURE_RECORD_KINDS or envelope.get("type") != record.kind
             or not isinstance(payload, Mapping) or not {"namespace", "tenant_id", "key", "value"}.issubset(payload)
             or set(payload) - {"namespace", "tenant_id", "key", "value", "source_digest"}
-            or not isinstance(payload["key"], str) or not payload["key"].isascii()
+            or not isinstance(payload["key"], str) or not 1 <= len(payload["key"]) <= 512 or not payload["key"].isascii()
             or payload["key"].encode("ascii") != record.sort_key):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return payload
@@ -69,7 +71,7 @@ def capture_record_value(record: StoredRecord) -> JsonValue:
 
 async def read_capture_record(store: StateStore, *, namespace: str, tenant_id: str,
                               key: str) -> StoredRecord | None:
-    identity = capture_record(namespace, tenant_id, key, None).key_digest
+    identity = capture_record(namespace, tenant_id, key, None).key
     return await store.read(lambda transaction: transaction.get_record(identity))
 
 
@@ -330,7 +332,7 @@ def capture_state_closure(records: Sequence[StoredRecord], *,
             payload = decode_envelope(record.data).value["payload"]
             identity = payload["fields"]["execution_id"]
             for namespace, tenant_id in scopes:
-                if record.key_digest == record_key_digest(namespace, tenant_id, "execution", "execution", identity):
+                if record.key == record_key(namespace, tenant_id, "execution", "execution", (identity,)):
                     key = input_capture_key(namespace, tenant_id, "invocation", identity)
                     if key in captures:
                         pending.append((key, None))
@@ -340,7 +342,7 @@ def capture_state_closure(records: Sequence[StoredRecord], *,
             admission = (_decode_enveloped_domain(record.data, TaskGraphAdmission) if record.kind == "task_admission"
                          else _decode_enveloped_domain(record.data, TaskGraphSubmission).admission)
             for namespace, tenant_id in scopes:
-                if record.key_digest != record_key_digest(namespace, tenant_id, "task", record.kind, admission.graph_id):
+                if record.key != record_key(namespace, tenant_id, "task", record.kind, (admission.graph_id,)):
                     continue
                 key = input_capture_key(namespace, tenant_id, "declaration", admission.graph_id)
                 if key in captures:

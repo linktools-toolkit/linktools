@@ -101,7 +101,7 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
 
     async def without_prefetch(transaction, keys):
         records = [await transaction.get_record(key) for key in keys]
-        return {record.key_digest: record for record in records if record is not None}
+        return {record.key: record for record in records if record is not None}
 
     # Resolve the shared scope once so neither side pays a one-time cold lookup.
     await archive.transcript_repository.content_archive(create=True)
@@ -217,7 +217,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
                     assert len(writes) == 1 and writes[0][0].startswith("UPDATE ai_state_records")
                     repository = state.execution.executions
                     assert repository.state_store.store_digest.hex() in writes[0][1]
-                    assert repository._key("execution", "execution").hex() in writes[0][1]
+                    assert repository._key("execution", ("execution",)) in writes[0][1]
         finally:
             await state.close()
     assert counts[1] == counts[0] - 1
@@ -239,7 +239,7 @@ async def test_checkpoint_projection_stale_version_rolls_back_commit(
 
         async def stale_projection(transaction, replacements):
             projection = next((
-                value for value in replacements if value.record.key_digest == projection_key
+                value for value in replacements if value.record.key == projection_key
             ), None)
             if projection is not None and not injected:
                 injected.append(True)

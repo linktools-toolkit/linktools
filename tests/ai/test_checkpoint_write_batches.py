@@ -38,7 +38,7 @@ pytestmark = pytest.mark.asyncio
 async def _snapshot(store, *, scope_mapping=None):
     async def read(transaction):
         return (
-            tuple(sorted(await transaction.scan_records(), key=lambda item: item.key_digest)),
+            tuple(sorted(await transaction.scan_records(), key=lambda item: item.key)),
             tuple(sorted(await transaction.scan_facts(), key=lambda item: (item.stream_digest, item.sequence))),
             await transaction.scan_sequences(),
         )
@@ -161,7 +161,7 @@ async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
                 table = transaction._table("ai_state_records")
                 await transaction._execute(update(table).where(
                     table.c.store_digest == transaction._store_hex,
-                    table.c.key_digest == member.record.key_digest.hex(),
+                    table.c.key == member.record.key,
                 ).values(storage_revision=member.expected_storage_revision + 1))
                 lost.append(target)
             return await original(transaction, replacements)
@@ -319,7 +319,7 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
             table = transaction._table("ai_state_records")
             await transaction._execute(update(table).where(
                 table.c.store_digest == transaction._store_hex,
-                table.c.key_digest == member.record.key_digest.hex(),
+                table.c.key == member.record.key,
             ).values(storage_revision=member.expected_storage_revision + 1))
             lost.append(target)
         return await original(transaction, replacements)

@@ -258,7 +258,7 @@ async def test_missing_or_corrupt_execution_fails_closed(tmp_path: Path, backend
         repository = state.execution.executions
 
         async def mutate(tx):
-            key = repository._key("execution", "execution")
+            key = repository._key("execution", ("execution",))
             stored = await tx.get_record(key)
             if damage == "missing":
                 await tx.delete_record(key)

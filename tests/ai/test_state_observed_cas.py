@@ -27,26 +27,26 @@ async def test_revision_guard_reuses_current_revision_and_source_payload(
         await store.mutate(lambda tx: tx.insert_record(original))
 
         async def mutate(tx: StateTransaction) -> None:
-            assert await tx.guard_record_revision(original.key_digest, expected_storage_revision=0) == 1
-            guarded = await tx.guard_record(original.key_digest, expected_storage_revision=0)
+            assert await tx.guard_record_revision(original.key, expected_storage_revision=0) == 1
+            guarded = await tx.guard_record(original.key, expected_storage_revision=0)
             assert guarded == replace(original, storage_revision=1)
-            assert await tx.guard_record(original.key_digest, expected_storage_revision=0) == guarded
-            assert await tx.guard_record(original.key_digest, expected_storage_revision=1) == guarded
+            assert await tx.guard_record(original.key, expected_storage_revision=0) == guarded
+            assert await tx.guard_record(original.key, expected_storage_revision=1) == guarded
             candidate = replace(guarded, storage_revision=2, state="updated")
             await tx.replace_records((RecordReplacement(candidate, 1),))
-            assert await tx.get_record(original.key_digest) == candidate
-            assert await tx.guard_record(original.key_digest, expected_storage_revision=0) == candidate
-            assert await tx.guard_record_revision(original.key_digest, expected_storage_revision=0) == 2
+            assert await tx.get_record(original.key) == candidate
+            assert await tx.guard_record(original.key, expected_storage_revision=0) == candidate
+            assert await tx.guard_record_revision(original.key, expected_storage_revision=0) == 2
 
         await store.mutate(mutate)
-        actual = await store.read(lambda tx: tx.get_record(original.key_digest))
+        actual = await store.read(lambda tx: tx.get_record(original.key))
         assert actual == replace(original, storage_revision=2, state="updated")
         assert await store.mutate(lambda tx: tx.guard_record(
-            original.key_digest, expected_storage_revision=0,
+            original.key, expected_storage_revision=0,
         )) is None
         with pytest.raises(StateTransactionNestingError, match="read-only"):
             await store.read(lambda tx: tx.guard_record(
-                original.key_digest, expected_storage_revision=0,
+                original.key, expected_storage_revision=0,
             ))
 
 
@@ -65,7 +65,7 @@ async def test_conditional_mutation_preserves_every_immutable_identity(
             with pytest.raises(ValueError, match="physical identity"):
                 await tx.replace_records((RecordReplacement(replace(candidate, storage_revision=1), 0),))
         await store.mutate(reject)
-        assert await store.read(lambda tx: tx.get_record(original.key_digest)) == original
+        assert await store.read(lambda tx: tx.get_record(original.key)) == original
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
@@ -76,22 +76,22 @@ async def test_revision_guard_validates_token_and_does_not_survive_rollback(
     async with _open_store(backend, tmp_path / backend) as store:
         await store.mutate(lambda tx: tx.insert_record(original))
         assert await store.mutate(lambda tx: tx.guard_record_revision(_digest("missing"), expected_storage_revision=0)) is None
-        assert await store.mutate(lambda tx: tx.guard_record_revision(original.key_digest, expected_storage_revision=1)) is None
+        assert await store.mutate(lambda tx: tx.guard_record_revision(original.key, expected_storage_revision=1)) is None
         for revision in (-1, True):
             async def reject(tx: StateTransaction) -> None:
                 with pytest.raises(ValueError, match="expected_storage_revision"):
-                    await tx.guard_record_revision(original.key_digest, expected_storage_revision=revision)
+                    await tx.guard_record_revision(original.key, expected_storage_revision=revision)
             await store.mutate(reject)
         with pytest.raises(StateTransactionNestingError, match="read-only"):
-            await store.read(lambda tx: tx.guard_record_revision(original.key_digest, expected_storage_revision=0))
+            await store.read(lambda tx: tx.guard_record_revision(original.key, expected_storage_revision=0))
 
         async def abort(tx: StateTransaction) -> None:
-            assert await tx.guard_record_revision(original.key_digest, expected_storage_revision=0) == 1
+            assert await tx.guard_record_revision(original.key, expected_storage_revision=0) == 1
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
         with pytest.raises(AIError, match="STORAGE_CONFLICT"):
             await store.mutate(abort)
-        assert await store.read(lambda tx: tx.get_record(original.key_digest)) == original
+        assert await store.read(lambda tx: tx.get_record(original.key)) == original
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
@@ -107,15 +107,15 @@ async def test_revision_receipt_cannot_publish_caller_supplied_mutable_fields(
 
         async def mutate(tx: StateTransaction) -> None:
             receipt = await tx.guard_record_revision(
-                fabricated.key_digest, expected_storage_revision=fabricated.storage_revision,
+                fabricated.key, expected_storage_revision=fabricated.storage_revision,
             )
             assert receipt == 1
             assert isinstance(receipt, int)
-            source = await tx.guard_record(original.key_digest, expected_storage_revision=0)
+            source = await tx.guard_record(original.key, expected_storage_revision=0)
             assert source == replace(original, storage_revision=1)
             assert source != replace(fabricated, storage_revision=1)
         await store.mutate(mutate)
-        assert await store.read(lambda tx: tx.get_record(original.key_digest)) == replace(original, storage_revision=1)
+        assert await store.read(lambda tx: tx.get_record(original.key)) == replace(original, storage_revision=1)
 
 
 @pytest.mark.parametrize("executemany", (False, True))
@@ -136,13 +136,13 @@ async def test_known_record_writes_execute_no_select_and_compile_for_mysql(
                 mysql_updates.append(str(context.compiled.statement.compile(dialect=mysql.dialect())))
 
         async def mutate(tx: StateTransaction) -> None:
-            assert await tx.guard_record_revision(records[0].key_digest, expected_storage_revision=0) == 1
-            assert await tx.guard_record_revision(records[0].key_digest, expected_storage_revision=0) == 1
+            assert await tx.guard_record_revision(records[0].key, expected_storage_revision=0) == 1
+            assert await tx.guard_record_revision(records[0].key, expected_storage_revision=0) == 1
             await tx.replace_records(tuple(RecordReplacement(
                 replace(record, storage_revision=2 if index == 0 else 1, data={"revision": 99}),
                 1 if index == 0 else 0,
             ) for index, record in enumerate(records)))
-            actual = await tx.get_records(tuple(record.key_digest for record in records))
+            actual = await tx.get_records(tuple(record.key for record in records))
             assert len(actual) == len(records)
             assert all(record.data["revision"] == 99 for record in actual.values())
 

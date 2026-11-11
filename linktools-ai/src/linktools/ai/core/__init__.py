@@ -5,7 +5,7 @@
 from ._execution_context import ExecutionContext
 from ._commit_policy import CommitPolicy
 from ._write_buffer import WriteBufferBackend, WriteBufferEntry
-from ._budget import BudgetUsage, RunBudget
+from ._budget import BudgetUsage, RunBudget, validate_budget_scope
 from ._correlation import (
     CorrelationData,
     CorrelationValue,
@@ -126,6 +126,7 @@ __all__ = [
     "WriteBufferBackend",
     "WriteBufferEntry",
     "BudgetUsage",
+    "validate_budget_scope",
     "RunBudget",
     "ApprovalDecision",
     "ApprovalStatus",

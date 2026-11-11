@@ -3,6 +3,7 @@
 """Memory, artifact, and evaluation repository implementations."""
 
 import json
+from collections.abc import Sequence
 from dataclasses import replace
 from ..core import (
     OperationKind,
@@ -44,7 +45,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
     def _stored(
         self,
         kind: str,
-        identity: object,
+        identity: Sequence[str],
         value: object,
         *,
         scope: bytes | None = None,
@@ -82,7 +83,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 page = await transaction.list_records(RecordQuery(kind="memory",
                     scope_key=self._scope("memory", "memory_scope", (memory_scope_digest,)),
                     after_sort_key=None if last is None else last.sort_key,
-                    after_key_digest=None if last is None else last.key_digest, limit=1000))
+                    after_key=None if last is None else last.key, limit=1000))
                 rows.extend(page)
                 if len(page) < 1000:
                     return tuple(rows)
@@ -117,14 +118,14 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 return None, True
             if operation_record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            key = self._key("memory", record.memory_id)
+            key = self._key("memory", (record.memory_id,))
             current = await transaction.get_record(key)
             if current is None:
                 if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 next_value = replace(record, revision=1)
                 await transaction.insert_record(
-                    self._stored("memory", record.memory_id, next_value)
+                    self._stored("memory", (record.memory_id,), next_value)
                 )
             else:
                 value = await self._decode(current, MemoryRecord)
@@ -207,7 +208,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 return _memory_delete_replay_result(operation_record), True
             if operation_record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            key = self._key("memory", memory_id)
+            key = self._key("memory", (memory_id,))
             current = await transaction.get_record(key)
             if current is None:
                 if expected_revision not in (None, 0):
@@ -276,7 +277,7 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
         _require_tenant(record, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> ArtifactRecord:
-            key = self._key("artifact", record.artifact_id)
+            key = self._key("artifact", (record.artifact_id,))
             current = await transaction.get_record(key)
             if current is not None:
                 existing = await self._decode(current, ArtifactRecord)
@@ -284,7 +285,7 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
                     return existing
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             await transaction.insert_record(
-                self._stored("artifact", record.artifact_id, record)
+                self._stored("artifact", (record.artifact_id,), record)
             )
             return record
 

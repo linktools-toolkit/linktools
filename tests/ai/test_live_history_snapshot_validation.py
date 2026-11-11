@@ -165,7 +165,7 @@ async def test_snapshot_model_interaction_records_validate_identity_and_sequence
         elif corruption == "state":
             record = replace(record, state="SUCCEEDED")
         elif corruption == "identity":
-            record = replace(record, key_digest=b"x" * 32)
+            record = replace(record, key=b"x" * 32)
         elif corruption == "conflict":
             second = replace(first, duration_ns=first.duration_ns + 1)
         records = (*records, record, archive._stored_interaction(second))

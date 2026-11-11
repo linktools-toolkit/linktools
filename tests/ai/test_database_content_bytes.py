@@ -63,7 +63,7 @@ async def test_archive_body_is_binary_in_database_and_round_trips_portable_codec
         table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})).tables["ai_state_records"]
         async with engine.connect() as connection:
             physical = (await connection.execute(select(table).where(
-                table.c.key_digest == record.key_digest.hex(),
+                table.c.key == record.key,
             ))).mappings().one()
         assert type(physical["payload_bytes"]) is bytes
         assert physical["payload_bytes"] == encoded

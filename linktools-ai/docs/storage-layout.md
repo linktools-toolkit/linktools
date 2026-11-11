@@ -82,6 +82,42 @@ than 64 ASCII hex characters: short IDs shrink, while a maximum-length ID can
 use 128 bytes. It is not a claim that every ID or in-memory representation uses
 less storage.
 
+## State record addresses
+
+`StoredRecord.key`, alias `record_key`, and fact `owner_key` are exact binary
+addresses of 1..1152 bytes. Built-in addresses frame `record`, namespace,
+tenant, domain, kind and each explicit owner component with a two-byte
+big-endian UTF-8 byte length. Owners render their integer indices explicitly;
+the common encoder rejects scalar, nested and non-string components. There
+is no normalization, truncation, fallback hashing or alternate wire shape.
+Archive system records use their reserved empty namespace and tenant binding.
+
+Independent repository bindings can share one bare StateStore. The full
+address preserves namespace, tenant, domain and family separation there.
+Ordinary resource IDs retain resource128; task graph and node components are
+bounded separately. Budget scopes permit 256 bytes, including built-in
+`execution:` and `graph:` prefixes with resource128 suffixes. Evaluation
+revisions and transcript indices use their owning int63 contracts. Capture
+paths permit 512 ASCII bytes. Turn session/request IDs permit 393/385 UTF-8
+bytes, preserving the generated request-backed session identity. At maximum
+namespace256, tenant128 and scope256, a turn session key occupies 1074 bytes.
+
+SQL uses MySQL `VARBINARY(1152)`, PostgreSQL `BYTEA` and SQLite `BLOB` for
+record references. Default sort is the raw key; timestamp sorts validate the
+complete eight-byte prefix plus key against the same 1152-byte sort limit.
+Parent references also permit 1152 bytes. The two-column parent/sort index
+therefore has at most 2304 field bytes, below ordinary backend index limits.
+The record unique index has at most 1408 MySQL declared key bytes with the
+current store digest. Store, stream and independent native Step digests retain
+their own contracts in this change.
+
+Current wire record references are canonical lowercase hex decoded back to
+bytes. The record cursor frames sort and key with two-byte lengths before one
+canonical URL-safe Base64 position encoding. Cache batch digests frame each
+sorted, deduplicated key by its length, keeping variable component boundaries
+and single-record/batch families distinct. Raw record, target, owner and
+cursor addresses are omitted from object representations.
+
 ## State operation addresses
 
 `StoredOperation.key` is a binary address of 1..1024 bytes. Public repositories
@@ -130,8 +166,9 @@ implied.
 
 ## State record relations
 
-`scope_key` and `parent_key` are nonempty binary addresses of at most 1024
-bytes. Direct relation helpers encode a flat sequence of exact UTF-8 strings:
+`scope_key` is a nonempty binary address of at most 1024 bytes.
+`parent_key` accepts at most 1152 bytes so it can also hold a complete record
+reference. Generated parent relations retain their 1024-byte limit. Direct relation helpers encode a flat sequence of exact UTF-8 strings:
 role (`scope` or `parent`), namespace, tenant, domain, record kind, relation,
 then each logical identity component. Every component has a fixed two-byte
 big-endian byte length. Scalars and nested JSON are not alternative encodings.
@@ -142,9 +179,9 @@ custom StateStore across namespaces, tenants and domains.
 The complete encoded bound is checked at construction, queries and current
 SQL/file readers. Namespace and tenant keep their 256- and 128-byte limits;
 validated resource IDs use 128 bytes, principal IDs and local turn purposes
-use 256. Some domain DTOs, including graph and budget scope IDs, do not impose
-those individual bounds. Their actual restriction here is the complete encoded
-1024-byte relation limit, not a new 128-byte ID limit. With a 384-byte
+use 256. Task graph/node IDs are individually resource128; budget scopes
+permit 256 bytes including their explicit prefixes. The complete encoded
+relation still has its own 1024-byte limit. With a 384-byte
 namespace/tenant pair, representative sizes at these component budgets are:
 
 | Relation family | Remaining payload and all frame bytes | Encoded bytes |
@@ -160,14 +197,15 @@ namespace/tenant pair, representative sizes at these component budgets are:
 Other direct resource relations use the same framing with their existing owner
 components; custom primitive relations are bounded by the complete 1024-byte
 limit. The existing memory-scope digest is a component, not recomputed as a
-second relation hash. Raw reused record-parent digests and ContentArchive's
-independent scope digest remain 32-byte values. Record keys, store identities,
-fact streams, fact owners, alias targets and native Step scopes retain their
-separate digest contracts in this change.
+second relation hash. Reused record parents are the full binary record
+references described above. ContentArchive's independent scope digest remains
+32 bytes. Store identities, fact streams and native Step scopes retain their
+separate digest contracts.
 
-SQL binds raw bytes as MySQL `VARBINARY(1024)`, PostgreSQL `BYTEA` or SQLite
-`BLOB`. `(scope_key, sort_key)` and `(parent_key, sort_key)` remain two-column
-indexes, with a complete field payload of 1024 + 1152 = 2176 bytes. Allowing
+SQL binds raw bytes as MySQL `VARBINARY(1024)` for scopes and
+`VARBINARY(1152)` for parents, PostgreSQL `BYTEA` or SQLite `BLOB`.
+`(scope_key, sort_key)` and `(parent_key, sort_key)` remain two-column
+indexes, with complete field payloads of 2176 and 2304 bytes. Allowing
 40 bytes for headers, alignment and tuple overhead still fits PostgreSQL's
 ordinary approximately 2704-byte B-tree limit and MySQL's 3072-byte limit.
 `(scope_key, subject_id)` has at most 1152 field bytes. SQL still filters the

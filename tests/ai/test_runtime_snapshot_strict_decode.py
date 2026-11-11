@@ -504,7 +504,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         tenant_id="tenant",
         domain=PersistenceDomain.CHECKPOINT,
         kind="tool_operation",
-        identity=operation.tool_operation_id,
+        identity=(operation.tool_operation_id,),
         value=operation,
         state=operation.status.value,
     )
@@ -522,7 +522,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         "runtime", "tenant", "checkpoint", "tool_call",
         [operation.agent_run_id, operation.tool_call_id],
     )
-    assert aliases == (StoredAlias(expected_alias, record.key_digest),)
+    assert aliases == (StoredAlias(expected_alias, record.key),)
     assert sequences == {}
 
     for field in ("agent_run_id", "tool_call_id"):
@@ -557,7 +557,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
             tenant_id="tenant",
             domain=PersistenceDomain.CHECKPOINT,
             records=(record,),
-            aliases=(StoredAlias(b"x" * 32, record.key_digest),),
+            aliases=(StoredAlias(b"x" * 32, record.key),),
             facts=(),
             operations=(),
             sequences=sequences,
@@ -720,9 +720,9 @@ def test_snapshot_object_refs_reject_malformed_known_fields(codec, change) -> No
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("raw", ({"alias_key": "AA", "record_key_digest": "77" * 32},
-                                {"alias_key": "aa" * 1025, "record_key_digest": "77" * 32},
-                                {"alias_key": "aa", "record_key_digest": "77" * 31},
+@pytest.mark.parametrize("raw", ({"alias_key": "AA", "record_key": "77" * 32},
+                                {"alias_key": "aa" * 1025, "record_key": "77" * 32},
+                                {"alias_key": "aa", "record_key": "77" * 31},
                                 {"alias_key": "aa"}))
 def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None:
     with pytest.raises(AIError) as rejected:
@@ -732,7 +732,7 @@ def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None
 
 def test_snapshot_alias_binary_transport_roundtrips() -> None:
     key = alias_key("runtime", "tenant", "checkpoint", "tool_call", ("é", "e\u0301"))
-    raw = {"alias_key": key.hex(), "record_key_digest": "77" * 32}
+    raw = {"alias_key": key.hex(), "record_key": "77" * 32}
     assert runtime_storage_snapshot_module._decode_snapshot_aliases([raw]) == (StoredAlias(key, b"w" * 32),)
     with pytest.raises(AIError) as rejected:
         runtime_storage_snapshot_module._decode_snapshot_aliases([raw, raw])
@@ -751,10 +751,11 @@ def test_snapshot_oversized_relation_owners_report_integrity_errors(family: str)
         value = MemoryRecord("memory", oversized, StoredPayload.inline_text("body"), {"path": "memory"}, 0, now, now)
         domain, kind, identity = PersistenceDomain.MEMORY, "memory", "memory"
     else:
-        value = TaskGraphView(oversized, TaskStatus.PENDING, ())
+        value = TaskGraphView("graph", TaskStatus.PENDING, ())
+        object.__setattr__(value, "graph_id", oversized)
         domain, kind, identity = PersistenceDomain.TASK, "task_graph", oversized
     record = project_record(namespace="namespace", tenant_id="tenant", domain=domain,
-                            kind=kind, identity=identity, value=value, scope=b"s" * 32)
+                            kind=kind, identity=(identity,), value=value, scope=b"s" * 32)
     with pytest.raises(AIError) as error:
         validate_snapshot_domain(namespace="namespace", tenant_id="tenant", domain=domain,
                                  records=(record,), aliases=(), facts=(), operations=(), sequences={})

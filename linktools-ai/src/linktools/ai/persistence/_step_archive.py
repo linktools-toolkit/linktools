@@ -96,12 +96,13 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
+    RECORD_KEY_MAX_BYTES,
     active_state_scope,
     active_state_transaction,
     enter_run_history_lock,
     exit_run_history_lock,
     parent_key,
-    record_key_digest,
+    record_key,
     require_no_run_history_lock,
     scope_key,
     sortable_timestamp,
@@ -1251,7 +1252,7 @@ class StateStepArchive(AgentRunStore):
         """Read DTO projections without replacing the transaction's raw records."""
         if self._native_runs is None:
             return await transaction.get_records(keys)
-        return {record.key_digest: record for record in await self._native_runs.read(transaction, keys=keys)}
+        return {record.key: record for record in await self._native_runs.read(transaction, keys=keys)}
 
     @property
     def runtime_domain(self) -> PersistenceDomain:
@@ -1928,8 +1929,8 @@ class StateStepArchive(AgentRunStore):
                         or set(observed_records) != {self._store, content.store}
                         or not owner_keys.issubset(observed_records[self._store])
                         or (content.store is not self._store and set(observed_records[self._store]) != owner_keys)
-                        or any(not isinstance(key, bytes) or len(key) != 32
-                               or (record is not None and record.key_digest != key)
+                        or any(not isinstance(key, bytes) or not 1 <= len(key) <= RECORD_KEY_MAX_BYTES
+                               or (record is not None and record.key != key)
                                for values in observed_records.values() for key, record in values.items())):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 captured = {store: {key: value for key, value in values.items() if value is not None}
@@ -2056,7 +2057,7 @@ class StateStepArchive(AgentRunStore):
         self._context_cache_keys.clear()
 
     def _agent_run_key(self, agent_run_id: str) -> bytes:
-        return record_key_digest(self._namespace, self._tenant_id, self._runtime_domain.value, "agent_run", agent_run_id)
+        return record_key(self._namespace, self._tenant_id, self._runtime_domain.value, "agent_run", (agent_run_id,))
 
     def _stream(self, agent_run_id: str, family: str) -> bytes:
         return stream_digest(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
@@ -2393,7 +2394,7 @@ class StateStepArchive(AgentRunStore):
                         or execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
                         or record.storage_revision != 0
                         or (producer_generation is not None and execution.producer_generation != producer_generation)
-                        or await core_transaction.get_record(record.key_digest) != record):
+                        or await core_transaction.get_record(record.key) != record):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return execution_guard
             if (execution.execution_id != execution_id or execution.history_seal_digest is not None
@@ -3352,7 +3353,7 @@ class StateStepArchive(AgentRunStore):
                 parent_key=self._agent_run_key(agent_run_id),
             ))
             await transaction.delete_records((
-                *(interaction.key_digest for interaction in interactions),
+                *(interaction.key for interaction in interactions),
                 self._agent_run_key(agent_run_id),
             ))
             await transaction.delete_sequences(
@@ -3435,9 +3436,9 @@ class StateStepArchive(AgentRunStore):
         )
 
     def _history_association_key(self, agent_run_id: str, family: str, identity: str) -> bytes:
-        return record_key_digest(
+        return record_key(
             self._namespace, self._tenant_id, self._runtime_domain.value,
-            "history_association", [agent_run_id, family, identity],
+            "history_association", (agent_run_id, family, identity),
         )
 
     def _history_association_records(
@@ -3478,7 +3479,7 @@ class StateStepArchive(AgentRunStore):
         if record is None:
             return 0
         sequence = record.data.get("sequence")
-        if (record.key_digest != self._history_association_key(agent_run_id, "coverage", "event")
+        if (record.key != self._history_association_key(agent_run_id, "coverage", "event")
                 or record.kind != "history_association" or record.sort_key != b"coverage:event"
                 or record.parent_key != self._agent_run_key(agent_run_id)
                 or set(record.data) != {"sequence"} or isinstance(sequence, bool)

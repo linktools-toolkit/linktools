@@ -354,7 +354,7 @@ class InputCaptures:
                 query = RecordQuery(kind="input_capture", scope_key=owner_scope,
                     sort_key_prefix=f"v1/input-capture/{kind}/".encode("ascii"), limit=1000,
                     after_sort_key=None if cursor is None else cursor.sort_key,
-                    after_key_digest=None if cursor is None else cursor.key_digest)
+                    after_key=None if cursor is None else cursor.key)
                 records = await self._state_store.read(lambda transaction: transaction.list_records(query))
                 for record in records:
                     value = capture_record_value(record)
@@ -411,7 +411,7 @@ class InputCaptures:
         await self._authorize(principal, ResourceKind.EVALUATION, "retention", AuthorizationAction.EVALUATION_PURGE)
         for key in keys:
             expiry_key = input_capture_expiry_key(key)
-            identity = capture_record(self._namespace, principal.tenant_id, expiry_key, None).key_digest
+            identity = capture_record(self._namespace, principal.tenant_id, expiry_key, None).key
 
             async def acknowledge(transaction: StateTransaction) -> None:
                 record = await transaction.get_record(identity)

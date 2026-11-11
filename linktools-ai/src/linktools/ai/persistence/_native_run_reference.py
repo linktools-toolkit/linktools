@@ -183,7 +183,7 @@ class NativeRunReferences:
             return
         if self.encode(run, source_receipt=source_receipt) != record.data:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._projections.setdefault(transaction, {})[record.key_digest] = (record.data, _encode_step_envelope(run))
+        self._projections.setdefault(transaction, {})[record.key] = (record.data, _encode_step_envelope(run))
 
     async def read_physical(self, transaction: StateTransaction, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         """Resolve existing sources in the write prefetch, retaining physical CAS records."""
@@ -240,21 +240,21 @@ class NativeRunReferences:
             else None
         )).where(records.c.store_digest == self._state.store_digest.hex())
         if keys is not None:
-            statement = statement.where(records.c.key_digest.in_(tuple(key.hex() for key in keys)))
+            statement = statement.where(records.c.key.in_(tuple(keys)))
         if query is not None:
             statement = statement.where(records.c.kind == "agent_run")
             if query.scope_key is not None:
                 statement = statement.where(records.c.scope_key == query.scope_key)
             if query.parent_key is not None:
                 statement = statement.where(records.c.parent_key == query.parent_key)
-            statement = statement.order_by(records.c.sort_key, records.c.key_digest)
+            statement = statement.order_by(records.c.sort_key, records.c.key)
         if scan is not None:
             after, limit = scan
             if type(limit) is not int or not 1 <= limit <= 1000:
                 raise ValueError("record page limit must be between 1 and 1000")
             if after is not None:
-                statement = statement.where(records.c.key_digest > after.key_digest.hex())
-            statement = statement.order_by(records.c.key_digest).limit(limit)
+                statement = statement.where(records.c.key > after.key)
+            statement = statement.order_by(records.c.key).limit(limit)
         return statement
 
     async def read(
@@ -329,10 +329,10 @@ class NativeRunReferences:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 run = self.project(record.data, native, store_digest=row["native_store_digest"])
                 data = _encode_step_envelope(run)
-                projected[record.key_digest] = (record.data, data)
+                projected[record.key] = (record.data, data)
                 record = replace(record, data=data)
             ordered.append(record)
-            values[record.key_digest] = record
+            values[record.key] = record
         return (tuple(ordered) if keys is None else
                 tuple(values[key] for key in dict.fromkeys(keys) if key in values))
 

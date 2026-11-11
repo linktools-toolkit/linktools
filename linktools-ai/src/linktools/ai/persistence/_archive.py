@@ -15,7 +15,7 @@ from ..model.attachments import read_attachment_payload, store_attachment_payloa
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
 from ._payload import decode_payload_bytes, encode_payload_bytes
-from .state import StateStore, StateTransaction, StoredRecord, record_key_digest
+from .state import RECORD_KEY_MAX_BYTES, StateStore, StateTransaction, StoredRecord, record_key
 
 
 if TYPE_CHECKING:
@@ -253,10 +253,10 @@ class PreparedArchive:
     _observed_content: dict[bytes, StoredRecord | None] = field(default_factory=dict, repr=False, compare=False)
 
     def content_verified(self, record: StoredRecord) -> bool:
-        return self._verified_content.get(record.key_digest) is record
+        return self._verified_content.get(record.key) is record
 
     def verify_content(self, record: StoredRecord) -> None:
-        self._verified_content[record.key_digest] = record
+        self._verified_content[record.key] = record
 
     def clear_verified_content(self) -> None:
         self._verified_content.clear()
@@ -330,7 +330,7 @@ class ContentArchive:
         return ArchiveRoot(self.scope_id, self.content_scope)
 
     def _key(self, kind: str, identity: str) -> bytes:
-        return record_key_digest("", "", "archive", kind, [self.content_scope, identity])
+        return record_key("", "", "archive", kind, (self.content_scope, identity))
 
     def _record(self, kind: str, identity: str, data: Mapping[str, JsonValue],
                 *, payload_bytes: bytes | None = None) -> StoredRecord:
@@ -348,11 +348,11 @@ class ContentArchive:
         """Retain one completed metadata observation, without proving body integrity."""
         self._bind(prepared)
         keys = frozenset(requested_keys)
-        if (any(not isinstance(key, bytes) or len(key) != 32 for key in keys)
+        if (any(not isinstance(key, bytes) or not 1 <= len(key) <= RECORD_KEY_MAX_BYTES for key in keys)
                 or not set(records).issubset(keys)):
             raise _integrity()
         for key, record in records.items():
-            if (record.key_digest != key or record.kind != "archive_content"
+            if (record.key != key or record.kind != "archive_content"
                     or record.scope_key != bytes.fromhex(self.content_scope)):
                 raise _integrity()
             content = ContentRecord.from_record(record)
@@ -464,12 +464,12 @@ class ContentArchive:
             if result is not None:
                 return result
         result = dict(await transaction.get_records(tuple(dict.fromkeys(
-            [request.key_digest for request in requests] + list(content_keys)
+            [request.key for request in requests] + list(content_keys)
         ))))
         related: set[bytes] = set()
         body_nodes: set[bytes] = set()
         for request in requests:
-            record = result.get(request.key_digest)
+            record = result.get(request.key)
             if record is None:
                 continue
             node = self._decode_node_record(record)
@@ -501,7 +501,7 @@ class ContentArchive:
         if record.kind != "archive_sequence" or record.scope_key != bytes.fromhex(self.content_scope):
             raise _integrity()
         node = ImmutableSequenceNode.from_json(record.data)
-        if record.sort_key != node.identity.encode("ascii") or record.key_digest != self._key(record.kind, node.identity):
+        if record.sort_key != node.identity.encode("ascii") or record.key != self._key(record.kind, node.identity):
             raise _integrity()
         return node
 
@@ -542,14 +542,14 @@ class ContentArchive:
             if (node.identity != identity or node.tree_count != weights[position]
                     or (node.next_forest is None) != (position + 1 == len(weights))):
                 raise _integrity()
-            previous = prepared.records.get(record.key_digest)
+            previous = prepared.records.get(record.key)
             previous_node = prepared.nodes.get(node.identity)
             if ((previous is not None and previous != record)
                     or (previous_node is not None and previous_node != node)):
                 raise _integrity()
             decoded[node.identity] = node
             identity = node.next_forest
-        prepared.records.update((record.key_digest, record) for record in records)
+        prepared.records.update((record.key, record) for record in records)
         prepared.nodes.update(decoded)
 
     async def prepare_append(
@@ -585,7 +585,7 @@ class ContentArchive:
             if record.kind != "archive_sequence":
                 continue
             node = self._decode_node_record(record)
-            if key != record.key_digest:
+            if key != record.key:
                 raise _integrity()
             previous = prepared.records.get(key)
             if previous is not None and previous != record:
@@ -639,7 +639,7 @@ class ContentArchive:
             identity = node.identity
             prepared.nodes[identity] = cache[identity] = node
             record = self._record("archive_sequence", identity, node.to_json())
-            prepared.records[record.key_digest] = record
+            prepared.records[record.key] = record
             count = 1 if tail is None else tail.count + 1
             value = ArchiveSlice(identity, count, 0, count)
             if tail is None:
@@ -875,7 +875,7 @@ class ContentArchive:
                     return None
                 rows = await self._frontiers(transaction, tuple(requests.values()))
                 for key, record in rows.items():
-                    if key != record.key_digest or record.scope_key != bytes.fromhex(self.content_scope):
+                    if key != record.key or record.scope_key != bytes.fromhex(self.content_scope):
                         raise _integrity()
                     if record.kind == "archive_sequence":
                         node = self._decode_node_record(record)

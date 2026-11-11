@@ -273,7 +273,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
             elif post_commit_change == "seal":
 
                 async def remove_seal(transaction):
-                    key = repository._key("execution_history_seal", "execution")
+                    key = repository._key("execution_history_seal", ("execution",))
                     stored = await transaction.get_record(key)
                     assert stored is not None
                     await transaction.delete_record(
@@ -325,7 +325,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     from linktools.ai.persistence._repository_common import _RepositoryBase
 
                     async def corrupt(transaction):
-                        stored = await transaction.get_record(repository._key("execution", "execution"))
+                        stored = await transaction.get_record(repository._key("execution", ("execution",)))
                         assert stored is not None
                         replacement = await _RepositoryBase._projected_content(repository, stored, changed)
                         assert await transaction.replace_record(

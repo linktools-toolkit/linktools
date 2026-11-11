@@ -43,7 +43,7 @@ async def test_fact_reads_preserve_exact_scope_and_transaction_view(tmp_path: Pa
 
         await store.mutate(seed)
         await other.mutate(seed)
-        await other.mutate(lambda tx: tx.delete_fact_streams(owner.key_digest))
+        await other.mutate(lambda tx: tx.delete_fact_streams(owner.key))
 
         async def read(transaction):
             assert isinstance(transaction, FactReader)
@@ -52,16 +52,16 @@ async def test_fact_reads_preserve_exact_scope_and_transaction_view(tmp_path: Pa
             assert await transaction.get_facts(_digest("absent"), (0, 2, 5)) == ()
             assert await transaction.get_facts(stream, ()) == ()
             with pytest.raises(StateTransactionNestingError):
-                await transaction.delete_fact_streams(owner.key_digest)
+                await transaction.delete_fact_streams(owner.key)
 
         await store.read(read)
         assert await other.read(lambda tx: tx.get_facts(stream, (0, 2, 5))) == ()
 
         async def abort(transaction):
             assert isinstance(transaction, FactReader)
-            await transaction.delete_fact_streams(owner.key_digest)
+            await transaction.delete_fact_streams(owner.key)
             assert await transaction.get_facts(stream, (0, 2, 5)) == ()
-            assert await transaction.guard_record(owner.key_digest, expected_storage_revision=0)
+            assert await transaction.guard_record(owner.key, expected_storage_revision=0)
             await transaction.insert_fact(facts[1])
             assert await transaction.get_facts(stream, (0, 2, 5)) == (facts[1],)
             raise AIError(ErrorCode.STORAGE_CONFLICT)

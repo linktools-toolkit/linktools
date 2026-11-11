@@ -51,7 +51,7 @@ async def _observe(
 
     async def capture(group: StateGroupTransaction) -> dict[bytes, StoredRecord]:
         assert isinstance(group, GroupRecordReader)
-        records = await group.get_records({owner: (_record("owner").key_digest,), archive.store: keys})
+        records = await group.get_records({owner: (_record("owner").key,), archive.store: keys})
         return dict(records[archive.store])
 
     observed = await owner.storage_group.read_many((owner, archive.store), capture)

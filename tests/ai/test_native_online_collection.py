@@ -71,7 +71,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
         async def publish(tx):
             await tx.insert_record(record)
             if owner == "fact":
-                await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key_digest, "chunk", None, "UNKNOWN", payload))
+                await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, "UNKNOWN", payload))
             elif owner == "operation":
                 await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
 
@@ -92,7 +92,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
                 replace(record, data={}, storage_revision=1), expected_storage_revision=0,
             ))
         else:
-            assert await state.mutate(lambda tx: tx.delete_record(record.key_digest))
+            assert await state.mutate(lambda tx: tx.delete_record(record.key))
         assert await _count(engine, "ai_step_messages") == 1
         assert await _count(engine, "ai_step_sequences") == 1
         assert await native.latest_snapshot(run_id="run") == current
@@ -127,7 +127,7 @@ async def test_native_binding_enables_retention_after_state_only_initialization(
             await native.publish_archived_messages(tx, prepared)
         await state.mutate(publish)
         assert (await native.read_message_roots((root,)))[0]
-        assert await state.mutate(lambda tx: tx.delete_record(record.key_digest))
+        assert await state.mutate(lambda tx: tx.delete_record(record.key))
         assert await _count(engine, "ai_step_messages") == 0
     finally:
         await native.close()
@@ -151,17 +151,17 @@ async def test_cold_state_owner_retains_and_releases_native_content(tmp_path: Pa
             await owner.close()
             owner = SqlStateStore(other_engine, native_content_index=True)
             await owner.initialize()
-            assert await owner.read(lambda tx: tx.get_record(record.key_digest)) == record
+            assert await owner.read(lambda tx: tx.get_record(record.key)) == record
             if release == "replace":
                 async def release_owner(tx):
-                    previous = await tx.get_record(record.key_digest)
+                    previous = await tx.get_record(record.key)
                     assert previous == record
                     return await tx.replace_record(
                         replace(previous, storage_revision=1, data={}), expected_storage_revision=0,
                     )
                 assert await owner.mutate(release_owner)
             else:
-                assert await owner.mutate(lambda tx: tx.delete_record(record.key_digest))
+                assert await owner.mutate(lambda tx: tx.delete_record(record.key))
             await index.maintain_native_content(native.storage_context, store_digests=(native.store_digest,))
             assert await _count(engine, "ai_step_messages") == 1
         finally:
@@ -184,7 +184,7 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
                 await tx.insert_record(record)
                 try:
                     if kind == "fact":
-                        await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key_digest, "chunk", None, "UNKNOWN", payload))
+                        await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, "UNKNOWN", payload))
                     elif kind == "operation":
                         await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
                 except AIError:
@@ -193,10 +193,10 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
             with pytest.raises(AIError) as raised:
                 await owner.mutate(publish)
             assert raised.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
-            assert await owner.read(lambda tx: tx.get_record(record.key_digest)) is None
+            assert await owner.read(lambda tx: tx.get_record(record.key)) is None
             business = _record(encode_domain({"root": payload}))
             await owner.mutate(lambda tx: tx.insert_record(business))
-            assert await owner.read(lambda tx: tx.get_record(business.key_digest)) == business
+            assert await owner.read(lambda tx: tx.get_record(business.key)) == business
         finally:
             await owner.close()
 
@@ -413,7 +413,7 @@ async def test_owner_and_native_edge_publication_roll_back_together(tmp_path: Pa
 
         with pytest.raises(AIError):
             await state.mutate(publish)
-        assert await state.read(lambda tx: tx.get_record(record.key_digest)) is None
+        assert await state.read(lambda tx: tx.get_record(record.key)) is None
         assert await _count(engine, "ai_native_content_edges") == before
         assert await _count(engine, "ai_step_messages") == 1
 
@@ -476,7 +476,7 @@ async def test_multiple_stale_candidates_each_rebuild_once_before_atomic_publica
 
         await state.mutate(publish)
         assert attempts == 3, "each newly encountered stale candidate permits only one cold retry"
-        assert await state.read(lambda tx: tx.get_record(record.key_digest)) == record
+        assert await state.read(lambda tx: tx.get_record(record.key)) == record
         assert await _count(engine, "ai_step_messages") == before + 2
         assert all(await native.read_message_roots(roots))
 
@@ -537,9 +537,9 @@ async def test_state_owner_consumes_only_live_matching_publication_handoff(
                 with pytest.raises(AIError) as failed:
                     await state.mutate(lambda transaction: write(transaction, abort=True))
                 assert failed.value.code is ErrorCode.STORAGE_CONFLICT
-                assert await state.read(lambda transaction: transaction.get_record(record.key_digest)) is None
+                assert await state.read(lambda transaction: transaction.get_record(record.key)) is None
             await state.mutate(write)
-            assert await state.read(lambda transaction: transaction.get_record(record.key_digest)) == record
+            assert await state.read(lambda transaction: transaction.get_record(record.key)) == record
             assert len(queries) == (1 if boundary == "same" else 3 if boundary == "savepoint_rollback" else 2)
             assert all(parameters[0] == native.store_digest and len(parameters) == 2 for _, parameters in queries)
             assert (await native.read_message_roots((retained,)))[0]
@@ -548,7 +548,7 @@ async def test_state_owner_consumes_only_live_matching_publication_handoff(
             await native.save_snapshot(_snapshot("run", 2, "current"))
             assert (await native.read_message_roots((retained,)))[0]
             assert await _count(engine, "ai_step_messages") == 2
-            assert await state.mutate(lambda transaction: transaction.delete_record(record.key_digest))
+            assert await state.mutate(lambda transaction: transaction.delete_record(record.key))
             assert await _count(engine, "ai_step_messages") == 1
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)

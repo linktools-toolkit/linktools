@@ -134,7 +134,7 @@ async def test_payload_publication_rolls_back_and_complete_reads_require_present
         rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
         body = rows[0]
         if corruption == "missing":
-            await archive.mutate(lambda tx: tx.delete_record(body.key_digest, expected_storage_revision=body.storage_revision))
+            await archive.mutate(lambda tx: tx.delete_record(body.key, expected_storage_revision=body.storage_revision))
         else:
             await archive.mutate(lambda tx: tx.replace_record(replace(body, payload_bytes=b"corrupt", storage_revision=body.storage_revision + 1),
                 expected_storage_revision=body.storage_revision))
@@ -309,7 +309,7 @@ async def test_cold_content_snapshot_discovers_its_dependency_once_and_fails_clo
             _, archive = state.execution.executions.state_store.storage_group.opened_archive
             rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
             for row in rows:
-                await archive.mutate(lambda tx: tx.delete_record(row.key_digest))
+                await archive.mutate(lambda tx: tx.delete_record(row.key))
     async with Persistence.open("payloads", storage=configuration, tenant_id="tenant", read_only=True) as state:
         repository = state.execution.executions
         group = repository.state_store.storage_group

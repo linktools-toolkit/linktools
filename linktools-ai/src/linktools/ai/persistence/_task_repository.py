@@ -379,13 +379,13 @@ class TaskRepositoryImpl(RepositoryBase):
         self._scheduler_definitions: tuple[str, tuple[TaskNode, ...]] | None = None
 
     def _graph_key(self, graph_id: str) -> bytes:
-        return self._key("task_graph", graph_id)
+        return self._key("task_graph", (graph_id,))
 
     def _definition_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node_definition", [graph_id, node_id])
+        return self._key("task_node_definition", (graph_id, node_id))
 
     def _state_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node_state", [graph_id, node_id])
+        return self._key("task_node_state", (graph_id, node_id))
 
     def _definition_parent(self, graph_id: str) -> bytes:
         return self._parent("task_node_definition", "graph", (graph_id,))
@@ -394,7 +394,7 @@ class TaskRepositoryImpl(RepositoryBase):
         return self._parent("task_node_state", "graph", (graph_id,))
 
     def _admission_key(self, graph_id: str) -> bytes:
-        return self._key("task_admission", graph_id)
+        return self._key("task_admission", (graph_id,))
 
     def _recovery_scope(self) -> bytes:
         return self._scope("task_admission", "recoverable", ("graphs",))
@@ -406,10 +406,10 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_admission"
-            or record.key_digest != self._admission_key(graph_id)
+            or record.key != self._admission_key(graph_id)
             or record.scope_key != self._recovery_scope()
             or record.parent_key is not None
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -428,10 +428,10 @@ class TaskRepositoryImpl(RepositoryBase):
         return admission.limits
 
     def _result_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_result", [graph_id, node_id])
+        return self._key("task_result", (graph_id, node_id))
 
     def _prepared_input_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_prepared_input", [graph_id, node_id])
+        return self._key("task_prepared_input", (graph_id, node_id))
 
     def _prepared_input_parent(self, graph_id: str) -> bytes:
         return self._parent("task_prepared_input", "graph", (graph_id,))
@@ -445,10 +445,10 @@ class TaskRepositoryImpl(RepositoryBase):
     def _validate_graph_record(self, record: StoredRecord, graph_id: str) -> None:
         if (
             record.kind != "task_graph"
-            or record.key_digest != self._graph_key(graph_id)
+            or record.key != self._graph_key(graph_id)
             or record.scope_key is not None
             or record.parent_key is not None
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -460,10 +460,10 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_node_state"
-            or record.key_digest != self._state_key(graph_id, node_id)
+            or record.key != self._state_key(graph_id, node_id)
             or record.scope_key is not None
             or record.parent_key != self._state_parent(graph_id)
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -475,10 +475,10 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_node_definition"
-            or record.key_digest != self._definition_key(graph_id, node_id)
+            or record.key != self._definition_key(graph_id, node_id)
             or record.scope_key is not None
             or record.parent_key != self._definition_parent(graph_id)
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -490,10 +490,10 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_result"
-            or record.key_digest != self._result_key(graph_id, node_id)
+            or record.key != self._result_key(graph_id, node_id)
             or record.scope_key != self._result_scope(graph_id)
             or record.parent_key != self._result_parent(graph_id)
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -640,7 +640,7 @@ class TaskRepositoryImpl(RepositoryBase):
             await transaction.insert_record(
                 self._stored(
                     "task_prepared_input",
-                    [lease.graph_id, lease.node_id],
+                    (lease.graph_id, lease.node_id),
                     record,
                     parent=self._prepared_input_parent(lease.graph_id),
                 )
@@ -669,10 +669,10 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_prepared_input"
-            or record.key_digest != self._prepared_input_key(graph_id, node_id)
+            or record.key != self._prepared_input_key(graph_id, node_id)
             or record.scope_key is not None
             or record.parent_key != self._prepared_input_parent(graph_id)
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -707,7 +707,7 @@ class TaskRepositoryImpl(RepositoryBase):
             now = await transaction.now()
             _require_live_task_lease(node, lease, now)
             renewed = await transaction.transition_record_lease(
-                node_record.key_digest,
+                node_record.key,
                 expected_storage_revision=node_record.storage_revision,
                 transition=RecordLeaseTransition("renew", lease.owner, lease.fence, lease_seconds),
             )
@@ -849,7 +849,7 @@ class TaskRepositoryImpl(RepositoryBase):
             # writer in READ COMMITTED. Prove the generation before reporting
             # a derived-count inconsistency; a successful guard is rolled back.
             guarded = await transaction.guard_record(
-                graph_record.key_digest,
+                graph_record.key,
                 expected_storage_revision=graph_record.storage_revision,
             )
             if guarded is None:
@@ -944,7 +944,7 @@ class TaskRepositoryImpl(RepositoryBase):
         latest = facts[0]
         if (
             latest.stream_digest != stream
-            or latest.owner_key_digest != owner
+            or latest.owner_key != owner
             or latest.subject_id is not None
             or latest.state is not None
             or latest.sequence < 1
@@ -991,7 +991,7 @@ class TaskRepositoryImpl(RepositoryBase):
         self._validate_state_record(current, value.graph_id, value.node_id)
         candidate = self._stored(
             "task_node_state",
-            [value.graph_id, value.node_id],
+            (value.graph_id, value.node_id),
             value,
             parent=self._state_parent(value.graph_id),
             state=value.status.value,
@@ -1186,7 +1186,7 @@ class TaskRepositoryImpl(RepositoryBase):
             latest = facts[0]
             if (
                 latest.stream_digest != stream
-                or latest.owner_key_digest != owner
+                or latest.owner_key != owner
                 or latest.subject_id is not None
                 or latest.state is not None
                 or latest.sequence < 1
@@ -1339,7 +1339,7 @@ class TaskRepositoryImpl(RepositoryBase):
             expected_event_seq += 1
             if (
                 value.stream_digest != stream
-                or value.owner_key_digest != owner
+                or value.owner_key != owner
                 or value.subject_id is not None
                 or value.sequence != expected_event_seq
             ):
@@ -1379,7 +1379,7 @@ class TaskRepositoryImpl(RepositoryBase):
             fact = values[0]
             if (
                 fact.stream_digest != stream
-                or fact.owner_key_digest != owner
+                or fact.owner_key != owner
                 or fact.subject_id is not None
                 or fact.state is not None
             ):
@@ -3128,13 +3128,13 @@ class TaskRepositoryImpl(RepositoryBase):
                         for record in (
                             self._stored(
                                 "task_node_definition",
-                                [target_graph_id, value.node_id],
+                                (target_graph_id, value.node_id),
                                 value,
                                 parent=self._definition_parent(target_graph_id),
                             ),
                             self._stored(
                                 "task_node_state",
-                                [target_graph_id, value.node_id],
+                                (target_graph_id, value.node_id),
                                 state_by_id[value.node_id],
                                 parent=self._state_parent(target_graph_id),
                                 state=state_by_id[value.node_id].status.value,
@@ -3145,7 +3145,7 @@ class TaskRepositoryImpl(RepositoryBase):
             await transaction.insert_record(
                 self._stored(
                     "task_result",
-                    [target_graph_id, target_node_id],
+                    (target_graph_id, target_node_id),
                     result_to_insert,
                     scope=self._result_scope(target_graph_id),
                     parent=self._result_parent(target_graph_id),

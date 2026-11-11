@@ -27,7 +27,7 @@ from .state import (
     StateStore,
     StateTransaction,
     StoredRecord,
-    record_key_digest,
+    record_key,
     require_no_run_history_lock,
 )
 
@@ -57,12 +57,12 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         )
 
     def _interaction_key(self, agent_run_id: str, model_request_seq: int) -> bytes:
-        return record_key_digest(
+        return record_key(
             self._namespace,
             self._tenant_id,
             self.runtime_domain.value,
             "model_interaction",
-            [agent_run_id, model_request_seq],
+            (agent_run_id, str(model_request_seq)),
         )
 
     async def checkpoint_publication_record_keys(
@@ -156,7 +156,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value.validate_storage_domain(self.runtime_domain)
         if (
-            record.key_digest != self._interaction_key(value.agent_run_id, value.model_request_seq)
+            record.key != self._interaction_key(value.agent_run_id, value.model_request_seq)
             or record.scope_key is not None
             or record.parent_key != self._agent_run_key(value.agent_run_id)
             or record.kind != "model_interaction"
@@ -193,7 +193,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             records = await transaction.list_records(
                 RecordQuery(
-                    parent_key=owner.key_digest,
+                    parent_key=owner.key,
                     kind="model_interaction",
                     states=frozenset({"RUNNING"}),
                 )
@@ -331,7 +331,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         if not owner_already_guarded:
             owner_record = await transaction.get_record(self._agent_run_key(run.agent_run_id))
             if owner_record is None or await transaction.guard_record(
-                owner_record.key_digest,
+                owner_record.key,
                 expected_storage_revision=owner_record.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)

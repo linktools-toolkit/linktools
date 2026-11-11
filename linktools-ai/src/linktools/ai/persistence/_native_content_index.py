@@ -305,20 +305,21 @@ async def finish_publications(context: "SqlStorageContext", session: "AsyncSessi
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
     import hashlib
     import json
-    from sqlalchemy import JSON, column, select, table
+    from sqlalchemy import JSON, LargeBinary, column, select, table
+    from .state import RECORD_KEY_MAX_BYTES, record_key
     pending = session.info.pop(_PENDING, {})
     if group_id is None and any(pending.values()):
-        records = table("ai_state_records", column("store_digest"), column("key_digest"), column("payload_json", JSON()))
+        records = table("ai_state_records", column("store_digest"), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()))
         wire = await session.scalar(select(records.c.payload_json).where(
             records.c.store_digest == hashlib.sha256(b"linktools-ai:state-group-metadata").hexdigest(),
-            records.c.key_digest == hashlib.sha256(b"archive_scope_id").hexdigest(),
+            records.c.key == record_key("", "", "archive", "archive_scope", ("archive_scope_id",)),
         ))
         if wire is not None:
             group_id = json.loads(wire)["archive_scope_id"]
     for (kind, store, identity), roots in pending.items():
         names = {"record": "ai_state_records", "fact": "ai_state_facts", "operation": "ai_state_operations"}
-        key_column = "operation_key" if kind == "operation" else "key_digest"
-        owner = table(names[kind], column("id"), column("store_digest"), column(key_column),
+        key_column = "operation_key" if kind == "operation" else "key"
+        owner = table(names[kind], column("id"), column("store_digest"), column(key_column, LargeBinary(RECORD_KEY_MAX_BYTES)),
                       column("stream_digest"), column("sequence"))
         conditions = (owner.c.store_digest == store,)
         if kind == "fact":

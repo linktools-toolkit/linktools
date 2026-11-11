@@ -179,7 +179,7 @@ async def test_deferred_readback_rejects_inconsistent_target(tmp_path: Path, mon
         repository = state.checkpoint.approvals
 
         async def break_member(tx):
-            key = repository._key("approval", approvals[0].approval_id)
+            key = repository._key("approval", (approvals[0].approval_id,))
             current = await tx.get_record(key)
             if defect == "missing":
                 assert await tx.delete_record(key, expected_storage_revision=current.storage_revision)

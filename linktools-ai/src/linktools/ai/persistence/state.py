@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_c
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_idempotency_key, validate_persistence_namespace, validate_resource_id, validate_tenant_id
 from ..errors import AIError
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
+from ._record_key import RECORD_KEY_MAX_BYTES, validate_record_key
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +31,7 @@ ALIAS_KEY_MAX_BYTES = 1024
 OPERATION_KEY_MAX_BYTES = 1024
 SORT_KEY_MAX_BYTES = 1152
 RELATION_KEY_MAX_BYTES = 1024
+PARENT_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
 
 
 class StateLockOrderError(RuntimeError):
@@ -330,7 +332,7 @@ def _require_data_mapping(value: object, name: str) -> Mapping[str, JsonValue]:
 class StoredRecord:
     """Current state with a physical CAS revision independent of domain data."""
 
-    key_digest: bytes
+    key: bytes = field(repr=False)
     scope_key: bytes | None = field(repr=False)
     parent_key: bytes | None = field(repr=False)
     kind: str
@@ -347,11 +349,11 @@ class StoredRecord:
     def __post_init__(self) -> None:
         if self.payload_bytes is not None and type(self.payload_bytes) is not bytes:
             raise TypeError("record binary payload must be frozen bytes")
-        _require_digest(self.key_digest, "key_digest")
+        validate_record_key(self.key)
         if self.scope_key is not None:
             validate_relation_key(self.scope_key)
         if self.parent_key is not None:
-            validate_relation_key(self.parent_key)
+            validate_parent_key(self.parent_key)
         if self.subject_id is not None:
             _require_subject_id(self.subject_id)
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
@@ -372,18 +374,18 @@ class StoredRecord:
 @dataclass(frozen=True, slots=True)
 class StoredAlias:
     alias_key: bytes = field(repr=False)
-    record_key_digest: bytes
+    record_key: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         validate_alias_key(self.alias_key)
-        _require_digest(self.record_key_digest, "record_key_digest")
+        validate_record_key(self.record_key)
 
 
 @dataclass(frozen=True, slots=True)
 class StoredFact:
     stream_digest: bytes
     sequence: int
-    owner_key_digest: bytes
+    owner_key: bytes = field(repr=False)
     kind: str
     subject_id: str | None
     state: str | None
@@ -391,7 +393,7 @@ class StoredFact:
 
     def __post_init__(self) -> None:
         _require_digest(self.stream_digest, "stream_digest")
-        _require_digest(self.owner_key_digest, "owner_key_digest")
+        validate_record_key(self.owner_key)
         if self.subject_id is not None:
             _require_subject_id(self.subject_id)
         _require_nonnegative_int(self.sequence, "fact sequence")
@@ -427,12 +429,12 @@ class StoredOperation:
 @dataclass(frozen=True, slots=True)
 class RecordScanCursor:
     kind: str
-    key_digest: bytes
+    key: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, str) or not self.kind:
             raise ValueError("record scan cursor kind is required")
-        _require_digest(self.key_digest, "key_digest")
+        validate_record_key(self.key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,15 +488,16 @@ class RecordQuery:
     states: frozenset[str] | None = None
     sort_key_prefix: bytes | None = field(default=None, repr=False)
     after_sort_key: bytes | None = field(default=None, repr=False)
-    after_key_digest: bytes | None = field(default=None, repr=False)
+    after_key: bytes | None = field(default=None, repr=False)
     limit: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind is None and self.scope_key is None and self.parent_key is None:
             raise ValueError("RecordQuery requires a query dimension")
-        for value in (self.scope_key, self.parent_key):
-            if value is not None:
-                validate_relation_key(value)
+        if self.scope_key is not None:
+            validate_relation_key(self.scope_key)
+        if self.parent_key is not None:
+            validate_parent_key(self.parent_key)
         if self.kind is not None and (
             not isinstance(self.kind, str)
             or not 0 < len(self.kind) <= 32
@@ -504,12 +507,12 @@ class RecordQuery:
             raise ValueError("record kind contains a path separator")
         if self.sort_key_prefix is not None:
             validate_sort_key(self.sort_key_prefix)
-        if self.after_sort_key is None and self.after_key_digest is not None:
+        if self.after_sort_key is None and self.after_key is not None:
             raise ValueError("record cursor key requires a sort key")
         if self.after_sort_key is not None:
             validate_sort_key(self.after_sort_key)
-        if self.after_key_digest is not None:
-            _require_digest(self.after_key_digest, "after_key_digest")
+        if self.after_key is not None:
+            validate_record_key(self.after_key)
         _validate_limit(self.limit)
 
 
@@ -758,7 +761,7 @@ class StateTransaction(Protocol):
 class RecordSubjectReader(Protocol):
     """Optional exact-subject reads within one record scope and kind.
 
-    Return matching records in ascending (sort_key, key_digest) order from the
+    Return matching records in ascending (sort_key, key) order from the
     transaction's current view, including its own writes. Subject duplicates
     do not duplicate rows, but multiple records for one subject are retained.
     Empty input returns an empty tuple without source reads. Parameter limits
@@ -1243,14 +1246,35 @@ class StateStore(Protocol):
     async def validate_integrity(self) -> None: ...
 
 
-def record_key_digest(
+def record_key(
     namespace: str,
     tenant_id: str,
     runtime_domain: str,
     kind: str,
-    identity: JsonValue,
+    identity: Sequence[str],
 ) -> bytes:
-    return _digest(["record", namespace, tenant_id, runtime_domain, kind, identity])
+    """Encode one exact globally scoped record identity with explicit owner parts."""
+    if not all(isinstance(value, str) and value for value in (runtime_domain, kind)):
+        raise ValueError("record domain and kind must be non-empty strings")
+    if not isinstance(identity, Sequence) or isinstance(identity, (str, bytes)):
+        raise TypeError("record identity must be a flat sequence of strings")
+    if not identity:
+        raise ValueError("record identity must contain at least one component")
+    # Group-owned archive records use the reserved empty binding, not a tenant.
+    if not (namespace == tenant_id == "" and runtime_domain == "archive"):
+        validate_persistence_namespace(namespace)
+        validate_tenant_id(tenant_id)
+    return _encode_key_components(
+        ("record", namespace, tenant_id, runtime_domain, kind, *identity),
+        RECORD_KEY_MAX_BYTES,
+    )
+
+
+def validate_parent_key(value: bytes) -> bytes:
+    """A parent can carry either a relation address or a complete record reference."""
+    if type(value) is not bytes or not 1 <= len(value) <= PARENT_KEY_MAX_BYTES:
+        raise ValueError(f"parent key must contain 1..{PARENT_KEY_MAX_BYTES} bytes")
+    return value
 
 
 def state_store_digest(namespace: str, tenant_id: str, runtime_domain: str) -> bytes:
@@ -1381,7 +1405,7 @@ def sortable_timestamp(value: datetime, key: bytes) -> bytes:
     micros = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
     if micros < 0 or micros >= 1 << 63:
         raise ValueError("sortable timestamp is outside the supported range")
-    return validate_sort_key(micros.to_bytes(8, "big") + _require_digest(key, "timestamp key"))
+    return validate_sort_key(micros.to_bytes(8, "big") + validate_record_key(key))
 
 
 def validate_sort_key(value: bytes) -> bytes:
@@ -1393,10 +1417,11 @@ def validate_sort_key(value: bytes) -> bytes:
 
 def validate_record_identity(record: StoredRecord) -> None:
     """Validate physical invariants after decoding a backend row or file."""
-    _require_digest(record.key_digest, "key_digest")
-    for value in (record.scope_key, record.parent_key):
-        if value is not None:
-            validate_relation_key(value)
+    validate_record_key(record.key)
+    if record.scope_key is not None:
+        validate_relation_key(record.scope_key)
+    if record.parent_key is not None:
+        validate_parent_key(record.parent_key)
     if record.subject_id is not None:
         _require_subject_id(record.subject_id)
     validate_sort_key(record.sort_key)
@@ -1411,7 +1436,7 @@ def validate_record_identity(record: StoredRecord) -> None:
 def validate_record_replacement(current: StoredRecord, candidate: StoredRecord) -> None:
     """Keep immutable physical identity columns stable across a CAS."""
     if (
-        current.key_digest != candidate.key_digest
+        current.key != candidate.key
         or current.scope_key != candidate.scope_key
         or current.parent_key != candidate.parent_key
         or current.subject_id != candidate.subject_id
@@ -1442,4 +1467,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'SORT_KEY_MAX_BYTES', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key_digest', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'SORT_KEY_MAX_BYTES', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

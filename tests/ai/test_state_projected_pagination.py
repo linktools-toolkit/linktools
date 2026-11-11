@@ -31,7 +31,7 @@ def _record(identity: str) -> StoredRecord:
     )
     return project_record(
         namespace="records", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
-        kind="session", identity=identity, value=session, state=session.status.value,
+        kind="session", identity=(identity,), value=session, state=session.status.value,
     )
 
 
@@ -54,15 +54,15 @@ async def test_projected_records_page_completely_and_validate_after_roundtrip(
             "session-z", "session-a", "session-中", "session-0", "session-b",
         ))
         await store.mutate(lambda transaction: transaction.insert_records(records))
-        assert all(record.sort_key == record.key_digest for record in records)
-        expected = tuple(sorted(records, key=lambda value: (value.sort_key, value.key_digest)))
+        assert all(record.sort_key == record.key for record in records)
+        expected = tuple(sorted(records, key=lambda value: (value.sort_key, value.key)))
         found: list[StoredRecord] = []
         while True:
             previous = found[-1] if found else None
             page = await store.read(lambda transaction: transaction.list_records(RecordQuery(
                 kind="session", limit=2,
                 after_sort_key=None if previous is None else previous.sort_key,
-                after_key_digest=None if previous is None else previous.key_digest,
+                after_key=None if previous is None else previous.key,
             )))
             if not page:
                 break
@@ -87,7 +87,7 @@ async def test_projected_records_page_completely_and_validate_after_roundtrip(
 
 def test_timestamp_sorting_preserves_chronology_and_stable_ties() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    first, second = _record("first").key_digest, _record("second").key_digest
+    first, second = _record("first").key, _record("second").key
     same_time = (sortable_timestamp(now, first), sortable_timestamp(now, second))
     assert len(same_time[0]) == 40
     assert same_time[0][8:] == first

@@ -226,7 +226,7 @@ async def test_terminal_hint_and_cached_pair_do_not_hide_missing_source(tmp_path
     await repository.create(execution)
     assert await repository.get("execution", tenant_id="tenant") == execution
     source = remote.execution.executions
-    await source.state_store.mutate(lambda tx: tx.delete_record(source._key("execution", "execution")))
+    await source.state_store.mutate(lambda tx: tx.delete_record(source._key("execution", ("execution",))))
     archive = state.run_store.read_store(PersistenceDomain.TRACE)
     try:
         with pytest.raises(AIError) as raised:

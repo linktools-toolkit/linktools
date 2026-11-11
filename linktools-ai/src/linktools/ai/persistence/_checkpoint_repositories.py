@@ -99,7 +99,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
         _require_repository_tenant(tenant_id, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> ApprovalRecord:
-            record = await transaction.get_record(self._key("approval", approval_id))
+            record = await transaction.get_record(self._key("approval", (approval_id,)))
             if record is None:
                 raise AIError(ErrorCode.APPROVAL_CONFLICT)
             current = await self._decode(record, ApprovalRecord)
@@ -140,7 +140,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
         ordered = tuple(dict.fromkeys(approval_ids))
         if not ordered:
             return ()
-        keys = tuple(self._key("approval", approval_id) for approval_id in ordered)
+        keys = tuple(self._key("approval", (approval_id,)) for approval_id in ordered)
         stored_records = await transaction.get_records(keys)
         values: list[ApprovalRecord] = []
         replacements: list[RecordReplacement] = []
@@ -164,7 +164,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
                     replace(
                         self._stored(
                             "approval",
-                            value.approval_id,
+                            (value.approval_id,),
                             value,
                             state=value.status.value,
                         ),
@@ -221,7 +221,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         _require_repository_tenant(tenant_id, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> ExternalCallRecord:
-            record = await transaction.get_record(self._key("external_call", call_id))
+            record = await transaction.get_record(self._key("external_call", (call_id,)))
             if record is None:
                 raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
             current = await self._decode(record, ExternalCallRecord)
@@ -258,7 +258,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         ordered = tuple(dict.fromkeys(call_ids))
         if not ordered:
             return ()
-        keys = tuple(self._key("external_call", call_id) for call_id in ordered)
+        keys = tuple(self._key("external_call", (call_id,)) for call_id in ordered)
         stored_records = await transaction.get_records(keys)
         values: list[ExternalCallRecord] = []
         replacements: list[RecordReplacement] = []
@@ -282,7 +282,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
                     replace(
                         self._stored(
                             "external_call",
-                            value.call_id,
+                            (value.call_id,),
                             value,
                             state=value.status.value,
                         ),
@@ -321,7 +321,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         )
 
     def _tool_key(self, identity: str) -> bytes:
-        return self._key("tool_operation", identity)
+        return self._key("tool_operation", (identity,))
 
     async def _retry_storage_conflict(
         self,
@@ -357,7 +357,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 current = await self._decode(stored, ToolOperationRecord)
             else:
                 current = observed.value
-                stored = replace(self._stored("tool_operation", current.tool_operation_id, current,
+                stored = replace(self._stored("tool_operation", (current.tool_operation_id,), current,
                                               state=current.status.value), storage_revision=observed.storage_revision)
             if (current.execution_id != execution_id or current.tool_call_id != effect.tool_call_id
                     or current.tool_name != effect.tool_name or current.binding_digest != binding_digest
@@ -404,10 +404,10 @@ class ToolRepositoryImpl(_RepositoryBase):
         if any(value.execution_id != execution_id for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         direct = {run_id, source_run_id} - {None}
-        selected = {stored.key_digest for stored, value in zip(records, values, strict=True)
+        selected = {stored.key for stored, value in zip(records, values, strict=True)
                     if value.agent_run_id in direct}
         remaining = [(stored, value) for stored, value in zip(records, values, strict=True)
-                     if stored.key_digest not in selected]
+                     if stored.key not in selected]
         if remaining:
             aliases = tuple(alias_key(
                 self._namespace, self._tenant_id, self._domain.value, "tool_call", [alias_run_id, value.tool_call_id],
@@ -415,7 +415,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             resolved = await self._store.read(lambda transaction: transaction.resolve_aliases(aliases))
             selected.update(resolved.values())
         return tuple(value for stored, value in zip(records, values, strict=True)
-                     if stored.key_digest in selected)
+                     if stored.key in selected)
 
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
@@ -461,7 +461,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                         or current.agent_run_id not in {request.agent_run_id, request.recovery_agent_run_id}
                         or current.tool_call_id != request.tool_call_id):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                record = replace(self._stored("tool_operation", current.tool_operation_id, current),
+                record = replace(self._stored("tool_operation", (current.tool_operation_id,), current),
                                  storage_revision=observed.storage_revision)
                 resolved = {}
             else:
@@ -510,7 +510,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 await transaction.insert_record(
                     self._stored(
                         "tool_operation",
-                        request.tool_operation_id,
+                        (request.tool_operation_id,),
                         value,
                         scope=self._scope(
                             "tool_operation", "agent_run", (request.agent_run_id,)
@@ -533,7 +533,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             )
             if missing_aliases:
                 guarded = await transaction.guard_record(
-                    record.key_digest,
+                    record.key,
                     expected_storage_revision=record.storage_revision,
                 )
                 if guarded is None:
@@ -541,7 +541,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 record = guarded
                 await transaction.insert_aliases(
                     tuple(
-                        StoredAlias(alias, record.key_digest)
+                        StoredAlias(alias, record.key)
                         for alias in missing_aliases
                     )
                 )
@@ -603,7 +603,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                     if resolved_key is None:
                         guarded = await transaction.guard_record(
-                            existing_record.key_digest,
+                            existing_record.key,
                             expected_storage_revision=existing_record.storage_revision,
                         )
                         if guarded is None:
@@ -614,7 +614,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     return existing
                 stored = self._stored(
                     "tool_operation",
-                    record.tool_operation_id,
+                    (record.tool_operation_id,),
                     record,
                     scope=self._scope("tool_operation", "agent_run", (record.agent_run_id,)),
                     state=record.status.value,
@@ -1047,7 +1047,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     ):
                         if write is not None:
                             guarded = await transaction.guard_record_revision(
-                                record.key_digest, expected_storage_revision=record.storage_revision,
+                                record.key, expected_storage_revision=record.storage_revision,
                             )
                             if guarded is None:
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1097,7 +1097,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         async def mutate(transaction: StateTransaction) -> Observed[ToolOperationRecord]:
             record = (await transaction.get_record(self._tool_key(tool_operation_id))
                       if observed is None else replace(
-                          self._stored("tool_operation", observed.value.tool_operation_id, observed.value),
+                          self._stored("tool_operation", (observed.value.tool_operation_id,), observed.value),
                           storage_revision=observed.storage_revision))
             if observed is not None and observed.value.tool_operation_id != tool_operation_id:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)

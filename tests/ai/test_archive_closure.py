@@ -25,7 +25,7 @@ from linktools.ai.persistence.contracts import ArchivedContextBlock, RuntimePayl
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._object_cleanup import _capture_closure, purge_unreferenced_objects
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import RELATION_KEY_MAX_BYTES, StoredRecord, record_key_digest
+from linktools.ai.persistence.state import RELATION_KEY_MAX_BYTES, StoredRecord, record_key
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
 
 pytestmark = pytest.mark.asyncio
@@ -59,7 +59,7 @@ async def test_archive_closure_preserves_partial_visible_content_and_shared_dag(
     retained = closure.retained_records
     assert {record.sort_key.decode("ascii") for record in retained if record.kind == "archive_content"} == {identities[1]}
     for record in closure.unreachable_records:
-        await store.mutate(lambda tx, record=record: tx.delete_record(record.key_digest))
+        await store.mutate(lambda tx, record=record: tx.delete_record(record.key))
     assert await archive.read_contents(await archive.content_ids(partial), codec="bytes") == (b"B",)
     restored = ArchiveClosure(scope, retained)
     restored.mark(partial)
@@ -217,7 +217,7 @@ async def test_archive_scope_keeps_its_digest_contract_with_bounded_relation_pri
         records = await store.read(lambda tx: tx.scan_records())
         for original in records:
             record = replace(original, scope_key=scope,
-                             key_digest=record_key_digest("", "", "archive", original.kind,
+                             key=record_key("", "", "archive", original.kind,
                                                           [scope.hex(), original.sort_key.decode("ascii")]))
             with pytest.raises(AIError) as error:
                 ArchiveClosure(scope_id, (record,))

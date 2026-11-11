@@ -124,7 +124,7 @@ async def test_owned_input_expiry_fences_only_its_reserved_derivation(
                 tenant_id=PRINCIPAL.tenant_id, key=candidates[0])
             assert record is not None
             await state.mutate(lambda transaction: transaction.delete_record(
-                record.key_digest, expected_storage_revision=record.storage_revision))
+                record.key, expected_storage_revision=record.storage_revision))
         await captures.expire_task_input_records(candidates, principal=PRINCIPAL, now=datetime.now(timezone.utc))
         await captures.expire_task_input_records(candidates, principal=PRINCIPAL, now=datetime.now(timezone.utc))
         with pytest.raises(AIError) as rejected:

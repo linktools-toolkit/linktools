@@ -17,7 +17,7 @@ from ..storage import (
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES
+from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -80,10 +80,10 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
         ),
         Column(
-            "key_digest",
-            digest,
+            "key",
+            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of the persisted runtime record.",
+            comment="Exact bounded binary identity of the persisted runtime record.",
         ),
         Column(
             "scope_key",
@@ -99,7 +99,7 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "parent_key",
-            LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
+            LargeBinary(PARENT_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(PARENT_KEY_MAX_BYTES), "mysql"),
             nullable=True,
             comment="Bounded binary parent identity used by hierarchical list queries.",
         ),
@@ -158,7 +158,7 @@ def build_runtime_sql_metadata(
         comment=_RECORD_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(records, "store_digest", "key_digest")
+    sql_unique(records, "store_digest", "key")
     sql_query_index(records, "store_digest", "kind", "sort_key")
     sql_query_index(records, "scope_key", "sort_key")
     sql_query_index(records, "scope_key", "subject_id")
@@ -182,17 +182,17 @@ def build_runtime_sql_metadata(
             comment="Binary secondary lookup address with a maximum of 1024 bytes.",
         ),
         Column(
-            "record_key_digest",
-            digest,
+            "record_key",
+            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of the runtime record resolved by this alias.",
+            comment="Exact bounded binary identity of the runtime record resolved by this alias.",
         ),
         *_audit(),
         comment=_ALIAS_COMMENT,
         **sql_table_options(),
     )
     sql_unique(aliases, "store_digest", "alias_key")
-    sql_query_index(aliases, "store_digest", "record_key_digest")
+    sql_query_index(aliases, "store_digest", "record_key")
     sql_audit_indexes(aliases)
 
     facts = Table(
@@ -218,10 +218,10 @@ def build_runtime_sql_metadata(
             comment="Strictly increasing position of the fact within its stream.",
         ),
         Column(
-            "owner_key_digest",
-            digest,
+            "owner_key",
+            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of the runtime record that owns this fact.",
+            comment="Exact bounded binary identity of the runtime record that owns this fact.",
         ),
         Column(
             "kind",
@@ -252,7 +252,7 @@ def build_runtime_sql_metadata(
         **sql_table_options(),
     )
     sql_unique(facts, "store_digest", "stream_digest", "sequence")
-    sql_query_index(facts, "owner_key_digest")
+    sql_query_index(facts, "owner_key")
     sql_query_index(facts, "stream_digest", "subject_id", "sequence")
     sql_audit_indexes(facts)
 

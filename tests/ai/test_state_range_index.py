@@ -21,7 +21,7 @@ from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._sql import SqlStateStore, _record_from_row, _record_values
 from linktools.ai.persistence.codec import decode_record, encode_record
 from linktools.ai.persistence.state import (
-    RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES, RecordQuery, StateStore, StoredRecord,
+    RELATION_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES, RecordQuery, StateStore, StoredRecord,
     parent_key, scope_key, validate_record_identity,
 )
 
@@ -51,9 +51,9 @@ async def test_binary_sort_prefix_and_pagination_match_byte_order(tmp_path: Path
                  b"\x7f", b"\x80", b"\xff", b"\xff\x00", b"\xff\xff",
                  b"x" * SORT_KEY_MAX_BYTES)
         records = tuple(_record(value) for value in sorts)
-        tied = replace(_record(b"A-one"), key_digest=b"\xff" * 32)
+        tied = replace(_record(b"A-one"), key=b"\xff" * 32)
         await store.mutate(lambda tx: tx.insert_records((*records, tied)))
-        ordered = tuple(sorted((*records, tied), key=lambda record: (record.sort_key, record.key_digest)))
+        ordered = tuple(sorted((*records, tied), key=lambda record: (record.sort_key, record.key)))
         for prefix in (None, b"A", b"a", b"\x00", b"%_", b"\xff", b"\xff\xff", b"x" * SORT_KEY_MAX_BYTES):
             found = []
             cursor = None
@@ -61,7 +61,7 @@ async def test_binary_sort_prefix_and_pagination_match_byte_order(tmp_path: Path
                 sort, key = decode_record_cursor(cursor)
                 page = await store.read(lambda tx: tx.list_records(RecordQuery(
                     kind="probe", scope_key=_SCOPE, sort_key_prefix=prefix,
-                    after_sort_key=sort, after_key_digest=key, limit=2,
+                    after_sort_key=sort, after_key=key, limit=2,
                 )))
                 if not page:
                     break
@@ -93,7 +93,7 @@ def test_binary_sorts_roundtrip_through_current_wire_rows_and_cursors(sort: byte
     record = _record(sort)
     assert decode_record(encode_record(record)) == record
     assert _record_from_row(_record_values(record)) == record
-    assert decode_record_cursor(record_cursor(record)) == (sort, record.key_digest)
+    assert decode_record_cursor(record_cursor(record)) == (sort, record.key)
 
 
 @pytest.mark.parametrize("sort", (b"", b"x" * (SORT_KEY_MAX_BYTES + 1), "text", bytearray(b"x")))
@@ -141,7 +141,7 @@ def test_raw_sort_and_cursor_fields_do_not_reveal_key_material_in_repr() -> None
     secret = b"secret-identity-MUST-NOT-APPEAR"
     record = _record(secret)
     query = RecordQuery(kind="probe", sort_key_prefix=secret, after_sort_key=secret,
-                        after_key_digest=record.key_digest)
+                        after_key=record.key)
     assert secret.decode("ascii") not in repr(record)
     assert secret.decode("ascii") not in repr(query)
 
@@ -193,8 +193,10 @@ def test_binary_relations_roundtrip_through_current_wire_and_rows(relation: byte
 
 
 @pytest.mark.parametrize("field", ("scope_key", "parent_key"))
-@pytest.mark.parametrize("relation", (b"", b"x" * (RELATION_KEY_MAX_BYTES + 1), "text", bytearray(b"x")))
+@pytest.mark.parametrize("relation", (b"", "oversized", "text", bytearray(b"x")))
 def test_relation_producers_queries_and_readers_reject_invalid_binary_bounds(field: str, relation: object) -> None:
+    if relation == "oversized":
+        relation = b"x" * ((PARENT_KEY_MAX_BYTES if field == "parent_key" else RELATION_KEY_MAX_BYTES) + 1)
     record = _record(b"sort")
     with pytest.raises(ValueError):
         replace(record, **{field: relation})
@@ -216,10 +218,10 @@ def test_relation_query_indexes_fit_full_binary_values_on_each_dialect() -> None
         column_type = records.c[name].type
         assert column_type.compile(dialect=postgresql.dialect()) == "BYTEA"
         assert column_type.compile(dialect=sqlite.dialect()) == "BLOB"
-        assert column_type.compile(dialect=mysql.dialect()) == f"VARBINARY({RELATION_KEY_MAX_BYTES})"
+        assert column_type.compile(dialect=mysql.dialect()) == f"VARBINARY({PARENT_KEY_MAX_BYTES if name == 'parent_key' else RELATION_KEY_MAX_BYTES})"
         index, = (index for index in records.indexes if index.info.get("ddl_dialect") == "portable"
                       and tuple(column.name for column in index.columns) == (name, "sort_key"))
-        assert sum(column.type.length for column in index.columns) == 2176
+        assert sum(column.type.length for column in index.columns) == (2304 if name == "parent_key" else 2176)
     subject_index, = (index for index in records.indexes
                       if index.info.get("ddl_dialect") == "portable"
                       and tuple(column.name for column in index.columns) == ("scope_key", "subject_id"))
@@ -256,14 +258,14 @@ async def test_relation_queries_isolate_all_global_components_with_exact_paging(
         records = tuple(replace(_record(str(index).encode()),
                                 scope_key=scope_key(*scope), parent_key=parent_key(*scope))
                         for index, scope in enumerate(scopes))
-        same_scope = replace(records[0], key_digest=b"z" * 32, sort_key=b"z" * SORT_KEY_MAX_BYTES)
+        same_scope = replace(records[0], key=b"z" * 32, sort_key=b"z" * SORT_KEY_MAX_BYTES)
         await store.mutate(lambda tx: tx.insert_records((*records, same_scope)))
         for field, address in (("scope_key", scope_key), ("parent_key", parent_key)):
             first = await store.read(lambda tx: tx.list_records(RecordQuery(**{field: address(*parts)}, limit=1)))
             assert first == (records[0],)
             last = await store.read(lambda tx: tx.list_records(RecordQuery(
                 **{field: address(*parts)}, after_sort_key=first[0].sort_key,
-                after_key_digest=first[0].key_digest, limit=1,
+                after_key=first[0].key, limit=1,
             )))
             assert last == (same_scope,)
         longest = replace(_record(b"longest"), scope_key=b"s" * RELATION_KEY_MAX_BYTES,

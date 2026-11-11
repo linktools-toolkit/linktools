@@ -20,7 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.execution import CancelExecutionRequest, ListSessionRequest
-from linktools.ai.persistence.state import active_state_scope, record_key_digest
+from linktools.ai.persistence.state import active_state_scope, record_key
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
@@ -392,8 +392,8 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
         async def observe(session_id, *, tenant_id):
             kinds = (("session", "session"), ("conversation_history", record.history_id),
                      ("transcript_head", record.history_id))
-            keys = tuple(record_key_digest(
-                sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, identity,
+            keys = tuple(record_key(
+                sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, (identity,),
             ) for kind, identity in kinds)
             await sessions.state_store.mutate(lambda transaction: transaction.delete_records(keys))
             await sessions.create(replace(_session(), owner_principal_id="other", metadata={"secret": "other owner"}))

@@ -890,9 +890,9 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
             "request-1", terminal.status, _encode_step(terminal),
         )
         async def seed(transaction):
-            owner = await transaction.get_record(fact.owner_key_digest)
+            owner = await transaction.get_record(fact.owner_key)
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
             await transaction.delete_record(archive._interaction_key(run.agent_run_id, 1))
             await transaction.insert_fact(fact)
         await archive.state_store.mutate(seed)

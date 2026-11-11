@@ -133,13 +133,13 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         self._background_tasks: set[asyncio.Task[object]] = set()
 
     def _graph_key(self, graph_id: str) -> bytes:
-        return self._key("task_graph", graph_id)
+        return self._key("task_graph", (graph_id,))
 
     def _definition_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node_definition", [graph_id, node_id])
+        return self._key("task_node_definition", (graph_id, node_id))
 
     def _state_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node_state", [graph_id, node_id])
+        return self._key("task_node_state", (graph_id, node_id))
 
     def _definition_parent(self, graph_id: str) -> bytes:
         return self._parent("task_node_definition", "graph", (graph_id,))
@@ -148,16 +148,16 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         return self._parent("task_node_state", "graph", (graph_id,))
 
     def _admission_key(self, graph_id: str) -> bytes:
-        return self._key("task_admission", graph_id)
+        return self._key("task_admission", (graph_id,))
 
     def _recovery_scope(self) -> bytes:
         return self._scope("task_admission", "recoverable", ("graphs",))
 
     def _submission_key(self, graph_id: str) -> bytes:
-        return self._key("task_submission", graph_id)
+        return self._key("task_submission", (graph_id,))
 
     def _prepared_key(self, graph_id: str) -> bytes:
-        return self._key("task_submission_payload", graph_id)
+        return self._key("task_submission_payload", (graph_id,))
 
     async def _replace_submission(
         self, transaction: StateTransaction, record: StoredRecord, state: str,
@@ -177,10 +177,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         stored = await self._decode(record, TaskSubmissionRef)
         if (
             record.kind != "task_submission"
-            or record.key_digest != self._submission_key(graph_id)
+            or record.key != self._submission_key(graph_id)
             or record.scope_key is not None
             or record.parent_key is not None
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
             or record.state not in {"prepared", "admitted", "cancelled"}
             or stored.namespace != self._namespace
             or stored.tenant_id != self._tenant_id
@@ -296,11 +296,11 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await transaction.insert_records((
                     self._stored(
-                        "task_submission", candidate.graph.graph_id,
+                        "task_submission", (candidate.graph.graph_id,),
                         candidate.ref, state="prepared",
                     ),
                     self._stored(
-                        "task_submission_payload", candidate.graph.graph_id, candidate,
+                        "task_submission_payload", (candidate.graph.graph_id,), candidate,
                     ),
                 ))
                 return candidate, True
@@ -362,7 +362,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 if submission.request_identity_version != 2:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
                                   safe_details={"reason": "legacy_submission_not_retained"})
-                record = self._stored("task_submission", submission.graph_id, submission, state="cancelled")
+                record = self._stored("task_submission", (submission.graph_id,), submission, state="cancelled")
                 await transaction.insert_records((record,))
             graph_record = await transaction.get_record(self._graph_key(submission.graph_id))
             admitted = graph_record is not None
@@ -377,13 +377,13 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 prepared = await self._decode(payload, TaskGraphSubmission)
                 if prepared.ref != submission:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await transaction.delete_record(payload.key_digest)
+                await transaction.delete_record(payload.key)
             if record.state != "cancelled":
                 await self._replace_submission(transaction, record, "cancelled")
             if admitted:
                 self._validate_graph_record(graph_record, submission.graph_id)
                 if await transaction.guard_record(
-                    graph_record.key_digest,
+                    graph_record.key,
                     expected_storage_revision=graph_record.storage_revision,
                 ) is None:
                     raise _SubmissionConflict()
@@ -517,10 +517,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
     def _validate_graph_record(self, record: StoredRecord, graph_id: str) -> None:
         if (
             record.kind != "task_graph"
-            or record.key_digest != self._graph_key(graph_id)
+            or record.key != self._graph_key(graph_id)
             or record.scope_key is not None
             or record.parent_key is not None
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -531,10 +531,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_admission"
-            or record.key_digest != self._admission_key(graph_id)
+            or record.key != self._admission_key(graph_id)
             or record.scope_key != self._recovery_scope()
             or record.parent_key is not None
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -546,10 +546,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_node_definition"
-            or record.key_digest != self._definition_key(graph_id, node_id)
+            or record.key != self._definition_key(graph_id, node_id)
             or record.scope_key is not None
             or record.parent_key != self._definition_parent(graph_id)
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -561,10 +561,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
     ) -> None:
         if (
             record.kind != "task_node_state"
-            or record.key_digest != self._state_key(graph_id, node_id)
+            or record.key != self._state_key(graph_id, node_id)
             or record.scope_key is not None
             or record.parent_key != self._state_parent(graph_id)
-            or record.sort_key != record.key_digest
+            or record.sort_key != record.key
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -673,7 +673,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             or not 1 <= limit <= 1000
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        after_sort_key, after_key_digest = decode_record_cursor(cursor)
+        after_sort_key, after_key = decode_record_cursor(cursor)
 
         async def read(transaction: StateTransaction) -> Page[TaskGraphLaunch]:
             records = await transaction.list_records(
@@ -681,7 +681,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     kind="task_graph",
                     states=_RECOVERABLE_GRAPH_STATES,
                     after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
+                    after_key=after_key,
                     limit=limit + 1,
                 )
             )
@@ -766,7 +766,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             if require_prepared:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             await transaction.insert_record(self._stored(
-                "task_submission", graph.graph_id, submission.ref, state="admitted",
+                "task_submission", (graph.graph_id,), submission.ref, state="admitted",
             ))
         elif head.state == "prepared":
             submission = await self._prepared_submission(transaction, head, submission)
@@ -908,13 +908,13 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         records = [
             self._stored(
                 "task_graph",
-                graph.graph_id,
+                (graph.graph_id,),
                 header,
                 state=status.value,
             ),
             self._stored(
                 "task_admission",
-                graph.graph_id,
+                (graph.graph_id,),
                 admission,
                 scope=self._recovery_scope(),
             ),
@@ -925,7 +925,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             records.append(
                 self._stored(
                     "task_node_definition",
-                    [graph.graph_id, node.node_id],
+                    (graph.graph_id, node.node_id),
                     node,
                     parent=self._definition_parent(graph.graph_id),
                 )
@@ -933,7 +933,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             records.append(
                 self._stored(
                     "task_node_state",
-                    [graph.graph_id, node.node_id],
+                    (graph.graph_id, node.node_id),
                     node_view,
                     parent=self._state_parent(graph.graph_id),
                     state=node_view.status.value,

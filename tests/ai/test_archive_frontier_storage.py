@@ -138,7 +138,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
             plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
         assert any("SEARCH ai_state_records USING INDEX" in row[3] and "sort_key=?" in row[3] for row in plan), plan
         assert not any("SCAN ai_state_records" in row[3] for row in plan), plan
-        assert all("sort_key=?" in row[3] or "key_digest=?" in row[3]
+        assert all("sort_key=?" in row[3] or "key=?" in row[3]
                    for row in plan if "SEARCH" in row[3] and "ai_state_records" in row[3]), plan
 
 
@@ -149,8 +149,8 @@ async def test_frontier_unions_overlaps_direct_keys_and_preserves_scope(tmp_path
         first = prepared.nodes[first_id]
         first_key = archive._key("archive_sequence", first_id)
         direct = archive._key("archive_content", first.content_id)
-        extra = next(record.key_digest for record in prepared.records.values()
-                     if record.kind == "archive_content" and record.key_digest != direct)
+        extra = next(record.key for record in prepared.records.values()
+                     if record.kind == "archive_content" and record.key != direct)
         requests = (ArchiveNodeRead(first_key, ArchiveNodeSlot.NEXT, ArchiveNodeSlot.SELF),
                     ArchiveNodeRead(first_key, ArchiveNodeSlot.SELF, ArchiveNodeSlot.NEXT))
 
@@ -177,7 +177,7 @@ async def test_sql_frontier_batches_stay_within_999_parameters(tmp_path: Path) -
     async with _archive_database(tmp_path / "bounded.db") as (engine, archive, prepared, root):
         actual = ArchiveNodeRead(archive._key("archive_sequence", root.slices[0].first), ALL, ALL)
         requests = (actual,) + tuple(ArchiveNodeRead(_digest(f"missing-node-{index}"), ALL, ALL) for index in range(500))
-        contents = tuple(record.key_digest for record in prepared.records.values() if record.kind == "archive_content")
+        contents = tuple(record.key for record in prepared.records.values() if record.kind == "archive_content")
         contents += tuple(_digest(f"missing-content-{index}") for index in range(1200))
         parameter_counts = []
 

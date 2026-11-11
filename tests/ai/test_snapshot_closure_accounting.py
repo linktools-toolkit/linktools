@@ -129,7 +129,7 @@ async def test_capture_stops_on_shared_entry_budget_before_caching_more_sources(
         consumed = 0
 
         async def scan_records_page(self, *, after, limit):
-            start = 0 if after is None else int.from_bytes(after.key_digest, "big") + 1
+            start = 0 if after is None else int.from_bytes(after.key, "big") + 1
             result = tuple(StoredRecord(index.to_bytes(32, "big"), None, None, "fixture", (str(index)).encode("ascii"),
                                         None, 0, None, 0, None, {}) for index in range(start, min(start + limit, 1000)))
             self.consumed += len(result)
@@ -242,3 +242,22 @@ def test_native_semantic_identity_still_rejects_corrupt_inline_bytes() -> None:
     with pytest.raises(AIError) as rejected:
         snapshot_manifest_identity(manifest)
     assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_captured_record_pages_use_kind_order_independently_of_source_key_order() -> None:
+    from linktools.ai.persistence.snapshots import _CapturedSnapshotReader
+    from linktools.ai.persistence.state import RecordScanCursor, record_key
+
+    def record(kind: str) -> StoredRecord:
+        key = record_key("namespace", "tenant", "execution", kind, ("owner",))
+        return StoredRecord(key, None, None, kind, key, None, 0, None, 0, None, {})
+
+    source_order = tuple(sorted((record("aa"), record("z")), key=lambda value: value.key))
+    assert tuple(value.kind for value in source_order) == ("z", "aa")
+    captured = _CapturedSnapshotReader(source_order, (), ())
+    first = await captured.scan_records_page(after=None, limit=1)
+    assert tuple(value.kind for value in first) == ("aa",)
+    second = await captured.scan_records_page(after=RecordScanCursor(first[0].kind, first[0].key), limit=1)
+    assert tuple(value.kind for value in second) == ("z",)
+    assert await captured.scan_records_page(after=RecordScanCursor(second[0].kind, second[0].key), limit=1) == ()

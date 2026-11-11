@@ -188,7 +188,7 @@ async def test_transcript_range_checks_all_returned_facts_before_finishing(
         assert len(facts) == 2
 
         async def corrupt(transaction):
-            owner = facts[0].owner_key_digest
+            owner = facts[0].owner_key
             record = await transaction.get_record(owner)
             assert record is not None
             assert await transaction.guard_record(owner, expected_storage_revision=record.storage_revision) is not None
@@ -617,7 +617,7 @@ async def test_history_batch_preserves_head_decode_error_priority() -> None:
             stored = await transaction.get_record(histories._key("transcript_head", session.history_id))
             assert stored is not None
             assert await transaction.delete_record(
-                stored.key_digest, expected_storage_revision=stored.storage_revision,
+                stored.key, expected_storage_revision=stored.storage_revision,
             )
             await transaction.insert_record(replace(
                 stored, kind="other-kind", data={**stored.data, "v": 999},
@@ -724,3 +724,28 @@ async def test_owner_content_read_survives_concurrent_native_collection(
             await asyncio.gather(task, return_exceptions=True)
         await state.close()
         await engine.dispose()
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_transcript_integrity_validates_all_paged_heads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    monkeypatch.setattr(_history, "_TRANSCRIPT_PAGE_SIZE", 1)
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace="transcript-integrity-pages", tenant_id="tenant")
+    try:
+        repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
+        for owner in ("a", "longer-owner", "last"):
+            await repository.create_head(owner)
+        validated = []
+        validate = repository._validate_head_record
+
+        async def validate_head(record):
+            await validate(record)
+            validated.append(repository.decode_head(record).owner_id)
+
+        monkeypatch.setattr(repository, "_validate_head_record", validate_head)
+        await repository.validate_integrity()
+        assert sorted(validated) == ["a", "last", "longer-owner"]
+    finally:
+        await state.close()

@@ -22,7 +22,7 @@ def _record(key: bytes, value: str) -> StoredRecord:
 @pytest.mark.asyncio
 async def test_single_and_batch_records_share_no_cache_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     first, second = _record(b"a" * 32, "first"), _record(b"b" * 32, "second")
-    batch_key = hashlib.sha256(canonical_json_bytes([first.key_digest.hex(), second.key_digest.hex()])).digest()
+    batch_key = hashlib.sha256(b"".join(len(key).to_bytes(2, "big") + key for key in (first.key, second.key))).digest()
     third = _record(batch_key, "third")
     store = InMemoryStateStore()
     await store.initialize()
@@ -34,18 +34,18 @@ async def test_single_and_batch_records_share_no_cache_entries(monkeypatch: pyte
 
     try:
         await store.mutate(insert)
-        expected = {record.key_digest: record for record in (first, second)}
+        expected = {record.key: record for record in (first, second)}
         assert await cache.read_records(tuple(expected)) == expected
-        assert await cache.read_record(third.key_digest) == third
-        assert await cache.read_record(first.key_digest) == first
+        assert await cache.read_record(third.key) == third
+        assert await cache.read_record(first.key) == first
 
         async def unavailable(callback):
             raise AssertionError("fresh cache entries must not require a source read")
 
         monkeypatch.setattr(store, "read", unavailable)
-        assert await cache.read_records((second.key_digest, first.key_digest, second.key_digest)) == expected
-        assert await cache.read_record(third.key_digest) == third
-        assert await cache.read_records((first.key_digest, first.key_digest)) == {first.key_digest: first}
+        assert await cache.read_records((second.key, first.key, second.key)) == expected
+        assert await cache.read_record(third.key) == third
+        assert await cache.read_records((first.key, first.key)) == {first.key: first}
     finally:
         await cache.close()
         await store.close()
@@ -69,13 +69,13 @@ async def test_published_record_is_reused_only_within_its_store(monkeypatch: pyt
     try:
         owner.publish_record(record, captured_at=time())
         await asyncio.wait_for(published.wait(), timeout=5)
-        assert await other.read_record(record.key_digest) is None
+        assert await other.read_record(record.key) is None
 
         async def unavailable(callback):
             raise AssertionError("a published record must be readable without loading the source")
 
         monkeypatch.setattr(store, "read", unavailable)
-        assert await owner.read_record(record.key_digest) == record
+        assert await owner.read_record(record.key) == record
     finally:
         await owner.close()
         await other.close()

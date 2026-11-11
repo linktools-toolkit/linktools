@@ -306,7 +306,7 @@ async def test_native_boundary_joins_control_transaction_with_identity_reads_and
         assert not native._message_proofs
         native.confirm_prepared_step(receipt)
         assert native._message_proofs
-        assert await state.read(lambda transaction: transaction.get_record(control.key_digest)) == control
+        assert await state.read(lambda transaction: transaction.get_record(control.key)) == control
         assert await native.get_run(run_id="run") == run
         assert await native.list_events(run_id="run") == events
         assert await native.latest_snapshot(run_id="run") == snapshot
@@ -332,7 +332,7 @@ async def test_native_boundary_failure_rolls_back_control_and_native_rows(tmp_pa
             await state.mutate(commit)
         assert raised.value.code is ErrorCode.INTERNAL_ERROR
         assert isinstance(raised.value.__cause__, RuntimeError)
-        assert await state.read(lambda transaction: transaction.get_record(control.key_digest)) is None
+        assert await state.read(lambda transaction: transaction.get_record(control.key)) is None
         assert await native.get_run(run_id="run") is None
         assert await native.latest_snapshot(run_id="run") is None
         assert not native._message_proofs

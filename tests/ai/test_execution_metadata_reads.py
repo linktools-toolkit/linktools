@@ -192,7 +192,7 @@ async def test_metadata_view_rejects_invalid_consumed_execution_state(kind: str,
         record = replace(record, binding=TaskBindingContract("callable", 1, "none", {"kind": "json"}, None, 1, 0),
                          mode=None, planning=None, thinking=None, agent_run_seq=0, conversation=False)
     stored = project_record(namespace="metadata", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                            kind="execution", identity=record.execution_id, value=record)
+                            kind="execution", identity=(record.execution_id,), value=record)
     value = stored.data["value"]
     fields = dict(value["payload"]["fields"])
     fields.update({key: encode_domain(record.created_at if item == "timestamp" else item)
@@ -211,7 +211,7 @@ async def test_metadata_identity_type_errors_use_storage_integrity_error() -> No
 
     record = _execution()
     stored = project_record(namespace="metadata", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                            kind="execution", identity=record.execution_id, value=record)
+                            kind="execution", identity=(record.execution_id,), value=record)
     value = stored.data["value"]
     payload = value["payload"]
     wire = encode_envelope({**value, "payload": {**payload,

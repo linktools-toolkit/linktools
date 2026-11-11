@@ -125,7 +125,7 @@ async def test_later_confirmation_removes_inline_duplicate_without_reordering_ev
         await _flush(state, step=1)
         after = await _raw_run(archive)
         assert is_native_run_reference(after.data)
-        assert after.key_digest == before.key_digest
+        assert after.key == before.key
         assert await archive.get_agent_run(agent_run_id="run") == run
         assert [item.step_index for item in await archive.list_events(agent_run_id="run")] == [0, 1]
         assert (await archive.capture_history(("run",)))["run"].event_count == 2

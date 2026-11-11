@@ -62,9 +62,9 @@ async def _erase_domain(storage: Persistence, domain: PersistenceDomain) -> None
     async def erase(transaction: StateTransaction) -> None:
         records = await transaction.scan_records()
         facts = await transaction.scan_facts()
-        for owner in {fact.owner_key_digest for fact in facts}:
+        for owner in {fact.owner_key for fact in facts}:
             await transaction.delete_fact_streams(owner)
-        await transaction.delete_records(tuple(record.key_digest for record in records))
+        await transaction.delete_records(tuple(record.key for record in records))
         await transaction.delete_operations(OperationQuery())
     await storage._stores[domain].mutate(erase)
 

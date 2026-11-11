@@ -62,8 +62,8 @@ async def test_group_archive_isolated_identity_and_atomic_publication(backend: s
         with pytest.raises(AIError) as error:
             await group.mutate((store,), abort)
         assert error.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await store.read(lambda tx: tx.get_record(owner_record.key_digest)) is None
-        assert await archive.read(lambda tx: tx.get_record(archive_record.key_digest)) is None
+        assert await store.read(lambda tx: tx.get_record(owner_record.key)) is None
+        assert await archive.read(lambda tx: tx.get_record(archive_record.key)) is None
         await group.mutate((store,), publish)
         scanned = await group.scan_stores()
         labels = []
@@ -265,7 +265,7 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
     value = _record("owned-archive")
     await archive.mutate(lambda tx: tx.insert_record(value))
     await first.close()
-    assert await archive.read_record(value.key_digest) == value
+    assert await archive.read_record(value.key) == value
     assert await second.read(lambda tx: tx.scan_records()) == ()
 
     entered, release = asyncio.Event(), asyncio.Event()
@@ -274,7 +274,7 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
         entered.set()
         await release.wait()
         # Closing admission must not revoke the already-bound transaction.
-        return await archive.read_record(value.key_digest)
+        return await archive.read_record(value.key)
 
     read = asyncio.create_task(archive.read(accepted_read))
     await entered.wait()
@@ -291,7 +291,7 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
     release.set()
     assert await read == value
     await closing
-    for operation in (lambda: archive.read_record(value.key_digest), group.scan_stores):
+    for operation in (lambda: archive.read_record(value.key), group.scan_stores):
         with pytest.raises(AIError) as error:
             await operation()
         assert error.value.code is ErrorCode.STORAGE_CLOSED
@@ -330,7 +330,7 @@ async def test_sql_first_owner_write_establishes_scope_in_the_same_commit(tmp_pa
         with pytest.raises(AIError):
             await owner.mutate(abort)
         assert await group.open_archive() is None
-        assert await owner.read_record(value.key_digest) is None
+        assert await owner.read_record(value.key) is None
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
             await owner.mutate(lambda tx: tx.insert_record(value))
@@ -339,7 +339,7 @@ async def test_sql_first_owner_write_establishes_scope_in_the_same_commit(tmp_pa
         assert len(transactions) == 1 and None not in transactions
         opened = await group.open_archive()
         assert opened is not None
-        assert await owner.read_record(value.key_digest) == value
+        assert await owner.read_record(value.key) == value
     finally:
         await owner.close()
         await group.close()
@@ -362,7 +362,7 @@ async def test_sql_concurrent_first_owner_writes_keep_one_scope(tmp_path: Path) 
         assert all(item is not None for item in opened)
         assert opened[0][0] == opened[1][0]
         for index in range(2):
-            assert await stores[0].read_record(_record(f"owner-{index}").key_digest) == _record(f"owner-{index}")
+            assert await stores[0].read_record(_record(f"owner-{index}").key) == _record(f"owner-{index}")
     finally:
         for store in stores:
             await store.close()
@@ -405,7 +405,7 @@ async def test_sql_first_owner_write_rejects_orphan_archive_without_repair(tmp_p
         with pytest.raises(AIError) as error:
             await reopened.mutate(lambda tx: tx.insert_record(_record("rejected-owner")))
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        assert await reopened.read_record(_record("rejected-owner").key_digest) is None
+        assert await reopened.read_record(_record("rejected-owner").key) is None
         with pytest.raises(AIError) as error:
             await reopened.storage_group.open_archive()
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -477,7 +477,7 @@ async def test_sql_first_archive_owner_unknown_commit_keeps_scope_with_owner_tru
             with pytest.raises(AIError) as error:
                 await owner.mutate(lambda tx: tx.insert_record(value))
             assert error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
-        assert await owner.read_record(value.key_digest) == (value if committed else None)
+        assert await owner.read_record(value.key) == (value if committed else None)
         opened = await group.open_archive()
         assert (opened is not None) is committed
         await owner.mutate(lambda tx: tx.insert_record(_record("later-owner")))

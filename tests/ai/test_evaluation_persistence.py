@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import IdempotencyStatus, ResourceKind, TaskStatus, service_principal
+from linktools.ai.core import JsonValue, IdempotencyStatus, ResourceKind, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateContract, CaseContract, CaseRef, DatasetContract, DatasetRef,
@@ -27,7 +27,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence._evaluation_records import (
     EvaluationCleanupRecord, EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
-    EvaluationTombstone,
+    EvaluationTombstone, EvaluationContentTombstone,
 )
 from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphState, TaskGraphSubmission, TaskNode, TaskNodeView, TaskRef
 
@@ -313,3 +313,39 @@ async def test_content_purge_persists_terminal_disposition_projections(backend: 
         ) for item in record.dispositions)
     finally:
         await storage.close()
+
+
+@pytest.mark.parametrize("kind,identity,record_identity", (
+    ("evaluation_dataset", ["数" * 42 + "ab", (1 << 63) - 1],
+     ("数" * 42 + "ab", str((1 << 63) - 1))),
+    ("evaluation_case", ["d" * 128, "c" * 128, 1], ("d" * 128, "c" * 128, "1")),
+    ("evaluation_evidence", "e" * 128, ("e" * 128,)),
+    ("evaluation_report", "r" * 128, ("r" * 128,)),
+    ("evaluation_comparison", "c" * 128, ("c" * 128,)),
+))
+def test_content_tombstone_owner_boundaries_round_trip(
+    kind: str, identity: JsonValue, record_identity: tuple[str, ...],
+) -> None:
+    value = EvaluationContentTombstone(kind, identity, "owner", "a" * 64, NOW)
+    restored = decode_domain(encode_domain(value), EvaluationContentTombstone)
+    assert restored == value
+    assert restored.identity == identity
+    assert restored.record_identity == record_identity
+
+
+@pytest.mark.parametrize("kind,identity", (
+    ("unknown", "id"),
+    ("evaluation_dataset", ["dataset"]),
+    ("evaluation_dataset", ["dataset", True]),
+    ("evaluation_dataset", ["dataset", 0]),
+    ("evaluation_case", ["dataset", "case", 1 << 63]),
+    ("evaluation_case", ["dataset", "数" * 43, 1]),
+    ("evaluation_report", ["report"]),
+))
+def test_content_tombstone_reader_rejects_invalid_owner_identity(kind: str, identity: JsonValue) -> None:
+    value = EvaluationContentTombstone("evaluation_dataset", ["dataset", 1], "owner", "a" * 64, NOW)
+    encoded = encode_domain(value)
+    encoded["fields"]["kind"] = kind
+    encoded["fields"]["identity"] = identity
+    with pytest.raises(AIError):
+        decode_domain(encoded, EvaluationContentTombstone)

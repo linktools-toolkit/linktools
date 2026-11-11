@@ -38,7 +38,7 @@ async def test_caught_replace_failure_rolls_back_group(
     other = SqlStateStore(engine, group=store._storage_group, store_digest=_digest("other"))
     await store.initialize()
     await other.initialize()
-    records = tuple(sorted((_record(index) for index in range(size)), key=lambda r: r.key_digest))
+    records = tuple(sorted((_record(index) for index in range(size)), key=lambda r: r.key))
     await _seed(store, records)
     entered, release = asyncio.Event(), asyncio.Event()
     caught = []
@@ -61,12 +61,12 @@ async def test_caught_replace_failure_rolls_back_group(
     async def callback(group):
         transaction = group.transaction(store)
         if failure == "conflict":
-            await transaction.get_records(tuple(record.key_digest for record in records))
+            await transaction.get_records(tuple(record.key for record in records))
             table = transaction._table("ai_state_records")
             # Preserve stale cached CAS revisions to model a competing winner.
             await execute(transaction, update(table).where(
                 table.c.store_digest == store.store_digest.hex(),
-                table.c.key_digest == records[-1].key_digest.hex(),
+                table.c.key == records[-1].key,
             ).values(storage_revision=1))
         try:
             await transaction.replace_records(tuple(
@@ -92,8 +92,8 @@ async def test_caught_replace_failure_rolls_back_group(
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
         assert len(caught) == 1
-        assert await store.read(lambda tx: tx.get_records(tuple(r.key_digest for r in records))) == {
-            record.key_digest: record for record in records
+        assert await store.read(lambda tx: tx.get_records(tuple(r.key for r in records))) == {
+            record.key: record for record in records
         }
         assert await other.read(lambda tx: tx.scan_records()) == ()
         await store.validate_integrity()
@@ -119,11 +119,11 @@ async def test_lost_scalar_cas_does_not_abort_unrelated_write(tmp_path: Path) ->
     await store.mutate(lambda tx: tx.insert_record(record))
 
     async def callback(transaction):
-        await transaction.get_record(record.key_digest)
+        await transaction.get_record(record.key)
         table = transaction._table("ai_state_records")
         await transaction._execute(update(table).where(
             table.c.store_digest == store.store_digest.hex(),
-            table.c.key_digest == record.key_digest.hex(),
+            table.c.key == record.key,
         ).values(storage_revision=1))
         assert not await transaction.replace_record(
             replace(record, storage_revision=1), expected_storage_revision=0,
@@ -225,8 +225,8 @@ async def test_mysql_large_replacements_preserve_individual_record_capacity(
                 await store.mutate(lambda tx: tx.replace_records(tuple(
                     RecordReplacement(record, 1) for record in final
                 )))
-                assert await store.read(lambda tx: tx.get_records(tuple(r.key_digest for r in records))) == {
-                    record.key_digest: record for record in final
+                assert await store.read(lambda tx: tx.get_records(tuple(r.key for r in records))) == {
+                    record.key: record for record in final
                 }
             finally:
                 try:

@@ -101,7 +101,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
         source["nested"]["value"] = "caller-mutated"
 
         async def fail_after_read(transaction: StateTransaction) -> None:
-            stored = await transaction.get_record(record.key_digest)
+            stored = await transaction.get_record(record.key)
             assert stored is not None
             nested = stored.data["nested"]
             assert isinstance(nested, dict)
@@ -113,7 +113,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
 
         await store.validate_integrity()
         stored = await store.read(
-            lambda transaction: transaction.get_record(record.key_digest)
+            lambda transaction: transaction.get_record(record.key)
         )
         assert stored is not None
         assert tuple(stored.data) == ("nested",)

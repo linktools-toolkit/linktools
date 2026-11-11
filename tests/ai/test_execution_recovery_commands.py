@@ -535,14 +535,14 @@ async def test_producer_guard_reuses_execution_without_history_control(
         async def guard(transaction):
             original = transaction.get_record
             async def execution_only(key):
-                assert key != repository._key("execution_history_head", "execution")
+                assert key != repository._key("execution_history_head", ("execution",))
                 return await original(key)
             with monkeypatch.context() as patch:
                 patch.setattr(transaction, "get_record", execution_only)
                 result = await repository.require_execution_producer_in_transaction(
                     transaction, "execution", expected_producer_generation=admitted.producer_generation,
                 )
-                assert await transaction.get_record(repository._key("execution", "execution")) == result[1]
+                assert await transaction.get_record(repository._key("execution", ("execution",))) == result[1]
                 return result[0]
         assert await repository.state_store.mutate(guard) == admitted
     finally:
@@ -582,7 +582,7 @@ async def test_producer_guard_batch_preserves_fail_closed_checks(
                 next_record=replace(execution, revision=execution.revision + 1,
                     status=ExecutionStatus.CANCELLING if failure == "cancelled" else ExecutionStatus.SUCCEEDED),
             )
-        execution_key = repository._key("execution", "execution")
+        execution_key = repository._key("execution", ("execution",))
         if failure in ("missing_execution", "stale_generation_missing_execution"):
             await repository.state_store.mutate(lambda transaction: transaction.delete_record(
                 execution_key,

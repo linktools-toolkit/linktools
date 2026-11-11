@@ -81,7 +81,7 @@ async def _capture_owners(partitions: Mapping[StateStore, PersistenceDomain]) ->
                 records.append((store, record))
             if len(page) < 1000:
                 break
-            cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
+            cursor = RecordScanCursor(page[-1].kind, page[-1].key)
         cursor = None
         while True:
             page = await store.read(lambda tx: tx.scan_facts_page(after=cursor, limit=1000))
@@ -148,7 +148,7 @@ async def purge_unreferenced_captures(
                 missing.append(key)
             else:
                 store, record = captures[key]
-                removed = await store.mutate(lambda tx: tx.delete_record(record.key_digest,
+                removed = await store.mutate(lambda tx: tx.delete_record(record.key,
                     expected_storage_revision=record.storage_revision))
                 (deleted if removed else missing).append(key)
         return CaptureCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
@@ -235,7 +235,7 @@ async def _purge_unreferenced_objects(
                 records.extend(page)
                 if len(page) < 1000:
                     break
-                cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
+                cursor = RecordScanCursor(page[-1].kind, page[-1].key)
             if scope in archive_closures:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             archive_closures[scope] = ArchiveClosure(scope, records)
@@ -340,7 +340,7 @@ async def _purge_unreferenced_objects(
                         await collect(dict(semantic.data), domain, archive_owner=False)
             if len(records) < 1000:
                 break
-            record_cursor = RecordScanCursor(records[-1].kind, records[-1].key_digest)
+            record_cursor = RecordScanCursor(records[-1].kind, records[-1].key)
         fact_cursor = None
         while True:
             facts = await store.read(lambda tx: tx.scan_facts_page(after=fact_cursor, limit=1000))
@@ -407,7 +407,7 @@ async def _purge_unreferenced_objects(
 
     for store, record in capture_records:
         if record.kind in CAPTURE_RECORD_KINDS and capture_record_key(record) not in retained_captures:
-            await store.mutate(lambda tx: tx.delete_record(record.key_digest,
+            await store.mutate(lambda tx: tx.delete_record(record.key,
                 expected_storage_revision=record.storage_revision))
 
     for scope, closure in archive_closures.items():
@@ -415,7 +415,7 @@ async def _purge_unreferenced_objects(
         unreachable = closure.unreachable_records
         archive = archive_stores[scope]
         for offset in range(0, len(unreachable), 1000):
-            keys = tuple(record.key_digest for record in unreachable[offset:offset + 1000])
+            keys = tuple(record.key for record in unreachable[offset:offset + 1000])
             await archive.mutate(lambda tx, keys=keys: tx.delete_records(keys))
 
     # Metadata must stop referring to reclaimed bodies before external object

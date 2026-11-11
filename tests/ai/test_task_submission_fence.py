@@ -587,7 +587,7 @@ async def test_prepare_disposition_missing_head_never_recreates_existing_resourc
             ):
                 if kind != remaining:
                     records = await transaction.list_records(RecordQuery(kind=kind))
-                    await transaction.delete_records(tuple(record.key_digest for record in records))
+                    await transaction.delete_records(tuple(record.key for record in records))
             if remaining != "admit_operation":
                 await transaction.delete_operations(OperationQuery(stream_digest=stream_digest(
                     submission.namespace, submission.ref.tenant_id, PersistenceDomain.TASK.value,

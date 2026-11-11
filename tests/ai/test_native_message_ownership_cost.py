@@ -118,7 +118,7 @@ class _Traffic:
         for statement, parameters in self.reads[start:]:
             projection = " ".join(statement.split("FROM", 1)[0].split())
             if projection.startswith("SELECT ai_state_records.id,"):
-                assert "ai_state_records.store_digest =" in statement and "ai_state_records.key_digest =" in statement
+                assert "ai_state_records.store_digest =" in statement and "ai_state_records.key =" in statement
                 assert parameters[0] == record_store and len(parameters) == 2
                 kinds['owner'] += 1
             elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":

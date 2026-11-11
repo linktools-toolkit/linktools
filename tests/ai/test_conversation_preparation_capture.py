@@ -45,7 +45,7 @@ async def test_capture_rejects_mismatched_store_scope_or_keys(tmp_path: Path, da
             await archive.materialize_checkpoint(run, checkpoint)
             observed = await _capture(archive, run, checkpoint)
             key, record = next((k, v) for k, v in observed[owner].items() if v is not None)
-            observed[owner][key] = replace(record, key_digest=b"x" * 32)
+            observed[owner][key] = replace(record, key=b"x" * 32)
         elif damage == "other_run":
             run = replace(run, agent_run_id="another")
             checkpoint = replace(checkpoint, agent_run_id="another")

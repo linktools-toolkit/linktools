@@ -24,7 +24,7 @@ async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> 
             parent_key=archive._agent_run_key(run_id), kind="history_association",
         ))
         await transaction.delete_records(tuple(
-            record.key_digest for record in records
+            record.key for record in records
             if record.sort_key == b"coverage:event" or record.data["sequence"] != keep_sequence
         ))
     await archive.state_store.mutate(mutate)
@@ -271,7 +271,7 @@ async def test_trace_duplicate_sequence_locators_keep_individual_validation(
             record = await transaction.get_record(key)
             assert record is not None
             await transaction.insert_record(replace(
-                record, key_digest=b"\xff" * 32,
+                record, key=b"\xff" * 32,
                 sort_key=record.sort_key + b"x",
             ))
 
@@ -304,7 +304,7 @@ async def test_trace_pages_reject_corrupt_facts_across_batches(
             facts = await transaction.list_facts(FactQuery(stream))
             owner = await transaction.get_record(archive._agent_run_key(run_id))
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
             await transaction.delete_fact_streams(archive._agent_run_key(run_id))
             await transaction.insert_facts(tuple(
                 replace(fact, data={"invalid": True}) if fact.sequence == corrupt_sequence else fact
@@ -346,7 +346,7 @@ async def test_association_source_batches_reject_corruption_only_inside_cutoff(
             facts = await transaction.list_facts(FactQuery(stream))
             owner = await transaction.get_record(archive._agent_run_key(run_id))
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.guard_record(owner.key, expected_storage_revision=owner.storage_revision)
             await transaction.delete_fact_streams(archive._agent_run_key(run_id))
             await transaction.insert_facts(tuple(
                 replace(fact, data={"invalid": True}) if fact.sequence == 33 else fact
@@ -379,7 +379,7 @@ async def test_associations_validate_each_locator_for_reused_source_fact(tmp_pat
         async def corrupt(transaction) -> None:
             record = await transaction.get_record(key)
             assert record is not None
-            await transaction.insert_record(replace(record, key_digest=alias))
+            await transaction.insert_record(replace(record, key=alias))
 
         await archive.state_store.mutate(corrupt)
         with pytest.raises(AIError) as raised:

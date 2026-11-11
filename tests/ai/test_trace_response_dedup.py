@@ -440,7 +440,7 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
                 head_key = transcript.head_key("run")
                 children = await transaction.list_records(RecordQuery(parent_key=head_key))
                 await transaction.delete_records((
-                    *(item.key_digest for item in children),
+                    *(item.key for item in children),
                     transcript.projection_key("run"), head_key,
                 ))
 

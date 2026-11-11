@@ -143,7 +143,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
         )
 
         async def duplicate(transaction) -> None:
-            owner_key = repository._key("session", "session")
+            owner_key = repository._key("session", ("session",))
             owner = await transaction.get_record(owner_key)
             assert owner is not None
             guarded = await transaction.guard_record(
@@ -157,7 +157,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
                 StoredFact(
                     repository._timeline_stream("session"),
                     sequence,
-                    repository._key("session", "session"),
+                    repository._key("session", ("session",)),
                     "session_turn",
                     "duplicate",
                     None,

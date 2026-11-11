@@ -231,7 +231,7 @@ async def test_readonly_source_turn_binding_never_mutates(tmp_path: Path, backen
             with pytest.raises(StateTransactionNestingError, match="read-only"):
                 await action()
         actual = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
-        assert {record.key_digest: record for record in actual} == {record.key_digest: record for record in original}
+        assert {record.key: record for record in actual} == {record.key: record for record in original}
     assert not cache.closed
 
 
@@ -267,7 +267,7 @@ async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
         assert not restored.exclusive_execution_writer
         restored.coordination_backend.bind(restored)
         actual = await restored.execution.executions.state_store.read(lambda tx: tx.scan_records())
-        assert {record.key_digest: record for record in actual} == {record.key_digest: record for record in expected}
+        assert {record.key: record for record in actual} == {record.key: record for record in expected}
         roundtrip = await restored.export_snapshot(object_store=archive, limits=_LIMITS)
         original_payload = json.loads(await read_object(archive, reference.key,
             expected_digest=reference.digest, expected_size=reference.size))
@@ -325,7 +325,7 @@ async def test_snapshot_rejects_broken_source_turn_graph(tmp_path: Path, defect:
     elif defect == "wrong_domain":
         domain = PersistenceDomain.MEMORY
     else:
-        records = (replace(records[0], key_digest=b"x" * 32), *records[1:])
+        records = (replace(records[0], key=b"x" * 32), *records[1:])
     with pytest.raises(AIError) as rejected:
         validate_snapshot_domain(
             namespace=namespace, tenant_id="tenant", domain=domain,

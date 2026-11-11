@@ -15,7 +15,7 @@ from ._native_event_reference import NativeEventReferences
 from ._step_backup import NativeStepBackup
 from ._step_store import SqlStepStore
 from .codec import _encode_step_envelope
-from .state import StoredRecord, StoredFact, record_key_digest
+from .state import StoredRecord, StoredFact, record_key
 
 
 _RUN_ADAPTER = TypeAdapter(RunRecord)
@@ -49,8 +49,8 @@ class NativeBackupProjections:
                 source = _RUN_ADAPTER.validate_python(dict(row, metadata=json.loads(row["metadata"])))
                 run = NativeRunReferences.project_source(physical_data, source,
                     store_digest=row["store_digest"], expected_store_digest=self._store_digest)
-                if projected.key_digest != record_key_digest(
-                        self._namespace, self._tenant_id, "trace", "agent_run", source.run_id):
+                if projected.key != record_key(
+                        self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,)):
                     raise ValueError("portable run projection belongs to another Trace record")
                 restored = replace(physical, data=_encode_step_envelope(run))
             elif isinstance(projected, StoredFact):

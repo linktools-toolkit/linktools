@@ -49,7 +49,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                 async def snapshot():
                     async def read(tx):
                         return (
-                            tuple(sorted(await tx.scan_records(), key=lambda value: value.key_digest)),
+                            tuple(sorted(await tx.scan_records(), key=lambda value: value.key)),
                             tuple(sorted(await tx.scan_facts(), key=lambda value: (value.stream_digest, value.sequence))),
                             dict(await tx.scan_sequences()),
                         )
@@ -84,7 +84,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                     # when the transaction has already captured the previous row.
                     await tx._execute(update(table).where(
                         table.c.store_digest == store.store_digest.hex(),
-                        table.c.key_digest == record.key_digest.hex(),
+                        table.c.key == record.key,
                     ).values(storage_revision=record.storage_revision + 1))
                     return result
 

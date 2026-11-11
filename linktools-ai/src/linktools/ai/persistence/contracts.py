@@ -123,6 +123,15 @@ if TYPE_CHECKING:
     from .state import Observed, StateStore, StateTransaction, StoredRecord
 
 
+def _validate_transcript_index(value: int, *, positive: bool = False) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not (1 if positive else 0) <= value <= (1 << 63) - 1
+    ):
+        raise ValueError("transcript index is outside the signed 64-bit range")
+
+
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -316,6 +325,11 @@ class TaskPreparedInputRecord:
     published_fence: int
 
     def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.graph_id)
+            validate_resource_id(self.node_id)
+        except AIError as error:
+            raise ValueError("prepared task identity is invalid") from error
         validate_tenant_id(self.tenant_id)
         digests = (
             self.admission_digest,
@@ -388,6 +402,9 @@ class TranscriptHeadRecord:
     pending_part_count: int = 0
 
     def __post_init__(self) -> None:
+        _validate_transcript_index(self.message_count)
+        _validate_transcript_index(self.chunk_count)
+        _validate_transcript_index(self.pending_part_count)
         if self.message_count < 0 or self.chunk_count < 0:
             raise ValueError("transcript head counts cannot be negative")
         if not self.owner_id:
@@ -412,6 +429,9 @@ class TranscriptSeekRecord:
     chunk_first_message_index: int
 
     def __post_init__(self) -> None:
+        _validate_transcript_index(self.block_start)
+        _validate_transcript_index(self.fact_sequence, positive=True)
+        _validate_transcript_index(self.chunk_first_message_index)
         if self.block_start < 0 or self.fact_sequence < 1:
             raise ValueError("transcript seek boundary values are invalid")
         if self.chunk_first_message_index < 0:
@@ -435,6 +455,7 @@ class TranscriptMessageRef:
     message_index: int
 
     def __post_init__(self) -> None:
+        _validate_transcript_index(self.message_index)
         if self.message_index < 0:
             raise ValueError("transcript message index cannot be negative")
 
@@ -678,6 +699,14 @@ class ModelInteractionRecord:
     stream_attempts: tuple[StreamAttemptRecord, ...] | None = None
 
     def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.agent_run_id)
+        except AIError as error:
+            raise ValueError("model interaction owner identity is invalid") from error
+        _validate_transcript_index(self.step_index)
+        _validate_transcript_index(self.model_request_seq, positive=True)
+        if self.output_retry_index is not None:
+            _validate_transcript_index(self.output_retry_index)
         if (
             not self.agent_run_id
             or self.step_index < 0

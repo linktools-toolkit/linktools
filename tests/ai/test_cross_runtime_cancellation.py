@@ -477,7 +477,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             tenant = owner.default_principal.tenant_id
             repository = owner._state.execution.executions
             before = await repository.get(execution.execution_id, tenant_id=tenant)
-            key = repository._key("execution", execution.execution_id)
+            key = repository._key("execution", (execution.execution_id,))
             before_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
             request = CancelExecutionRequest(owner.default_principal, "stop-projection-race")
 

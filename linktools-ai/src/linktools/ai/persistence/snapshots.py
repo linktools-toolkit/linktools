@@ -155,14 +155,17 @@ class _CapturedSnapshotReader:
     facts: tuple[StoredFact, ...]
     operations: tuple[StoredOperation, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "records", tuple(sorted(self.records, key=lambda value: (value.kind, value.key))))
+
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         index = bisect_left(self.operations, key, key=lambda value: value.key)
         return (self.operations[index] if index < len(self.operations)
                 and self.operations[index].key == key else None)
 
     async def scan_records_page(self, *, after: RecordScanCursor | None, limit: int) -> tuple[StoredRecord, ...]:
-        start = 0 if after is None else bisect_right(self.records, (after.kind, after.key_digest),
-                                                    key=lambda value: (value.kind, value.key_digest))
+        start = 0 if after is None else bisect_right(self.records, (after.kind, after.key),
+                                                    key=lambda value: (value.kind, value.key))
         return self.records[start:start + limit]
 
     async def scan_facts_page(self, *, after: FactScanCursor | None, limit: int) -> tuple[StoredFact, ...]:
@@ -210,7 +213,7 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
             records.append(value)
         if len(page) < limit:
             break
-        cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
+        cursor = RecordScanCursor(page[-1].kind, page[-1].key)
     if records_only:
         return _CapturedSnapshotReader(tuple(records), (), ())
     cursor = None
@@ -446,13 +449,13 @@ class RuntimeSnapshotOperations:
                     trace = self._resources.stores[PersistenceDomain.TRACE]
                     physical = await _capture_snapshot_reader(_StateSnapshotReader(trace), budget=_SnapshotCaptureBudget(limits))
                     projected = readers[PersistenceDomain.TRACE]
-                    records = {value.key_digest: value for value in projected.records}
+                    records = {value.key: value for value in projected.records}
                     facts = {(value.stream_digest, value.sequence): value for value in projected.facts}
                     validator = NativeBackupProjections(native_checkpoints[opened[0]],
                         namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
                     raw_records, raw_facts = [], []
                     for value in physical.records:
-                        visible = records.get(value.key_digest)
+                        visible = records.get(value.key)
                         if visible is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         if value.data != visible.data:
@@ -536,7 +539,7 @@ async def _export_snapshot(
             records.extend(page)
             if len(page) < 1000:
                 break
-            cursor = RecordScanCursor(page[-1].kind, page[-1].key_digest)
+            cursor = RecordScanCursor(page[-1].kind, page[-1].key)
         archive_closures[archive.scope_id] = ArchiveClosure(archive.scope_id, records)
         archive_domains[archive.scope_id] = archive.domain
 
@@ -689,7 +692,7 @@ async def _export_snapshot(
                     if value.kind == "execution":
                         await copy_references(encode_record(semantic_value), domain, archive_owner=False)
             last = page[-1]
-            record_cursor = RecordScanCursor(last.kind, last.key_digest)
+            record_cursor = RecordScanCursor(last.kind, last.key)
             if len(page) < 128:
                 break
 
@@ -735,7 +738,7 @@ async def _export_snapshot(
                 accept(
                     {
                         "alias_key": value.alias_key.hex(),
-                        "record_key_digest": value.record_key_digest.hex(),
+                        "record_key": value.record_key.hex(),
                     }
                 )
             )
@@ -1093,7 +1096,7 @@ async def restore_snapshot(
     native_record_projections, native_fact_projections = {}, {}
     seen_projection_groups = set()
     trace_values = decoded_domains.get(PersistenceDomain.TRACE, ((), (), (), (), {}))
-    trace_records = {value.key_digest: value for value in trace_values[0]}
+    trace_records = {value.key: value for value in trace_values[0]}
     trace_facts = {(value.stream_digest, value.sequence): value for value in trace_values[2]}
     for entry in raw_projections:
         if (not isinstance(entry, dict) or set(entry) != {"group_id", "records", "facts"}
@@ -1107,11 +1110,11 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for encoded in entry["records"]:
             raw = decode_record(encoded)
-            visible = trace_records.get(raw.key_digest)
-            if (visible is None or raw.key_digest in native_record_projections
+            visible = trace_records.get(raw.key)
+            if (visible is None or raw.key in native_record_projections
                     or validator.validate(visible, raw.data) != raw):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            native_record_projections[raw.key_digest] = raw
+            native_record_projections[raw.key] = raw
         for encoded in entry["facts"]:
             raw = decode_fact(encoded)
             key = raw.stream_digest, raw.sequence
@@ -1314,10 +1317,10 @@ async def restore_snapshot(
                             if rewritten:
                                 content = replace(content, payload=content.payload.map_object_refs(rewritten.__getitem__))
                                 imported = replace(record, data=content.to_json())
-                        previous = archive_records.get(imported.key_digest)
+                        previous = archive_records.get(imported.key)
                         if previous is not None and previous != imported:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        archive_records[imported.key_digest] = imported
+                        archive_records[imported.key] = imported
             native_rows = []
             for source_group in native_groups:
                 entry = native_entries[source_group]
@@ -1353,7 +1356,7 @@ async def restore_snapshot(
                                               native_mapping if native_groups else {}),
                     native_mapping if native_groups else {})
             if domain is PersistenceDomain.TRACE:
-                records = tuple(native_record_projections.get(value.key_digest, value) for value in records)
+                records = tuple(native_record_projections.get(value.key, value) for value in records)
                 facts = tuple(native_fact_projections.get((value.stream_digest, value.sequence), value) for value in facts)
             records = tuple(map_capture_references(value, rekey) if value.kind in CAPTURE_RECORD_KINDS
                             else replace(value, data=rekey(value.data)) for value in records)
@@ -1780,12 +1783,12 @@ def _decode_snapshot_aliases(value: object) -> tuple[StoredAlias, ...]:
     for raw in value:
         if not isinstance(raw, Mapping) or set(raw) != {
             "alias_key",
-            "record_key_digest",
+            "record_key",
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         alias = decode_alias({
             "alias": raw["alias_key"],
-            "record": raw["record_key_digest"],
+            "record": raw["record_key"],
         })
         if alias.alias_key in seen:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

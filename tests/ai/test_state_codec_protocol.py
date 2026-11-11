@@ -107,7 +107,7 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     assert decode_operation(primitives["operation"]).sequence == 1
     assert decode_operation(primitives["operation"]).key == operation_key("golden", "tenant", "conversation", "operation")
     assert decode_alias(primitives["alias"]).alias_key == alias_key("golden", "tenant", "checkpoint", "tool_call", ("run", "call"))
-    assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(
+    assert decode_alias(primitives["alias"]).record_key == bytes.fromhex(
         "77" * 32
     )
 

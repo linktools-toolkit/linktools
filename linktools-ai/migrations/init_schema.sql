@@ -4,10 +4,10 @@
 CREATE TABLE ai_state_records (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
-    key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the persisted runtime record.',
+    `key` VARBINARY(1152) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
     scope_key VARBINARY(1024) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
     subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-    parent_key VARBINARY(1024) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
+    parent_key VARBINARY(1152) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
     sort_key VARBINARY(1152) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
@@ -19,7 +19,7 @@ CREATE TABLE ai_state_records (
     payload_bytes LONGBLOB NULL COMMENT 'Optional binary content body owned by this record; ordinary domain state remains JSON.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key (store_digest, `key`),
     KEY ix_store_digest_kind_sort_key (store_digest, kind, sort_key),
     KEY ix_scope_key_sort_key (scope_key, sort_key),
     KEY ix_scope_key_subject_id (scope_key, subject_id),
@@ -31,11 +31,11 @@ CREATE TABLE ai_state_aliases (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
     alias_key VARBINARY(1024) NOT NULL COMMENT 'Binary secondary lookup address with a maximum of 1024 bytes.',
-    record_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record resolved by this alias.',
+    record_key VARBINARY(1152) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record resolved by this alias.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_alias_key (store_digest, alias_key),
-    KEY ix_store_digest_record_key_digest (store_digest, record_key_digest),
+    KEY ix_store_digest_record_key (store_digest, record_key),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Secondary unique lookup identities that resolve to canonical runtime records.';
 
@@ -44,7 +44,7 @@ CREATE TABLE ai_state_facts (
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
     stream_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the append-only fact stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
-    owner_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record that owns this fact.',
+    owner_key VARBINARY(1152) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record that owns this fact.',
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.',
     subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier grouping facts such as one tool call.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.',
@@ -52,7 +52,7 @@ CREATE TABLE ai_state_facts (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
-    KEY ix_owner_key_digest (owner_key_digest), KEY ix_stream_digest_subject_id_sequence (stream_digest, subject_id, sequence),
+    KEY ix_owner_key (owner_key), KEY ix_stream_digest_subject_id_sequence (stream_digest, subject_id, sequence),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ordered runtime facts including events, checkpoints, and effects.';
 

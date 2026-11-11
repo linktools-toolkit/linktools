@@ -38,12 +38,12 @@ def _record(index: int) -> StoredRecord:
 
 
 def _alias(record: StoredRecord) -> StoredAlias:
-    return StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("run", record.sort_key.decode("ascii"))), record.key_digest)
+    return StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("run", record.sort_key.decode("ascii"))), record.key)
 
 
 def _fact(record: StoredRecord, sequence: int = 1) -> StoredFact:
     return StoredFact(
-        _digest(f"stream-{record.sort_key}"), sequence, record.key_digest, "probe",
+        _digest(f"stream-{record.sort_key}"), sequence, record.key, "probe",
         f"subject-{sequence}", None, {"sequence": sequence},
     )
 
@@ -81,19 +81,19 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
     backend: str, tmp_path: Path,
 ) -> None:
     deleted = _record(1)
-    retained = replace(_record(2), parent_key=deleted.key_digest)
+    retained = replace(_record(2), parent_key=deleted.key)
     staged = _record(3)
-    staged_alias = StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("recovery", "staged")), deleted.key_digest)
+    staged_alias = StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("recovery", "staged")), deleted.key)
     counter = _digest("counter")
     operation = StoredOperation(_digest("operation"), counter, 1, "DONE", False, {})
     async with _open_store(backend, tmp_path / backend) as store:
         await _seed(store, (deleted, retained))
 
         async def remove(transaction: StateTransaction) -> None:
-            assert await transaction.get_record(deleted.key_digest) == deleted
-            assert await transaction.resolve_alias(_alias(deleted).alias_key) == deleted.key_digest
+            assert await transaction.get_record(deleted.key) == deleted
+            assert await transaction.resolve_alias(_alias(deleted).alias_key) == deleted.key
             assert await transaction.list_facts(FactQuery(_fact(deleted).stream_digest)) == (_fact(deleted),)
-            assert await transaction.guard_record(deleted.key_digest, expected_storage_revision=0)
+            assert await transaction.guard_record(deleted.key, expected_storage_revision=0)
             await transaction.insert_alias(staged_alias)
             await transaction.insert_fact(_fact(deleted, 2))
             await transaction.insert_record(staged)
@@ -102,9 +102,9 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
             await transaction.reserve_sequence(counter, 1)
             await transaction.insert_operation(operation)
             await transaction.delete_records((
-                deleted.key_digest, staged.key_digest, deleted.key_digest, _digest("missing"),
+                deleted.key, staged.key, deleted.key, _digest("missing"),
             ))
-            assert await transaction.get_records((deleted.key_digest, staged.key_digest)) == {}
+            assert await transaction.get_records((deleted.key, staged.key)) == {}
             assert await transaction.resolve_aliases((
                 _alias(deleted).alias_key, staged_alias.alias_key, _alias(staged).alias_key,
             )) == {}
@@ -114,7 +114,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
             assert await transaction.get_sequence(counter) == 1
             assert await transaction.get_operation(operation.key) == operation
             await transaction.delete_records(())
-            await transaction.delete_records((deleted.key_digest, staged.key_digest, _digest("missing")))
+            await transaction.delete_records((deleted.key, staged.key, _digest("missing")))
 
         await store.mutate(remove)
         assert await store.read(lambda transaction: transaction.scan_records()) == (retained,)
@@ -132,7 +132,7 @@ async def test_batch_delete_rolls_back_owners_aliases_and_facts(
         await _seed(store, records)
 
         async def abort(transaction: StateTransaction) -> None:
-            await transaction.delete_records(tuple(record.key_digest for record in records))
+            await transaction.delete_records(tuple(record.key for record in records))
             assert await transaction.scan_records() == ()
             assert await transaction.scan_aliases() == ()
             assert await transaction.scan_facts() == ()
@@ -142,8 +142,8 @@ async def test_batch_delete_rolls_back_owners_aliases_and_facts(
             await store.mutate(abort)
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
         assert await store.read(lambda transaction: transaction.get_records(
-            tuple(record.key_digest for record in records)
-        )) == {record.key_digest: record for record in records}
+            tuple(record.key for record in records)
+        )) == {record.key: record for record in records}
         assert set(await store.read(lambda transaction: transaction.scan_aliases())) == {
             _alias(record) for record in records
         }
@@ -165,16 +165,16 @@ async def test_batch_delete_allows_reusing_deleted_identity(
         await _seed(store, (record,))
 
         async def recreate(transaction: StateTransaction) -> None:
-            await transaction.delete_records((record.key_digest,))
+            await transaction.delete_records((record.key,))
             await transaction.insert_record(replacement)
             await transaction.insert_alias(_alias(replacement))
             await transaction.insert_fact(replacement_fact)
-            assert await transaction.get_record(record.key_digest) == replacement
-            assert await transaction.resolve_alias(_alias(record).alias_key) == record.key_digest
+            assert await transaction.get_record(record.key) == replacement
+            assert await transaction.resolve_alias(_alias(record).alias_key) == record.key
             assert await transaction.list_facts(FactQuery(replacement_fact.stream_digest)) == (replacement_fact,)
 
         await store.mutate(recreate)
-        assert await store.read(lambda transaction: transaction.get_record(record.key_digest)) == replacement
+        assert await store.read(lambda transaction: transaction.get_record(record.key)) == replacement
         assert await store.read(lambda transaction: transaction.scan_facts()) == (replacement_fact,)
         await store.validate_integrity()
 
@@ -187,8 +187,8 @@ async def test_batch_delete_is_rejected_in_read_only_callbacks(
     async with _open_store(backend, tmp_path / backend) as store:
         await _seed(store, (record,))
         with pytest.raises(StateTransactionNestingError):
-            await store.read(lambda transaction: transaction.delete_records((record.key_digest,)))
-        assert await store.read(lambda transaction: transaction.get_record(record.key_digest)) == record
+            await store.read(lambda transaction: transaction.delete_records((record.key,)))
+        assert await store.read(lambda transaction: transaction.get_record(record.key)) == record
 
 
 async def test_sql_batch_delete_later_chunk_conflict_rolls_back_entire_batch(tmp_path: Path) -> None:
@@ -198,13 +198,13 @@ async def test_sql_batch_delete_later_chunk_conflict_rolls_back_entire_batch(tmp
 
         async def conflict(transaction: StateTransaction) -> None:
             assert isinstance(transaction, _SqlTransaction)
-            keys = tuple(record.key_digest for record in records)
+            keys = tuple(record.key for record in records)
             await transaction.get_records(keys)
             table = transaction._table("ai_state_records")
             # Leave the read version stale to exercise the same CAS failure as a competing writer.
             await transaction._execute(update(table).where(
                 table.c.store_digest == store.store_digest.hex(),
-                table.c.key_digest == records[-1].key_digest.hex(),
+                table.c.key == records[-1].key,
             ).values(storage_revision=1))
             await transaction.delete_records(keys)
 
@@ -212,9 +212,9 @@ async def test_sql_batch_delete_later_chunk_conflict_rolls_back_entire_batch(tmp
             await store.mutate(conflict)
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
         actual = await store.read(lambda transaction: transaction.get_records(
-            tuple(record.key_digest for record in records)
+            tuple(record.key for record in records)
         ))
-        assert actual == {record.key_digest: record for record in records}
+        assert actual == {record.key: record for record in records}
         assert len(await store.read(lambda transaction: transaction.scan_aliases())) == len(records)
         assert len(await store.read(lambda transaction: transaction.scan_facts())) == len(records)
         await store.validate_integrity()
@@ -242,7 +242,7 @@ async def test_sql_batch_delete_statement_count_does_not_grow_per_owner(tmp_path
             event.listen(store.context.engine.sync_engine, "before_cursor_execute", capture)
             try:
                 await store.mutate(lambda transaction: transaction.delete_records(
-                    tuple(record.key_digest for record in records)
+                    tuple(record.key for record in records)
                 ))
             finally:
                 event.remove(store.context.engine.sync_engine, "before_cursor_execute", capture)
@@ -269,9 +269,9 @@ async def test_sql_batch_delete_preserves_other_logical_stores(tmp_path: Path) -
         try:
             await _seed(store, (record,))
             await _seed(other, (record,))
-            await store.mutate(lambda transaction: transaction.delete_records((record.key_digest,)))
-            assert await store.read(lambda transaction: transaction.get_record(record.key_digest)) is None
-            assert await other.read(lambda transaction: transaction.get_record(record.key_digest)) == record
+            await store.mutate(lambda transaction: transaction.delete_records((record.key,)))
+            assert await store.read(lambda transaction: transaction.get_record(record.key)) is None
+            assert await other.read(lambda transaction: transaction.get_record(record.key)) == record
             assert await other.read(lambda transaction: transaction.scan_aliases()) == (_alias(record),)
             assert await other.read(lambda transaction: transaction.scan_facts()) == (_fact(record),)
             await other.validate_integrity()

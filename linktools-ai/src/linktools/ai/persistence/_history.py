@@ -60,7 +60,7 @@ from .state import (
     StoredFact,
     StoredRecord,
     active_state_scope,
-    record_key_digest,
+    record_key,
     require_no_run_history_lock,
     stream_digest,
 )
@@ -380,7 +380,7 @@ class TranscriptRepository:
             for fact in facts:
                 if (
                     fact.kind != "transcript_pending_part"
-                    or fact.owner_key_digest != self._head_key(head.owner_id)
+                    or fact.owner_key != self._head_key(head.owner_id)
                     or fact.sequence != start + len(chunks) + 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -616,7 +616,7 @@ class TranscriptRepository:
             and head.pending_part_count == len(prepared.pending_parts)
         ):
             guarded = await transaction.guard_record(
-                record.key_digest, expected_storage_revision=record.storage_revision,
+                record.key, expected_storage_revision=record.storage_revision,
             )
             if guarded is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -883,7 +883,7 @@ class TranscriptRepository:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         else:
             value = self._projection_record(owner_id, projection)
-            current = await transaction.get_record(value.key_digest)
+            current = await transaction.get_record(value.key)
             replacements = [RecordReplacement(upgraded, head_record.storage_revision)]
             if current is None:
                 projection_insert = value
@@ -1251,11 +1251,11 @@ class TranscriptRepository:
         after_key: bytes | None = None
         while True:
             page = await self._store.read(
-                lambda transaction, sort_key=after_sort, key_digest=after_key: transaction.list_records(
+                lambda transaction, sort_key=after_sort, key=after_key: transaction.list_records(
                     RecordQuery(
                         kind="transcript_head",
                         after_sort_key=sort_key,
-                        after_key_digest=key_digest,
+                        after_key=key,
                         limit=_TRANSCRIPT_PAGE_SIZE,
                     )
                 )
@@ -1266,7 +1266,7 @@ class TranscriptRepository:
                 await self._validate_head_record(record)
             last = page[-1]
             after_sort = last.sort_key
-            after_key = last.key_digest
+            after_key = last.key
         facts = await self._store.read(lambda transaction: transaction.scan_facts())
         for fact in facts:
             if fact.kind != "transcript_pending_part":
@@ -1302,7 +1302,7 @@ class TranscriptRepository:
             for fact in facts:
                 if (
                     fact.kind != "transcript_chunk"
-                    or fact.owner_key_digest != record.key_digest
+                    or fact.owner_key != record.key
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 chunk = self.decode_chunk(fact)
@@ -1325,7 +1325,7 @@ class TranscriptRepository:
         if head.pending is not None:
             await self.load_pending(head)
         current = await self._store.read(
-            lambda transaction: transaction.get_record(record.key_digest)
+            lambda transaction: transaction.get_record(record.key)
         )
         if current is None or current.storage_revision != record.storage_revision:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1576,7 +1576,7 @@ class TranscriptRepository:
         projection: ContextProjection,
     ) -> None:
         value = self._projection_record(agent_run_id, projection)
-        key = value.key_digest
+        key = value.key
         current = await transaction.get_record(key)
         if current is None:
             await transaction.insert_record(value)
@@ -2290,12 +2290,12 @@ class TranscriptRepository:
         return self._head_key(owner_id)
 
     def _head_key(self, owner_id: str) -> bytes:
-        return record_key_digest(
+        return record_key(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
             "transcript_head",
-            owner_id,
+            (owner_id,),
         )
 
     def head_key(self, owner_id: str) -> bytes:
@@ -2303,12 +2303,12 @@ class TranscriptRepository:
         return self._head_key(owner_id)
 
     def _seek_key(self, owner_id: str, block_start: int) -> bytes:
-        return record_key_digest(
+        return record_key(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
             "transcript_seek",
-            [owner_id, TranscriptSeekDimension.MESSAGE.value, block_start],
+            (owner_id, TranscriptSeekDimension.MESSAGE.value, str(block_start)),
         )
 
     def _transcript_stream(self, owner_id: str) -> bytes:
@@ -2325,12 +2325,12 @@ class TranscriptRepository:
         )
 
     def _projection_key(self, agent_run_id: str) -> bytes:
-        return record_key_digest(
+        return record_key(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
             "context_projection",
-            agent_run_id,
+            (agent_run_id,),
         )
 
     def projection_key(self, agent_run_id: str) -> bytes:
