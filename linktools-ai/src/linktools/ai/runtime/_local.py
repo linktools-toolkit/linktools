@@ -5974,7 +5974,6 @@ class LocalExecutionBackend:
                 tool_call_id=record.tool_call_id,
                 tool_name=record.tool_name,
                 fence=record.fence,
-                idempotency_key_digest=record.idempotency_key_digest,
                 replay_safe=record.replay_safe,
                 error_code=record.error_code,
             )
@@ -6019,7 +6018,6 @@ class LocalExecutionBackend:
                 tool_call_id=record.tool_call_id,
                 tool_name=record.tool_name,
                 fence=record.fence,
-                idempotency_key_digest=record.idempotency_key_digest,
                 replay_safe=record.replay_safe,
                 error_code=record.error_code,
             )

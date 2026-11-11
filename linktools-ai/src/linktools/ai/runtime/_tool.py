@@ -531,15 +531,6 @@ class RuntimeToolOperationBridge:
             agent_run_id=self._run_id(ctx),
             recovery_agent_run_id=(replay_agent_run_id if replay_agent_run_id != self._run_id(ctx) else None),
             tool_call_id=call.tool_call_id,
-            idempotency_key_digest=canonical_sha256(
-                {
-                    "execution_id": self._execution_id,
-                    "agent_run_id": replay_agent_run_id,
-                    "tool_call_id": call.tool_call_id,
-                    "tool_name": tool_def.name,
-                    "arguments_digest": arguments_digest,
-                }
-            ),
             tool_name=tool_def.name,
             arguments_digest=arguments_digest,
             binding_digest=self._binding_digest,

@@ -80,7 +80,6 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
         execution_id="execution",
         agent_run_id="agent-run",
         tool_call_id=f"call:{operation_id}",
-        idempotency_key_digest=canonical_sha256({"operation": operation_id}),
         tool_name="tool",
         arguments_digest=canonical_sha256({"args": operation_id}),
         binding_digest="a" * 64,
@@ -329,7 +328,7 @@ async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
         claimed = await state.checkpoint.tools.admit(ToolOperationAdmission(
             execution_id=resolved.execution_id, tool_operation_id=resolved.tool_operation_id,
             agent_run_id=resolved.agent_run_id, recovery_agent_run_id=None,
-            tool_call_id=resolved.tool_call_id, idempotency_key_digest=resolved.idempotency_key_digest,
+            tool_call_id=resolved.tool_call_id,
             tool_name=resolved.tool_name, arguments_digest=resolved.arguments_digest,
             binding_digest=resolved.binding_digest, replay_safe=resolved.replay_safe, owner="next-worker",
         ))

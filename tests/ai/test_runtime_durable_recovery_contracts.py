@@ -235,7 +235,6 @@ def test_execution_recovery_contracts_validate_identity() -> None:
         tool_call_id="call",
         tool_name="write_file",
         fence=2,
-        idempotency_key_digest="c" * 64,
         replay_safe=False,
         error_code="TOOL_EFFECT_UNKNOWN",
     )

@@ -81,7 +81,7 @@ class _PendingExecutionTurn:
                 now = datetime.now(timezone.utc)
                 current = ToolOperationRecord(
                     request.tool_operation_id, request.execution_id, request.agent_run_id, request.tool_call_id,
-                    request.idempotency_key_digest, request.tool_name, request.arguments_digest,
+                     request.tool_name, request.arguments_digest,
                     request.binding_digest, True, ToolOperationStatus.CLAIMED, request.owner, 1, None, now, now,
                     producer_generation=request.producer_generation, arguments_payload=request.arguments_payload,
                     capability_ref=request.capability_ref,

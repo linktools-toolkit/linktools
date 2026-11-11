@@ -63,7 +63,6 @@ class ExecutionRecoveryEffect:
     tool_call_id: str
     tool_name: str
     fence: int
-    idempotency_key_digest: str
     replay_safe: bool
     error_code: "str | None"
 
@@ -74,7 +73,6 @@ class ExecutionRecoveryEffect:
             self.agent_run_id,
             self.tool_call_id,
             self.tool_name,
-            self.idempotency_key_digest,
         )
         if any(not isinstance(value, str) or not value.strip() for value in identities):
             raise ValueError("recovery effect identity is invalid")

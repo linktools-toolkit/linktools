@@ -492,7 +492,6 @@ class ToolRepositoryImpl(_RepositoryBase):
                     execution_id=request.execution_id,
                     agent_run_id=request.agent_run_id,
                     tool_call_id=request.tool_call_id,
-                    idempotency_key_digest=request.idempotency_key_digest,
                     tool_name=request.tool_name,
                     arguments_digest=request.arguments_digest,
                     binding_digest=request.binding_digest,
@@ -1212,7 +1211,6 @@ def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) 
         left.execution_id == right.execution_id
         and left.agent_run_id == right.agent_run_id
         and left.tool_call_id == right.tool_call_id
-        and left.idempotency_key_digest == right.idempotency_key_digest
         and left.tool_name == right.tool_name
         and left.arguments_digest == right.arguments_digest
         and _tool_argument_payloads_match(

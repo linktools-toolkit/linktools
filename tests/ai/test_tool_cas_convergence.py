@@ -48,7 +48,6 @@ def _record(
         execution_id="execution",
         agent_run_id="agent-run",
         tool_call_id="tool-call",
-        idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
         tool_name="tool",
         arguments_digest=canonical_sha256({"args": True}),
         binding_digest=canonical_sha256({"binding": True}),
@@ -71,7 +70,6 @@ def _admission(*, owner: str = "tool-owner") -> ToolOperationAdmission:
         agent_run_id="agent-run",
         recovery_agent_run_id=None,
         tool_call_id="tool-call",
-        idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
         tool_name="tool",
         arguments_digest=canonical_sha256({"args": True}),
         binding_digest=canonical_sha256({"binding": True}),
@@ -112,6 +110,23 @@ async def test_sqlite_parallel_admissions_share_one_effect_record(tmp_path) -> N
             "other-execution",
             tenant_id="tenant",
         ) == ()
+
+        for change in (
+            {"arguments_digest": canonical_sha256({"args": False})},
+            {"binding_digest": canonical_sha256({"binding": False})},
+            {"tool_name": "other-tool"},
+            {"tool_call_id": "other-call"},
+            {"agent_run_id": "other-run"},
+        ):
+            with pytest.raises(AIError) as error:
+                await repository.admit(replace(request, **change))
+            assert error.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert await repository.list_by_execution(
+            request.execution_id, tenant_id="tenant",
+        ) == (first,)
+        effect = replace(first, effect_idempotency_key="provider-effect-key")
+        assert effect.to_tool_effect(request.agent_run_id).idempotency_key == "provider-effect-key"
+        assert effect.fence == first.fence
 
         payload = StoredPayload.inline_bytes(b"result")
         terminal = await repository.complete_payload(

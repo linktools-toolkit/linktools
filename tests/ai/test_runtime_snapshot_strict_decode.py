@@ -487,7 +487,6 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         execution_id="execution",
         agent_run_id="run",
         tool_call_id="call",
-        idempotency_key_digest=canonical_sha256({"idempotency": 1}),
         tool_name="tool",
         arguments_digest=canonical_sha256({"arguments": 1}),
         binding_digest=canonical_sha256({"binding": 1}),

@@ -1013,7 +1013,6 @@ class ToolOperationRecord:
     execution_id: str
     agent_run_id: str
     tool_call_id: str
-    idempotency_key_digest: str
     tool_name: str
     arguments_digest: str
     binding_digest: str
@@ -1045,7 +1044,6 @@ class ToolOperationRecord:
             raise ValueError("tool producer generation is invalid")
         if (not isinstance(self.status, ToolOperationStatus)
                 or not isinstance(self.arguments_digest, str)
-                or not isinstance(self.idempotency_key_digest, str)
                 or not isinstance(self.replay_safe, bool)):
             raise ValueError("admitted tool operation is incomplete")
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
@@ -1110,7 +1108,6 @@ class ToolOperationRecord:
             self.execution_id == request.execution_id
             and self.tool_operation_id == request.tool_operation_id
             and self.tool_call_id == request.tool_call_id
-            and self.idempotency_key_digest == request.idempotency_key_digest
             and self.tool_name == request.tool_name
             and self.arguments_digest == request.arguments_digest
             and arguments_match
@@ -1756,7 +1753,6 @@ class ToolOperationAdmission:
     agent_run_id: str
     recovery_agent_run_id: str | None
     tool_call_id: str
-    idempotency_key_digest: str
     tool_name: str
     arguments_digest: str
     binding_digest: str

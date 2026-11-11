@@ -401,7 +401,6 @@ def _tool_operation(
         execution_id="execution",
         agent_run_id="agent-run",
         tool_call_id="tool-call",
-        idempotency_key_digest="key-digest",
         tool_name="tool",
         replay_safe=replay_safe,
         status=status,
@@ -532,7 +531,7 @@ async def _tool_cancel_state(
         await commands.commit_tool_admission(ToolOperationAdmission(
             execution_id="execution", tool_operation_id="tool-operation",
             agent_run_id="agent-run", recovery_agent_run_id=None,
-            tool_call_id="tool-call", idempotency_key_digest="a" * 64,
+            tool_call_id="tool-call",
             tool_name="tool", arguments_digest="b" * 64, binding_digest="c" * 64,
             replay_safe=replay_safe, owner="owner", producer_generation=1,
         ))
