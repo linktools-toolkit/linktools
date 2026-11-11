@@ -421,7 +421,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     from pydantic_ai.messages import ModelResponse, ToolCallPart
 
     from linktools.ai.capability import AgentContext
-    from linktools.ai.core import OperationStatus, idempotency_key_digest
+    from linktools.ai.core import OperationStatus
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.persistence._sql import _SqlTransaction
 
@@ -519,7 +519,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             )
             assert sum(item.event_type == "CANCEL_REQUESTED" for item in events.items) == 1
             operation = await owner._state.execution.operations.get(
-                idempotency_key_digest(request.idempotency_key), tenant_id=tenant,
+                request.idempotency_key, tenant_id=tenant,
             )
             assert operation is not None and operation.status is OperationStatus.EFFECT_UNKNOWN
             assert operation.resource_id == execution.execution_id

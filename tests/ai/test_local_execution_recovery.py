@@ -249,7 +249,7 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy(
         assert started.revision == execution.revision + 1
         assert started.event_seq == execution.event_seq + 1
         claimed = await state.execution.idempotency.get(
-            identity.scope, identity.idempotency_key_digest, tenant_id="tenant",
+            identity.scope, identity.idempotency_key, tenant_id="tenant",
         )
         assert claimed is not None
         assert claimed.resource_id == execution.execution_id

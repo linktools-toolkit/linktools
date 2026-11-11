@@ -3,7 +3,6 @@
 """Regression coverage for durable deferred-result replay."""
 
 import asyncio
-import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -122,7 +121,7 @@ class _ExternalCalls:
         *,
         tenant_id: str,
         expected_status: ExternalCallStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
         resolution_metadata: dict[str, object],
@@ -137,7 +136,7 @@ class _ExternalCalls:
         self.record = replace(
             self.record,
             status=ExternalCallStatus.SUPPLIED,
-            idempotency_key_digest=idempotency_key_digest,
+            idempotency_key=idempotency_key,
             supplied_at=supplied_at,
             resolution_kind=resolution_kind,
             result_payload=result_payload,
@@ -191,7 +190,7 @@ class _Approvals:
         *,
         tenant_id: str,
         expected_status: ApprovalStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         decision: ApprovalDecision,
         principal_id: str,
         decision_digest: str,
@@ -212,7 +211,7 @@ class _Approvals:
                 if decision is ApprovalDecision.APPROVE
                 else ApprovalStatus.DENIED
             ),
-            idempotency_key_digest=idempotency_key_digest,
+            idempotency_key=idempotency_key,
             decision=decision,
             decided_by=principal_id,
             decision_digest=decision_digest,
@@ -240,7 +239,7 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
             call_id=call_id,
             execution_id="execution",
             status=ExternalCallStatus.PENDING,
-            idempotency_key_digest=None,
+            idempotency_key=None,
             created_at=now,
             supplied_at=None,
         )
@@ -300,7 +299,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
             approval_id=approval_id,
             execution_id="execution",
             status=ApprovalStatus.PENDING,
-            idempotency_key_digest=None,
+            idempotency_key=None,
             decision=None,
             decided_by=None,
             decision_digest=None,
@@ -337,9 +336,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
     )
 
     assert first == second
-    assert approvals.record.idempotency_key_digest == hashlib.sha256(
-        b"approval-key"
-    ).hexdigest()
+    assert approvals.record.idempotency_key == "approval-key"
     assert approvals.record.decided_by == first_principal.principal_id
     assert approvals.record.decision_digest == persisted_digest
 
@@ -418,7 +415,7 @@ def _structured_external_service(*, inline: bool = True):
     call_id = deferred_resource_id('external-call-v1', 'tenant', 'execution', 'step', pending.tool_call_id)
     calls = _ExternalCalls(ExternalCallRecord(
         call_id=call_id, execution_id='execution', status=ExternalCallStatus.PENDING,
-        idempotency_key_digest=None, created_at=datetime.now(timezone.utc), supplied_at=None,
+        idempotency_key=None, created_at=datetime.now(timezone.utc), supplied_at=None,
     ))
     objects = InMemoryObjectStore()
     factory = ObjectKeyFactory('external-replay')
@@ -448,7 +445,7 @@ async def _legacy_external_result(objects, factory, *, inline: bool) -> StoredPa
 
 def _supplied_record(record: ExternalCallRecord, payload: StoredPayload) -> ExternalCallRecord:
     return replace(record, status=ExternalCallStatus.SUPPLIED,
-                   idempotency_key_digest=hashlib.sha256(b'supply-key').hexdigest(),
+                   idempotency_key='supply-key',
                    supplied_at=datetime.now(timezone.utc), resolution_kind='succeeded', result_payload=payload)
 
 

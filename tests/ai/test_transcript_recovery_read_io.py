@@ -201,7 +201,7 @@ async def test_combined_projection_publishes_messages_with_its_owner(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("foreign_scope", ("group_id", "store_digest"))
+@pytest.mark.parametrize("foreign_scope", ("group_id", "store_key"))
 async def test_foreign_projection_baseline_rebuilds_captured_messages(tmp_path: Path, foreign_scope: str) -> None:
     from dataclasses import replace
     from linktools.ai.persistence._archive import PreparedArchive
@@ -216,7 +216,7 @@ async def test_foreign_projection_baseline_rebuilds_captured_messages(tmp_path: 
         prepared = PreparedArchive()
         projection = await repository.prepare_model_projection(messages, prepared, baseline=baseline)
         assert projection.items[0].root.group_id == block.root.group_id
-        assert projection.items[0].root.store_digest == block.root.store_digest
+        assert projection.items[0].root.store_key == block.root.store_key
         assert prepared.native_messages
 
         async def publish(transaction):

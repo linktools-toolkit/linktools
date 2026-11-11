@@ -220,7 +220,7 @@ async def test_evaluation_read_reuse_has_one_entry_and_preserves_concurrent_resu
     original = experiment()
     manifest = replace(original.manifest, experiment_id="other")
     await repository.reserve_experiment(replace(original, manifest=manifest,
-        manifest_digest=manifest.digest, idempotency_key_digest="c" * 64))
+        manifest_digest=manifest.digest, idempotency_key="c" * 64))
     original_read, original_decode = repository._record, repository._decode
     entered, release = asyncio.Event(), asyncio.Event()
     paused = False

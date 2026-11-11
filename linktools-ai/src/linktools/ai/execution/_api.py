@@ -13,7 +13,7 @@ from ._records import ResultRecord
 @dataclass(frozen=True, slots=True)
 class CancelExecutionRequest:
     principal: Principal
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     force: bool = False
 
     def __post_init__(self) -> None:

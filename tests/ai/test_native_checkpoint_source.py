@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai_harness.step_persistence import InMemoryStepStore
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.codec import decode_domain, encode_domain
@@ -14,12 +15,12 @@ from linktools.ai.steps import NativeStepSource, rekey_native_step_sources
 
 
 def test_native_source_codec_relocation_preserves_partition_and_application_data() -> None:
-    source = NativeStepSource("a" * 32, "b" * 64)
+    source = NativeStepSource("a" * 32, native_store_key("b", "tenant"))
     encoded = encode_domain(source)
     assert decode_domain(encoded, NativeStepSource) == source
     original = {"source": encoded, "application": {"group_id": source.group_id}}
     relocated = rekey_native_step_sources(original, {source.group_id: "c" * 32})
-    assert decode_domain(relocated["source"], NativeStepSource) == NativeStepSource("c" * 32, source.store_digest)
+    assert decode_domain(relocated["source"], NativeStepSource) == NativeStepSource("c" * 32, source.store_key)
     assert relocated["application"] == original["application"]
     assert decode_domain(original["source"], NativeStepSource) == source
     with pytest.raises(ValueError):
@@ -45,7 +46,7 @@ async def test_native_source_requires_builtin_colocated_effect_owner(tmp_path: P
                 assert source == native.backup_source
                 runs.validate_native_step_source(source)
                 with pytest.raises(AIError) as rejected:
-                    runs.validate_native_step_source(NativeStepSource("0" * 32, source.store_digest))
+                    runs.validate_native_step_source(NativeStepSource("0" * 32, source.store_key))
                 assert rejected.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
         finally:
             await runs.preflight_close()
@@ -57,7 +58,7 @@ async def test_native_source_requires_builtin_colocated_effect_owner(tmp_path: P
             try:
                 assert owner.backup_source == source
                 with pytest.raises(AIError) as rejected:
-                    await offline.checkpoint_backup_source(NativeStepSource(source.group_id, "0" * 64))
+                    await offline.checkpoint_backup_source(NativeStepSource(source.group_id, native_store_key("0", "tenant")))
                 assert rejected.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
             finally:
                 await owner.close()

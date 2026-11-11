@@ -14,6 +14,7 @@ from sqlalchemy import event, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_message_content import NativeMessageContent
@@ -31,7 +32,7 @@ class _ReadTraffic:
             self.reads.append((statement, tuple(parameters)))
 
     def assert_publication_metadata(
-        self, start: int, *, store_digest: str, node_bound: int, message_bound: int,
+        self, start: int, *, store_key: bytes, node_bound: int, message_bound: int,
     ) -> None:
         reads = self.reads[start:]
         assert len(reads) == 3
@@ -42,8 +43,8 @@ class _ReadTraffic:
                 if projection == f"SELECT {table}.sha256, {table}.id":
                     assert table not in seen
                     seen.add(table)
-                    assert f"{table}.store_digest =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[0] == store_digest
+                    assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
+                    assert parameters[0] == store_key
                     assert 0 < len(parameters) - 1 <= bound
                     break
             else:
@@ -79,7 +80,7 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
             # One appended node references at most three existing frontier IDs.
             # Crossing the SQL batch size must not turn this into a history scan.
             traffic.assert_publication_metadata(
-                start, store_digest=store.store_digest, node_bound=4, message_bound=1,
+                start, store_key=store.store_key, node_bound=4, message_bound=1,
             )
         assert traffic.count == 3 * size
         async with engine.connect() as connection:
@@ -152,7 +153,7 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
             # This uncached writer receives each full branch as new input;
             # ID reads stay bounded by that input, not unrelated stored history.
             traffic.assert_publication_metadata(
-                start, store_digest=store.store_digest,
+                start, store_key=store.store_key,
                 node_bound=4 * len(snapshot.messages), message_bound=len(snapshot.messages),
             )
             after = traffic.count
@@ -241,8 +242,8 @@ def test_sequence_read_compiles_for_supported_dialects_without_unbounded_mysql_e
     store = object.__new__(SqlStepStore)
     store._context = SimpleNamespace(engine=SimpleNamespace(dialect=dialect))
     store._metadata = build_step_sql_metadata()
-    store._store_digest = "a" * 64
-    store._message_content = NativeMessageContent(store._context, store_digest=store._store_digest)
+    store._store_key = native_store_key("a", "tenant")
+    store._message_content = NativeMessageContent(store._context, store_key=store._store_key)
     query = store._sequence_query([{
         "id": 1, "sequence_root": "b" * 64,
         "messages": json.dumps({"stored_messages": count, "checkpoint": None}),
@@ -334,13 +335,13 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
         roots = tuple(span.first for span in prepared.root.slices)
         for previous in receipts:
             with pytest.raises(ValueError, match="active transaction"):
-                previous.publication_targets(session, store_digest=store.store_digest, roots=roots)
+                previous.publication_targets(session, store_key=store.store_key, roots=roots)
         receipt = await publish(content, session, prepared, **kwargs)
-        targets = receipt.publication_targets(session, store_digest=store.store_digest, roots=roots)
+        targets = receipt.publication_targets(session, store_key=store.store_key, roots=roots)
         assert len(targets) == 1 and targets[0] > 0
-        for scope, selected in (("0" * 64, roots), (store.store_digest, ("0" * 64,))):
+        for scope, selected in ((native_store_key("0", "tenant"), roots), (store.store_key, ("0" * 64,))):
             with pytest.raises(ValueError, match="store, and roots"):
-                receipt.publication_targets(session, store_digest=scope, roots=selected)
+                receipt.publication_targets(session, store_key=scope, roots=selected)
         receipts.append(receipt)
         sessions.append(session)
         if fail_once:
@@ -368,7 +369,7 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
         for receipt, session in zip(receipts, sessions):
             with pytest.raises(ValueError, match="active transaction"):
                 receipt.publication_targets(
-                    session, store_digest=store.store_digest,
+                    session, store_key=store.store_key,
                     roots=tuple(span.first for span in receipt.root.slices),
                 )
         assert await store.latest_snapshot(run_id="run") == snapshot
@@ -395,14 +396,14 @@ async def test_publication_ids_reject_a_completed_savepoint(
         try:
             async with session.begin_nested():
                 receipt = await publish(content, session, prepared, **kwargs)
-                assert receipt.publication_targets(session, store_digest=store.store_digest, roots=roots)
+                assert receipt.publication_targets(session, store_key=store.store_key, roots=roots)
                 if rollback:
                     raise RuntimeError("rollback savepoint")
         except RuntimeError as error:
             assert rollback and str(error) == "rollback savepoint"
         assert session.in_transaction()
         with pytest.raises(ValueError, match="active transaction"):
-            receipt.publication_targets(session, store_digest=store.store_digest, roots=roots)
+            receipt.publication_targets(session, store_key=store.store_key, roots=roots)
         return receipt
 
     monkeypatch.setattr(NativeMessageContent, "publish_in_session", nested_publication)

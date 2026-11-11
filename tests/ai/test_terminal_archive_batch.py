@@ -268,7 +268,7 @@ async def test_terminal_archive_batch_preserves_tool_history_and_caller_proofs(
                 table = build_step_sql_metadata().tables["ai_step_messages"]
                 async with owner.state_store.context.engine.connect() as connection:
                     assert (await connection.execute(select(table.c.id).where(
-                        table.c.store_digest == SqlStepStore.scope_digest(
+                        table.c.store_key == SqlStepStore.scope_key(
                             namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                         ),
                     ).limit(1))).first() is not None

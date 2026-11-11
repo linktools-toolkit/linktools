@@ -57,7 +57,7 @@ async def test_pending_unsuccessful_outcome_and_source_replay(
         assert result.result.output is None and result.execution.retention_closed
         identity = turn.reservation.idempotency
         stored = await state.storage.execution.idempotency.get(
-            identity.scope, identity.idempotency_key_digest, tenant_id="tenant",
+            identity.scope, identity.idempotency_key, tenant_id="tenant",
         )
         assert stored.status is (IdempotencyStatus.FAILED if status is ExecutionStatus.FAILED
                                  else IdempotencyStatus.CANCELLED)

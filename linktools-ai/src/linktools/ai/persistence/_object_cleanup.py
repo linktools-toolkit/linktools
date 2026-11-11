@@ -260,9 +260,9 @@ async def _purge_unreferenced_objects(
         closure = NativeMessageClosure(sequences)
         for snapshot in snapshots:
             closure.mark_snapshot(snapshot)
-        bodies = {(row["store_digest"], row["sha256"]): row for row in messages}
+        bodies = {(row["store_key"], row["sha256"]): row for row in messages}
         opened = await group.open_archive()
-        sequence_ids = {(row["store_digest"], row["sha256"]) for row in sequences}
+        sequence_ids = {(row["store_key"], row["sha256"]) for row in sequences}
         native_groups[group] = closure, bodies, domain, None if opened is None else opened[0], sequence_ids
         if opened is not None:
             if opened[0] in native_closures:
@@ -299,7 +299,7 @@ async def _purge_unreferenced_objects(
             closure = native_closures.get(root.group_id)
             if closure is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            closure.mark(root.store_digest, root.slices)
+            closure.mark(root.store_key, root.slices)
         for root in iter_archive_roots(value) if archive_owner else ():
             closure = archive_closures.get(root.scope_id)
             if closure is None:
@@ -436,13 +436,13 @@ async def _purge_unreferenced_objects(
         async def remove_native_content(session: "AsyncSession") -> None:
             for table, identities in unused:
                 by_store: dict[str, list[str]] = {}
-                for store_digest, identity in sorted(identities):
-                    by_store.setdefault(store_digest, []).append(identity)
-                for store_digest, scoped_ids in by_store.items():
+                for store_key, identity in sorted(identities):
+                    by_store.setdefault(store_key, []).append(identity)
+                for store_key, scoped_ids in by_store.items():
                     for offset in range(0, len(scoped_ids), 128):
                         batch = scoped_ids[offset:offset + 128]
                         target_ids = select(table.c.id).where(
-                            table.c.store_digest == store_digest, table.c.sha256.in_(batch),
+                            table.c.store_key == store_key, table.c.sha256.in_(batch),
                         )
                         if table is native_metadata.tables["ai_step_sequences"]:
                             await replace_owner_edges(group.context, session, "sequence", target_ids, ())
@@ -455,7 +455,7 @@ async def _purge_unreferenced_objects(
                             edges.c.edge_kind.in_(edge_kinds), edges.c.target_id.in_(target_ids),
                         ))
                         removed = await session.execute(delete(table).where(
-                            table.c.store_digest == store_digest, table.c.sha256.in_(batch),
+                            table.c.store_key == store_key, table.c.sha256.in_(batch),
                         ))
                         if removed.rowcount != len(batch):
                             raise AIError(ErrorCode.STORAGE_CONFLICT)

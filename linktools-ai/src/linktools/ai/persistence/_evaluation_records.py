@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Durable evaluation control facts, separate from native execution state."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
-from ..core import Principal, JsonValue, validate_resource_id
+from ..core import Principal, JsonValue, validate_idempotency_key, validate_resource_id
 from ..errors import AIError
 from ..evaluation import (
     ScoreBundle, CaseContract, DatasetContract, CaseRef, DatasetRef,
@@ -67,8 +67,14 @@ class EvaluationHumanDecision:
     actor: Principal
     created_at: datetime
     request_digest: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     score: ScoreBundle
+
+    def __post_init__(self) -> None:
+        try:
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("evaluation idempotency key is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +82,7 @@ class EvaluationRecord:
     manifest: EvaluationManifest
     manifest_digest: str
     request_digest: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     gate: Literal["open", "closed_cancel", "closed_budget"]
     revision: int
     created_at: datetime
@@ -92,6 +98,10 @@ class EvaluationRecord:
     owned_input_captures: tuple[TaskInvocationInputRef, ...] = ()
 
     def __post_init__(self) -> None:
+        try:
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("evaluation idempotency key is invalid") from error
         if self.content_deleted_at is None and any(
             candidate.graph_template is not None and candidate.graph_template.template is None
             for candidate in self.manifest.candidates
@@ -108,9 +118,15 @@ class EvaluationTombstone:
     evaluation_id: str
     owner_principal_id: str
     request_digest: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     manifest_digest: str
     deleted_at: datetime
+
+    def __post_init__(self) -> None:
+        try:
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("evaluation idempotency key is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)

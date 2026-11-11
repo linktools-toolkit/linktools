@@ -152,7 +152,7 @@ async def test_composed_transcript_archives_cache_verified_attachment_bytes(
         table = build_step_sql_metadata().tables["ai_step_messages"]
         async with archive.state_store.context.engine.connect() as connection:
             rows = (await connection.execute(select(table).where(
-                table.c.store_digest == chunk.content.store_digest,
+                table.c.store_key == chunk.content.store_key,
             ))).mappings().all()
         records = tuple(ContentRecord.from_native_row(row) for row in rows)
         assert len(records) == 1

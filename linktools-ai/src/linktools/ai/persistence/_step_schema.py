@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from collections.abc import Iterable
 
 from ..core import RESOURCE_ID_MAX_BYTES
+from ..steps import NATIVE_STORE_KEY_MAX_BYTES, NATIVE_REPLAY_KEY_MAX_BYTES
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -27,9 +28,9 @@ if TYPE_CHECKING:
 
 def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
     """Build scoped upstream run, event, snapshot and message tables."""
-    from sqlalchemy import BigInteger, Boolean, Column, JSON, MetaData, SmallInteger, String, Table
+    from sqlalchemy import BigInteger, Boolean, Column, JSON, LargeBinary, MetaData, SmallInteger, String, Table
     from sqlalchemy import text as sql_text
-    from sqlalchemy.dialects.mysql import SMALLINT
+    from sqlalchemy.dialects.mysql import SMALLINT, VARBINARY
 
     if metadata is None:
         metadata = MetaData()
@@ -39,6 +40,16 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
 
     def identifier(name: str, comment: str, *, nullable: bool = True) -> "Column":
         return Column(name, sql_text_key(RESOURCE_ID_MAX_BYTES), nullable=nullable, comment=comment)
+
+    def partition() -> "Column":
+        return Column("store_key", LargeBinary(NATIVE_STORE_KEY_MAX_BYTES).with_variant(
+            VARBINARY(NATIVE_STORE_KEY_MAX_BYTES), "mysql"), nullable=False,
+            comment="Exact bounded binary native namespace and tenant partition.")
+
+    def replay() -> "Column":
+        return Column("idempotency_key", LargeBinary(NATIVE_REPLAY_KEY_MAX_BYTES).with_variant(
+            VARBINARY(NATIVE_REPLAY_KEY_MAX_BYTES), "mysql"), nullable=True,
+                      comment="Original bounded replay key; NULL appends a distinct occurrence.")
 
     def digest(name: str, comment: str, *, nullable: bool = False) -> "Column":
         return Column(name, sql_sha256(), nullable=nullable, comment=comment)
@@ -56,7 +67,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
     if "ai_step_runs" not in metadata.tables:
         runs = table(
             "ai_step_runs", "Upstream agent run lineage and registration records.",
-            digest("store_digest", "Physical namespace and tenant partition."),
+            partition(),
             identifier("run_id", "Original upstream run identifier.", nullable=False),
             identifier("conversation_id", "Original upstream conversation identifier."),
             identifier("parent_run_id", "Original upstream parent run identifier."),
@@ -65,14 +76,14 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
             text("registration_id", "Upstream registration invocation identifier."),
         )
-        sql_unique(runs, "store_digest", "run_id")
-        sql_query_index(runs, "store_digest", "conversation_id")
-        sql_query_index(runs, "store_digest", "parent_run_id")
+        sql_unique(runs, "store_key", "run_id")
+        sql_query_index(runs, "store_key", "conversation_id")
+        sql_query_index(runs, "store_key", "parent_run_id")
 
     if "ai_step_events" not in metadata.tables:
         events = table(
             "ai_step_events", "Append-only upstream agent execution boundary events.",
-            digest("store_digest", "Physical namespace and tenant partition."),
+            partition(),
             identifier("run_id", "Original upstream run identifier.", nullable=False),
             Column("kind", sql_state(), nullable=False, comment="Upstream boundary event kind."),
             Column("outcome", sql_state(), nullable=True, comment="Owned lifecycle outcome, absent for ordinary upstream events."),
@@ -91,16 +102,16 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
                    comment="Native run field references: conversation 1, parent 2, agent 4, metadata 8."),
             digest("body_sha256", "Integrity digest of the managed lifecycle source body.", nullable=True),
             digest("fields_sha256", "Integrity digest of managed lifecycle fields excluding metadata.", nullable=True),
-            text("idempotency_key", "Upstream boundary replay key."),
-            digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
+            replay(),
         )
-        sql_unique(events, "key_digest")
-        sql_query_index(events, "store_digest", "run_id")
+        sql_unique(events, "store_key", "run_id", "idempotency_key")
+        # Replay order differs from occurrence order; this index serves ordered run reads.
+        sql_query_index(events, "store_key", "run_id")
 
     if "ai_step_snapshots" not in metadata.tables:
         snapshots = table(
             "ai_step_snapshots", "Upstream complete or interrupted message-history snapshots.",
-            digest("store_digest", "Physical namespace and tenant partition."),
+            partition(),
             identifier("run_id", "Original upstream run identifier.", nullable=False),
             Column("step_index", BigInteger, nullable=False, comment="Upstream graph step index."),
             identifier("conversation_id", "Original upstream conversation identifier."),
@@ -111,17 +122,16 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("messages", sql_text_key(1024), nullable=False,
                    comment="Bounded message descriptor and native checkpoint state without message bodies."),
             digest("sequence_root", "Immutable message sequence root retained by this snapshot.", nullable=True),
-            text("idempotency_key", "Upstream boundary replay key."),
-            digest("key_digest", "SHA-256 identity of the scoped run and replay key or append occurrence."),
+            replay(),
             Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),
         )
-        sql_unique(snapshots, "key_digest")
-        sql_query_index(snapshots, "store_digest", "run_id", "pruned")
+        sql_unique(snapshots, "store_key", "run_id", "idempotency_key")
+        sql_query_index(snapshots, "store_key", "run_id", "pruned")
 
     if "ai_step_messages" not in metadata.tables:
         messages = table(
             "ai_step_messages", "Deduplicated upstream ModelMessage bodies and attachment manifests.",
-            digest("store_digest", "Physical namespace and tenant partition."),
+            partition(),
             digest("sha256", "SHA-256 of the canonical uncompressed upstream message JSON."),
             Column("message", sql_blob(), nullable=True, comment="Raw or compressed canonical message bytes, absent for attachment manifests."),
             Column("compression", sql_state(), nullable=False, comment="Message body compression codec: raw or zlib."),
@@ -131,12 +141,12 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("gc_revision", BigInteger, nullable=False, server_default=sql_text("0"),
                    comment="Optimistic native dependency publication fence."),
         )
-        sql_unique(messages, "store_digest", "sha256")
+        sql_unique(messages, "store_key", "sha256")
 
     if "ai_step_sequences" not in metadata.tables:
         sequences = table(
             "ai_step_sequences", "Shared immutable message sequence nodes for native snapshots.",
-            digest("store_digest", "Physical namespace and tenant partition."),
+            partition(),
             digest("sha256", "SHA-256 of the immutable sequence node."),
             digest("message_sha256", "SHA-256 of the referenced upstream message JSON."),
             Column("tree_count", BigInteger, nullable=False, comment="Number of ordered message occurrences in this tree."),
@@ -146,7 +156,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("gc_revision", BigInteger, nullable=False, server_default=sql_text("0"),
                    comment="Optimistic native dependency publication fence."),
         )
-        sql_unique(sequences, "store_digest", "sha256")
+        sql_unique(sequences, "store_key", "sha256")
 
     if "ai_native_content_edges" not in metadata.tables:
         edges = table(

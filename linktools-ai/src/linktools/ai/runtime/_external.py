@@ -19,7 +19,6 @@ from ..core import (
     ExecutionStatus,
     canonical_json_bytes,
     normalize_json_value,
-    idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, StoredPayload
@@ -146,7 +145,7 @@ class DefaultExternalService:
                     request.call_id,
                     tenant_id=request.principal.tenant_id,
                     expected_status=ExternalCallStatus.PENDING,
-                    idempotency_key_digest=idempotency_key_digest(request.idempotency_key),
+                    idempotency_key=request.idempotency_key,
                     resolution_kind=resolution_kind,
                     result_payload=payload,
                     resolution_metadata=dict(request.metadata),
@@ -188,7 +187,7 @@ class DefaultExternalService:
     ) -> bool:
         if (record is None or record.execution_id != execution_id
             or record.status is not ExternalCallStatus.SUPPLIED
-            or record.idempotency_key_digest != idempotency_key_digest(request.idempotency_key)
+            or record.idempotency_key != request.idempotency_key
             or dict(record.resolution_metadata) != dict(request.metadata)):
             return False
         resolution = request.resolution

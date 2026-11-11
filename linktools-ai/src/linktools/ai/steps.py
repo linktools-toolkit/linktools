@@ -3,12 +3,98 @@
 """Native step records with explicitly owned Runtime lifecycle semantics."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+import base64
+import binascii
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic_ai_harness.step_persistence import StepEvent
 
-from .core import validate_resource_id
+from .core import validate_resource_id, validate_persistence_namespace, validate_tenant_id
+from .errors import AIError
+
+
+NATIVE_STORE_KEY_MAX_BYTES = 402
+NATIVE_REPLAY_KEY_MAX_BYTES = 512
+
+
+def native_store_key(namespace: str, tenant_id: str) -> bytes:
+    """Exact native partition tuple, independent of State store partitions."""
+    values = ("native_store", validate_persistence_namespace(namespace), validate_tenant_id(tenant_id))
+    return b"".join(len(raw).to_bytes(2, "big") + raw for raw in (value.encode("utf-8") for value in values))
+
+
+def validate_native_store_key(value: bytes) -> bytes:
+    """Check the complete current native scope at authoring and durable boundaries."""
+    if type(value) is not bytes or not 1 <= len(value) <= NATIVE_STORE_KEY_MAX_BYTES:
+        raise ValueError("native store key is invalid")
+    parts = []
+    offset = 0
+    try:
+        while offset < len(value):
+            if offset + 2 > len(value):
+                raise ValueError("native store key is invalid")
+            size = int.from_bytes(value[offset:offset + 2], "big")
+            offset += 2
+            if offset + size > len(value):
+                raise ValueError("native store key is invalid")
+            parts.append(value[offset:offset + size].decode("utf-8"))
+            offset += size
+        if len(parts) != 3 or parts[0] != "native_store" or native_store_key(parts[1], parts[2]) != value:
+            raise ValueError("native store key is invalid")
+    except (AIError, UnicodeError) as error:
+        raise ValueError("native store key is invalid") from error
+    return value
+
+
+def encode_native_store_key(value: bytes) -> str:
+    """Encode an exact native scope only at a JSON transport boundary."""
+    return base64.b64encode(validate_native_store_key(value)).decode("ascii")
+
+
+def decode_native_store_key(value: object) -> bytes:
+    """Reject malformed and noncanonical native scope transport tokens."""
+    if not isinstance(value, str) or len(value) > 4 * ((NATIVE_STORE_KEY_MAX_BYTES + 2) // 3):
+        raise ValueError("native store key transport is invalid")
+    try:
+        raw = base64.b64decode(value, validate=True)
+        if encode_native_store_key(raw) != value:
+            raise ValueError("native store key transport is invalid")
+    except (binascii.Error, UnicodeError) as error:
+        raise ValueError("native store key transport is invalid") from error
+    return raw
+
+
+def validate_native_replay_key(value: str | None) -> str | None:
+    """Preserve NULL occurrences and exact keyed strings, including empty keys."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError("native replay key must be a string without NUL or None")
+    try:
+        if len(value.encode("utf-8")) > NATIVE_REPLAY_KEY_MAX_BYTES:
+            raise ValueError("native replay key exceeds 512 UTF-8 bytes")
+    except UnicodeEncodeError as error:
+        raise ValueError("native replay key is invalid") from error
+    return value
+
+
+def encode_native_replay_key(value: str | None) -> bytes | None:
+    """Store original UTF-8 bytes so SQL cannot fold case or trailing spaces."""
+    return None if validate_native_replay_key(value) is None else value.encode("utf-8")
+
+
+def decode_native_replay_key(value: bytes | None) -> str | None:
+    """Read exact nullable replay bytes without normalizing their contents."""
+    if value is None:
+        return None
+    if type(value) is not bytes:
+        raise ValueError("native replay row must contain bytes or NULL")
+    try:
+        result = value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("native replay row is invalid") from error
+    return validate_native_replay_key(result)
 
 
 def validate_native_step_ids(
@@ -26,13 +112,13 @@ class NativeStepSource:
     """Physical native checkpoint owner admitted with an execution."""
 
     group_id: str
-    store_digest: str
+    store_key: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
-        for value, size in ((self.group_id, 32), (self.store_digest, 64)):
-            if (not isinstance(value, str) or len(value) != size
-                    or any(character not in "0123456789abcdef" for character in value)):
-                raise ValueError("native checkpoint source identity is invalid")
+        if (not isinstance(self.group_id, str) or len(self.group_id) != 32
+                or any(character not in "0123456789abcdef" for character in self.group_id)):
+            raise ValueError("native checkpoint source group is invalid")
+        validate_native_store_key(self.store_key)
 
 
 def rekey_native_step_sources(value: object, groups: Mapping[str, str]) -> object:
@@ -43,7 +129,10 @@ def rekey_native_step_sources(value: object, groups: Mapping[str, str]) -> objec
             fields = result.get("fields")
             if not isinstance(fields, dict):
                 raise ValueError("native checkpoint source fields are invalid")
-            source = NativeStepSource(**fields)
+            raw_key = fields.get("store_key")
+            if not isinstance(raw_key, dict) or set(raw_key) != {"$bytes"}:
+                raise ValueError("native checkpoint source key is invalid")
+            source = NativeStepSource(fields.get("group_id"), decode_native_store_key(raw_key["$bytes"]))
             if source.group_id not in groups:
                 raise ValueError("native checkpoint source group is missing")
             fields["group_id"] = groups[source.group_id]
@@ -67,6 +156,7 @@ class NativeLifecycleEvent(StepEvent):
     def __post_init__(self) -> None:
         validate_native_step_ids(run_id=self.run_id, conversation_id=self.conversation_id,
                                  parent_run_id=self.parent_run_id)
+        validate_native_replay_key(self.idempotency_key)
         kind = {"succeeded": "run_completed", "interrupted": "run_completed",
                 "failed": "run_failed", "cancelled": "run_failed"}.get(self.outcome)
         if (kind is None or self.kind != kind or self.idempotency_key is None
@@ -88,4 +178,10 @@ class NativeLifecycleEvent(StepEvent):
         return "AGENT_RUN_FAILED"
 
 
-__all__ = ["validate_native_step_ids", "LifecycleOutcome", "NativeLifecycleEvent", "NativeStepSource", "rekey_native_step_sources"]
+__all__ = [
+    "NATIVE_STORE_KEY_MAX_BYTES", "NATIVE_REPLAY_KEY_MAX_BYTES", "native_store_key",
+    "validate_native_store_key", "encode_native_store_key", "decode_native_store_key",
+    "validate_native_replay_key", "encode_native_replay_key", "decode_native_replay_key",
+    "validate_native_step_ids", "LifecycleOutcome", "NativeLifecycleEvent", "NativeStepSource",
+    "rekey_native_step_sources",
+]

@@ -97,7 +97,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                         # A cold publisher must compare the immutable winner before
                         # its owner references can commit in this same transaction.
                         changed = await session.execute(update(table).where(
-                            table.c.store_digest == candidate["store_digest"],
+                            table.c.store_key == candidate["store_key"],
                             table.c.sha256 == candidate["sha256"],
                         ).values(message=b'{"corrupt":true}'))
                         if changed.rowcount == 0:

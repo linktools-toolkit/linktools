@@ -93,6 +93,7 @@ from ..core import (
     validate_lease_owner,
     validate_memory_scope,
     validate_resource_id,
+    validate_idempotency_key,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -1157,7 +1158,7 @@ class ApprovalRecord:
     approval_id: str
     execution_id: str
     status: ApprovalStatus
-    idempotency_key_digest: str | None
+    idempotency_key: str | None = field(repr=False)
     decision: ApprovalDecision | None
     decided_by: str | None
     decision_digest: str | None
@@ -1167,6 +1168,11 @@ class ApprovalRecord:
     resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.idempotency_key is not None:
+            try:
+                validate_idempotency_key(self.idempotency_key)
+            except AIError as error:
+                raise ValueError("idempotency key is invalid") from error
         if self.decision_message is not None and not isinstance(
             self.decision_message, str
         ):
@@ -1186,7 +1192,7 @@ class ExternalCallRecord:
     call_id: str
     execution_id: str
     status: ExternalCallStatus
-    idempotency_key_digest: str | None
+    idempotency_key: str | None = field(repr=False)
     created_at: datetime
     supplied_at: datetime | None
     resolution_kind: str | None = None
@@ -1194,6 +1200,11 @@ class ExternalCallRecord:
     resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.idempotency_key is not None:
+            try:
+                validate_idempotency_key(self.idempotency_key)
+            except AIError as error:
+                raise ValueError("idempotency key is invalid") from error
         if self.resolution_kind not in {None, "succeeded", "retry", "failed"}:
             raise ValueError("external resolution kind is invalid")
         if self.status is ExternalCallStatus.SUPPLIED:
@@ -1676,7 +1687,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
 class IdempotencyRepository(RuntimeRepository, Protocol):
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord: ...
     async def get(
-        self, scope: str, idempotency_key_digest: str, *, tenant_id: str
+        self, scope: str, idempotency_key: str, *, tenant_id: str
     ) -> IdempotencyRecord | None: ...
     async def list_by_resource(
         self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str
@@ -1684,7 +1695,7 @@ class IdempotencyRepository(RuntimeRepository, Protocol):
     async def compare_and_swap(
         self,
         scope: str,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         *,
         tenant_id: str,
         expected_status: IdempotencyStatus,
@@ -1729,7 +1740,7 @@ class EventRepository(RuntimeRepository, Protocol):
 @dataclass(frozen=True, slots=True)
 class ExecutionEventAppend:
     event_type: str
-    payload: Mapping[str, JsonValue]
+    payload: Mapping[str, JsonValue] = field(repr=False)
 
     def __post_init__(self) -> None:
         event_type = str(self.event_type)
@@ -1780,7 +1791,7 @@ class ExecutionEventRecord:
     execution_id: str
     event_seq: int
     event_type: str
-    payload: JsonValue
+    payload: JsonValue = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_type, str) or not self.event_type:
@@ -1820,7 +1831,7 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_status: ApprovalStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         decision: ApprovalDecision,
         principal_id: str,
         decision_digest: str,
@@ -1868,7 +1879,7 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_status: ExternalCallStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
         resolution_metadata: Mapping[str, JsonValue],

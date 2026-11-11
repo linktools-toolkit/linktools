@@ -44,7 +44,7 @@ async def test_imported_context_admission_commits_or_rolls_back_one_owner(
         execution = replace(_record(ExecutionStatus.PENDING_START, 0),
                             input_context=write.reference, context_imported=True)
         identity = IdempotencyRecord(
-            scope='test', idempotency_key_digest='a' * 64, request_digest='b' * 64,
+            scope='test', idempotency_key='a' * 64, request_digest='b' * 64,
             resource_kind=ResourceKind.EXECUTION, resource_id=execution.execution_id,
             status=IdempotencyStatus.RESERVED, result_digest=None, error_code=None,
             created_at=execution.created_at, updated_at=execution.updated_at,

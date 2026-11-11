@@ -34,15 +34,15 @@ class PublicationTargetsUnavailable(ValueError):
 
 class _PublicationTargets(Protocol):
     def __call__(
-        self, session: "AsyncSession", *, store_digest: str, roots: Sequence[str],
+        self, session: "AsyncSession", *, store_key: bytes, roots: Sequence[str],
     ) -> tuple[int, ...]: ...
 
 
 def register_publication_targets(
-    session: "AsyncSession", store: str, roots: Sequence[str], resolve: _PublicationTargets,
+    session: "AsyncSession", store: bytes, roots: Sequence[str], resolve: _PublicationTargets,
 ) -> None:
     """Hand one receipt's live evidence to its pending durable owner."""
-    resolve(session, store_digest=store, roots=roots)
+    resolve(session, store_key=store, roots=roots)
     transaction = session.get_nested_transaction() or session.get_transaction()
     current = session.info.get(_PUBLICATION_HANDOFF)
     if current is None or current[0] is not transaction:
@@ -51,13 +51,13 @@ def register_publication_targets(
     current[1][store, tuple(sorted(set(roots)))] = resolve
 
 
-async def _owner_targets(session: "AsyncSession", store: str, roots: Sequence[str]) -> tuple[int, ...]:
+async def _owner_targets(session: "AsyncSession", store: bytes, roots: Sequence[str]) -> tuple[int, ...]:
     current = session.info.get(_PUBLICATION_HANDOFF)
     if current is not None:
         resolve = current[1].pop((store, tuple(sorted(set(roots)))), None)
         if resolve is not None:
             try:
-                return resolve(session, store_digest=store, roots=roots)
+                return resolve(session, store_key=store, roots=roots)
             except PublicationTargetsUnavailable:
                 # A completed savepoint or prior transaction is not evidence
                 # for the owner's current write. Resolve its actual rows again.
@@ -122,10 +122,10 @@ async def run_native_mutation(
                 await recover()
 
 
-async def maintain_native_content(context: "SqlStorageContext", *, store_digests: Sequence[str]) -> None:
+async def maintain_native_content(context: "SqlStorageContext", *, store_keys: Sequence[bytes]) -> None:
     from linktools.core import environ
     try:
-        await context.run_mutation(lambda session: collect_native_content(context, session, store_digests=store_digests),
+        await context.run_mutation(lambda session: collect_native_content(context, session, store_keys=store_keys),
                                    domain="native.content_cleanup")
     except Exception:
         # The owner has already committed. Durable candidates survive both a
@@ -225,7 +225,7 @@ async def replace_owner_edges(
 
 
 async def resolve_targets(
-    session: "AsyncSession", kind: str, store: str, identities: Sequence[str], *, required: bool = True,
+    session: "AsyncSession", kind: str, store: bytes, identities: Sequence[str], *, required: bool = True,
 ) -> dict[str, int]:
     from sqlalchemy import select
     _, sequences, messages = _tables()
@@ -234,7 +234,7 @@ async def resolve_targets(
     identities = tuple(sorted(set(identities)))
     for offset in range(0, len(identities), 128):
         rows = (await session.execute(select(table.c.sha256, table.c.id).where(
-            table.c.store_digest == store, table.c.sha256.in_(identities[offset:offset + 128]),
+            table.c.store_key == store, table.c.sha256.in_(identities[offset:offset + 128]),
         ))).all()
         result.update(rows)
     if required and len(result) != len(identities):
@@ -243,7 +243,7 @@ async def resolve_targets(
 
 
 async def index_nodes(
-    context: "SqlStorageContext", session: "AsyncSession", store: str, rows: Sequence[Mapping[str, object]], *,
+    context: "SqlStorageContext", session: "AsyncSession", store: bytes, rows: Sequence[Mapping[str, object]], *,
     partial_restore: bool = False,
 ) -> dict[str, int]:
     from sqlalchemy import update
@@ -284,7 +284,7 @@ async def index_nodes(
 
 
 async def note_publication(
-    session: "AsyncSession", store: str, roots: Sequence[str], *, resolved: Mapping[str, int] | None = None,
+    session: "AsyncSession", store: bytes, roots: Sequence[str], *, resolved: Mapping[str, int] | None = None,
 ) -> dict[str, int]:
     # Reuse only IDs read while indexing this publication's same-store nodes.
     known = {} if resolved is None else resolved
@@ -330,26 +330,26 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
         for root in roots:
             if group_id is None or root.group_id != group_id:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            targets.extend(await _owner_targets(session, root.store_digest, tuple(span.first for span in root.slices)))
+            targets.extend(await _owner_targets(session, root.store_key, tuple(span.first for span in root.slices)))
         await replace_owner_edges(context, session, kind, sources, targets)
 
 
 async def collect_native_content(
-    context: "SqlStorageContext", session: "AsyncSession", *, store_digests: Sequence[str], budget: int = 32,
+    context: "SqlStorageContext", session: "AsyncSession", *, store_keys: Sequence[bytes], budget: int = 32,
 ) -> None:
     from sqlalchemy import and_, delete, exists, or_, select
     edges, sequences, messages = _tables()
-    if not store_digests:
+    if not store_keys:
         return
     scoped = or_(
         and_(edges.c.edge_kind == "candidate_sequence", or_(
             exists(select(sequences.c.id).where(
-                sequences.c.id == edges.c.target_id, sequences.c.store_digest.in_(tuple(store_digests)),
+                sequences.c.id == edges.c.target_id, sequences.c.store_key.in_(tuple(store_keys)),
             )), ~exists(select(sequences.c.id).where(sequences.c.id == edges.c.target_id)),
         )),
         and_(edges.c.edge_kind == "candidate_message", or_(
             exists(select(messages.c.id).where(
-                messages.c.id == edges.c.target_id, messages.c.store_digest.in_(tuple(store_digests)),
+                messages.c.id == edges.c.target_id, messages.c.store_key.in_(tuple(store_keys)),
             )), ~exists(select(messages.c.id).where(messages.c.id == edges.c.target_id)),
         )),
     )
@@ -364,7 +364,7 @@ async def collect_native_content(
         for candidate in candidates:
             is_message = candidate["edge_kind"] == "candidate_message"
             table = messages if is_message else sequences
-            row = (await session.execute(select(table.c.id, table.c.store_digest, table.c.sha256, table.c.gc_revision).where(
+            row = (await session.execute(select(table.c.id, table.c.store_key, table.c.sha256, table.c.gc_revision).where(
                 table.c.id == candidate["target_id"],
             ))).mappings().one_or_none()
             if row is not None:
@@ -374,7 +374,7 @@ async def collect_native_content(
                 ))
                 removed = await session.execute(delete(table).where(
                     table.c.id == row["id"], table.c.gc_revision == row["gc_revision"],
-                    table.c.store_digest.in_(tuple(store_digests)), ~inbound,
+                    table.c.store_key.in_(tuple(store_keys)), ~inbound,
                 ))
                 if removed.rowcount == 1 and not is_message:
                     source = row["id"]

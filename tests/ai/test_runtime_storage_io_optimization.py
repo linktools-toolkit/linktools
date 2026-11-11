@@ -229,7 +229,7 @@ async def test_approval_cancel_batches_known_record_sql(
                 approval_id=approval_id,
                 execution_id="execution",
                 status=ApprovalStatus.PENDING,
-                idempotency_key_digest=None,
+                idempotency_key=None,
                 decision=None,
                 decided_by=None,
                 decision_digest=None,

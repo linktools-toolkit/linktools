@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
 
+from ..steps import validate_native_store_key
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, StoredPayload
@@ -428,27 +429,31 @@ class NativeMessageClosure(_SequenceClosure):
 
     def __init__(self, rows: Sequence[Mapping[str, object]]) -> None:
         super().__init__()
-        self._rows: dict[tuple[str, str], Mapping[str, object]] = {}
-        self._nodes: dict[tuple[str, str], ImmutableSequenceNode] = {}
-        self.retained_sequences: set[tuple[str, str]] = set()
-        self.retained_messages: set[tuple[str, str]] = set()
+        self._rows: dict[tuple[bytes, str], Mapping[str, object]] = {}
+        self._nodes: dict[tuple[bytes, str], ImmutableSequenceNode] = {}
+        self.retained_sequences: set[tuple[bytes, str]] = set()
+        self.retained_messages: set[tuple[bytes, str]] = set()
         for row in rows:
             if not isinstance(row, Mapping) or not {
-                "store_digest", "sha256", "message_sha256", "tree_count",
+                "store_key", "sha256", "message_sha256", "tree_count",
                 "left_sha256", "right_sha256", "next_sha256",
             }.issubset(row):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for field in ("store_digest", "sha256", "message_sha256"):
+            try:
+                validate_native_store_key(row["store_key"])
+            except (TypeError, ValueError, AIError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            for field in ("sha256", "message_sha256"):
                 value = row[field]
                 if (not isinstance(value, str) or len(value) != 64
                         or any(char not in "0123456789abcdef" for char in value)):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            key = row["store_digest"], row["sha256"]
+            key = row["store_key"], row["sha256"]
             if key in self._rows:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._rows[key] = row
 
-    def _node(self, scope: str, identity: str) -> ImmutableSequenceNode:
+    def _node(self, scope: bytes, identity: str) -> ImmutableSequenceNode:
         key = scope, identity
         if key not in self._nodes:
             row = self._rows.get(key)
@@ -464,32 +469,32 @@ class NativeMessageClosure(_SequenceClosure):
             self._nodes[key] = node
         return self._nodes[key]
 
-    def _retain_sequence(self, scope: str, identity: str) -> None:
+    def _retain_sequence(self, scope: bytes, identity: str) -> None:
         self.retained_sequences.add((scope, identity))
 
-    def _retain_content(self, scope: str, identity: str) -> None:
+    def _retain_content(self, scope: bytes, identity: str) -> None:
         self.retained_messages.add((scope, identity))
 
-    def mark(self, store_digest: str, slices: Sequence[NativeMessageSlice]) -> None:
+    def mark(self, store_key: bytes, slices: Sequence[NativeMessageSlice]) -> None:
         try:
-            self._mark_slices(store_digest, slices)
+            self._mark_slices(store_key, slices)
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-    def message_identities(self, store_digest: str, slices: Sequence[NativeMessageSlice]) -> tuple[str, ...]:
+    def message_identities(self, store_key: bytes, slices: Sequence[NativeMessageSlice]) -> tuple[str, ...]:
         """Read validated message identities in chronological occurrence order."""
-        self.mark(store_digest, slices)
+        self.mark(store_key, slices)
 
         def tree(identity: str, start: int, end: int) -> Iterator[str]:
-            node = self._node(store_digest, identity)
+            node = self._node(store_key, identity)
             if start == 0:
                 yield node.content_id
             offset = 1
             for child in (node.left, node.right):
                 if child is None:
                     continue
-                count = self._node(store_digest, child).tree_count
+                count = self._node(store_key, child).tree_count
                 lo, hi = max(0, start - offset), min(count, end - offset)
                 if hi > lo:
                     yield from tree(child, lo, hi)
@@ -501,7 +506,7 @@ class NativeMessageClosure(_SequenceClosure):
             identity, offset = span.first, 0
             reversed_messages = []
             while identity is not None and offset < hi:
-                node = self._node(store_digest, identity)
+                node = self._node(store_key, identity)
                 start, end = max(0, lo - offset), min(node.tree_count, hi - offset)
                 if end > start:
                     reversed_messages.extend(tree(identity, start, end))
@@ -537,7 +542,7 @@ class NativeMessageClosure(_SequenceClosure):
             if type(count) is not int or count < 0 or (root is None) != (count == 0):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if count:
-                self.mark(row["store_digest"], (NativeMessageSlice(root, count, 0, count),))
+                self.mark(row["store_key"], (NativeMessageSlice(root, count, 0, count),))
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -548,6 +553,7 @@ def validate_native_message_content(
 ) -> ContentRecord:
     """Verify native metadata and inline bytes without reinterpreting SDK JSON."""
     try:
+        validate_native_store_key(row["store_key"])
         content = ContentRecord.from_native_row(row)
         if content.codec != "model-message" or content.raw_digest != row["sha256"]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -579,13 +585,13 @@ def validate_native_message_content(
 
 def rekey_native_message_roots(
     value: JsonValue, groups: Mapping[str, str],
-    stores: Mapping[tuple[str, str], str] | None = None,
+    stores: Mapping[tuple[str, bytes], bytes] | None = None,
 ) -> JsonValue:
     """Rewrite declared native root slots; leave business payloads opaque."""
     def rewrite(root: NativeMessageRoot) -> NativeMessageRoot:
         if root.group_id not in groups:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        store = root.store_digest if stores is None else stores.get((root.group_id, root.store_digest))
+        store = root.store_key if stores is None else stores.get((root.group_id, root.store_key))
         if store is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return NativeMessageRoot(groups[root.group_id], store, root.slices)

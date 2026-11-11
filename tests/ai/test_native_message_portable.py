@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, FilePart, ModelResponse, TextPart
 
+from linktools.ai.steps import native_store_key, encode_native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, SqlStepStore
@@ -96,9 +97,9 @@ async def test_partial_trace_snapshot_restores_native_bodies_and_rekeys_group(
 
 @pytest.mark.parametrize("change", ["audit", "duplicate", "partition", "count", "body"])
 def test_native_transport_rejects_nonsemantic_or_malformed_rows(change: str) -> None:
-    sequence = {"store_digest": "a" * 64, "sha256": "b" * 64, "message_sha256": "c" * 64,
+    sequence = {"store_key": encode_native_store_key(native_store_key("a", "tenant")), "sha256": "b" * 64, "message_sha256": "c" * 64,
                 "tree_count": 1, "left_sha256": None, "right_sha256": None, "next_sha256": None}
-    message = {"store_digest": "a" * 64, "sha256": "c" * 64, "message": "W10=",
+    message = {"store_key": encode_native_store_key(native_store_key("a", "tenant")), "sha256": "c" * 64, "message": "W10=",
                "compression": "raw", "raw_size": 2, "payload_json": None}
     sequences, messages = [sequence], [message]
     if change == "audit":
@@ -106,7 +107,7 @@ def test_native_transport_rejects_nonsemantic_or_malformed_rows(change: str) -> 
     elif change == "duplicate":
         sequences.append(dict(sequence))
     elif change == "partition":
-        message["store_digest"] = "not a digest"
+        message["store_key"] = "not a digest"
     elif change == "count":
         sequence["tree_count"] = True
     else:

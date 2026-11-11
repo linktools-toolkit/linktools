@@ -380,7 +380,7 @@ class StoredFact:
     kind: str
     subject_id: str | None
     state: str | None
-    data: Mapping[str, JsonValue]
+    data: Mapping[str, JsonValue] = field(repr=False)
 
     def __post_init__(self) -> None:
         validate_stream_key(self.stream_key)

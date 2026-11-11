@@ -189,7 +189,7 @@ CREATE TABLE ai_metric_observations (
 
 CREATE TABLE ai_step_events (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	store_key VARBINARY(402) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream boundary event kind.',
 	outcome VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Owned lifecycle outcome, absent for ordinary upstream events.',
@@ -205,35 +205,36 @@ CREATE TABLE ai_step_events (
 	run_fields SMALLINT UNSIGNED NOT NULL COMMENT 'Native run field references: conversation 1, parent 2, agent 4, metadata 8.' DEFAULT 0,
 	body_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Integrity digest of the managed lifecycle source body.',
 	fields_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Integrity digest of managed lifecycle fields excluding metadata.',
-	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
-	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
+	idempotency_key VARBINARY(512) COMMENT 'Original bounded replay key; NULL appends a distinct occurrence.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_run_id (store_digest, run_id),
-	UNIQUE KEY uk_key_digest (key_digest),
-	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Append-only upstream agent execution boundary events.' COLLATE utf8mb4_bin;
+	INDEX ix_created_at (created_at),
+	INDEX ix_store_key_run_id (store_key, run_id),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_store_key_run_id_idempotency_key (store_key, run_id, idempotency_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Append-only upstream agent execution boundary events.';
 
 CREATE TABLE ai_step_messages (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	store_key VARBINARY(402) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical uncompressed upstream message JSON.',
-	message LONGBLOB NULL COMMENT 'Raw or compressed canonical message bytes, absent for attachment manifests.',
+	message LONGBLOB COMMENT 'Raw or compressed canonical message bytes, absent for attachment manifests.',
 	compression VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Message body compression codec: raw or zlib.',
 	raw_size BIGINT NOT NULL COMMENT 'Canonical uncompressed message byte count for bounded decompression.',
-	payload_json JSON NULL COMMENT 'Typed attachment manifest without attachment bytes, absent for ordinary message bodies.',
+	payload_json JSON COMMENT 'Typed attachment manifest without attachment bytes, absent for ordinary message bodies.',
 	gc_revision BIGINT NOT NULL COMMENT 'Optimistic native dependency publication fence.' DEFAULT 0,
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	UNIQUE KEY uk_store_digest_sha256 (store_digest, sha256),
-	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Deduplicated upstream ModelMessage bodies and attachment manifests.' COLLATE utf8mb4_bin;
+	INDEX ix_created_at (created_at),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_store_key_sha256 (store_key, sha256)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Deduplicated upstream ModelMessage bodies and attachment manifests.';
 
 CREATE TABLE ai_step_runs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	store_key VARBINARY(402) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
 	parent_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
@@ -244,15 +245,16 @@ CREATE TABLE ai_step_runs (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_conversation_id (store_digest, conversation_id),
-	KEY ix_store_digest_parent_run_id (store_digest, parent_run_id),
-	UNIQUE KEY uk_store_digest_run_id (store_digest, run_id),
-	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;
+	INDEX ix_created_at (created_at),
+	INDEX ix_store_key_conversation_id (store_key, conversation_id),
+	INDEX ix_store_key_parent_run_id (store_key, parent_run_id),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_store_key_run_id (store_key, run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Upstream agent run lineage and registration records.';
 
 CREATE TABLE ai_step_sequences (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	store_key VARBINARY(402) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the immutable sequence node.',
 	message_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the referenced upstream message JSON.',
 	tree_count BIGINT NOT NULL COMMENT 'Number of ordered message occurrences in this tree.',
@@ -263,13 +265,14 @@ CREATE TABLE ai_step_sequences (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	UNIQUE KEY uk_store_digest_sha256 (store_digest, sha256),
-	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Shared immutable message sequence nodes for native snapshots.' COLLATE utf8mb4_bin;
+	INDEX ix_created_at (created_at),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_store_key_sha256 (store_key, sha256)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Shared immutable message sequence nodes for native snapshots.';
 
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
+	store_key VARBINARY(402) NOT NULL COMMENT 'Exact bounded binary native namespace and tenant partition.',
 	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
 	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
@@ -279,16 +282,16 @@ CREATE TABLE ai_step_snapshots (
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
 	messages VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Bounded message descriptor and native checkpoint state without message bodies.',
 	sequence_root CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Immutable message sequence root retained by this snapshot.',
-	idempotency_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream boundary replay key.',
-	key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of the scoped run and replay key or append occurrence.',
+	idempotency_key VARBINARY(512) COMMENT 'Original bounded replay key; NULL appends a distinct occurrence.',
 	pruned BOOL NOT NULL COMMENT 'Retired snapshot identity without retained message references.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_run_id_pruned (store_digest, run_id, pruned),
-	UNIQUE KEY uk_key_digest (key_digest),
-	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
-)ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream complete or interrupted message-history snapshots.' COLLATE utf8mb4_bin;
+	INDEX ix_created_at (created_at),
+	INDEX ix_store_key_run_id_pruned (store_key, run_id, pruned),
+	INDEX ix_updated_at (updated_at),
+	UNIQUE INDEX uk_store_key_run_id_idempotency_key (store_key, run_id, idempotency_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Upstream complete or interrupted message-history snapshots.';
 
 
 CREATE TABLE ai_native_content_edges (

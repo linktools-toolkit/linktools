@@ -88,7 +88,7 @@ async def _stored_message_records(
         table = build_step_sql_metadata().tables["ai_step_messages"]
         async with archive.state_store.context.engine.connect() as connection:
             bodies = (await connection.execute(select(table).where(
-                table.c.store_digest == root.store_digest, table.c.sha256.in_(raw_ids),
+                table.c.store_key == root.store_key, table.c.sha256.in_(raw_ids),
             ))).mappings().all()
         return tuple(ContentRecord.from_native_row(body) for body in bodies)
     content = await archive.transcript_repository.content_archive()

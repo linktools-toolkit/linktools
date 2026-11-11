@@ -18,7 +18,7 @@ from ..core import (AuthorizationAction, AuthorizationPolicy, BudgetUsage, Corre
     ExecutionEventType, ExecutionLineageKind, ExecutionStatus, HandoffGate, HandoffState,
     IdempotencyStatus, JsonValue, Principal, ResourceKind, ResourceRef, StopReason, UsageMetrics,
     canonical_sha256, normalize_json_value, overlay_correlation,
-    principal_identity_payload, idempotency_key_digest as compute_idempotency_key_digest)
+    principal_identity_payload, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..task import TaskBindingContract, TaskEffectResolution
@@ -390,7 +390,7 @@ class TaskExecutionService:
             },
         )
         scope = "execution.task"
-        key_digest = compute_idempotency_key_digest(idempotency_key)
+        idempotency_key = validate_idempotency_key(idempotency_key)
         request_digest = canonical_sha256(
             {
                 "contract": "task-execution-request-v1",
@@ -437,7 +437,7 @@ class TaskExecutionService:
                 execution,
                 IdempotencyRecord(
                     scope=scope,
-                    idempotency_key_digest=key_digest,
+                    idempotency_key=idempotency_key,
                     request_digest=request_digest,
                     resource_kind=ResourceKind.EXECUTION,
                     resource_id=execution_id,
@@ -469,7 +469,7 @@ class TaskExecutionService:
                     current.revision,
                     current.event_seq,
                     scope,
-                    key_digest,
+                    idempotency_key,
                     request_digest,
                     now,
                 )
@@ -1254,7 +1254,7 @@ class TaskExecutionService:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return IdempotencyTerminalUpdate(
             record.scope,
-            record.idempotency_key_digest,
+            record.idempotency_key,
             IdempotencyStatus.STARTED,
             next_status,
             record.request_digest,

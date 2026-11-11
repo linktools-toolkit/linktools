@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import wraps
@@ -72,9 +72,7 @@ from ..core import (
     overlay_correlation,
     principal_identity_payload,
     validate_idempotency_key,
-)
-from ..core import (
-    idempotency_key_digest as compute_idempotency_key_digest,
+    validate_resource_id,
 )
 from ..asset import AssetVersionRef
 from ..session import SessionAdmission
@@ -188,10 +186,14 @@ class _SessionLockEntry:
 @dataclass(frozen=True, slots=True)
 class ExecutionStartIdentity:
     scope: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     request_digest: str
     expected_session: "SessionRecord | None" = None
     request_identity_version: int = 1
+
+    def __post_init__(self) -> None:
+        validate_resource_id(self.scope)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,26 +566,26 @@ class DefaultExecutionService(TaskExecutionService):
         )
 
     async def _request_identity(
-        self, scope: str, key_digest: str, *, tenant_id: str,
+        self, scope: str, idempotency_key: str, *, tenant_id: str,
         include_remote: bool = False,
     ) -> tuple[int, IdempotencyRecord | None]:
-        identity = await self._state.idempotency.get(scope, key_digest, tenant_id=tenant_id)
+        identity = await self._state.idempotency.get(scope, idempotency_key, tenant_id=tenant_id)
         if identity is not None:
             return identity.request_identity_version, identity
         pending = self._runtime_bridge.pending_turns
-        local = pending.peek_request(tenant_id=tenant_id, scope=scope, idempotency_key_digest=key_digest)
+        local = pending.peek_request(tenant_id=tenant_id, scope=scope, idempotency_key=idempotency_key)
         if local is not None:
             return local.reservation.idempotency.request_identity_version, None
         coordinator = pending.coordination
         if (include_remote and coordinator is not None and coordinator.supports_pending_views
                 and coordinator.supports_request_lookup):
             version = await coordinator.read_request_identity_version(
-                f"{scope}:{key_digest}", tenant_id=tenant_id,
+                canonical_sha256([scope, idempotency_key]), tenant_id=tenant_id,
             )
             if version is not None:
                 return version, None
             # A live owner may have committed and released between source and owner reads.
-            identity = await self._state.idempotency.get(scope, key_digest, tenant_id=tenant_id)
+            identity = await self._state.idempotency.get(scope, idempotency_key, tenant_id=tenant_id)
             if identity is not None:
                 return identity.request_identity_version, identity
         return 2, None
@@ -624,11 +626,11 @@ class DefaultExecutionService(TaskExecutionService):
         self, session_id: str, *, principal: Principal, idempotency_key: str,
     ) -> SessionAdmission | None:
         """Read one session request without changing pending execution ownership."""
-        key = compute_idempotency_key_digest(validate_idempotency_key(idempotency_key))
+        key = validate_idempotency_key(idempotency_key)
         scope = "session.resume"
         pending_turns = self._runtime_bridge.pending_turns
         pending = pending_turns.peek_request(
-            tenant_id=principal.tenant_id, scope=scope, idempotency_key_digest=key,
+            tenant_id=principal.tenant_id, scope=scope, idempotency_key=key,
         )
         identity = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
         record = None
@@ -639,14 +641,14 @@ class DefaultExecutionService(TaskExecutionService):
                 record = pending.execution
             elif pending_turns.coordination is not None:
                 record = await pending_turns.coordination.read_request_execution(
-                    f"{scope}:{key}", tenant_id=principal.tenant_id,
+                    canonical_sha256([scope, key]), tenant_id=principal.tenant_id,
                 )
                 if record is None:
                     # The owner may have committed and released between reads.
                     identity = await self._state.idempotency.get(scope, key, tenant_id=principal.tenant_id)
         if identity is not None:
             if (identity.resource_kind is not ResourceKind.EXECUTION
-                    or identity.scope != scope or identity.idempotency_key_digest != key
+                    or identity.scope != scope or identity.idempotency_key != key
                     or (pending is not None and pending.execution.execution_id != identity.resource_id)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if identity.status in {IdempotencyStatus.RESERVED, IdempotencyStatus.START_UNKNOWN}:
@@ -805,9 +807,9 @@ class DefaultExecutionService(TaskExecutionService):
         if budget_scope_id is not None:
             await self.authorize_budget_scope(budget_scope_id, request.principal)
         scope = "execution.run"
-        idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
+        idempotency_key = request.idempotency_key
         identity_version, existing = await self._request_identity(
-            scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
+            scope, idempotency_key, tenant_id=request.principal.tenant_id,
         )
         request_digest = _request_digest(
             request,
@@ -826,13 +828,13 @@ class DefaultExecutionService(TaskExecutionService):
         )
         try:
             admitted = await self._management.resolve_admission(
-                scope, idempotency_key_digest, request_digest, request.principal, identity=existing,
+                scope, idempotency_key, request_digest, request.principal, identity=existing,
             )
         except AIError as error:
             if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT or existing is not None:
                 raise
             latest_version, existing = await self._request_identity(
-                scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
+                scope, idempotency_key, tenant_id=request.principal.tenant_id,
             )
             if latest_version == identity_version:
                 raise
@@ -846,7 +848,7 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
             )
             admitted = await self._management.resolve_admission(
-                scope, idempotency_key_digest, request_digest, request.principal, identity=existing,
+                scope, idempotency_key, request_digest, request.principal, identity=existing,
             )
         if admitted is None:
             return None
@@ -882,7 +884,7 @@ class DefaultExecutionService(TaskExecutionService):
                 request,
                 execution,
                 scope=scope,
-                idempotency_key_digest=idempotency_key_digest,
+                idempotency_key=idempotency_key,
                 prepare_local_stream=True,
             )
             return ExecutionHandle(execution.execution_id)
@@ -960,10 +962,10 @@ class DefaultExecutionService(TaskExecutionService):
         parent_invocation_id: str,
     ) -> "ExecutionHandle | None":
         """Replay an already-established child using its own durable binding."""
-        idempotency_key_digest = compute_idempotency_key_digest(idempotency_key)
+        idempotency_key = validate_idempotency_key(idempotency_key)
         existing = await self._state.idempotency.get(
             "execution.subagent",
-            idempotency_key_digest,
+            idempotency_key,
             tenant_id=principal.tenant_id,
         )
         if existing is None:
@@ -1275,9 +1277,9 @@ class DefaultExecutionService(TaskExecutionService):
                     previous_execution_id or fork_base_execution_id or parent_execution_id
                 ),
             )
-        idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
+        idempotency_key = request.idempotency_key
         identity_version, existing = await self._request_identity(
-            scope, idempotency_key_digest, tenant_id=request.principal.tenant_id, include_remote=prepared_input is not None,
+            scope, idempotency_key, tenant_id=request.principal.tenant_id, include_remote=prepared_input is not None,
         )
         request_digest = _request_digest(
             request,
@@ -1296,7 +1298,7 @@ class DefaultExecutionService(TaskExecutionService):
         )
         pending_turn = await self._runtime_bridge.pending_turns.lookup(
             tenant_id=request.principal.tenant_id, scope=scope,
-            idempotency_key_digest=idempotency_key_digest, request_digest=request_digest,
+            idempotency_key=idempotency_key, request_digest=request_digest,
         )
         if pending_turn is not None:
             self._validate_replayed_execution(
@@ -1308,7 +1310,7 @@ class DefaultExecutionService(TaskExecutionService):
         if existing is None:
             existing = await self._state.idempotency.get(
                 scope,
-                idempotency_key_digest,
+                idempotency_key,
                 tenant_id=request.principal.tenant_id,
             )
         if existing is not None:
@@ -1344,7 +1346,7 @@ class DefaultExecutionService(TaskExecutionService):
                         request,
                         pending,
                         scope=scope,
-                        idempotency_key_digest=idempotency_key_digest,
+                        idempotency_key=idempotency_key,
                         prepare_local_stream=prepare_local_stream,
                         dependency_hold_id=dependency_hold_id,
                         parent_producer_generation=parent_producer_generation,
@@ -1360,7 +1362,7 @@ class DefaultExecutionService(TaskExecutionService):
                     request,
                     pending,
                     scope=scope,
-                    idempotency_key_digest=idempotency_key_digest,
+                    idempotency_key=idempotency_key,
                     request_digest=request_digest,
                     request_identity_version=existing.request_identity_version,
                     prepare_local_stream=prepare_local_stream,
@@ -1410,7 +1412,7 @@ class DefaultExecutionService(TaskExecutionService):
                 request,
                 started,
                 scope=scope,
-                idempotency_key_digest=idempotency_key_digest,
+                idempotency_key=idempotency_key,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
                 parent_producer_generation=parent_producer_generation,
@@ -1568,7 +1570,7 @@ class DefaultExecutionService(TaskExecutionService):
                 execution,
                 IdempotencyRecord(
                     scope=scope,
-                    idempotency_key_digest=idempotency_key_digest,
+                    idempotency_key=idempotency_key,
                     request_digest=request_digest,
                     resource_kind=ResourceKind.EXECUTION,
                     resource_id=execution_id,
@@ -1595,7 +1597,7 @@ class DefaultExecutionService(TaskExecutionService):
             if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT or prepared_input is not None:
                 raise
             winner_version, _ = await self._request_identity(
-                scope, idempotency_key_digest, tenant_id=request.principal.tenant_id, include_remote=True,
+                scope, idempotency_key, tenant_id=request.principal.tenant_id, include_remote=True,
             )
             if winner_version == 2:
                 raise
@@ -1669,7 +1671,7 @@ class DefaultExecutionService(TaskExecutionService):
             if proposed_reservation.idempotency.request_identity_version != 2:
                 identity = proposed_reservation.idempotency
                 previous = await self._state.idempotency.get(
-                    identity.scope, identity.idempotency_key_digest, tenant_id=request.principal.tenant_id,
+                    identity.scope, identity.idempotency_key, tenant_id=request.principal.tenant_id,
                 )
                 if previous is None:
                     # The observed legacy owner disappeared; it cannot authorize a new legacy admission.
@@ -1796,7 +1798,7 @@ class DefaultExecutionService(TaskExecutionService):
             ))
         identity = proposed_reservation.idempotency
         scope = identity.scope
-        idempotency_key_digest = identity.idempotency_key_digest
+        idempotency_key = identity.idempotency_key
         request_digest = identity.request_digest
         reservation = None
         if prepared_context is None and self._runtime_bridge.prepare_reserved_start is not None:
@@ -1835,7 +1837,7 @@ class DefaultExecutionService(TaskExecutionService):
                     request,
                     reservation.execution,
                     scope=scope,
-                    idempotency_key_digest=idempotency_key_digest,
+                    idempotency_key=idempotency_key,
                     request_digest=request_digest,
                     request_identity_version=reservation.idempotency.request_identity_version,
                     prepare_local_stream=prepare_local_stream,
@@ -1876,7 +1878,7 @@ class DefaultExecutionService(TaskExecutionService):
                     request,
                     reservation.execution,
                     scope=scope,
-                    idempotency_key_digest=idempotency_key_digest,
+                    idempotency_key=idempotency_key,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     parent_producer_generation=proposed_reservation.parent_producer_generation,
@@ -1893,7 +1895,7 @@ class DefaultExecutionService(TaskExecutionService):
         if reservation.execution.status is ExecutionStatus.STARTED:
             await self._launch_started(
                 request, reservation.execution, scope=scope,
-                idempotency_key_digest=idempotency_key_digest,
+                idempotency_key=idempotency_key,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
                 parent_producer_generation=proposed_reservation.parent_producer_generation,
@@ -1906,7 +1908,7 @@ class DefaultExecutionService(TaskExecutionService):
             request,
             reservation.execution,
             scope=scope,
-            idempotency_key_digest=idempotency_key_digest,
+            idempotency_key=idempotency_key,
             request_digest=request_digest,
             request_identity_version=reservation.idempotency.request_identity_version,
             prepare_local_stream=prepare_local_stream,
@@ -1946,7 +1948,7 @@ class DefaultExecutionService(TaskExecutionService):
         execution: ExecutionRecord,
         *,
         scope: str,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         request_digest: str,
         request_identity_version: int = 1,
         prepare_local_stream: bool = False,
@@ -1963,7 +1965,7 @@ class DefaultExecutionService(TaskExecutionService):
                 usage = await self._state.budgets.read(execution.budget_scope_id)
                 launch_request = replace(request, budget=usage.limits)
             identity = ExecutionStartIdentity(
-                scope, idempotency_key_digest, request_digest,
+                scope, idempotency_key, request_digest,
                 expected_session, request_identity_version,
             )
             try:
@@ -1987,7 +1989,7 @@ class DefaultExecutionService(TaskExecutionService):
                 launch_request,
                 started,
                 scope=scope,
-                idempotency_key_digest=idempotency_key_digest,
+                idempotency_key=idempotency_key,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
                 parent_producer_generation=parent_producer_generation,
@@ -2034,13 +2036,13 @@ class DefaultExecutionService(TaskExecutionService):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         idempotency = await self._state.idempotency.get(
             identity.scope,
-            identity.idempotency_key_digest,
+            identity.idempotency_key,
             tenant_id=self._state.executions.tenant_id,
         )
         if (
             idempotency is None
             or idempotency.scope != identity.scope
-            or idempotency.idempotency_key_digest != identity.idempotency_key_digest
+            or idempotency.idempotency_key != identity.idempotency_key
             or idempotency.resource_kind is not ResourceKind.EXECUTION
             or idempotency.resource_id != current.execution_id
             or idempotency.request_digest != identity.request_digest
@@ -2108,7 +2110,7 @@ class DefaultExecutionService(TaskExecutionService):
                         ),
                         idempotency=IdempotencyTerminalUpdate(
                             idempotency.scope,
-                            idempotency.idempotency_key_digest,
+                            idempotency.idempotency_key,
                             idempotency.status,
                             IdempotencyStatus.FAILED,
                             idempotency.request_digest,
@@ -2129,7 +2131,7 @@ class DefaultExecutionService(TaskExecutionService):
                     )
                     observed_identity = await self._state.idempotency.get(
                         identity.scope,
-                        identity.idempotency_key_digest,
+                        identity.idempotency_key,
                         tenant_id=self._state.executions.tenant_id,
                     )
                 except Exception as read_error:
@@ -2189,7 +2191,7 @@ class DefaultExecutionService(TaskExecutionService):
         execution: ExecutionRecord,
         *,
         scope: str,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         parent_producer_generation: int | None = None,
@@ -2205,7 +2207,7 @@ class DefaultExecutionService(TaskExecutionService):
                     request,
                     execution,
                     scope=scope,
-                    idempotency_key_digest=idempotency_key_digest,
+                    idempotency_key=idempotency_key,
                     prepare_local_stream=prepare_local_stream,
                     # The hold is now confirmed in the source. If the start
                     # capture predates it, refresh before claiming that revision.
@@ -2238,7 +2240,7 @@ class DefaultExecutionService(TaskExecutionService):
         execution: ExecutionRecord,
         *,
         scope: str,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         prepare_local_stream: bool = False,
         confirmed_start: bool = False,
     ) -> None:
@@ -2315,7 +2317,7 @@ class DefaultExecutionService(TaskExecutionService):
             if current is not None and current.status is ExecutionStatus.STARTED:
                 identity = await self._state.idempotency.get(
                     scope,
-                    idempotency_key_digest,
+                    idempotency_key,
                     tenant_id=self._state.executions.tenant_id,
                 )
                 if identity is None:
@@ -2326,7 +2328,7 @@ class DefaultExecutionService(TaskExecutionService):
                         current.revision,
                         current.event_seq,
                         scope,
-                        idempotency_key_digest,
+                        idempotency_key,
                         identity.request_digest,
                         datetime.now(timezone.utc),
                     )
@@ -2786,7 +2788,7 @@ class DefaultExecutionService(TaskExecutionService):
         else:
             now = datetime.now(timezone.utc)
             operation = OperationLedgerInput(
-                operation_id=compute_idempotency_key_digest(validate_idempotency_key(idempotency_key)),
+                operation_id=validate_idempotency_key(idempotency_key),
                 tenant_id=principal.tenant_id,
                 resource_kind=ResourceKind.EXECUTION,
                 resource_id=execution_id,

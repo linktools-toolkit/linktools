@@ -120,7 +120,7 @@ async def test_foreign_baseline_rejected_even_when_its_content_matches_local_pro
             await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
         await state.mutate(write)
         digest, size = messages.encoded_digest()
-        foreign = NativeMessageRoot("another-group", root.store_digest, root.slices)
+        foreign = NativeMessageRoot("another-group", root.store_key, root.slices)
         with pytest.raises(ValueError, match="scope"):
             await native.prepare_message_content(messages, baseline=(foreign, digest, size))
 

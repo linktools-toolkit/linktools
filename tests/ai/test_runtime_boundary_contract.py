@@ -325,7 +325,7 @@ async def test_launch_normal_return_without_worker_abandons_prepared_stream(exec
         SimpleNamespace(execution_id="execution", tenant_id="tenant",
                         status=ExecutionStatus.STARTED, agent_run_seq=0),
         scope="execution.run",
-        idempotency_key_digest="digest",
+        idempotency_key="digest",
         prepare_local_stream=True,
     )
     assert prepared == ["execution"]
@@ -348,7 +348,7 @@ async def test_existing_worker_skips_new_prepared_reservation(execution_storage:
         SimpleNamespace(execution_id="execution", tenant_id="tenant",
                         status=ExecutionStatus.STARTED, agent_run_seq=0),
         scope="execution.run",
-        idempotency_key_digest="digest",
+        idempotency_key="digest",
         prepare_local_stream=True,
     )
     assert prepared == []
@@ -373,7 +373,7 @@ async def test_cancellation_before_worker_installation_abandons_reservation(exec
             SimpleNamespace(execution_id="execution", tenant_id="tenant",
                         status=ExecutionStatus.STARTED, agent_run_seq=0),
             scope="execution.run",
-            idempotency_key_digest="digest",
+            idempotency_key="digest",
             prepare_local_stream=True,
         )
     assert prepared == ["execution"]
@@ -402,7 +402,7 @@ async def test_cancellation_after_worker_installation_retains_reservation(execut
             SimpleNamespace(execution_id="execution", tenant_id="tenant",
                         status=ExecutionStatus.STARTED, agent_run_seq=0),
             scope="execution.run",
-            idempotency_key_digest="digest",
+            idempotency_key="digest",
             prepare_local_stream=True,
         )
     assert prepared == ["execution"]

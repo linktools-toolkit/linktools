@@ -15,6 +15,7 @@ from pydantic_ai import RequestUsage, messages as sdk
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.model.attachments import store_attachment_payload
 from linktools.ai.model.messages import SummaryPromptPart, decode_model_messages, encode_model_messages
 from linktools.ai.errors import AIError, ErrorCode
@@ -87,7 +88,7 @@ async def test_frozen_append_prepares_only_delta_and_keeps_bounded_knowledge(tmp
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'append.db'}")
     native = SqlStepStore(engine, namespace="messages", tenant_id="one")
     await native.initialize(local=True)
-    content = NativeMessageContent(native.storage_context, group_id="execution", store_digest=native.store_digest,
+    content = NativeMessageContent(native.storage_context, group_id="execution", store_key=native.store_key,
                                    max_cached_messages=2, max_cached_bytes=4096, max_cached_nodes=4)
     archive, traffic, proof = MessageArchive(), _Traffic(), None
     calls = 0
@@ -148,7 +149,7 @@ async def test_mutable_capture_checks_all_messages_but_frozen_delta_never_decode
     assert archive.snapshot(first) is first
     assert len(calls) == 6
     owner = NativeMessageContent(SimpleNamespace(engine=SimpleNamespace(dialect=sqlite.dialect())),
-                                 group_id="execution", store_digest="a" * 64)
+                                 group_id="execution", store_key=native_store_key("a", "tenant"))
 
     def forbid_decode(self):
         raise AssertionError("frozen prepare must not reconstruct SDK objects")
@@ -193,7 +194,7 @@ async def test_cold_duplicates_are_idempotent_without_body_reads(tmp_path: Path)
         frozen = MessageArchive().snapshot(_messages("好", "好", "好"))
         for _ in range(2):
             content = NativeMessageContent(native.storage_context, group_id="execution",
-                                           store_digest=native.store_digest, max_cached_messages=0, max_cached_nodes=0)
+                                           store_key=native.store_key, max_cached_messages=0, max_cached_nodes=0)
             prepared = await content.prepare_append(frozen, prepare_payload=_inline)
             content.confirm_committed(await _publish(native, content, prepared))
         assert traffic.body_reads == 0
@@ -213,7 +214,7 @@ async def test_owner_conflicts_rollback_and_foreign_receipts_never_grant_candida
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'receipts.db'}")
     native = SqlStepStore(engine, namespace="messages", tenant_id="one")
     await native.initialize(local=True)
-    content = NativeMessageContent(native.storage_context, group_id="execution", store_digest=native.store_digest)
+    content = NativeMessageContent(native.storage_context, group_id="execution", store_key=native.store_key)
     archive = MessageArchive()
     try:
         prepared = await content.prepare_append(archive.snapshot(_messages("candidate")), prepare_payload=_inline)
@@ -241,7 +242,7 @@ async def test_owner_conflicts_rollback_and_foreign_receipts_never_grant_candida
         other = await content.prepare_append(archive.snapshot(_messages("different")), prepare_payload=_inline)
         with pytest.raises(ValueError, match="does not match"):
             await _publish(native, content, other, owner_inserted=False, confirmed_content=proof)
-        foreign = NativeMessageContent(native.storage_context, group_id="other", store_digest=native.store_digest)
+        foreign = NativeMessageContent(native.storage_context, group_id="other", store_key=native.store_key)
         with pytest.raises(ValueError, match="committed root"):
             foreign.confirm_committed(receipt)
         with pytest.raises(ValueError, match="prepared content"):
@@ -257,7 +258,7 @@ async def test_canonical_business_fields_roundtrip_with_binary_body_and_typed_at
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'codec.db'}")
     native = SqlStepStore(engine, namespace="messages", tenant_id="one")
     await native.initialize(local=True)
-    content = NativeMessageContent(native.storage_context, group_id="execution", store_digest=native.store_digest)
+    content = NativeMessageContent(native.storage_context, group_id="execution", store_key=native.store_key)
     messages = [
         sdk.ModelRequest(parts=[
             SummaryPromptPart("trusted summary", timestamp=_STAMP),
@@ -320,7 +321,7 @@ def test_internal_sequences_do_not_invent_group_scope_or_portable_authority() ->
     from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
 
     context = SimpleNamespace(engine=SimpleNamespace(dialect=sqlite.dialect()))
-    content = NativeMessageContent(context, store_digest="a" * 64)
+    content = NativeMessageContent(context, store_key=native_store_key("a", "tenant"))
     sequence = NativeMessageSequence((NativeMessageSlice("b" * 64, 3, 0, 3),))
     assert NativeMessageSequence.from_json(sequence.to_json()) == sequence
     assert sequence.slice(1, 3).count == 2
@@ -328,7 +329,7 @@ def test_internal_sequences_do_not_invent_group_scope_or_portable_authority() ->
     assert content.range_query((sequence,)) is not None
     with pytest.raises(ValueError, match="must be bound"):
         content.scoped_root(sequence)
-    portable = NativeMessageRoot("actual-group", "a" * 64, sequence.slices)
+    portable = NativeMessageRoot("actual-group", native_store_key("a", "tenant"), sequence.slices)
     with pytest.raises(ValueError, match="scope"):
         content.range_query((portable,))
     content.bind_group("actual-group")
@@ -347,7 +348,7 @@ async def test_direct_session_publication_and_retained_cas_keep_outer_confirmati
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'retained.db'}")
     native = SqlStepStore(engine, namespace="messages", tenant_id="one")
     await native.initialize(local=True)
-    content = NativeMessageContent(native.storage_context, store_digest=native.store_digest)
+    content = NativeMessageContent(native.storage_context, store_key=native.store_key)
     prepared = await content.prepare_append(MessageArchive().snapshot(_messages("body")), prepare_payload=_inline)
     try:
         async with native.storage_context.sessions() as session:

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public execution recovery value contracts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 from ..core import Principal, ToolOperationStatus, validate_idempotency_key
@@ -34,7 +34,7 @@ class ResolveToolEffectRequest:
     operation_id: str
     expected_fence: int
     resolution: ToolEffectResolution
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.principal, Principal):

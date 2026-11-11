@@ -83,7 +83,7 @@ class _Traffic:
             )
 
     def assert_snapshot_metadata(
-        self, start: int, *, store_digest: str, node_ids: int, message_ids: int,
+        self, start: int, *, store_key: bytes, node_ids: int, message_ids: int,
     ) -> None:
         lookups: Counter[str] = Counter()
         identities: Counter[str] = Counter()
@@ -92,8 +92,8 @@ class _Traffic:
             projection = " ".join(statement.split("FROM", 1)[0].split())
             for table in ("ai_step_sequences", "ai_step_messages"):
                 if projection == f"SELECT {table}.sha256, {table}.id":
-                    assert f"{table}.store_digest =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[0] == store_digest and 0 < len(parameters) - 1 <= 128
+                    assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
+                    assert parameters[0] == store_key and 0 < len(parameters) - 1 <= 128
                     lookups[table] += 1
                     identities[table] += len(parameters) - 1
                     break
@@ -111,7 +111,7 @@ class _Traffic:
             assert lookups[table] == (bound + 127) // 128
 
     def assert_owner_metadata(
-        self, start: int, *, store_digest: str, record_store: bytes, root: str,
+        self, start: int, *, store_key: bytes, record_store: bytes, root: str,
         collecting: bool, replacing: bool = False,
     ) -> None:
         kinds: Counter[str] = Counter()
@@ -123,7 +123,7 @@ class _Traffic:
                 kinds['owner'] += 1
             elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
                 assert "ai_step_sequences.sha256 IN" in statement
-                assert parameters == (store_digest, root)
+                assert parameters == (store_key, root)
                 kinds['root'] += 1
             elif projection.startswith("SELECT ai_native_content_edges.id,"):
                 columns = projection.removeprefix("SELECT ").split(", ")
@@ -134,7 +134,7 @@ class _Traffic:
                 assert "LIMIT" in statement and 0 < parameters[-2] <= 32
                 kinds['collector'] += 1
             else:
-                assert projection == ("SELECT ai_step_sequences.id, ai_step_sequences.store_digest, "
+                assert projection == ("SELECT ai_step_sequences.id, ai_step_sequences.store_key, "
                                       "ai_step_sequences.sha256, ai_step_sequences.gc_revision")
                 assert "WHERE ai_step_sequences.id =" in statement and len(parameters) == 1
                 kinds['retired_target'] += 1
@@ -254,7 +254,7 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     started = time.process_time_ns()
     try:
         await native.save_snapshot(snapshot)
-        traffic.assert_snapshot_metadata(0, store_digest=native.store_digest, node_ids=size, message_ids=size)
+        traffic.assert_snapshot_metadata(0, store_key=native.store_key, node_ids=size, message_ids=size)
         roots = []
         for archive in traces:
             repository = archive.transcript_repository
@@ -532,7 +532,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             await native.save_snapshot(snapshot)
             phase_encodings['mutable_snapshot_freeze'] += writer_traffic.encodings - before
             writer_traffic.assert_snapshot_metadata(
-                reads, store_digest=native.store_digest, node_ids=4, message_ids=1,
+                reads, store_key=native.store_key, node_ids=4, message_ids=1,
             )
             phase_reads['snapshot'] += writer_traffic.statements['SELECT'] - reads
             budgeted_writes += writer_traffic.assert_writes(write_start, {
@@ -561,7 +561,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                 write_start = len(writer_traffic.writes)
                 await archive.state_store.mutate(publish)
                 writer_traffic.assert_owner_metadata(
-                    reads, store_digest=native.store_digest, record_store=archive.state_store.store_key,
+                    reads, store_key=native.store_key, record_store=archive.state_store.store_key,
                     root=projection.items[0].root.slices[0].first, collecting=True, replacing=turn > 1,
                 )
                 phase_reads['archive'] += writer_traffic.statements['SELECT'] - reads
@@ -600,7 +600,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             write_start = len(writer_traffic.writes)
             await store.mutate(admit)
             writer_traffic.assert_owner_metadata(
-                reads, store_digest=native.store_digest, record_store=store.store_key,
+                reads, store_key=native.store_key, record_store=store.store_key,
                 root=roots[0].slices[0].first, collecting=False,
             )
             phase_reads['context'] += writer_traffic.statements['SELECT'] - reads

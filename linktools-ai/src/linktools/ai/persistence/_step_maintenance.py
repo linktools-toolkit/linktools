@@ -105,7 +105,7 @@ async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeM
 
 
 async def purge_step_content(
-    context: "SqlStorageContext", metadata: "MetaData", store_digest: str, *,
+    context: "SqlStorageContext", metadata: "MetaData", store_key: bytes, *,
     group: StateStorageGroup | None = None,
     read_object: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
 ) -> StepContentCleanupResult:
@@ -151,22 +151,22 @@ async def purge_step_content(
 
     async def mutate(session: "AsyncSession") -> StepContentCleanupResult:
         roots = [] if snapshots is None else (await session.execute(select(
-            snapshots.c.store_digest, snapshots.c.sequence_root, snapshots.c.messages, snapshots.c.pruned,
-        ).where(snapshots.c.store_digest == store_digest))).mappings().all()
+            snapshots.c.store_key, snapshots.c.sequence_root, snapshots.c.messages, snapshots.c.pruned,
+        ).where(snapshots.c.store_key == store_key))).mappings().all()
         rows = (await session.execute(select(
-            sequences.c.store_digest, sequences.c.sha256, sequences.c.message_sha256, sequences.c.tree_count,
+            sequences.c.store_key, sequences.c.sha256, sequences.c.message_sha256, sequences.c.tree_count,
             sequences.c.left_sha256, sequences.c.right_sha256, sequences.c.next_sha256,
-        ).where(sequences.c.store_digest == store_digest))).mappings().all()
+        ).where(sequences.c.store_key == store_key))).mappings().all()
         closure = NativeMessageClosure(rows)
         for snapshot in roots:
             closure.mark_snapshot(snapshot)
         for root in owner_roots:
-            if root.store_digest == store_digest:
-                closure.mark(store_digest, root.slices)
+            if root.store_key == store_key:
+                closure.mark(store_key, root.slices)
         # Candidate discovery reads identities only: orphan bodies may dominate
         # the namespace's bytes and are not needed to prove retained integrity.
         body_ids = set((await session.execute(select(messages.c.sha256).where(
-            messages.c.store_digest == store_digest,
+            messages.c.store_key == store_key,
         ))).scalars())
         retained_nodes = {identity for _, identity in closure.retained_sequences}
         retained_messages = {identity for _, identity in closure.retained_messages}
@@ -176,10 +176,10 @@ async def purge_step_content(
         for offset in range(0, len(retained_ids), 128):
             batch = retained_ids[offset:offset + 128]
             body_rows = (await session.execute(select(
-                messages.c.store_digest, messages.c.sha256, messages.c.message,
+                messages.c.store_key, messages.c.sha256, messages.c.message,
                 messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ).where(
-                messages.c.store_digest == store_digest, messages.c.sha256.in_(batch),
+                messages.c.store_key == store_key, messages.c.sha256.in_(batch),
             ))).mappings().all()
             if {row["sha256"] for row in body_rows} != set(batch):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -200,18 +200,18 @@ async def purge_step_content(
                 batch = identities[offset:offset + 128]
                 from ._native_content_index import replace_owner_edges
                 if table is sequences:
-                    sources = select(table.c.id).where(table.c.store_digest == store_digest, table.c.sha256.in_(batch))
+                    sources = select(table.c.id).where(table.c.store_key == store_key, table.c.sha256.in_(batch))
                     await replace_owner_edges(context, session, "sequence", sources, ())
                     await replace_owner_edges(context, session, "message", sources, ())
                 edge_table = metadata.tables["ai_native_content_edges"]
-                target_ids = select(table.c.id).where(table.c.store_digest == store_digest, table.c.sha256.in_(batch))
+                target_ids = select(table.c.id).where(table.c.store_key == store_key, table.c.sha256.in_(batch))
                 edge_kinds = (("record", "fact", "operation", "snapshot", "sequence", "candidate_sequence")
                               if table is sequences else ("message", "candidate_message"))
                 await session.execute(delete(edge_table).where(
                     edge_table.c.edge_kind.in_(edge_kinds), edge_table.c.target_id.in_(target_ids),
                 ))
                 removed = await session.execute(delete(table).where(
-                    table.c.store_digest == store_digest, table.c.sha256.in_(batch),
+                    table.c.store_key == store_key, table.c.sha256.in_(batch),
                 ))
                 if removed.rowcount != len(batch):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)

@@ -19,7 +19,6 @@ from ..core import (
     ResourceRef,
     ExecutionStatus,
     canonical_sha256,
-    idempotency_key_digest,
     normalize_json_value,
     principal_identity_payload,
 )
@@ -129,13 +128,13 @@ class DefaultApprovalService:
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.APPROVAL_CONFLICT)
         decision_digest = _decision_digest(request)
-        key_digest = idempotency_key_digest(request.idempotency_key)
+        idempotency_key = request.idempotency_key
         try:
             updated = await self._approvals.decide(
                 request.approval_id,
                 tenant_id=request.principal.tenant_id,
                 expected_status=ApprovalStatus.PENDING,
-                idempotency_key_digest=key_digest,
+                idempotency_key=idempotency_key,
                 decision=request.decision,
                 principal_id=request.principal.principal_id,
                 decision_digest=decision_digest,
@@ -153,7 +152,7 @@ class DefaultApprovalService:
             if not _is_exact_replay(
                 updated,
                 execution_id=execution_id,
-                idempotency_key_digest=key_digest,
+                idempotency_key=idempotency_key,
                 decision=request.decision,
                 principal_id=request.principal.principal_id,
                 decision_digest=decision_digest,
@@ -275,7 +274,7 @@ def _is_exact_replay(
     record: ApprovalRecord | None,
     *,
     execution_id: str,
-    idempotency_key_digest: str,
+    idempotency_key: str,
     decision: ApprovalDecision,
     principal_id: str,
     decision_digest: str,
@@ -291,7 +290,7 @@ def _is_exact_replay(
         record is not None
         and record.execution_id == execution_id
         and record.status is expected_status
-        and record.idempotency_key_digest == idempotency_key_digest
+        and record.idempotency_key == idempotency_key
         and record.decision is decision
         and record.decided_by == principal_id
         and record.decision_digest == decision_digest

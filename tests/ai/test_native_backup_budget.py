@@ -7,6 +7,7 @@ import hashlib
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.attachments import store_attachment_payload
 from linktools.ai.model.messages import encode_model_messages
@@ -34,7 +35,7 @@ async def _content(*, external: bool, text: str = ""):
     digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
     content = (ContentRecord("model-message", digest, size, "raw", payload)
                if payload is not None else ContentRecord("model-message", digest, size, compression, body=encoded))
-    row = {"store_digest": "c" * 64, "sha256": content.raw_digest, **content.to_native_values()}
+    row = {"store_key": native_store_key("c", "tenant"), "sha256": content.raw_digest, **content.to_native_values()}
     return content, raw, row, bodies
 
 

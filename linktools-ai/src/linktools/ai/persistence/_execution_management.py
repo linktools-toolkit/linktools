@@ -121,8 +121,8 @@ class StoredExecutionManagementAdapter:
                               *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
         return await self._repositories.idempotency.list_by_resource(resource_kind, resource_id, tenant_id=tenant_id)
 
-    async def get_idempotency(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None:
-        return await self._repositories.idempotency.get(scope, key_digest, tenant_id=tenant_id)
+    async def get_idempotency(self, scope: str, idempotency_key: str, *, tenant_id: str) -> IdempotencyRecord | None:
+        return await self._repositories.idempotency.get(scope, idempotency_key, tenant_id=tenant_id)
 
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None:
         return await self._repositories.executions.get_result(execution_id, tenant_id=tenant_id)

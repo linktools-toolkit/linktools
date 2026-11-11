@@ -79,7 +79,7 @@ async def _message_content_records(
             assert root.group_id == contents.scope_id
             context = contents.store.context
             observer = NativeMessageContent(
-                context, store_digest=root.store_digest, group_id=root.group_id,
+                context, store_key=root.store_key, group_id=root.group_id,
             )
             query = observer.range_query((root,))
             if query is None:
@@ -889,7 +889,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
             table = build_step_sql_metadata().tables["ai_step_messages"]
             async with contents.store.context.sessions() as sql, sql.begin():
                 result = await sql.execute(table.update().where(
-                    table.c.store_digest == chunk.content.store_digest,
+                    table.c.store_key == chunk.content.store_key,
                     table.c.sha256 == content.raw_digest,
                 ).values(message=compressed, compression=metadata["compression"], raw_size=metadata["raw_size"],
                          sha256=metadata["raw_digest"],

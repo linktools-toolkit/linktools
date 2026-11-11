@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.codec import decode_fact, decode_operation, encode_fact, encode_operation
 from linktools.ai.persistence.snapshots import _decode_snapshot_sequences
@@ -191,7 +192,7 @@ def test_pending_transcript_index_owner_and_current_reader_enforce_signed_bound(
     from linktools.ai.persistence._repository_common import _decode_enveloped_domain, domain_data
     from linktools.ai.persistence.contracts import TranscriptChunk, TranscriptOrigin
     chunk = TranscriptChunk("run", (1 << 63) - 1, 1, TranscriptOrigin.RAW, "codec", "a" * 64, 1,
-                            NativeMessageRoot("a" * 32, "b" * 64, ()))
+                            NativeMessageRoot("a" * 32, native_store_key("b", "tenant"), ()))
     assert _decode_enveloped_domain(domain_data(chunk), TranscriptChunk) == chunk
     with pytest.raises(ValueError):
         replace(chunk, first_message_index=index)

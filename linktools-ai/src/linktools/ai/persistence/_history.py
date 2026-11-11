@@ -226,7 +226,7 @@ class TranscriptRepository:
 
         if (type(store) is not SqlStepStore or not isinstance(self._store, SqlStateStore)
                 or store.storage_context.engine is not self._store.context.engine
-                or store.store_digest != SqlStepStore.scope_digest(namespace=self._namespace, tenant_id=self._tenant_id)):
+                or store.store_key != SqlStepStore.scope_key(namespace=self._namespace, tenant_id=self._tenant_id)):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         self._native_messages = store
         if self._content_archive is not None:
@@ -1723,10 +1723,10 @@ class TranscriptRepository:
                     elif all(type(item.root) is type(first.root) for item, _refs in items):
                         if isinstance(first.root, NativeMessageRoot):
                             if any(not isinstance(item.root, NativeMessageRoot)
-                                   or (item.root.group_id, item.root.store_digest) != (first.root.group_id, first.root.store_digest)
+                                   or (item.root.group_id, item.root.store_key) != (first.root.group_id, first.root.store_key)
                                    for item, _refs in items):
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            root = NativeMessageRoot(first.root.group_id, first.root.store_digest,
+                            root = NativeMessageRoot(first.root.group_id, first.root.store_key,
                                 tuple(span for item, _refs in items for span in item.root.slices))
                         else:
                             if any(not isinstance(item.root, ArchiveRoot)

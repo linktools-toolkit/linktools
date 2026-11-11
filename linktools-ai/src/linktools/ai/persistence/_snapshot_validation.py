@@ -1101,7 +1101,7 @@ def _fact_stream(
     if isinstance(owner, TranscriptHeadRecord):
         chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
         scope_matches = (
-            chunk.content.store_digest == SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
+            chunk.content.store_key == SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
             if isinstance(chunk.content, NativeMessageRoot)
             else chunk.content.content_scope == archive_content_scope(namespace, tenant_id)
         )

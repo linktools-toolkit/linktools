@@ -589,7 +589,7 @@ class Persistence:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         opened = await state.storage_group.open_archive()
         if (opened is None or opened[0] != source.group_id
-                or source.store_digest != SqlStepStore.scope_digest(
+                or source.store_key != SqlStepStore.scope_key(
                     namespace=self.namespace, tenant_id=self.tenant_id)):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         from functools import partial

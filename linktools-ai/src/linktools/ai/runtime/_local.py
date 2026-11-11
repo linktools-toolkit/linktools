@@ -538,7 +538,7 @@ class LocalExecutionBackend:
                 execution.revision,
                 execution.event_seq,
                 identity.scope,
-                identity.idempotency_key_digest,
+                identity.idempotency_key,
                 identity.request_digest,
                 datetime.now(timezone.utc),
                 identity.request_identity_version,
@@ -1090,7 +1090,7 @@ class LocalExecutionBackend:
             # ephemeral claim, before starting any model work.
             repository = self._execution.idempotency
             existing = await repository.state_store.read(lambda _transaction: repository.get(
-                identity.scope, identity.idempotency_key_digest, tenant_id=self._tenant_id,
+                identity.scope, identity.idempotency_key, tenant_id=self._tenant_id,
             ))
             if existing is not None:
                 if (existing.request_digest != identity.request_digest
@@ -1405,10 +1405,13 @@ class LocalExecutionBackend:
             if coordinator is None:
                 await execute(None, None)
             else:
+                # One compact composite fits Turn's request/session limits and preserves
+                # boundaries when either raw identity contains a colon.
+                request_key = canonical_sha256([identity.scope, identity.idempotency_key])
                 scope = coordinator.enter(
                     session_key=(f"session:{execution.session_id}" if execution.session_id is not None else
-                                 f"request:{identity.scope}:{identity.idempotency_key_digest}"),
-                    request_key=f"{identity.scope}:{identity.idempotency_key_digest}",
+                                 f"request:{request_key}"),
+                    request_key=request_key,
                     request_digest=identity.request_digest, execution_id=execution.execution_id,
                     owner_id=uuid.uuid4().hex,
                 )
@@ -1794,7 +1797,7 @@ class LocalExecutionBackend:
                 execution.revision,
                 execution.event_seq,
                 identity.scope,
-                identity.idempotency_key_digest,
+                identity.idempotency_key,
                 identity.request_digest,
                 now,
                 identity.request_identity_version,
@@ -3155,7 +3158,7 @@ class LocalExecutionBackend:
         ):
             return await self._execution.idempotency.compare_and_swap(
                 identity.scope,
-                identity.idempotency_key_digest,
+                identity.idempotency_key,
                 tenant_id=self._tenant_id,
                 expected_status=identity.status,
                 next_record=replace(

@@ -15,6 +15,8 @@ from ..core import (
     OperationLedgerRecord,
     Page,
     ResourceKind,
+    validate_resource_id,
+    validate_idempotency_key,
     ResourceRef,
 )
 from ..errors import AIError, ErrorCode
@@ -103,12 +105,12 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _identity_key(self, scope: str, key: str) -> tuple[str, str]:
-        return scope, key
+        return validate_resource_id(scope), validate_idempotency_key(key)
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         _require_tenant(record, self._tenant_id)
         self._require_resource_kind(record)
-        identity = self._identity_key(record.scope, record.idempotency_key_digest)
+        identity = self._identity_key(record.scope, record.idempotency_key)
         try:
             await self._insert(
                 await self._stored_content("idempotency", identity, record, state=record.status.value)
@@ -126,13 +128,13 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
     async def get(
         self,
         scope: str,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         *,
         tenant_id: str,
     ) -> IdempotencyRecord | None:  # type: ignore[override]
         if tenant_id != self._tenant_id:
             return None
-        record = await self._record(self._key(self._kind, self._identity_key(scope, idempotency_key_digest)))
+        record = await self._record(self._key(self._kind, self._identity_key(scope, idempotency_key)))
         return None if record is None else await self._decode(record, IdempotencyRecord)
 
     async def list_by_resource(
@@ -152,7 +154,7 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
     async def compare_and_swap(
         self,
         scope: str,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         *,
         tenant_id: str,
         expected_status: IdempotencyStatus,
@@ -162,9 +164,9 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
         self._require_resource_kind(next_record)
-        if next_record.scope != scope or next_record.idempotency_key_digest != idempotency_key_digest:
+        if next_record.scope != scope or next_record.idempotency_key != idempotency_key:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        identity = self._identity_key(scope, idempotency_key_digest)
+        identity = self._identity_key(scope, idempotency_key)
 
         async def mutate(transaction: StateTransaction) -> IdempotencyRecord:
             current_record = await transaction.get_record(
@@ -800,7 +802,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> IdempotencyRecord | None:
         return await self._idempotency.get(
             claim.scope,
-            claim.idempotency_key_digest,
+            claim.idempotency_key,
             tenant_id=self._tenant_id,
         )
 
@@ -840,7 +842,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         ) -> ExecutionStartReservationResult:
             identity = self._idempotency._identity_key(
                 reservation.idempotency.scope,
-                reservation.idempotency.idempotency_key_digest,
+                reservation.idempotency.idempotency_key,
             )
             id_key = self._idempotency._key("idempotency", identity)
             execution_key = self._key("execution", (reservation.execution.execution_id,))
@@ -956,7 +958,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         execution_key = self._key("execution", (claim.execution_id,))
         identity = self._idempotency._identity_key(
             claim.scope,
-            claim.idempotency_key_digest,
+            claim.idempotency_key,
         )
         idempotency_key = self._idempotency._key("idempotency", identity)
         stored = await transaction.get_records((execution_key, idempotency_key))
@@ -975,7 +977,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if idempotency_record is None:
             idempotency = IdempotencyRecord(
                 scope=claim.scope,
-                idempotency_key_digest=claim.idempotency_key_digest,
+                idempotency_key=claim.idempotency_key,
                 request_digest=claim.request_digest,
                 resource_kind=ResourceKind.EXECUTION,
                 resource_id=claim.execution_id,
@@ -1004,7 +1006,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     idempotency,
                     IdempotencyRecord(
                         scope=claim.scope,
-                        idempotency_key_digest=claim.idempotency_key_digest,
+                        idempotency_key=claim.idempotency_key,
                         request_digest=claim.request_digest,
                         resource_kind=ResourceKind.EXECUTION,
                         resource_id=claim.execution_id,
@@ -1512,7 +1514,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     def start_idempotency_record_key(self, identity: IdempotencyRecord) -> bytes:
         """Physical key of the request identity confirmed by admission."""
         return self._idempotency._key("idempotency", self._idempotency._identity_key(
-            identity.scope, identity.idempotency_key_digest,
+            identity.scope, identity.idempotency_key,
         ))
 
     async def terminal_idempotency_in_transaction(
@@ -1545,7 +1547,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         return IdempotencyTerminalUpdate(
             identity.scope,
-            identity.idempotency_key_digest,
+            identity.idempotency_key,
             identity.status,
             next_status,
             identity.request_digest,
@@ -1591,7 +1593,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if commit.idempotency is not None:
                 identity = self._idempotency._identity_key(
                     commit.idempotency.scope,
-                    commit.idempotency.idempotency_key_digest,
+                    commit.idempotency.idempotency_key,
                 )
                 id_key = self._idempotency._key("idempotency", identity)
                 record_keys.append(id_key)
@@ -1626,7 +1628,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 if (id_value.resource_kind is not ResourceKind.EXECUTION
                         or id_value.resource_id != commit.execution.execution_id
                         or id_value.scope != commit.idempotency.scope
-                        or id_value.idempotency_key_digest != commit.idempotency.idempotency_key_digest
+                        or id_value.idempotency_key != commit.idempotency.idempotency_key
                         or id_value.request_digest != commit.idempotency.request_digest):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if id_value.status is not commit.idempotency.expected_status:
@@ -1769,7 +1771,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         self, transaction: StateTransaction, reservation: ExecutionStartReservation,
     ) -> ExecutionTerminalCommitResult | None:
         identity = self._idempotency._identity_key(
-            reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
+            reservation.idempotency.scope, reservation.idempotency.idempotency_key,
         )
         stored = await transaction.get_record(self._idempotency._key("idempotency", identity))
         if stored is None:
@@ -1797,7 +1799,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     def pending_turn_record_keys(self, reservation: ExecutionStartReservation) -> tuple[bytes, ...]:
         _require_tenant(reservation.idempotency, self._tenant_id)
         identity = self._idempotency._identity_key(
-            reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
+            reservation.idempotency.scope, reservation.idempotency.idempotency_key,
         )
         return (self._idempotency._key("idempotency", identity),)
 
@@ -1844,7 +1846,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         final = replace(commit.execution, result=commit.result, event_seq=len(events), retention_closed=True,
                         revision=commit.expected_revision + len(audit_events) + 1).finalize_terminal(commit.result)
         identity = self._idempotency._identity_key(
-            reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
+            reservation.idempotency.scope, reservation.idempotency.idempotency_key,
         )
         completed = replace(reservation.idempotency, status=terminal_states[commit.execution.status][1],
                             result_digest=None if commit.result.output is None else commit.result.output.digest,
@@ -2366,7 +2368,7 @@ def _same_idempotency_identity(
     """Compare only the immutable request identity, never a candidate resource id."""
     return (
         left.scope == right.scope
-        and left.idempotency_key_digest == right.idempotency_key_digest
+        and left.idempotency_key == right.idempotency_key
         and left.request_digest == right.request_digest
         and left.request_identity_version == right.request_identity_version
         and left.resource_kind is right.resource_kind

@@ -15,7 +15,6 @@ from linktools.ai.persistence._native_backup_projection import NativeBackupProje
 from linktools.ai.persistence._native_event_reference import NativeEventReferences
 from linktools.ai.persistence._official_step_reader import OfficialStepReader
 from linktools.ai.persistence._step_backup import NativeStepBackup
-from linktools.ai.persistence._step_store import _replay_digest
 from linktools.ai.persistence.codec import _encode_step_envelope, encode_envelope
 from linktools.ai.persistence.state import StoredRecord, StoredFact, record_key, stream_key
 
@@ -25,12 +24,12 @@ def _digest(value: str) -> str:
 
 
 def _inventory():
-    store = SqlStepStore.scope_digest(namespace="portable", tenant_id="tenant")
+    store = SqlStepStore.scope_key(namespace="portable", tenant_id="tenant")
     run = RunRecord(run_id="run", registration_id="registration", metadata={"native": "body"})
-    row = dict(SqlStepStore._record_values(run), store_digest=store)
+    row = dict(SqlStepStore._record_values(run), store_key=store)
     event = StepEvent(run_id="run", kind="run_started", step_index=1, idempotency_key="start")
-    event_row = dict(SqlStepStore._event_values(event), store_digest=store,
-                     key_digest=_replay_digest(store, run.run_id, "start"), outcome=None, run_fields=0,
+    event_row = dict(SqlStepStore._event_values(event), store_key=store,
+                     idempotency_key=b"start", outcome=None, run_fields=0,
                      body_sha256=_digest(SqlStepStore._started_body(event)),
                      fields_sha256=_digest(SqlStepStore._started_fields_body(event)))
     return run, event, NativeStepBackup(store, (row,), (event_row,), ())
@@ -58,7 +57,7 @@ def test_portable_event_projection_requires_exact_source_and_trace_position() ->
     _, event, backup = _inventory()
     projection = NativeEventReferences.project(event, event_index=2)
     reference = encode_envelope({"type": "native_event_reference", "payload": {
-        "key": backup.events[0]["key_digest"], "index": 2,
+        "run": event.run_id, "replay": event.idempotency_key, "index": 2,
     }})
     projected = StoredFact(stream_key("portable", "tenant", "trace", "event", ("run",)), 7,
         record_key("portable", "tenant", "trace", "agent_run", ("run",)),

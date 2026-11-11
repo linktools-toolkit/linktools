@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
+from linktools.ai.steps import native_store_key, encode_native_store_key
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice
@@ -54,13 +55,13 @@ def _content(group: str, *, external: bool, compressed: bool = False) -> Content
 
 
 def _row(content: ContentRecord) -> dict:
-    return {"store_digest": "a" * 64, "sha256": content.raw_digest, **content.to_native_values()}
+    return {"store_key": native_store_key("a", "tenant"), "sha256": content.raw_digest, **content.to_native_values()}
 
 
 def _manifest(group: str) -> dict:
     content = _content(group, external=True)
     node = ImmutableSequenceNode(content.raw_digest, 1, None, None, None)
-    root = NativeMessageRoot(group, "a" * 64, (NativeMessageSlice(node.identity, 1, 0, 1),))
+    root = NativeMessageRoot(group, native_store_key("a", "tenant"), (NativeMessageSlice(node.identity, 1, 0, 1),))
     reference, = content.object_refs()
     return {
         "kind": "runtime-storage-snapshot", "format_version": 1, "namespace": "test", "tenant_id": "default",
@@ -68,7 +69,7 @@ def _manifest(group: str) -> dict:
                                "aliases": [], "facts": [], "operations": [], "sequences": []}},
         "archives": [],
         "native_messages": [{"group_id": group, "domain": "trace", "messages": [encode_native_message_row(_row(content))],
-            "sequences": [{"store_digest": "a" * 64, "sha256": node.identity, "message_sha256": content.raw_digest,
+            "sequences": [{"store_key": encode_native_store_key(native_store_key("a", "tenant")), "sha256": node.identity, "message_sha256": content.raw_digest,
                            "tree_count": 1, "left_sha256": None, "right_sha256": None, "next_sha256": None}]}],
         "objects": [{"domain": "trace", "source": {"store_id": "runtime", "key": reference.key,
                      "digest": reference.digest, "size": reference.size}, "content": {
@@ -160,14 +161,14 @@ def test_capture_byte_budget_rejects_before_retaining_a_large_body() -> None:
 async def test_capture_reads_only_bodies_selected_by_the_shared_native_closure() -> None:
     from linktools.ai.persistence.snapshots import _read_native_messages
 
-    partition = "a" * 64
+    partition = native_store_key("a", "tenant")
     wanted = hashlib.sha256(b"wanted").hexdigest()
     unrelated = hashlib.sha256(b"unrelated").hexdigest()
     nodes = [ImmutableSequenceNode(identity, 1, None, None, None) for identity in (wanted, unrelated)]
-    rows = [{"store_digest": partition, "sha256": node.identity, "message_sha256": node.content_id,
+    rows = [{"store_key": partition, "sha256": node.identity, "message_sha256": node.content_id,
              "tree_count": 1, "left_sha256": None, "right_sha256": None, "next_sha256": None} for node in nodes]
     content = ContentRecord("model-message", wanted, 6, "raw", body=b"wanted")
-    body = {"store_digest": partition, "sha256": wanted, **content.to_native_values()}
+    body = {"store_key": partition, "sha256": wanted, **content.to_native_values()}
     body_requests = []
 
     class Transaction:

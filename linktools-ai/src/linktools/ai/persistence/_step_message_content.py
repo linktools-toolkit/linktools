@@ -5,18 +5,19 @@
 This component does not provision schemas, publish owner roots, or register GC
 roots. Its caller must retain roots in the actual Snapshot/Trace/Conversation
 owner and include those roots and payload ObjectRefs in maintenance/export.
-A native adapter supplies its existing store digest and physical SQL context;
-there is no alternative namespace/tenant digest here.
+A native adapter supplies its existing raw store key and physical SQL context;
+there is no alternative namespace/tenant identity here.
 """
 
 import hashlib
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary, WeakSet
 
 from ..core import canonical_json_bytes
+from ..steps import validate_native_store_key
 from ..model.attachments import read_attachment_payload, validate_attachment_payload
 from ..errors import AIError
 from ..storage import ObjectRef, SqlStorageContext, StoredPayload
@@ -108,18 +109,18 @@ class NativeMessageReceipt:
 
     prepared: PreparedNativeMessages | None
     _transaction: "AsyncSessionTransaction | None" = None
-    _store_digest: str | None = None
+    _store_key: bytes | None = field(default=None, repr=False)
     _root_targets: tuple[tuple[str, int], ...] = ()
 
     def publication_targets(
-        self, session: "AsyncSession", *, store_digest: str, roots: Sequence[str],
+        self, session: "AsyncSession", *, store_key: bytes, roots: Sequence[str],
     ) -> tuple[int, ...]:
         """Reuse physical IDs only inside this exact live publication transaction."""
         from ._native_content_index import PublicationTargetsUnavailable
 
         if (self.prepared is None or self._transaction is None
                 or (session.get_nested_transaction() or session.get_transaction()) is not self._transaction or not self._transaction.is_active
-                or store_digest != self._store_digest
+                or store_key != self._store_key
                 or tuple(sorted(set(roots))) != tuple(root for root, _ in self._root_targets)):
             raise PublicationTargetsUnavailable("native publication targets require their active transaction, store, and roots")
         return tuple(target for _, target in self._root_targets)
@@ -181,7 +182,7 @@ class NativeRangeQuery:
 class NativeMessageContent:
     """One native content owner, borrowing the existing adapter's SQL scope.
 
-    The native adapter supplies its public storage_context/store_digest.
+    The native adapter supplies its public storage_context/store_key.
     Standalone snapshot sequences use that row's existing scope. Cross-owner
     references require bind_group with the actual durable group ID; publication
     additionally checks the physical SQL context. No synthetic group is minted.
@@ -193,12 +194,12 @@ class NativeMessageContent:
     """
 
     def __init__(
-        self, context: SqlStorageContext, *, store_digest: str, group_id: str | None = None,
+        self, context: SqlStorageContext, *, store_key: bytes, group_id: str | None = None,
         max_cached_messages: int = 256, max_cached_bytes: int = 1024 * 1024,
         max_cached_nodes: int = 1024,
     ) -> None:
         self._empty = NativeMessageSequence()
-        self._store_digest = _digest(store_digest)
+        self._store_key = validate_native_store_key(store_key)
         self._group_id: str | None = None
         if group_id is not None:
             self.bind_group(group_id)
@@ -256,7 +257,7 @@ class NativeMessageContent:
             raise TypeError("native message reference requires an internal sequence")
         if self._group_id is None:
             raise ValueError("native message group must be bound before cross-owner reference")
-        return NativeMessageRoot(self._group_id, self._store_digest, sequence.slices)
+        return NativeMessageRoot(self._group_id, self._store_key, sequence.slices)
 
     def validate_root(self, root: NativeMessageSequence | NativeMessageRoot) -> None:
         """Check the physical owner before interpreting a cross-owner sequence."""
@@ -266,7 +267,7 @@ class NativeMessageContent:
         if isinstance(root, NativeMessageSequence):
             return
         if (not isinstance(root, NativeMessageRoot) or self._group_id is None
-                or (root.group_id, root.store_digest) != (self._group_id, self._store_digest)):
+                or (root.group_id, root.store_key) != (self._group_id, self._store_key)):
             raise ValueError("native message root belongs to another persistence scope")
 
     def _proof(self, proof: CommittedNativeMessages) -> None:
@@ -435,29 +436,29 @@ class NativeMessageContent:
         else:
             if confirmed_content is None or prepared.cold:
                 await self._insert_rows(session, self._messages, [
-                    {"store_digest": self._store_digest, "sha256": identity, **body.to_native_values()}
+                    {"store_key": self._store_key, "sha256": identity, **body.to_native_values()}
                     for identity, body in prepared.messages if prepared.cold or identity not in self._known_messages
                 ])
                 await self._insert_rows(session, self._nodes, [
-                    {"store_digest": self._store_digest, "sha256": identity,
+                    {"store_key": self._store_key, "sha256": identity,
                      "message_sha256": node.content_id, "tree_count": node.tree_count,
                      "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
                     for identity, node in prepared.nodes if prepared.cold or identity not in self._known_nodes
                 ])
-            resolved = await index_nodes(self._context, session, self._store_digest, [
+            resolved = await index_nodes(self._context, session, self._store_key, [
                 {"sha256": identity, "message_sha256": node.content_id,
                  "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
                 for identity, node in prepared.nodes
             ])
             targets = await note_publication(
-                session, self._store_digest, tuple(span.first for span in prepared.root.slices), resolved=resolved,
+                session, self._store_key, tuple(span.first for span in prepared.root.slices), resolved=resolved,
             )
             receipt = NativeMessageReceipt(
                 prepared, session.get_nested_transaction() or session.get_transaction(),
-                self._store_digest, tuple(sorted(targets.items())),
+                self._store_key, tuple(sorted(targets.items())),
             )
             register_publication_targets(
-                session, self._store_digest, tuple(span.first for span in prepared.root.slices),
+                session, self._store_key, tuple(span.first for span in prepared.root.slices),
                 receipt.publication_targets,
             )
         self._receipts.add(receipt)
@@ -470,7 +471,7 @@ class NativeMessageContent:
         batch: list[Mapping[str, object]] = []
         size = 0
         for row in rows:
-            _digest(row["store_digest"])
+            validate_native_store_key(row["store_key"])
             _digest(row["sha256"])
             if table is self._messages:
                 ContentRecord.from_native_row(row)
@@ -484,7 +485,7 @@ class NativeMessageContent:
             if batch and (len(batch) >= 64 or size + row_size > 256 * 1024):
                 await self._context.dialect.insert_immutable_many(
                     session, table=table, rows=batch,
-                    index_elements=("store_digest", "sha256"), conflict_column="id",
+                    index_elements=("store_key", "sha256"), conflict_column="id",
                 )
                 batch, size = [], 0
             batch.append(row)
@@ -492,7 +493,7 @@ class NativeMessageContent:
         if batch:
             await self._context.dialect.insert_immutable_many(
                 session, table=table, rows=batch,
-                index_elements=("store_digest", "sha256"), conflict_column="id",
+                index_elements=("store_key", "sha256"), conflict_column="id",
             )
 
     def confirm_current(self, receipt: NativeMessageReceipt) -> CommittedNativeMessages | None:
@@ -592,7 +593,7 @@ class NativeMessageContent:
         integer = lambda value: cast(literal_column(str(value)), BigInteger)
         true = literal_column("1 = 1")
         nodes, messages = self._nodes, self._messages
-        store = bindparam("native_store_digest", self._store_digest, type_=nodes.c.store_digest.type)
+        store = bindparam("native_store_key", self._store_key, type_=nodes.c.store_key.type)
         seeds = []
         depth = path_units = 0
         inputs, _ = self._range_inputs(roots)
@@ -604,8 +605,8 @@ class NativeMessageContent:
                 nodes.c.sha256, nodes.c.message_sha256, nodes.c.tree_count,
                 nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ).select_from(nodes.outerjoin(messages, and_(
-                messages.c.store_digest == store, messages.c.sha256 == nodes.c.message_sha256,
-            ))).where(nodes.c.store_digest == store, nodes.c.sha256.in_(
+                messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
+            ))).where(nodes.c.store_key == store, nodes.c.sha256.in_(
                 bindparam("native_singleton_ids", [item.first for _, _, item in inputs], expanding=True),
             ))
             return self._range_plan(statement, depth=0, path_units=len(inputs), budget=budget)
@@ -658,7 +659,7 @@ class NativeMessageContent:
                 case((edges.c.edge == integer(2), integer(1)),
                      (edges.c.edge == integer(3), frontier.c.forest), else_=integer(0)).label("forest"),
             ).select_from(frontier.join(nodes, and_(
-                nodes.c.store_digest == store, nodes.c.sha256 == frontier.c.sha256,
+                nodes.c.store_key == store, nodes.c.sha256 == frontier.c.sha256,
             )).join(edges, true)).where(
                 child.is_not(None), frontier.c.depth < integer(depth),
                 nodes.c.tree_count > integer(0), nodes.c.tree_count <= frontier.c.remaining,
@@ -684,9 +685,9 @@ class NativeMessageContent:
             nodes.c.message_sha256, nodes.c.tree_count, nodes.c.left_sha256, nodes.c.right_sha256,
             nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
         ).select_from(closure.join(nodes, and_(
-            nodes.c.store_digest == store, nodes.c.sha256 == closure.c.sha256,
+            nodes.c.store_key == store, nodes.c.sha256 == closure.c.sha256,
         )).outerjoin(messages, and_(
-            selected, messages.c.store_digest == store, messages.c.sha256 == nodes.c.message_sha256,
+            selected, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
         )))
         return self._range_plan(statement, depth=depth, path_units=path_units, budget=budget)
 

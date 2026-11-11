@@ -249,8 +249,8 @@ async def test_snapshot_pruning_and_body_lookup_stay_in_their_partition(tmp_path
         assert await stores[1].latest_snapshot(run_id="run") == first
         await stores[1].save_snapshot(second)
         async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_digest = :scope"),
-                                     {"scope": stores[0]._store_digest})
+            await connection.execute(text("DELETE FROM ai_step_messages WHERE store_key = :scope"),
+                                     {"scope": stores[0]._store_key})
         with pytest.raises(ValueError, match="missing or corrupt"):
             await stores[0].latest_snapshot(run_id="run")
         assert await stores[1].latest_snapshot(run_id="run") == second
@@ -443,10 +443,11 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
     metadata = build_step_sql_metadata()
     kind = "mysql" if dialect.name == "mysql" else "portable"
     expected = {
-        "runs": {("store_digest", "run_id"): True,
-                 ("store_digest", "conversation_id"): False, ("store_digest", "parent_run_id"): False},
-        "events": {("store_digest", "run_id"): False},
-        "snapshots": {("store_digest", "run_id", "pruned"): False},
+        "runs": {("store_key", "run_id"): True,
+                 ("store_key", "conversation_id"): False, ("store_key", "parent_run_id"): False},
+        "events": {("store_key", "run_id", "idempotency_key"): True, ("store_key", "run_id"): False},
+        "snapshots": {("store_key", "run_id", "pruned"): False,
+                      ("store_key", "run_id", "idempotency_key"): True},
     }
     for name, lookups in expected.items():
         table = metadata.tables["ai_step_" + name]
@@ -467,9 +468,12 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
             assert "(" + ", ".join(columns) + ")" in ddl
             if dialect.name == "mysql":
                 # MySQL budgets declared characters, not the application's byte limit.
-                key_bytes = sum(column.type.length * 4 if getattr(column.type, "length", None) else 1
+                from sqlalchemy import LargeBinary
+
+                key_bytes = sum(column.type.length * (1 if isinstance(column.type, LargeBinary) else 4)
+                                if getattr(column.type, "length", None) else 1
                                 for column in (table.c[name] for name in columns))
-                assert key_bytes == (769 if name == "snapshots" else 768)
+                assert key_bytes == (1426 if "idempotency_key" in columns else 915 if "pruned" in columns else 914)
                 assert key_bytes <= 3072
 
 

@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.steps import native_store_key
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._sql import (
     SqlStateStore, _fact_from_row, _fact_values, _operation_from_row,
@@ -186,7 +187,7 @@ async def test_native_publication_uses_raw_state_owner_and_native_target_without
     from linktools.ai.persistence.contracts import ArchivedContextBlock
     from linktools.ai.persistence.state import record_key
 
-    group_id, native_store, root_id = "a" * 32, "b" * 64, "c" * 64
+    group_id, native_store, root_id = "a" * 32, native_store_key("native", "tenant"), "c" * 64
     store_key = b"\xff" * STORE_KEY_MAX_BYTES
     root = NativeMessageRoot(group_id, native_store, (NativeMessageSlice(root_id, 1, 0, 1),))
     owner_key = b"owner" if kind != "operation" else b"o" * 1152

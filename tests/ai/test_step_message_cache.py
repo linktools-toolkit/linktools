@@ -71,7 +71,7 @@ def test_sql_traffic_counts_binary_message_rows_and_bound_bytes(many: bool) -> N
             ("store", "two", None, "raw", 20, '{"name":"文"}'))
     statement = (
         "INSERT INTO ai_step_messages "
-        "(store_digest, sha256, message, compression, raw_size, payload_json) "
+        "(store_key, sha256, message, compression, raw_size, payload_json) "
         "VALUES (?, ?, ?, ?, ?, ?)"
     )
     if not many:

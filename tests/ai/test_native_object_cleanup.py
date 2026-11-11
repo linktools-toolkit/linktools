@@ -47,7 +47,7 @@ async def _bodies(native: SqlStepStore) -> dict[tuple[str, str], ContentRecord]:
     messages = build_step_sql_metadata().tables["ai_step_messages"]
     async with native.storage_context.engine.connect() as connection:
         rows = (await connection.execute(select(messages))).mappings().all()
-    return {(row["store_digest"], row["sha256"]): ContentRecord.from_native_row(row) for row in rows}
+    return {(row["store_key"], row["sha256"]): ContentRecord.from_native_row(row) for row in rows}
 
 
 @pytest.mark.asyncio
@@ -69,13 +69,13 @@ async def test_offline_cleanup_releases_shared_content_for_online_collection(
         monkeypatch.undo()
         await native.save_snapshot(_snapshot("run", 3))
         await _native_content_index.maintain_native_content(
-            native.storage_context, store_digests=(native.store_digest,),
+            native.storage_context, store_keys=(native.store_key,),
         )
         async with native.storage_context.engine.connect() as connection:
             for table in ("ai_step_sequences", "ai_step_messages"):
                 assert await connection.scalar(text(
-                    f"SELECT count(*) FROM {table} WHERE store_digest = :store"
-                ), {"store": native.store_digest}) == 0
+                    f"SELECT count(*) FROM {table} WHERE store_key = :store"
+                ), {"store": native.store_key}) == 0
         assert await foreign.latest_snapshot(run_id="foreign") == foreign_snapshot
         await foreign.save_snapshot(_snapshot("foreign", 2))
         async with native.storage_context.engine.connect() as connection:
@@ -105,7 +105,7 @@ async def test_object_cleanup_preserves_shared_scopes_and_republishes_retired_bo
         assert (await state.purge_unreferenced_objects(candidates, exclusive=_Offline())).retained == candidates
         remaining = await _bodies(native)
         assert len(remaining) == 1
-        assert next(iter(remaining))[0] == foreign.scope_digest(namespace="native-gc", tenant_id="two")
+        assert next(iter(remaining))[0] == foreign.scope_key(namespace="native-gc", tenant_id="two")
         assert await foreign.latest_snapshot(run_id="shared") == shared
         await foreign.save_snapshot(_snapshot("shared", 2))
         result = await state.purge_unreferenced_objects(candidates, exclusive=_Offline())

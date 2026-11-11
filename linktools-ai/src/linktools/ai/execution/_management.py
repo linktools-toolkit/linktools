@@ -15,8 +15,7 @@ from linktools.core import environ
 from ..core import (AuthorizationAction, AuthorizationPolicy, TenantAuthorizationPolicy, Principal, ResourceRef,
     ResourceKind, ExecutionStatus, ExecutionEventType, IdempotencyStatus, JsonValue,
     OperationKind, OperationStatus, OperationLedgerInput, OperationLedgerRecord,
-    StopReason, UsageMetrics, canonical_sha256, principal_identity_payload,
-    idempotency_key_digest as compute_idempotency_key_digest)
+    StopReason, UsageMetrics, canonical_sha256, principal_identity_payload)
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectRef
 from ._records import (ExecutionRecord, ResultRecord, IdempotencyRecord,
@@ -75,7 +74,7 @@ class ExecutionManagementPort(Protocol):
         expected_status: OperationStatus, next_record: OperationLedgerRecord) -> OperationLedgerRecord: ...
     async def list_idempotency(self, resource_kind: ResourceKind, resource_id: str,
         *, tenant_id: str) -> tuple[IdempotencyRecord, ...]: ...
-    async def get_idempotency(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
+    async def get_idempotency(self, scope: str, idempotency_key: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
     async def result_record(self, execution: ExecutionRecord, *, tenant_id: str) -> ResultRecord | None: ...
     async def read_output(self, reference: ObjectRef) -> bytes: ...
@@ -101,17 +100,17 @@ class ExecutionManager:
         await self._authorization.authorize(principal, action, header)
         return header
 
-    async def resolve_admission(self, scope: str, key_digest: str, request_digest: str,
+    async def resolve_admission(self, scope: str, idempotency_key: str, request_digest: str,
                                 principal: Principal, *, identity: IdempotencyRecord | None = None,
                                 ) -> tuple[IdempotencyRecord, ExecutionRecord] | None:
         """Reuse an observed source identity for request validation and replay."""
         if identity is None:
-            identity = await self._port.get_idempotency(scope, key_digest, tenant_id=principal.tenant_id)
+            identity = await self._port.get_idempotency(scope, idempotency_key, tenant_id=principal.tenant_id)
         if identity is None:
             return None
         if identity.request_digest != request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        if (identity.scope != scope or identity.idempotency_key_digest != key_digest
+        if (identity.scope != scope or identity.idempotency_key != idempotency_key
                 or identity.resource_kind is not ResourceKind.EXECUTION):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if identity.status is IdempotencyStatus.START_UNKNOWN:
@@ -136,12 +135,12 @@ class ExecutionManager:
         # Terminal commit updates both records atomically, but these two
         # reads can straddle that commit. Refresh only this mixed view.
         refreshed = await self._port.get_idempotency(
-            identity.scope, identity.idempotency_key_digest, tenant_id=tenant_id,
+            identity.scope, identity.idempotency_key, tenant_id=tenant_id,
         )
         if (
             refreshed is None
             or refreshed.scope != identity.scope
-            or refreshed.idempotency_key_digest != identity.idempotency_key_digest
+            or refreshed.idempotency_key != identity.idempotency_key
             or refreshed.request_digest != identity.request_digest
             or refreshed.request_identity_version != identity.request_identity_version
             or refreshed.resource_kind is not identity.resource_kind
@@ -225,7 +224,7 @@ class ExecutionManager:
                 "force": request.force,
             }
         )
-        operation_id = compute_idempotency_key_digest(request.idempotency_key)
+        operation_id = request.idempotency_key
         operation = await self._port.get_operation(
             operation_id,
             tenant_id=request.principal.tenant_id,
@@ -404,9 +403,8 @@ class ExecutionManager:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if current.status is OperationStatus.EFFECT_UNKNOWN:
                     _logger.warning(
-                        "execution cancellation effect unknown: execution=%s operation=%s",
+                        "execution cancellation effect unknown: execution=%s",
                         execution_id,
-                        operation.operation_id,
                     )
                     return CancelExecutionResult(execution_id, False)
                 if current.status in {
@@ -468,7 +466,7 @@ class ExecutionManager:
                 if identity is None
                 else IdempotencyTerminalUpdate(
                     identity.scope,
-                    identity.idempotency_key_digest,
+                    identity.idempotency_key,
                     identity.status,
                     IdempotencyStatus.CANCELLED,
                     identity.request_digest,
@@ -559,9 +557,8 @@ class ExecutionManager:
                         exc_info=environ.debug,
                     )
             _logger.info(
-                "execution cancelled: execution=%s operation=%s",
+                "execution cancelled: execution=%s",
                 execution_id,
-                operation.operation_id,
             )
         except asyncio.CancelledError:
             raise
@@ -608,9 +605,8 @@ class ExecutionManager:
                     )
             except Exception:
                 _logger.exception(
-                    "execution cancellation ledger update failed: execution=%s operation=%s",
+                    "execution cancellation ledger update failed: execution=%s",
                     execution_id,
-                    operation.operation_id,
                 )
             raise
         finally:
@@ -652,7 +648,7 @@ class ExecutionManager:
                 "force": request.force,
             }
         )
-        operation_id = compute_idempotency_key_digest(request.idempotency_key)
+        operation_id = request.idempotency_key
         now = datetime.now(timezone.utc)
         candidate = OperationLedgerInput(
             operation_id,
@@ -780,10 +776,9 @@ class ExecutionManager:
                 }:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
         _logger.debug(
-            "execution cancellation race resolved: execution=%s status=%s operation=%s",
+            "execution cancellation race resolved: execution=%s status=%s",
             execution_id,
             current.status.value,
-            operation.operation_id,
         )
         return CancelExecutionResult(
             execution_id, current.status is ExecutionStatus.CANCELLED

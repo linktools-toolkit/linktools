@@ -482,7 +482,7 @@ class EvaluationSpec:
 class StartEvaluationRequest:
     spec: EvaluationSpec
     principal: Principal
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.idempotency_key)
@@ -491,7 +491,7 @@ class StartEvaluationRequest:
 @dataclass(frozen=True, slots=True)
 class RescoreRequest:
     scorers: tuple[ScorerSpec, ...]
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     trial_ids: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:

@@ -125,7 +125,7 @@ async def test_cold_source_damage_fails_closed(native, damage: str) -> None:
     mutations = {
         "body": "UPDATE ai_step_events SET error = 'changed'",
         "missing": "DELETE FROM ai_step_events",
-        "scope": "UPDATE ai_step_events SET store_digest = 'wrong'",
+        "scope": "UPDATE ai_step_events SET store_key = 'wrong'",
         "hash": "UPDATE ai_step_events SET body_sha256 = NULL",
     }
     async with engine.begin() as connection:
@@ -148,8 +148,8 @@ async def test_public_decoder_checks_inherited_fields_and_scope(native) -> None:
         source = dict((await connection.execute(select(store._table("events")))).mappings().one())
         registration = dict((await connection.execute(select(store._table("runs")))).mappings().one())
     assert source["run_fields"] == 15
-    assert SqlStepStore.decode_started_row(source, expected_store_digest=store.store_digest, run=registration) == started
-    for corrupted in (source | {"key_digest": "wrong"}, source | {"run_id": "wrong"},
+    assert SqlStepStore.decode_started_row(source, expected_store_key=store.store_key, run=registration) == started
+    for corrupted in (source | {"idempotency_key": b"wrong"}, source | {"run_id": "wrong"},
                       source | {"run_fields": 16}, source | {"body_sha256": None},
                       source | {"step_index": "0"}, source | {"step_index": False}):
         with pytest.raises(ValueError):
@@ -157,7 +157,7 @@ async def test_public_decoder_checks_inherited_fields_and_scope(native) -> None:
     with pytest.raises(ValueError):
         store.decode_started_source(source, run=registration | {"metadata": '{"caller":"changed"}'})
     with pytest.raises(ValueError):
-        SqlStepStore.decode_started_row(source, expected_store_digest="another", run=registration)
+        SqlStepStore.decode_started_row(source, expected_store_key="another", run=registration)
 
 
 @pytest.mark.asyncio
@@ -235,7 +235,7 @@ async def test_unknown_readback_requires_native_source_proof(native, damage: str
     assert store.confirmed_started(run.run_id) is None
     mutations = {
         "hash_null": "UPDATE ai_step_events SET body_sha256 = NULL",
-        "locator": "UPDATE ai_step_events SET key_digest = 'wrong'",
+        "locator": "UPDATE ai_step_events SET idempotency_key = X'77726F6E67'",
         "missing": "DELETE FROM ai_step_events",
         "key": "UPDATE ai_step_events SET idempotency_key = 'wrong'",
     }
@@ -324,19 +324,19 @@ async def test_narrow_start_fields_proof_does_not_claim_metadata_integrity(nativ
 
     projected = {field.name: getattr(full, field.name) for field in fields(full) if field.name != "metadata"}
     projected["timestamp"] = full.timestamp.isoformat()
-    projected.update({name: source[name] for name in ("outcome", "store_digest", "key_digest", "fields_sha256")})
+    projected.update({name: source[name] for name in ("outcome", "store_key", "idempotency_key", "fields_sha256")})
     assert "metadata" not in projected and "body_sha256" not in projected
-    assert SqlStepStore.decode_started_fields(projected, expected_store_digest=store.store_digest) == replace(started, metadata={})
+    assert SqlStepStore.decode_started_fields(projected, expected_store_key=store.store_key) == replace(started, metadata={})
     for damage in ({"error": "changed"}, {"fields_sha256": None}, {"fields_sha256": "wrong"}, {"step_index": "0"}):
         with pytest.raises(ValueError):
-            SqlStepStore.decode_started_fields(projected | damage, expected_store_digest=store.store_digest)
+            SqlStepStore.decode_started_fields(projected | damage, expected_store_key=store.store_key)
     with pytest.raises(ValueError):
         store.decode_started_source(source | {"fields_sha256": None}, run=registration)
     changed_registration = registration | {"metadata": '{"caller":"tampered"}'}
     with pytest.raises(ValueError):
         store.decode_started_source(source, run=changed_registration)
     # Narrow projection authenticates only the fields it actually consumes.
-    assert SqlStepStore.decode_started_fields(projected, expected_store_digest=store.store_digest).metadata == {}
+    assert SqlStepStore.decode_started_fields(projected, expected_store_key=store.store_key).metadata == {}
 
 
 @pytest.mark.asyncio

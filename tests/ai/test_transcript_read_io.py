@@ -48,7 +48,7 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
         archive_partition = contents.store.store_key
         latest = await repository.latest_chunk(session.history_id)
         assert latest is not None and isinstance(latest.content, NativeMessageRoot)
-        native_partition = latest.content.store_digest
+        native_partition = latest.content.store_key
         body_ids: list[str] = []
         decode_body = _step_message_content.decode_payload_bytes
 

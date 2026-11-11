@@ -42,7 +42,7 @@ async def _shared(path: Path):
         table = build_step_sql_metadata().tables["ai_step_snapshots"]
         async with engine.connect() as connection:
             first = await connection.scalar(select(table.c.sequence_root))
-        root = NativeMessageRoot(group, native.store_digest, (NativeMessageSlice(first, 1, 0, 1),))
+        root = NativeMessageRoot(group, native.store_key, (NativeMessageSlice(first, 1, 0, 1),))
         yield engine, state, native, root
     finally:
         await native.close()
@@ -162,7 +162,7 @@ async def test_cold_state_owner_retains_and_releases_native_content(tmp_path: Pa
                 assert await owner.mutate(release_owner)
             else:
                 assert await owner.mutate(lambda tx: tx.delete_record(record.key))
-            await index.maintain_native_content(native.storage_context, store_digests=(native.store_digest,))
+            await index.maintain_native_content(native.storage_context, store_keys=(native.store_key,))
             assert await _count(engine, "ai_step_messages") == 1
         finally:
             await owner.close()
@@ -307,14 +307,14 @@ async def test_collection_budget_bounds_deleted_rows_and_preserves_pending_work(
         await store.save_snapshot(_snapshot("run", 2))
         before = await _count(engine, "ai_step_messages") + await _count(engine, "ai_step_sequences")
         await store.storage_context.run_mutation(lambda session: index.collect_native_content(
-            store.storage_context, session, store_digests=(store.store_digest,), budget=3,
+            store.storage_context, session, store_keys=(store.store_key,), budget=3,
         ))
         after = await _count(engine, "ai_step_messages") + await _count(engine, "ai_step_sequences")
         assert 0 < before - after <= 3
         assert await _count(engine, "ai_native_content_edges") > 0
         for _ in range(12):
             await store.storage_context.run_mutation(lambda session: index.collect_native_content(
-                store.storage_context, session, store_digests=(store.store_digest,), budget=3,
+                store.storage_context, session, store_keys=(store.store_key,), budget=3,
             ))
         assert await _count(engine, "ai_step_messages") == await _count(engine, "ai_step_sequences") == 0
         assert await _count(engine, "ai_step_snapshots") == 2
@@ -355,7 +355,7 @@ async def test_pin_winning_against_collector_keeps_target_and_unknown_owner(tmp_
             with monkeypatch.context() as patch:
                 patch.setattr(AsyncSession, "execute", publish_before_delete)
                 await native.storage_context.run_mutation(lambda session: index.collect_native_content(
-                    native.storage_context, session, store_digests=(native.store_digest,),
+                    native.storage_context, session, store_keys=(native.store_key,),
                 ))
             assert inserted
             assert await _count(engine, "ai_step_messages") == 2
@@ -386,7 +386,7 @@ async def test_candidate_reenqueue_cannot_be_consumed_by_an_older_collector(tmp_
         with monkeypatch.context() as patch:
             patch.setattr(AsyncSession, "execute", renew_before_ack)
             await native.storage_context.run_mutation(lambda session: index.collect_native_content(
-                native.storage_context, session, store_digests=(native.store_digest,), budget=1,
+                native.storage_context, session, store_keys=(native.store_key,), budget=1,
             ))
         assert reenqueued
         async with native.storage_context.engine.connect() as connection:
@@ -435,14 +435,14 @@ async def test_scoped_collection_leaves_other_namespace_content_and_clears_dead_
             stores[0].storage_context, session, "sequence", 999999,
         ))
         await stores[0].storage_context.run_mutation(lambda session: index.collect_native_content(
-            stores[0].storage_context, session, store_digests=(stores[0].store_digest,),
+            stores[0].storage_context, session, store_keys=(stores[0].store_key,),
         ))
         table = build_step_sql_metadata().tables["ai_step_messages"]
         edges = build_step_sql_metadata().tables["ai_native_content_edges"]
         async with engine.connect() as connection:
             for store, expected in zip(stores, (1, 2)):
                 assert len((await connection.execute(select(table.c.id).where(
-                    table.c.store_digest == store.store_digest,
+                    table.c.store_key == store.store_key,
                 ))).all()) == expected
             assert await connection.scalar(select(edges.c.id).where(edges.c.target_id == 999999)) is None
     finally:
@@ -541,7 +541,7 @@ async def test_state_owner_consumes_only_live_matching_publication_handoff(
             await state.mutate(write)
             assert await state.read(lambda transaction: transaction.get_record(record.key)) == record
             assert len(queries) == (1 if boundary == "same" else 3 if boundary == "savepoint_rollback" else 2)
-            assert all(parameters[0] == native.store_digest and len(parameters) == 2 for _, parameters in queries)
+            assert all(parameters[0] == native.store_key and len(parameters) == 2 for _, parameters in queries)
             assert (await native.read_message_roots((retained,)))[0]
             if boundary == "other_root":
                 assert await _count(engine, "ai_step_messages") == 1

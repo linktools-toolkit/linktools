@@ -20,7 +20,8 @@ from ._step_contracts import AgentRunRecord, StepEvent
 from ._official_step_reader import OfficialStepReader
 from ._step_schema import build_step_sql_metadata
 from ._step_store import PreparedStep, SqlStepStore, StepWriteReceipt
-from ..steps import NativeLifecycleEvent
+from ..core import validate_resource_id
+from ..steps import NativeLifecycleEvent, validate_native_replay_key, encode_native_replay_key
 from .codec import _encode_step_envelope, decode_envelope, encode_envelope
 from .state import FactQuery, FactScanCursor, SqlStateFactReader, StateTransaction, StoredFact, record_key, stream_key
 
@@ -58,7 +59,7 @@ class NativeEventReferences:
 
     def __init__(self, state: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
         self._state, self._namespace, self._tenant_id = state, namespace, tenant_id
-        self._store_digest = SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
+        self._store_key = SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
         self._native: SqlStepStore | None = None
         self._runs_pending: dict[str, _RunPublication] = {}
         metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE}))
@@ -69,7 +70,7 @@ class NativeEventReferences:
 
     def bind(self, native: SqlStepStore) -> None:
         if (native.storage_context.engine is self._state.context.engine
-                and native.store_digest == self._store_digest):
+                and native.store_key == self._store_key):
             if self._native is not None and self._native is not native:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._native = native
@@ -103,11 +104,15 @@ class NativeEventReferences:
         value = decode_envelope(data).value
         reference = value.get("payload")
         if (set(value) != {"type", "payload"} or value["type"] != _TYPE
-                or not isinstance(reference, Mapping) or set(reference) != {"key", "index"}
+                or not isinstance(reference, Mapping) or set(reference) != {"run", "replay", "index"}
                 or type(reference["index"]) is not int or reference["index"] < 0
-                or not isinstance(reference["key"], str) or len(reference["key"]) != 64
-                or any(character not in "0123456789abcdef" for character in reference["key"])):
+                or reference["replay"] is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            validate_resource_id(reference["run"])
+            validate_native_replay_key(reference["replay"])
+        except (AIError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return reference
 
     @classmethod
@@ -117,12 +122,12 @@ class NativeEventReferences:
         reference = cls.decode_reference(fact.data)
         try:
             source = SqlStepStore.decode_started_row(row,
-                expected_store_digest=SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id), run=run)
+                expected_store_key=SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id), run=run)
             event = cls.project(source, event_index=reference["index"])
         except (TypeError, ValueError, KeyError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         try:
-            if (reference["key"] != row.get("key_digest") or fact.kind != "step_event"
+            if ((reference["run"], reference["replay"]) != (source.run_id, source.idempotency_key) or fact.kind != "step_event"
                     or fact.state != event.event_type or fact.subject_id is not None
                     or fact.owner_key != record_key(namespace, tenant_id, "trace", "agent_run", (source.run_id,))
                     or fact.stream_key != stream_key(namespace, tenant_id, "trace", "event", (source.run_id,))):
@@ -213,7 +218,7 @@ class NativeEventReferences:
         if source not in self._native.events_from_receipt(pending.receipt):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return encode_envelope({"type": _TYPE, "payload": {
-            "key": self._native.event_key_digest(source), "index": event.event_index,
+            "run": source.run_id, "replay": source.idempotency_key, "index": event.event_index,
         }})
 
     def confirm(self, events: Sequence[StepEvent]) -> tuple[StepWriteReceipt, ...]:
@@ -298,6 +303,7 @@ class NativeEventReferences:
                   scan: tuple[FactScanCursor | None, int] | None = None,
                   full_source: bool = False) -> "Select":
         from sqlalchemy import JSON, Text, and_, bindparam, case, cast, func, or_, select, type_coerce
+        from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
 
@@ -305,6 +311,12 @@ class NativeEventReferences:
         encoded = type_coerce(facts.c.payload_json, JSON)[()].as_string()
         payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
         reference = payload["value"]["payload"]
+        replay = reference["replay"].as_string()
+        if self._state.context.dialect.name == "postgresql":
+            replay = func.convert_to(replay, "UTF8")
+        else:
+            from sqlalchemy import LargeBinary
+            replay = cast(replay, LargeBinary)
         columns = {field.name: events.c[field.name] for field in fields(NativeStepEvent)
                    if full_source or field.name != "metadata"}
         columns["outcome"] = events.c.outcome
@@ -321,25 +333,33 @@ class NativeEventReferences:
             if not full_source:
                 columns[name] = case((referenced, runs.c[name]), else_=columns[name])
             invalid.append(and_(referenced, or_(events.c[name].is_not(None), runs.c[name].is_(None))))
-        columns.update((name, events.c[name]) for name in ("store_digest", "key_digest", "fields_sha256"))
+        columns.update((name, events.c[name]) for name in ("store_key", "fields_sha256"))
         registration_columns = ()
         if full_source:
             columns["body_sha256"] = events.c.body_sha256
             columns["run_fields"] = events.c.run_fields
             registration_columns = tuple(runs.c[name].label("registration_" + name) for name in (
-                "store_digest", *(field.name for field in fields(RunRecord)),
+                "store_key", *(field.name for field in fields(RunRecord)),
             ))
         statement = select(facts, *(column.label("native_" + name) for name, column in columns.items()),
                            *registration_columns, or_(*invalid).label("invalid_native_reference")).select_from(
-            facts.outerjoin(events, and_(facts.c.kind == "step_event", events.c.store_digest == self._store_digest,
-                                         events.c.key_digest == reference["key"].as_string())).outerjoin(runs, and_(
-                *(() if full_source else (inherited != 0,)), runs.c.store_digest == events.c.store_digest,
+            facts.outerjoin(events, and_(facts.c.kind == "step_event", events.c.store_key == self._store_key,
+                                         events.c.run_id == reference["run"].as_string(),
+                                         events.c.idempotency_key == replay)).outerjoin(runs, and_(
+                *(() if full_source else (inherited != 0,)), runs.c.store_key == events.c.store_key,
                 runs.c.run_id == events.c.run_id,
             )))
-        statement = visitors.replacement_traverse(statement, {}, lambda node: (
-            bindparam(None, node.value, type_=node.type, literal_execute=True)
-            if isinstance(node, BindParameter) else None
-        )).where(facts.c.store_key == self._state.store_key)
+        def inline_constant(node):
+            if not isinstance(node, BindParameter):
+                return None
+            if isinstance(node.value, bytes):
+                hex_value = node.value.hex()
+                literal = ("E'\\\\x" + hex_value + "'::bytea" if self._state.context.dialect.name == "postgresql"
+                           else "X'" + hex_value + "'")
+                return literal_column(literal, type_=node.type)
+            return bindparam(None, node.value, type_=node.type, literal_execute=True)
+
+        statement = visitors.replacement_traverse(statement, {}, inline_constant).where(facts.c.store_key == self._state.store_key)
         if query is not None:
             conditions = [facts.c.stream_key == query.stream_key]
             if query.after_sequence is not None:
@@ -390,16 +410,16 @@ class NativeEventReferences:
                         registration = {key.removeprefix("registration_"): entry for key, entry in row.items()
                                         if key.startswith("registration_")}
                         source = SqlStepStore.decode_started_row(source_data,
-                            expected_store_digest=self._store_digest, run=registration)
+                            expected_store_key=self._store_key, run=registration)
                         registration["metadata"] = json.loads(registration["metadata"])
                         native_run = _RUN_ADAPTER.validate_python(registration)
                     else:
-                        source = SqlStepStore.decode_started_fields(source_data, expected_store_digest=self._store_digest)
+                        source = SqlStepStore.decode_started_fields(source_data, expected_store_key=self._store_key)
                     event = self.project(source, event_index=reference["index"])
                 except (TypeError, ValueError, KeyError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 try:
-                    if (reference["key"] != row["native_key_digest"] or fact.kind != "step_event"
+                    if ((reference["run"], reference["replay"]) != (source.run_id, source.idempotency_key) or fact.kind != "step_event"
                             or fact.state != event.event_type or fact.subject_id is not None
                             or fact.owner_key != record_key(self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,))
                             or fact.stream_key != stream_key(self._namespace, self._tenant_id, "trace", "event", (source.run_id,))):

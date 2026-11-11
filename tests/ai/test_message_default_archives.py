@@ -241,7 +241,7 @@ async def test_loaded_projection_reuse_digest_describes_original_root_bytes(tmp_
             from linktools.ai.persistence import SqlStepStore
 
             assert prepared.archive.scope_id == loaded.archive_root.group_id
-            assert loaded.archive_root.store_digest == SqlStepStore.scope_digest(
+            assert loaded.archive_root.store_key == SqlStepStore.scope_key(
                 namespace="message-defaults-reuse", tenant_id="tenant",
             )
         else:

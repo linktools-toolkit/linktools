@@ -4,6 +4,7 @@
 
 import pytest
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.core import JsonValue
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice
 from linktools.ai.persistence.codec import (
@@ -13,7 +14,7 @@ from linktools.ai.persistence.contracts import ArchivedContextBlock, TranscriptC
 
 
 def _root() -> NativeMessageRoot:
-    return NativeMessageRoot("group", "a" * 64, (NativeMessageSlice("b" * 64, 7, 1, 5),))
+    return NativeMessageRoot("group", native_store_key("a", "tenant"), (NativeMessageSlice("b" * 64, 7, 1, 5),))
 
 
 @pytest.mark.parametrize("persisted", (False, True))
@@ -32,7 +33,7 @@ def test_native_root_wire_is_explicit_and_validates_ranges() -> None:
     assert NativeMessageRoot.from_json(root.to_json()) == root
     assert root.slice(1, 3).slices == (NativeMessageSlice("b" * 64, 7, 2, 4),)
     for value in ({**root.to_json(), "type": "unknown"},
-                  {**root.to_json(), "store_digest": "A" * 64},
+                  {**root.to_json(), "store_key": "A" * 64},
                   {**root.to_json(), "slices": [{"first": "b" * 64, "count": 7, "start": True, "end": 4}]}):
         with pytest.raises((TypeError, ValueError)):
             NativeMessageRoot.from_json(value)

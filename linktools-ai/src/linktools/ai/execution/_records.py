@@ -12,10 +12,10 @@ from ..agent import AgentBindingContract
 from ..asset import AssetVersionRef
 from ..core import (PersistenceDomain, RunBudget, ExecutionEventType, ExecutionLineageKind,
     ExecutionMode, ExecutionStatus, IdempotencyStatus, JsonValue, OperationStatus,
-    ResourceKind, StopReason, ThinkingValue, UsageMetrics, canonical_sha256,
+    ResourceKind, StopReason, ThinkingValue, UsageMetrics, canonical_sha256, validate_idempotency_key, validate_resource_id,
     normalize_correlation, normalize_execution_mode, normalize_thinking, normalize_tool_effects, ToolEffects)
 from ..session import SessionContext, normalize_session_context
-from ..errors import ErrorDiagnostics
+from ..errors import AIError, ErrorDiagnostics
 from ..storage import StoredPayload
 from ..steps import NativeStepSource
 from ..spec import CapabilityRef
@@ -339,10 +339,17 @@ class ExecutionStartClaim:
     expected_revision: int
     expected_event_seq: int
     scope: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     request_digest: str
     started_at: datetime
     request_identity_version: int = 1
+
+    def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.scope)
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("idempotency identity is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,9 +358,16 @@ class ExecutionStartUnknownCommit:
     expected_revision: int
     expected_event_seq: int
     scope: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     request_digest: str
     occurred_at: datetime
+
+    def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.scope)
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("idempotency identity is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +375,7 @@ class ExecutionCancelRequestCommit:
     execution_id: str
     expected_revision: int
     expected_event_seq: int
-    operation_id: str
+    operation_id: str = field(repr=False)
     requested_at: datetime
 
 
@@ -393,7 +407,7 @@ class ExecutionStartReservationResult:
 @dataclass(frozen=True, slots=True)
 class IdempotencyRecord:
     scope: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     request_digest: str
     resource_kind: ResourceKind
     resource_id: str
@@ -405,6 +419,11 @@ class IdempotencyRecord:
     request_identity_version: int = 1
 
     def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.scope)
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("idempotency identity is invalid") from error
         if type(self.request_identity_version) is not int or self.request_identity_version not in (1, 2):
             raise ValueError("request identity version is unsupported")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
@@ -483,17 +502,24 @@ class ExecutionTerminalCommit:
 @dataclass(frozen=True, slots=True)
 class IdempotencyTerminalUpdate:
     scope: str
-    idempotency_key_digest: str
+    idempotency_key: str = field(repr=False)
     expected_status: IdempotencyStatus
     next_status: IdempotencyStatus
     request_digest: str
     result_digest: str | None
     error_code: str | None
 
+    def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.scope)
+            validate_idempotency_key(self.idempotency_key)
+        except AIError as error:
+            raise ValueError("idempotency identity is invalid") from error
+
 
 @dataclass(frozen=True, slots=True)
 class OperationTerminalUpdate:
-    operation_id: str
+    operation_id: str = field(repr=False)
     expected_status: OperationStatus
     next_status: OperationStatus
     result_ref: str | None

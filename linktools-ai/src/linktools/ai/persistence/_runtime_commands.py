@@ -1008,7 +1008,7 @@ class StateCommands:
         await self._execution.prepare_content(initial)
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, initial.revision, initial.event_seq,
-                                    identity.scope, identity.idempotency_key_digest,
+                                    identity.scope, identity.idempotency_key,
                                     identity.request_digest, initial.created_at, identity.request_identity_version)
 
         async def mutate(group: StateGroupTransaction) -> ExecutionStartReservationResult | None:
@@ -2440,7 +2440,7 @@ class StateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
-                                    identity.idempotency_key_digest, identity.request_digest, initial.created_at, identity.request_identity_version)
+                                    identity.idempotency_key, identity.request_digest, initial.created_at, identity.request_identity_version)
 
         async def read(group: StateGroupTransaction) -> ExecutionRecord | None:
             idempotency = await self._execution.get_start_idempotency(claim)
@@ -2522,7 +2522,7 @@ class StateCommands:
         await self._execution.prepare_content(initial)
         identity = reservation.idempotency
         claim = ExecutionStartClaim(initial.execution_id, 0, 0, identity.scope,
-                                    identity.idempotency_key_digest, identity.request_digest,
+                                    identity.idempotency_key, identity.request_digest,
                                     initial.created_at, identity.request_identity_version)
         resolved: ExecutionRecord | None = None
         rejected = False

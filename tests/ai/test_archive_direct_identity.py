@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import Persistence
@@ -84,7 +85,7 @@ def test_archive_codec_limit_applies_to_current_record_reader(codec: str) -> Non
 
 def test_archive_and_native_sequence_readers_keep_distinct_content_owners() -> None:
     native = ImmutableSequenceNode("a" * 64)
-    row = {"store_digest": "b" * 64, "sha256": native.identity, "message_sha256": "a" * 64,
+    row = {"store_key": native_store_key("b", "tenant"), "sha256": native.identity, "message_sha256": "a" * 64,
            "tree_count": 1, "left_sha256": None, "right_sha256": None, "next_sha256": None}
     NativeMessageClosure((row,))
     with pytest.raises(AIError) as error:
@@ -164,7 +165,8 @@ async def test_archive_object_paths_keep_maximum_scope_and_hide_reversible_value
         assert replace(reference) == reference and replace(stat) == stat
         for value in (reference, stat, StoredPayload.object(reference)):
             assert reference.key not in repr(value) and archive.content_scope not in repr(value)
-        row = {"sha256": content.raw_digest, **content.to_native_values()}
+        row = {"store_key": native_store_key(namespace, tenant),
+               "sha256": content.raw_digest, **content.to_native_values()}
         assert validate_native_message_content(row, group_id=group, content_scope=archive.content_scope) == content
         with pytest.raises(AIError) as error:
             validate_native_message_content(row, group_id=group, content_scope=archive_content_scope("other", tenant))

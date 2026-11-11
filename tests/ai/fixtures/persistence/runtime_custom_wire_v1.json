@@ -5,7 +5,7 @@
       "$enum": "idempotency_status",
       "value": "STARTED"
     },
-    "idempotency_key_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "idempotency_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "next_status": {
       "$enum": "idempotency_status",
       "value": "COMPLETED"

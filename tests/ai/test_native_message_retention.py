@@ -11,6 +11,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice, SqlStepStore
@@ -44,8 +45,8 @@ def _exercise_explicit_offline_collection(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 
-def _row(node: ImmutableSequenceNode, scope: str = "a" * 64) -> dict[str, object]:
-    return dict(store_digest=scope, sha256=node.identity, message_sha256=node.content_id,
+def _row(node: ImmutableSequenceNode, scope: bytes = native_store_key("a", "tenant")) -> dict[str, object]:
+    return dict(store_key=scope, sha256=node.identity, message_sha256=node.content_id,
                 tree_count=node.tree_count, left_sha256=node.left, right_sha256=node.right,
                 next_sha256=node.next_forest)
 
@@ -56,26 +57,26 @@ def test_native_closure_retains_only_visible_bodies_and_not_historical_tails() -
     right = ImmutableSequenceNode("2" * 64, 1)
     head = ImmutableSequenceNode("3" * 64, 3, left.identity, right.identity)
     closure = NativeMessageClosure([_row(node) for node in (left, right, head)])
-    closure.mark("a" * 64, (NativeMessageSlice(head.identity, 3, 1, 2),))
-    assert closure.retained_messages == {("a" * 64, left.content_id)}
-    assert closure.retained_sequences == {("a" * 64, node.identity) for node in (left, right, head)}
+    closure.mark(native_store_key("a", "tenant"), (NativeMessageSlice(head.identity, 3, 1, 2),))
+    assert closure.retained_messages == {(native_store_key("a", "tenant"), left.content_id)}
+    assert closure.retained_sequences == {(native_store_key("a", "tenant"), node.identity) for node in (left, right, head)}
     with pytest.raises(AIError):
-        closure.mark("b" * 64, (NativeMessageSlice(head.identity, 3, 0, 3),))
+        closure.mark(native_store_key("b", "tenant"), (NativeMessageSlice(head.identity, 3, 0, 3),))
     with pytest.raises(AIError):
-        closure.mark("a" * 64, (NativeMessageSlice(left.identity, 1, 0, 1),))
+        closure.mark(native_store_key("a", "tenant"), (NativeMessageSlice(left.identity, 1, 0, 1),))
 
 
 @pytest.mark.parametrize("persisted", (False, True))
 def test_native_scanner_and_rekey_preserve_declared_context_slots(persisted: bool) -> None:
-    root = NativeMessageRoot("group", "a" * 64, (NativeMessageSlice("b" * 64, 1, 0, 1),))
+    root = NativeMessageRoot("group", native_store_key("a", "tenant"), (NativeMessageSlice("b" * 64, 1, 0, 1),))
     encode = _encode_persisted_domain if persisted else encode_domain
     context = encode(ArchivedContextBlock(root, "c" * 64, 2))
     business = encode({"root": root.to_json(), "fake": encode(root)})
     assert tuple(iter_native_message_roots(context)) == (root,)
     assert not tuple(iter_native_message_roots(business))
     assert rekey_native_message_roots(business, {}) == business
-    rewritten = rekey_native_message_roots(context, {"group": "target"}, {("group", "a" * 64): "d" * 64})
-    assert tuple(iter_native_message_roots(rewritten)) == (replace(root, group_id="target", store_digest="d" * 64),)
+    rewritten = rekey_native_message_roots(context, {"group": "target"}, {("group", native_store_key("a", "tenant")): native_store_key("d", "tenant")})
+    assert tuple(iter_native_message_roots(rewritten)) == (replace(root, group_id="target", store_key=native_store_key("d", "tenant")),)
     manifest = dict(kind="execution-context", version=1, history=root.to_json(),
                     semantic_digest="digest", replace_history_system_prompt=False, unavailable_reason=None,
                     repository_instructions=None, session_metadata=None, memory=None, preload_skills=[])
@@ -120,13 +121,13 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
             ])])])
         await native.save_snapshot(old)
         async with engine.connect() as connection:
-            first = await connection.scalar(select(table.c.sequence_root).where(table.c.store_digest == native.store_digest))
+            first = await connection.scalar(select(table.c.sequence_root).where(table.c.store_key == native.store_key))
             messages = build_step_sql_metadata().tables["ai_step_messages"]
             body = (await connection.execute(select(messages))).mappings().one()
         content = validate_native_message_content(body, group_id=group_id)
         reference = next(iter(content.object_refs()), None)
         assert (reference is not None) is object_backed
-        root = NativeMessageRoot(group_id, native.store_digest, (NativeMessageSlice(first, 1, 0, 1),))
+        root = NativeMessageRoot(group_id, native.store_key, (NativeMessageSlice(first, 1, 0, 1),))
         value = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))
         if owner == "execution-context":
             manifest = dict(kind="execution-context", version=1, history=root.to_json(),
@@ -188,7 +189,7 @@ async def test_native_database_integrity_and_attachment_group_boundaries_fail_cl
     raw = b'[{"kind":"request","parts":[]}]'
     digest = hashlib.sha256(raw).hexdigest()
     content = ContentRecord("model-message", digest, len(raw), "raw", body=raw)
-    row = dict(store_digest="a" * 64, sha256=digest, **content.to_native_values())
+    row = dict(store_key=native_store_key("a", "tenant"), sha256=digest, **content.to_native_values())
     assert validate_native_message_content(row) == content
     with pytest.raises(AIError):
         validate_native_message_content({**row, "sha256": "f" * 64})
@@ -203,7 +204,7 @@ async def test_native_database_integrity_and_attachment_group_boundaries_fail_cl
     payload = await store_attachment_payload(raw, format="model-messages", write_object=write)
     content = ContentRecord("model-message", payload.digest, payload.size, "raw", payload)
     with pytest.raises(AIError):
-        validate_native_message_content(dict(store_digest="a" * 64, sha256=payload.digest,
+        validate_native_message_content(dict(store_key=native_store_key("a", "tenant"), sha256=payload.digest,
                                             **content.to_native_values()), group_id="group")
 
 
@@ -214,7 +215,7 @@ def test_native_snapshot_retention_rejects_unknown_checkpoint_shape(checkpoint: 
 
     closure = NativeMessageClosure([])
     with pytest.raises(AIError):
-        closure.mark_snapshot(dict(store_digest="a" * 64, sequence_root=None, pruned=False,
+        closure.mark_snapshot(dict(store_key=native_store_key("a", "tenant"), sequence_root=None, pruned=False,
             messages=json.dumps(dict(stored_messages=0, checkpoint=checkpoint))))
 
 
@@ -223,7 +224,7 @@ def test_native_closure_rejects_malformed_known_node_fields(damage: dict[str, ob
     node = ImmutableSequenceNode("1" * 64)
     closure = NativeMessageClosure([{**_row(node), **damage}])
     with pytest.raises(AIError) as failure:
-        closure.mark("a" * 64, (NativeMessageSlice(node.identity, 1, 0, 1),))
+        closure.mark(native_store_key("a", "tenant"), (NativeMessageSlice(node.identity, 1, 0, 1),))
     assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -267,9 +268,9 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
         async with engine.begin() as connection:
             for value, node in zip((content, orphan), nodes):
                 await connection.execute(metadata.tables["ai_step_messages"].insert().values(
-                    store_digest=native.store_digest, sha256=value.raw_digest, **value.to_native_values()))
-                await connection.execute(metadata.tables["ai_step_sequences"].insert().values(_row(node, native.store_digest)))
-        root = NativeMessageRoot(group_id, native.store_digest, (NativeMessageSlice(nodes[0].identity, 1, 0, 1),))
+                    store_key=native.store_key, sha256=value.raw_digest, **value.to_native_values()))
+                await connection.execute(metadata.tables["ai_step_sequences"].insert().values(_row(node, native.store_key)))
+        root = NativeMessageRoot(group_id, native.store_key, (NativeMessageSlice(nodes[0].identity, 1, 0, 1),))
         key = hashlib.sha256(b"native-only-owner").digest()
         record = StoredRecord(key, None, None, "test_owner", b'owner', None, 1, None, 0, None,
                               encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))

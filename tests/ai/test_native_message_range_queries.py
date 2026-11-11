@@ -16,6 +16,7 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.migrate import provision_database
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
@@ -55,13 +56,13 @@ async def _publish(native, content, prepared):
 
 def _owner(dialect) -> NativeMessageContent:
     context = SimpleNamespace(engine=SimpleNamespace(dialect=dialect), dialect=dialect_for_name(dialect.name))
-    return NativeMessageContent(context, group_id="execution", store_digest="a" * 64)
+    return NativeMessageContent(context, group_id="execution", store_key=native_store_key("a", "tenant"))
 
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect(), mysql.dialect()])
 def test_range_query_limits_paths_binds_sql_and_unselected_bodies(dialect) -> None:
     content = _owner(dialect)
-    root = NativeMessageRoot("execution", "a" * 64, (NativeMessageSlice("b" * 64, 1023, 501, 504),))
+    root = NativeMessageRoot("execution", native_store_key("a", "tenant"), (NativeMessageSlice("b" * 64, 1023, 501, 504),))
     plan = content.range_query((root,))
     compiled = str(plan.statement.compile(dialect=dialect)).upper()
     assert ("WITH RECURSIVE" in compiled) == (dialect.name != "mysql")
@@ -83,13 +84,13 @@ def test_range_query_limits_paths_binds_sql_and_unselected_bodies(dialect) -> No
     with pytest.raises(ValueError, match="scope"):
         content.range_query((replace(root, group_id="other"),))
     with pytest.raises(ValueError, match="scope"):
-        content.range_query((replace(root, store_digest="c" * 64),))
+        content.range_query((replace(root, store_key=native_store_key("c", "tenant")),))
 
 
 def test_mysql_tiny_ranges_do_not_expand_the_entire_forest_height() -> None:
     content = _owner(mysql.dialect())
     for count in (10_000, 1_000_000):
-        tail = NativeMessageRoot("execution", "a" * 64,
+        tail = NativeMessageRoot("execution", native_store_key("a", "tenant"),
                                  (NativeMessageSlice("b" * 64, count, count - 1, count),))
         plan = content.range_query((tail,))
         assert plan.depth == 0 and plan.path_units == 1
@@ -107,7 +108,7 @@ def test_mysql_tiny_ranges_do_not_expand_the_entire_forest_height() -> None:
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect(), mysql.dialect()])
 def test_repeated_span_work_is_shared_and_singleton_batches_fit_one_read(dialect) -> None:
     content = _owner(dialect)
-    single = NativeMessageRoot("execution", "a" * 64, (NativeMessageSlice("b" * 64, 1, 0, 1),))
+    single = NativeMessageRoot("execution", native_store_key("a", "tenant"), (NativeMessageSlice("b" * 64, 1, 0, 1),))
     once, repeated = content.range_query((single,)), content.range_query((single,) * 1000)
     assert (once.bind_parameters, once.sql_bytes, once.path_units) == (
         repeated.bind_parameters, repeated.sql_bytes, repeated.path_units,
@@ -128,8 +129,8 @@ async def test_immutable_content_insert_compares_winners_without_body_reads(dial
     ]), prepare_payload=_payload)
     identity, body = prepared.messages[0]
     node_id, node = prepared.nodes[0]
-    rows = ((content._messages, {"store_digest": "a" * 64, "sha256": identity, **body.to_native_values()}),
-            (content._nodes, {"store_digest": "a" * 64, "sha256": node_id,
+    rows = ((content._messages, {"store_key": native_store_key("a", "tenant"), "sha256": identity, **body.to_native_values()}),
+            (content._nodes, {"store_key": native_store_key("a", "tenant"), "sha256": node_id,
                 "message_sha256": node.content_id, "tree_count": node.tree_count,
                 "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}))
 
@@ -164,7 +165,7 @@ async def test_range_hydration_returns_only_selected_bodies_and_one_read(tmp_pat
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'ranges.db'}")
     native = SqlStepStore(engine, namespace="messages", tenant_id="one")
     await native.initialize(local=True)
-    content = NativeMessageContent(native.storage_context, group_id="execution", store_digest=native.store_digest)
+    content = NativeMessageContent(native.storage_context, group_id="execution", store_key=native.store_key)
     archive = MessageArchive()
     frozen = archive.snapshot([ModelRequest(parts=[UserPromptPart(str(index), timestamp=_STAMP)], timestamp=_STAMP)
                                for index in range(255)])
@@ -210,7 +211,7 @@ async def test_trim_branch_and_fragmented_selections_keep_exact_occurrence_order
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'branch.db'}")
     native = SqlStepStore(engine, namespace="messages", tenant_id="one")
     await native.initialize(local=True)
-    content = NativeMessageContent(native.storage_context, group_id="execution", store_digest=native.store_digest)
+    content = NativeMessageContent(native.storage_context, group_id="execution", store_key=native.store_key)
     archive = MessageArchive()
     frozen = archive.snapshot([ModelRequest(parts=[UserPromptPart(value, timestamp=_STAMP)], timestamp=_STAMP)
                                for value in ("a", "b", "a", "c", "a", "d", "a", "e", "a", "f")])
@@ -221,7 +222,7 @@ async def test_trim_branch_and_fragmented_selections_keep_exact_occurrence_order
         # The previously published "a" singleton already owns the same immutable node.
         assert len(branch.nodes) == 1
         branch_proof = await _publish(native, content, branch)
-        fragments = NativeMessageRoot("execution", native.store_digest,
+        fragments = NativeMessageRoot("execution", native.store_key,
             proof.root.slice(0, 2).slices + proof.root.slice(6, 9).slices)
         roots = (trimmed.root, branch_proof.root, fragments, proof.root.slice(2, 2))
         plan = content.range_query(roots)
@@ -232,7 +233,7 @@ async def test_trim_branch_and_fragmented_selections_keep_exact_occurrence_order
         assert groups == (payloads[1:5], payloads[1:5] + payloads[8:10], payloads[:2] + payloads[6:9], ())
         unique_slices = set(item for root in roots for item in root.slices)
         assert sum(row["message"] is not None for row in rows) == sum(item.end - item.start for item in unique_slices)
-        foreign = NativeMessageContent(native.storage_context, group_id="other", store_digest=native.store_digest)
+        foreign = NativeMessageContent(native.storage_context, group_id="other", store_key=native.store_key)
         with pytest.raises(ValueError, match="scope"):
             await foreign.hydrate_ranges(tuple(root if isinstance(root, NativeMessageRoot) else content.scoped_root(root)
                                                 for root in roots), rows)
@@ -282,7 +283,7 @@ async def _check_native_cas_and_range_execution(engine: AsyncEngine) -> None:
         for _ in range(2):
             publication_io.clear()
             content = NativeMessageContent(native.storage_context, group_id="execution",
-                                           store_digest=native.store_digest, max_cached_messages=0, max_cached_nodes=0)
+                                           store_key=native.store_key, max_cached_messages=0, max_cached_nodes=0)
             prepared = await content.prepare_append(frozen, prepare_payload=_payload)
             proof = await _publish(native, content, prepared)
             # Each fresh publisher resolves bounded surrogate IDs, then fences
@@ -298,7 +299,7 @@ async def _check_native_cas_and_range_execution(engine: AsyncEngine) -> None:
                 (sequence_ids, message_ids), strict=True,
             ):
                 expected = select(table.c.sha256, table.c.id).where(
-                    table.c.store_digest == native.store_digest, table.c.sha256.in_(identities),
+                    table.c.store_key == native.store_key, table.c.sha256.in_(identities),
                 )
                 assert str(actual.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
                     expected.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}),
@@ -355,7 +356,7 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
     archive = MessageArchive()
     frozen = archive.snapshot([ModelRequest(parts=[UserPromptPart(str(index), timestamp=_STAMP)], timestamp=_STAMP)
                                for index in range(history_count)])
-    warm = NativeMessageContent(native.storage_context, store_digest=native.store_digest)
+    warm = NativeMessageContent(native.storage_context, store_key=native.store_key)
     statements = []
     read_calls = []
 
@@ -367,7 +368,7 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
 
     try:
         original = await _publish(native, warm, await warm.prepare_append(frozen, prepare_payload=_payload))
-        cold = NativeMessageContent(native.storage_context, store_digest=native.store_digest)
+        cold = NativeMessageContent(native.storage_context, store_key=native.store_key)
         roots = (original.root, original.root.slice(4, 9))
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         async with engine.connect() as connection:
@@ -406,7 +407,7 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
                 r"FROM \1 WHERE \1\.STORE_DIGEST = \? AND \1\.SHA256 IN \([?, ]+\)",
                 normalized,
             ), normalized
-            assert parameters[0] == native.store_digest
+            assert parameters[0] == native.store_key
             assert 1 <= len(parameters[1:]) <= 4
             assert set(parameters[1:]) <= allowed
         selected = cold.adopt_read(readbacks[1])
@@ -426,12 +427,12 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect(), mysql.dialect()])
 def test_range_seed_cast_keeps_binary_scope_comparison_in_legal_sql(dialect) -> None:
     content = _owner(dialect)
-    root = NativeMessageRoot("execution", "a" * 64, (NativeMessageSlice("b" * 64, 4, 0, 4),))
+    root = NativeMessageRoot("execution", native_store_key("a", "tenant"), (NativeMessageSlice("b" * 64, 4, 0, 4),))
     query = content.range_query((root,))
     compiled = query.statement.compile(dialect=dialect)
     sql = str(compiled).upper()
     assert compiled.params["native_root_0"] == "b" * 64
-    assert compiled.params["native_store_digest"] == "a" * 64
+    assert compiled.params["native_store_key"] == native_store_key("a", "tenant")
     if dialect.name == "mysql":
         assert "AS CHAR(64) CHARACTER SET UTF8MB4) COLLATE UTF8MB4_BIN" in sql
         assert "COLLATE UTF8MB4_BIN)" not in sql

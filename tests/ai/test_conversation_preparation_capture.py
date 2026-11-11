@@ -159,7 +159,7 @@ async def test_unobserved_content_is_validated_before_owner_commit(
             identity, body = next(iter(actual.native_messages.values())).messages[0]
             async with native.storage_context.engine.begin() as connection:
                 await connection.execute(native._message_content._messages.insert().values(
-                    store_digest=native.store_digest, sha256=identity,
+                    store_key=native.store_key, sha256=identity,
                     **{**body.to_native_values(), "raw_size": body.raw_size + 1},
                 ))
             _relocated, batch = await archive.prepare_conversation_checkpoint(

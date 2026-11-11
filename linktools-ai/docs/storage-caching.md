@@ -1122,12 +1122,39 @@ reference inventory; do not treat an absent marker as proof of no custom data.
 The check adds one source read scope per discovered partition to offline cleanup,
 not to Runtime writes or reads. It neither creates markers nor changes schema.
 
+## Native StepStore identity
+
+Native SQL partitions retain the exact length-prefixed tuple
+`("native_store", namespace, tenant_id)` in `store_key`, independently of State
+store keys. Namespace and tenant limits are 256 and 128 UTF-8 bytes, so the native
+partition is at most 402 bytes. Constructors and current durable readers enforce
+these limits.
+
+Event and snapshot replay keys are exact optional strings of at most 512 UTF-8
+bytes. SQL stores their original UTF-8 bytes in `VARBINARY(512)` / `BYTEA` / `BLOB`,
+preserving empty strings, trailing spaces, and Unicode without collation
+normalization. NUL is rejected at writers and current readers because PostgreSQL
+text and JSON text extraction cannot represent it. The unique key is `(store_key, run_id, idempotency_key)`.
+A NULL replay key appends a new occurrence; row order retains those occurrences,
+without a generated replay identity. Pruned keyed snapshots retain their original
+replay tuple as a tombstone. Native Trace references carry the original run and
+replay strings; existing queries join those fields directly.
+
+The largest native unique index reserves 402 + 4 × 128 + 512 = 1426 MySQL
+key bytes. PostgreSQL values use at most 402 + 128 + 512 = 1042 bytes before normal
+tuple overhead. Native content and sequence SHA-256 values remain byte-integrity
+and structural identities. JSON transport encodes only binary native scopes as
+canonical Base64; decoding occurs before SQL and does not create a second identity.
+
 ## Native StepStore backup boundary
 
 The official StepStore protocol has no portable export/restore method. Its
 caller-owned records are not silently copied into Persistence's portable format.
-When any persisted execution uses native restart checkpoints, portable export
-raises `SNAPSHOT_UNSUPPORTED`; checkpoint-free portable export is unchanged.
+The built-in, colocated `SqlStepStore` without an external tool-effect ledger can
+export its native owner rows and shared message closure. Restore preserves raw
+scope and replay identities, occurrence order, and pruning tombstones, while
+relocating the explicit group reference. Other native checkpoint owners raise
+`SNAPSHOT_UNSUPPORTED`; checkpoint-free portable export is unchanged.
 
 Stop writers and object cleanup, then take a consistent backend backup of the
 Runtime database and the StepStore. With `SqlStepStore` on that database, include

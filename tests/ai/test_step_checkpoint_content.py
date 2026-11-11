@@ -13,6 +13,7 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_store import _snapshot_descriptor_json
 from linktools.ai.persistence.runs import NativeCheckpoint, OfficialStepReader
@@ -138,7 +139,7 @@ async def test_checkpoint_digest_roundtrips_canonical_media(tmp_path: Path, meta
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("column", ("store_digest", "run_id", "key_digest"))
+@pytest.mark.parametrize("column", ("store_key", "run_id", "idempotency_key"))
 async def test_snapshot_lookup_keeps_scope_and_replay_identity(atomic_store, column) -> None:
     store, engine = atomic_store
     snapshot = ContinuableSnapshot(run_id="run", step_index=1,
@@ -146,13 +147,13 @@ async def test_snapshot_lookup_keeps_scope_and_replay_identity(atomic_store, col
     await store.save_snapshot(snapshot)
     async with engine.begin() as connection:
         await connection.execute(store._table("snapshots").update().values(
-            **{column: "different" if column == "run_id" else "0" * 64},
+            **{column: "different" if column == "run_id" else b"\xff" if column == "idempotency_key" else native_store_key("other", "tenant")},
         ))
     cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
     try:
         assert await cold.list_snapshots(run_id="run", include_interrupted=True) == []
-        if column == "key_digest":
-            with pytest.raises(ValueError, match="snapshot owner identity"):
+        if column == "idempotency_key":
+            with pytest.raises(ValueError, match="native replay row"):
                 await cold.latest_snapshot(run_id="run")
         else:
             assert await cold.latest_snapshot(run_id="run") is None

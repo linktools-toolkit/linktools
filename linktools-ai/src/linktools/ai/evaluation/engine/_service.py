@@ -5,6 +5,7 @@
 from ...storage import StorageRetentionMode
 
 import asyncio
+import hashlib
 import json
 import sys
 import time
@@ -27,7 +28,7 @@ from ...core import (
     AuthorizationAction, AuthorizationPolicy, CursorPayload, CursorSigner, HmacCursorSigner,
     ExecutionStatus, IdempotencyStatus, JsonValue, Page, Principal,
     ResourceKind, ResourceRef, TaskStatus, UsageMetrics, canonical_json_bytes, canonical_sha256,
-    idempotency_key_digest, normalize_json_value, principal_identity_payload, validate_idempotency_key,
+    normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
 )
 from ...errors import AIError, ErrorCode, ObservationError
@@ -87,6 +88,11 @@ ScopeAppT = TypeVar("ScopeAppT")
 _logger = environ.get_logger("ai.runtime.evaluation")
 _TERMINAL = frozenset({TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED})
 _RECORDED = frozenset({"valid", "error", "not_applicable", "not_attempted"})
+
+
+def _admission_resource_id(idempotency_key: str) -> str:
+    """Keep admission authorization IDs bounded without exposing replay keys."""
+    return hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
 
 
 def _now() -> datetime:
@@ -435,7 +441,7 @@ class Evaluations:
         now = _now()
         return await self._state.publish_dataset(dataset, tuple(cases), owner_principal_id=principal.principal_id,
             content_expires_at=content_expires_at, idempotency=IdempotencyRecord(
-            "evaluation.dataset.publish", idempotency_key_digest(idempotency_key), digest,
+            "evaluation.dataset.publish", idempotency_key, digest,
             ResourceKind.EVALUATION, spec.ref.id, IdempotencyStatus.COMPLETED, dataset.digest,
             None, now, now))
 
@@ -497,7 +503,7 @@ class Evaluations:
         with self._admit_control():
             self._ensure_open()
             await self._authorize(request.principal, AuthorizationAction.EVALUATION_CANCEL,
-                                  idempotency_key_digest(request.idempotency_key))
+                                  _admission_resource_id(request.idempotency_key))
             record = await self._reserve_start(request, engine=self._engine_owner, cancelled=True,
                                                scope_required=trial_scope is not None)
             await self._cancel(record.experiment_id, request.principal, request.idempotency_key)
@@ -510,8 +516,8 @@ class Evaluations:
         self._ensure_open()
         bound = engine
         spec, principal = request.spec, request.principal
-        identity = idempotency_key_digest(request.idempotency_key)
-        await self._authorize(principal, AuthorizationAction.EVALUATION_RUN, identity)
+        identity = request.idempotency_key
+        await self._authorize(principal, AuthorizationAction.EVALUATION_RUN, _admission_resource_id(identity))
         previous = await self._evaluation_repositories.idempotency.get(
             "evaluation.run", identity, tenant_id=principal.tenant_id)
         existing = None
@@ -1791,7 +1797,7 @@ class Evaluations:
         source_deadlines = tuple(value for value in (source.content_expires_at, source.metadata_expires_at)
                                  if value is not None)
         record = await self._state.reserve_experiment(EvaluationRecord(manifest, manifest.digest,
-            canonical_sha256(data), idempotency_key_digest(request.idempotency_key), "open", 0, now, now, evidence=evidence,
+            canonical_sha256(data), request.idempotency_key, "open", 0, now, now, evidence=evidence,
             content_expires_at=min(source_deadlines) if source_deadlines else None,
             metadata_expires_at=None if source.manifest.policy.metadata_retention_seconds is None else
             now + timedelta(seconds=source.manifest.policy.metadata_retention_seconds)))
@@ -1819,7 +1825,7 @@ class Evaluations:
         digest = canonical_sha256({"actor": principal_identity_payload(principal), "slot": intent.slot_id,
             "evidence": evidence.ref.to_mapping(), "score": request.score.to_mapping()})
         decision = EvaluationHumanDecision(intent.slot_id, uuid.uuid4().hex, principal, _now(), digest,
-                                           idempotency_key_digest(request.idempotency_key), request.score)
+                                           request.idempotency_key, request.score)
         header = await self._task_repositories.tasks.get_header(
             intent.submission.graph.graph_id, tenant_id=principal.tenant_id)
         native = (None if header is None else
@@ -1828,7 +1834,7 @@ class Evaluations:
             node.node_id == "score" and node.status in _TERMINAL for node in native.node_states))
         def reserve(value: EvaluationRecord) -> EvaluationRecord:
             existing = next((item for item in value.human_decisions if item.slot_id == intent.slot_id or
-                             item.idempotency_key_digest == decision.idempotency_key_digest), None)
+                             item.idempotency_key == decision.idempotency_key), None)
             if existing is not None:
                 if existing.request_digest != digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)

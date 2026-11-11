@@ -22,15 +22,9 @@ def canonical_sha256(value: JsonValue) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def idempotency_key_digest(value: str) -> str:
-    if not value:
-        raise ValueError("idempotency key must not be empty")
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
 def deterministic_id(*parts: JsonValue) -> str:
     """Return a stable UUID derived from canonical values."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical_sha256(parts)))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical_json_bytes(parts).decode("utf-8")))
 
 
 def agent_conversation_id(*, namespace: str, tenant_id: str, execution_id: str) -> str:
@@ -72,7 +66,6 @@ __all__ = [
     "RUNTIME_OBJECT_STORE_ID",
     "canonical_sha256",
     "deterministic_id",
-    "idempotency_key_digest",
     "principal_identity_payload",
     "agent_conversation_id",
     "agent_run_id",

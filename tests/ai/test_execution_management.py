@@ -49,7 +49,7 @@ class _ReadPort:
     async def read_header(self, execution_id, *, tenant_id):
         return await self.read_source_header(execution_id, tenant_id=tenant_id)
 
-    async def get_idempotency(self, scope, key_digest, *, tenant_id):
+    async def get_idempotency(self, scope, idempotency_key, *, tenant_id):
         return self.identity
 
     async def result_record(self, execution, *, tenant_id):
@@ -212,14 +212,14 @@ async def test_admission_reuses_observed_identity_without_bypassing_validation(
     elif mismatch == "scope":
         identity = replace(identity, scope="other")
     elif mismatch == "key":
-        identity = replace(identity, idempotency_key_digest="other")
+        identity = replace(identity, idempotency_key="other")
     elif mismatch == "kind":
         identity = replace(identity, resource_kind=ResourceKind.SESSION)
     elif mismatch == "owner":
         record = replace(record, principal_id="other")
 
     class ObservedPort(_ReadPort):
-        async def get_idempotency(self, scope, key_digest, *, tenant_id):
+        async def get_idempotency(self, scope, idempotency_key, *, tenant_id):
             raise AssertionError("Admission must reuse the observed source identity")
 
     port = ObservedPort(record)

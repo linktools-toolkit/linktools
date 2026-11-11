@@ -156,7 +156,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
         content_expires_at: datetime | None = None,
     ) -> DatasetRef:
         async def write(transaction: StateTransaction) -> DatasetRef:
-            identity = (idempotency.scope, idempotency.idempotency_key_digest)
+            identity = (idempotency.scope, idempotency.idempotency_key)
             existing = await transaction.get_record(self._key("idempotency", identity))
             if existing is not None:
                 receipt = await self._decode(existing, IdempotencyRecord)
@@ -176,7 +176,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
             current = await self.get_dataset(dataset.ref)
             if current != dataset:
                 return None
-            receipt = await self._get("idempotency", (idempotency.scope, idempotency.idempotency_key_digest), IdempotencyRecord)
+            receipt = await self._get("idempotency", (idempotency.scope, idempotency.idempotency_key), IdempotencyRecord)
             return dataset.ref if receipt is not None and receipt.request_digest == idempotency.request_digest else None
         return await self._commit(lambda: self._store.mutate(write), readback)
 
@@ -253,7 +253,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
     async def reserve_experiment(self, record: EvaluationRecord) -> EvaluationRecord:
         async def write(transaction: StateTransaction) -> EvaluationRecord:
             scope = "evaluation.run"
-            identity = (scope, record.idempotency_key_digest)
+            identity = (scope, record.idempotency_key)
             existing = await transaction.get_record(self._key("idempotency", identity))
             if existing is not None:
                 reservation = await self._decode(existing, IdempotencyRecord)
@@ -268,7 +268,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
                 self._require_content(existing_record, datetime.now(timezone.utc))
                 return existing_record
             reservation = IdempotencyRecord(
-                scope, record.idempotency_key_digest, record.request_digest,
+                scope, record.idempotency_key, record.request_digest,
                 ResourceKind.EVALUATION, record.experiment_id, IdempotencyStatus.COMPLETED,
                 record.manifest_digest, None, record.created_at, record.created_at,
             )
@@ -276,7 +276,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
             await self._put(transaction, "evaluation", (record.experiment_id,), record)
             return record
         async def readback() -> EvaluationRecord | None:
-            receipt = await self._get("idempotency", ("evaluation.run", record.idempotency_key_digest), IdempotencyRecord)
+            receipt = await self._get("idempotency", ("evaluation.run", record.idempotency_key), IdempotencyRecord)
             if receipt is None or receipt.request_digest != record.request_digest:
                 return None
             current = await self.get(receipt.resource_id, tenant_id=self.tenant_id)
@@ -328,6 +328,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
                 return value
             if (changed.manifest != value.manifest or
                     changed.request_digest != value.request_digest or
+                    changed.idempotency_key != value.idempotency_key or
                     changed.manifest_digest != value.manifest_digest or
                     changed.owned_input_captures != value.owned_input_captures):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -560,7 +561,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
                 await transaction.delete_record(stored.key, expected_storage_revision=stored.storage_revision)
                 await self._put(transaction, "evaluation_tombstone", (experiment_id,),
                     EvaluationTombstone(experiment_id, owner, record.request_digest,
-                                        record.idempotency_key_digest, record.manifest_digest, now))
+                                        record.idempotency_key, record.manifest_digest, now))
             else:
                 def numerical_score(score: ScoreBundle) -> ScoreBundle:
                     return ScoreBundle(dimensions={name: ScoreNotApplicable(reason="evidence_deleted")

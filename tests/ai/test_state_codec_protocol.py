@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from linktools.ai.steps import native_store_key
 from linktools.ai.core import ExecutionStatus, BudgetUsage, IdempotencyStatus, OperationStatus, RunBudget, UsageMetrics
 from linktools.ai.evaluation import CaseRef
 from linktools.ai.errors import AIError, ErrorCode
@@ -61,9 +62,9 @@ def test_current_wire_registry_matches_golden_manifest() -> None:
 
 
 @pytest.mark.parametrize("value", (
-    NativeStepSource("a" * 32, "b" * 64),
+    NativeStepSource("a" * 32, native_store_key("b", "tenant")),
     NativeMessageSlice("c" * 64, 7, 2, 5),
-    NativeMessageRoot("a" * 32, "b" * 64, (NativeMessageSlice("c" * 64, 7, 2, 5),)),
+    NativeMessageRoot("a" * 32, native_store_key("b", "tenant"), (NativeMessageSlice("c" * 64, 7, 2, 5),)),
 ))
 def test_native_owner_wire_values_roundtrip(value: object) -> None:
     payload = _encode_persisted_domain(value)
@@ -138,7 +139,7 @@ def test_registered_enum_wire_values_round_trip(
             IdempotencyStatus.COMPLETED, "b" * 64, None, None,
         ),
         {
-            "scope": "scope", "idempotency_key_digest": "a" * 64,
+            "scope": "scope", "idempotency_key": "a" * 64,
             "expected_status": {"$enum": "idempotency_status", "value": "STARTED"},
             "next_status": {"$enum": "idempotency_status", "value": "COMPLETED"},
             "request_digest": "b" * 64, "result_digest": None, "error_code": None,

@@ -220,12 +220,12 @@ class SqlStateStorageGroup:
         self._archive_scope_initialized = False
         self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
-        self._native_partitions: set[str] = set()
+        self._native_partitions: set[bytes] = set()
         self._native_content_index = native_content_index
 
-    def bind_native_partition(self, store_digest: str) -> None:
+    def bind_native_partition(self, store_key: bytes) -> None:
         """Limit automatic physical maintenance to explicitly bound native owners."""
-        self._native_partitions.add(store_digest)
+        self._native_partitions.add(store_key)
         self._native_content_index = True
 
     def add_member(self, store: "SqlStateStore") -> None:
@@ -550,7 +550,7 @@ class SqlStateStorageGroup:
             if self._archive_on_mutation:
                 self._archive_scope_initialized = True
             if maintenance and self._native_partitions:
-                await maintain_native_content(self._context, store_digests=tuple(self._native_partitions))
+                await maintain_native_content(self._context, store_keys=tuple(self._native_partitions))
             return result
         except asyncio.CancelledError:
             raise

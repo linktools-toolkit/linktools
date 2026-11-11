@@ -168,7 +168,7 @@ async def _assert_committed(state: _TurnState, turn: _PendingTurn, result: Execu
     assert result.result == turn.commit.result
     assert await storage.execution.executions.get(execution_id, tenant_id="tenant") == result.execution
     identity = turn.reservation.idempotency
-    committed_identity = await storage.execution.idempotency.get(identity.scope, identity.idempotency_key_digest, tenant_id="tenant")
+    committed_identity = await storage.execution.idempotency.get(identity.scope, identity.idempotency_key, tenant_id="tenant")
     assert committed_identity is not None
     assert committed_identity.status is IdempotencyStatus.COMPLETED
     assert committed_identity.resource_id == execution_id

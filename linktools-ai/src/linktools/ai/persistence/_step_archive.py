@@ -1188,7 +1188,7 @@ class StateStepArchive(AgentRunStore):
     def bind_native_run_store(self, native: SqlStepStore) -> None:
         if (type(native) is SqlStepStore and isinstance(self._store, SqlStateStore)
                 and native.storage_context.engine is self._store.context.engine
-                and native.store_digest == SqlStepStore.scope_digest(
+                and native.store_key == SqlStepStore.scope_key(
                     namespace=self._namespace, tenant_id=self._tenant_id,
                 )):
             self._history.bind_native_message_store(native)
@@ -3143,7 +3143,7 @@ class StateStepArchive(AgentRunStore):
             messages = decode_model_messages(raw)
             block = ArchivedContextBlock(root, value["digest"], len(raw))
             archive = await self._history.content_archive()
-            valid_scope = ((root.group_id == archive.scope_id and root.store_digest == SqlStepStore.scope_digest(
+            valid_scope = ((root.group_id == archive.scope_id and root.store_key == SqlStepStore.scope_key(
                 namespace=self._namespace, tenant_id=self._tenant_id)) if isinstance(root, NativeMessageRoot)
                 else root.scope_id == archive.scope_id and root.content_scope == archive.content_scope)
             if (not valid_scope

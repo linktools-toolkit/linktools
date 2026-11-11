@@ -88,7 +88,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
         *,
         tenant_id: str,
         expected_status: ApprovalStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         decision: ApprovalDecision,
         principal_id: str,
         decision_digest: str,
@@ -110,7 +110,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
                 status=ApprovalStatus.APPROVED
                 if decision is ApprovalDecision.APPROVE
                 else ApprovalStatus.DENIED,
-                idempotency_key_digest=idempotency_key_digest,
+                idempotency_key=idempotency_key,
                 decision=decision,
                 decided_by=principal_id,
                 decision_digest=decision_digest,
@@ -212,7 +212,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         *,
         tenant_id: str,
         expected_status: ExternalCallStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
         resolution_metadata: Mapping[str, JsonValue],
@@ -230,7 +230,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             value = replace(
                 current,
                 status=ExternalCallStatus.SUPPLIED,
-                idempotency_key_digest=idempotency_key_digest,
+                idempotency_key=idempotency_key,
                 resolution_kind=resolution_kind,
                 result_payload=result_payload,
                 resolution_metadata=resolution_metadata,

@@ -16,6 +16,7 @@ from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepEvent as
 from sqlalchemy import delete, event, update
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.capability import TraceCapability
 from linktools.ai.capability.steps import AtomicStepPersistence, StepRunRegistration
 from linktools.ai.core import CommitPolicy, ExecutionStatus, canonical_json_bytes
@@ -229,7 +230,7 @@ async def test_runtime_start_remains_first_and_single_after_terminal_flush(
         assert [item.sequence for item in raw] == list(range(1, len(events) + 1))
         assert raw[0].data["value"]["type"] == "native_event_reference"
         assert raw[0].data["value"]["payload"] == {
-            "key": native.event_key_digest(starts[0]), "index": 0,
+            "run": starts[0].run_id, "replay": starts[0].idempotency_key, "index": 0,
         }
         capture = (await archive.capture_history((run.run_id,)))[run.run_id]
         assert capture.event_count == len(events)
@@ -289,13 +290,13 @@ async def test_cold_start_reference_fails_closed(tmp_path: Path, corruption: str
         expected = await state.run_store.read_store(PersistenceDomain.TRACE).list_events(agent_run_id=run.run_id)
         table = build_step_sql_metadata().tables["ai_step_events"]
         statement = delete(table) if corruption == "missing" else update(table).values(**{
-            "scope": {"store_digest": "a" * 64},
+            "scope": {"store_key": native_store_key("a", "tenant")},
             "body": {"step_index": 999},
             "lineage": {"run_id": "foreign-run"},
             "metadata": {"metadata": '{"tampered":"body"}'},
         }[corruption])
         async with native.storage_context.engine.begin() as connection:
-            await connection.execute(statement.where(table.c.store_digest == native.store_digest, table.c.kind == "run_started"))
+            await connection.execute(statement.where(table.c.store_key == native.store_key, table.c.kind == "run_started"))
         cold = await state.create_agent_run_store()
         try:
             archive = cold.read_store(PersistenceDomain.TRACE)
@@ -515,7 +516,7 @@ async def test_concurrent_first_publishers_keep_receipt_proof_after_cache_evicti
                     await release.wait()
                 if kind == "trace":
                     assert references.encode(projected)["value"]["payload"] == {
-                        "key": native.event_key_digest(source), "index": 0,
+                        "run": source.run_id, "replay": source.idempotency_key, "index": 0,
                     }
                     references.confirm((projected,))
                 else:
@@ -1015,9 +1016,9 @@ async def test_terminal_unknown_verification_checks_pending_source_in_original_r
                 tables = build_step_sql_metadata().tables
                 table = tables["ai_step_runs" if damage == "registration" else "ai_step_events"]
                 values = {"metadata": {"metadata": '{"corrupted":"source metadata"}'},
-                          "key": {"key_digest": "f" * 64}, "step": {"step_index": 99},
+                          "key": {"idempotency_key": b"wrong"}, "step": {"step_index": 99},
                           "registration": {"registration_id": "foreign-registration"}}[damage]
-                statement = update(table).where(table.c.store_digest == native.store_digest)
+                statement = update(table).where(table.c.store_key == native.store_key)
                 if damage != "registration":
                     statement = statement.where(table.c.kind == "run_started")
                 async with engine.begin() as connection:
@@ -1071,7 +1072,7 @@ def test_terminal_source_join_keeps_explicit_locator_bind_budget(dialect_name: s
     locators = {"source_run_id", "source_event_key"}
     assert locators <= compiled.params.keys()
     assert compiled.params["source_run_id"] == "run"
-    assert compiled.params["source_event_key"] == native.event_key_digest(source)
+    assert compiled.params["source_event_key"] == source.idempotency_key.encode("utf-8")
     assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 4
     ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(998))).compile(
         dialect=dialect, compile_kwargs={"render_postcompile": True})

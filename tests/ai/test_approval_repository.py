@@ -24,7 +24,7 @@ def storage(request: pytest.FixtureRequest, tmp_path: Path) -> PersistenceStorag
 def _approval() -> ApprovalRecord:
     return ApprovalRecord(
         approval_id="approval", execution_id="execution", status=ApprovalStatus.PENDING,
-        idempotency_key_digest=None, decision=None, decided_by=None,
+        idempotency_key=None, decision=None, decided_by=None,
         decision_digest=None, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         decided_at=None,
     )

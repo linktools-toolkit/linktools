@@ -52,7 +52,7 @@ async def test_execution_idempotency_repository_owns_resource_kind() -> None:
         now = datetime.now(timezone.utc)
         record = IdempotencyRecord(
             scope="execution.run",
-            idempotency_key_digest="a" * 64,
+            idempotency_key="a" * 64,
             request_digest="b" * 64,
             resource_kind=ResourceKind.EVALUATION,
             resource_id="evaluation",
@@ -102,7 +102,7 @@ async def test_in_memory_terminal_commit_validates_success_result(
         )
         identity = IdempotencyRecord(
             scope="execution.run",
-            idempotency_key_digest="a" * 64,
+            idempotency_key="a" * 64,
             request_digest="b" * 64,
             resource_kind=ResourceKind.EXECUTION,
             resource_id="execution",
@@ -144,7 +144,7 @@ async def test_in_memory_terminal_commit_validates_success_result(
                 {},
                 IdempotencyTerminalUpdate(
                     identity.scope,
-                    identity.idempotency_key_digest,
+                    identity.idempotency_key,
                     identity.status,
                     IdempotencyStatus.COMPLETED,
                     identity.request_digest,

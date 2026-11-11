@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import CommitPolicy, ExecutionStatus, IdempotencyStatus, ResourceKind, RunBudget
+from linktools.ai.core import canonical_sha256, CommitPolicy, ExecutionStatus, IdempotencyStatus, ResourceKind, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import Execution, ExecutionStartReservation, ExecutionStartReservationResult
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -183,7 +183,7 @@ async def _terminal_race(
                     )
                     assert await observer.read_owner(winner.execution_id, tenant_id=state.tenant_id) is None
                     assert await observer.read_request_execution(
-                        f"{identity.scope}:{identity.idempotency_key_digest}", tenant_id=state.tenant_id,
+                        canonical_sha256([identity.scope, identity.idempotency_key]), tenant_id=state.tenant_id,
                     ) is None
                 if outcome == "succeeded" or session:
                     sequential = await start(delayed_runtime, prompt="same request", hold_id="late-hold")

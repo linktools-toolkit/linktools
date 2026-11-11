@@ -212,7 +212,7 @@ class _PendingExecutionTurns:
     ) -> tuple[_PendingExecutionTurn, bool]:
         execution = reservation.execution
         identity = reservation.idempotency
-        request_key = (tenant_id, identity.scope, identity.idempotency_key_digest)
+        request_key = (tenant_id, identity.scope, identity.idempotency_key)
         existing = self._requests.get(request_key)
         if existing is not None:
             if (existing.reservation.idempotency.request_digest != identity.request_digest
@@ -312,21 +312,21 @@ class _PendingExecutionTurns:
             self._release_admission(turn)
 
     def peek_request(
-        self, *, tenant_id: str, scope: str, idempotency_key_digest: str,
+        self, *, tenant_id: str, scope: str, idempotency_key: str,
     ) -> _PendingExecutionTurn | None:
         """Observe local admission without settling a possibly unknown commit."""
-        return self._requests.get((tenant_id, scope, idempotency_key_digest))
+        return self._requests.get((tenant_id, scope, idempotency_key))
 
     async def lookup(
-        self, *, tenant_id: str, scope: str, idempotency_key_digest: str,
+        self, *, tenant_id: str, scope: str, idempotency_key: str,
         request_digest: str,
     ) -> _PendingExecutionTurn | None:
-        turn = self._requests.get((tenant_id, scope, idempotency_key_digest))
+        turn = self._requests.get((tenant_id, scope, idempotency_key))
         if turn is not None and turn.reservation.idempotency.request_digest != request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if turn is not None:
             await self.settle(turn)
-        return self._requests.get((tenant_id, scope, idempotency_key_digest))
+        return self._requests.get((tenant_id, scope, idempotency_key))
 
     def release(self, turn: _PendingExecutionTurn) -> None:
         execution = turn.reservation.execution
@@ -338,7 +338,7 @@ class _PendingExecutionTurns:
 
     def _release_admission(self, turn: _PendingExecutionTurn) -> None:
         identity = turn.reservation.idempotency
-        request_key = (turn.tenant_id, identity.scope, identity.idempotency_key_digest)
+        request_key = (turn.tenant_id, identity.scope, identity.idempotency_key)
         if self._requests.get(request_key) is turn:
             self._requests.pop(request_key)
         if turn.session is not None:

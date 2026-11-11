@@ -367,7 +367,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         await self._insert(
             self._stored(self._kind, identity, value, state=_record_state(value))
         )
-        _logger.debug("created Runtime record: kind=%s id=%s", self._kind, identity)
+        _logger.debug("created Runtime record: kind=%s", self._kind)
         return value
 
     async def create_in_transaction(
@@ -388,9 +388,8 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
             await self._stored_content(self._kind, identity, value, state=_record_state(value))
         )
         _logger.debug(
-            "created Runtime record in group: kind=%s id=%s",
+            "created Runtime record in group: kind=%s",
             self._kind,
-            identity,
         )
         return value
 
@@ -850,7 +849,7 @@ def _default_record_parent(
 
 def _canonical_record_identity(kind: str, value: object) -> tuple[str, ...]:
     if isinstance(value, IdempotencyRecord):
-        return (value.scope, value.idempotency_key_digest)
+        return (value.scope, value.idempotency_key)
     if isinstance(value, TaskGraphView):
         return (value.graph_id,)
     if isinstance(value, TaskNodeView):

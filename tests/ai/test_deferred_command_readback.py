@@ -81,12 +81,12 @@ async def _resolve_members(state, approvals, calls):
     now = datetime.now(timezone.utc)
     await state.checkpoint.approvals.decide(
         approvals[0].approval_id, tenant_id="tenant", expected_status=ApprovalStatus.PENDING,
-        idempotency_key_digest="a" * 64, decision=ApprovalDecision.APPROVE, principal_id="owner",
+        idempotency_key="a" * 64, decision=ApprovalDecision.APPROVE, principal_id="owner",
         decision_digest="b" * 64, decided_at=now,
     )
     await state.checkpoint.external_calls.supply(
         calls[0].call_id, tenant_id="tenant", expected_status=ExternalCallStatus.PENDING,
-        idempotency_key_digest="c" * 64, resolution_kind="succeeded",
+        idempotency_key="c" * 64, resolution_kind="succeeded",
         result_payload=StoredPayload.inline_text("result"), resolution_metadata={}, supplied_at=now,
     )
     repository = state.checkpoint.external_calls

@@ -433,7 +433,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
         assert len(approvals) == 1
         await original._state.checkpoint.approvals.decide(
             approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
-            idempotency_key_digest="a" * 64, decision=ApprovalDecision.DENY,
+            idempotency_key="a" * 64, decision=ApprovalDecision.DENY,
             principal_id=original.default_principal.principal_id, decision_digest="b" * 64,
             decided_at=datetime.now(timezone.utc),
         )

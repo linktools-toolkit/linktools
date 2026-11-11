@@ -118,8 +118,8 @@ def test_portable_runs_and_runtime_projections_reject_oversized_ids(field: str) 
     ):
         with pytest.raises(AIError):
             constructor(**(values | {projected_field: invalid}))
-    scope = SqlStepStore.scope_digest(namespace="ids", tenant_id="tenant")
-    row = SqlStepStore._record_values(RunRecord(run_id="run")) | {"store_digest": scope, field: invalid}
+    scope = SqlStepStore.scope_key(namespace="ids", tenant_id="tenant")
+    row = SqlStepStore._record_values(RunRecord(run_id="run")) | {"store_key": scope, field: invalid}
     with pytest.raises(AIError) as caught:
         SqlStepStore.validate_backup(NativeStepBackup(scope, (row,), (), ()))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
