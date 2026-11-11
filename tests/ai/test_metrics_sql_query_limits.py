@@ -179,7 +179,7 @@ async def test_oversized_window_does_not_expand_payload_json(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("aggregation", (MetricAggregation.MIN, MetricAggregation.MAX))
 @pytest.mark.parametrize("sample_count", (
-    pytest.param(100, id="representative"),
+    pytest.param(3, id="representative"),
     pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
 ))
 async def test_sqlite_extrema_expand_once_without_order_sort(

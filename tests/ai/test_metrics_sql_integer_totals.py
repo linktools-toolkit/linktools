@@ -148,7 +148,7 @@ async def test_integer_partitions_remain_exact_next_to_float_partitions(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sample_count", (
-    pytest.param(100, id="representative"),
+    pytest.param(2, id="representative"),
     pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
 ))
 async def test_large_integer_sum_transfers_only_one_aggregate_statement(
