@@ -43,7 +43,8 @@ def _runtime_store(records: _RecordingMemoryRepository) -> PersistentMemoryStore
     store = object.__new__(PersistentMemoryStore)
     store._state = SimpleNamespace(records=records)
     store._tenant_id = "tenant"
-    store._memory_scope_digest = "scope-digest"
+    store._memory_scope = "scope"
+    store._transient_execution_id = None
     return store
 
 
@@ -55,7 +56,8 @@ async def test_list_paths_pushes_prefix_and_limit_to_repository_once() -> None:
     assert records.calls == [
         {
             "tenant_id": "tenant",
-            "memory_scope_digest": "scope-digest",
+            "memory_scope": "scope",
+            "transient_execution_id": None,
             "prefix": "memory",
             "cursor": None,
             "limit": 10,
@@ -116,7 +118,7 @@ async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
     now = datetime.now(timezone.utc)
     value = MemoryRecord(
         "memory-id",
-        "scope-digest",
+        "scope",
         StoredPayload.inline_text("content"),
         {"path": "memory/z.md"},
         1,
@@ -139,7 +141,7 @@ async def test_memory_repository_accepts_full_harness_path_length() -> None:
     logical_path = "memory/" + "x" * 197 + ".md"
     value = MemoryRecord(
         "memory-id",
-        "scope-digest",
+        "scope",
         StoredPayload.inline_text("content"),
         {"path": logical_path},
         1,
@@ -166,7 +168,7 @@ async def test_memory_repository_applies_prefix_before_limit() -> None:
         values = tuple(
             MemoryRecord(
                 memory_id,
-                "scope-digest",
+                "scope",
                 StoredPayload.inline_text("content"),
                 {"path": path},
                 1,
@@ -186,7 +188,7 @@ async def test_memory_repository_applies_prefix_before_limit() -> None:
 
         first = await repository.list(
             tenant_id="tenant",
-            memory_scope_digest="scope-digest",
+            memory_scope="scope",
             prefix="memory/",
             cursor=None,
             limit=1,
@@ -196,7 +198,7 @@ async def test_memory_repository_applies_prefix_before_limit() -> None:
 
         second = await repository.list(
             tenant_id="tenant",
-            memory_scope_digest="scope-digest",
+            memory_scope="scope",
             prefix="memory/",
             cursor=first.next_cursor,
             limit=10,
@@ -221,7 +223,8 @@ async def test_list_paths_preserves_lexical_prefix() -> None:
     assert records.calls == [
         {
             "tenant_id": "tenant",
-            "memory_scope_digest": "scope-digest",
+            "memory_scope": "scope",
+            "transient_execution_id": None,
             "prefix": "memory/0",
             "cursor": None,
             "limit": 2,
@@ -248,7 +251,7 @@ async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
     now = datetime.now(timezone.utc)
     values = tuple(
         MemoryRecord(
-            f"memory-{index}", "scope-digest", StoredPayload.inline_text("content"),
+            f"memory-{index}", "scope", StoredPayload.inline_text("content"),
             {"path": f"memory/{index:03d}.md"}, 1, now, now,
         ) for index in range(200)
     )
@@ -269,7 +272,7 @@ async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
             page = await repository.list(
-                tenant_id="tenant", memory_scope_digest="scope-digest", prefix=prefix,
+                tenant_id="tenant", memory_scope="scope", prefix=prefix,
                 cursor=None, limit=1,
             )
         finally:
@@ -280,7 +283,7 @@ async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
         assert "LIMIT" in queries[0][0]
         assert queries[0][1][-2:] == (2, 0)
         second = await repository.list(
-            tenant_id="tenant", memory_scope_digest="scope-digest", prefix="memory/0",
+            tenant_id="tenant", memory_scope="scope", prefix="memory/0",
             cursor=page.next_cursor, limit=1,
         )
         assert [value.metadata["path"] for value in second.items] == ["memory/001.md"]

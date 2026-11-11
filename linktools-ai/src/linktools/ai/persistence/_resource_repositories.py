@@ -73,21 +73,42 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             sort_key=path.encode("ascii"),
         )
 
-    async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]:
+    def _validate_record_identity(self, record: StoredRecord, value: MemoryRecord) -> None:
+        super()._validate_record_identity(record, value)
+        try:
+            scope = self._scope("memory", "memory_scope", value.scope_components(
+                value.memory_scope, value.transient_execution_id,
+            ))
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        path = value.metadata.get("path")
+        if (record.scope_key != scope or not isinstance(path, str)
+                or not path.isascii() or record.sort_key != path.encode("ascii")):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def capture_scope(
+        self, *, tenant_id: str, memory_scope: str,
+        transient_execution_id: str | None = None,
+    ) -> tuple[MemoryRecord, ...]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        scope = self._scope("memory", "memory_scope", MemoryRecord.scope_components(
+            memory_scope, transient_execution_id,
+        ))
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
             rows: list[StoredRecord] = []
             while True:
                 last = rows[-1] if rows else None
                 page = await transaction.list_records(RecordQuery(kind="memory",
-                    scope_key=self._scope("memory", "memory_scope", (memory_scope_digest,)),
+                    scope_key=scope,
                     after_sort_key=None if last is None else last.sort_key,
                     after_key=None if last is None else last.key, limit=1000))
                 rows.extend(page)
                 if len(page) < 1000:
                     return tuple(rows)
         records = await self._store.read(read)
+        if any(record.scope_key != scope for record in records):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple([await self._decode(record, MemoryRecord) for record in records])
 
     async def apply_write(
@@ -157,7 +178,8 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         self,
         *,
         tenant_id: str,
-        memory_scope_digest: str,
+        memory_scope: str,
+        transient_execution_id: str | None = None,
         prefix: str,
         cursor: str | None,
         limit: int,
@@ -165,13 +187,18 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         if tenant_id != self._tenant_id:
             return Page(())
         _validate_page_limit(limit)
+        scope = self._scope("memory", "memory_scope", MemoryRecord.scope_components(
+            memory_scope, transient_execution_id,
+        ))
         records = await self._records(
             "memory",
-            scope=self._scope("memory", "memory_scope", (memory_scope_digest,)),
+            scope=scope,
             sort_key_prefix=prefix.encode("ascii") if prefix else None,
             cursor=cursor,
             limit=limit + 1,
         )
+        if any(record.scope_key != scope for record in records):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values = tuple(
             [await self._decode(record, MemoryRecord) for record in records[:limit]]
         )

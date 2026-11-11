@@ -91,6 +91,7 @@ from ..core import (
     normalize_thinking,
     validate_agent_id,
     validate_lease_owner,
+    validate_memory_scope,
     validate_resource_id,
     validate_tenant_id,
 )
@@ -977,12 +978,30 @@ class AgentAttemptClaim:
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
     memory_id: str
-    memory_scope_digest: str
+    memory_scope: str = field(repr=False)
     content: StoredPayload
     metadata: Mapping[str, JsonValue]
     revision: int
     created_at: datetime
     updated_at: datetime
+    transient_execution_id: str | None = field(default=None, kw_only=True, repr=False)
+
+    def __post_init__(self) -> None:
+        self.scope_components(self.memory_scope, self.transient_execution_id)
+
+    @classmethod
+    def scope_components(
+        cls, memory_scope: str, transient_execution_id: str | None = None,
+    ) -> tuple[str, ...]:
+        try:
+            validate_memory_scope(memory_scope)
+            if transient_execution_id is not None:
+                validate_resource_id(transient_execution_id)
+        except AIError as error:
+            raise ValueError("memory scope identity is invalid") from error
+        if transient_execution_id is None:
+            return ("persistent", memory_scope)
+        return ("transient", memory_scope, transient_execution_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2092,7 +2111,10 @@ class EvaluationRepository(RuntimeRepository, Protocol):
 
 
 class MemoryRepository(RuntimeRepository, Protocol):
-    async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]: ...
+    async def capture_scope(
+        self, *, tenant_id: str, memory_scope: str,
+        transient_execution_id: str | None = None,
+    ) -> tuple[MemoryRecord, ...]: ...
     async def get_header(
         self, memory_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...
@@ -2108,7 +2130,8 @@ class MemoryRepository(RuntimeRepository, Protocol):
         self,
         *,
         tenant_id: str,
-        memory_scope_digest: str,
+        memory_scope: str,
+        transient_execution_id: str | None = None,
         prefix: str,
         cursor: str | None,
         limit: int,

@@ -93,7 +93,7 @@ def test_fixture_request_identity_preserves_live_digest_and_pins_asset_version()
         "principal": principal_identity_payload(request.principal),
         "session_id": None, "previous_execution_id": None, "fork_base_execution_id": None,
         "parent_execution_id": None, "parent_invocation_id": None, "root_identity": "$self",
-        "lineage_kind": ExecutionLineageKind.RUN.value, "memory_scope_digest": None,
+        "lineage_kind": ExecutionLineageKind.RUN.value, "memory_scope": None,
         "mode": "run", "planning": False, "thinking": False,
     })
     assert _request_digest(request, "b" * 64, **lineage) == original

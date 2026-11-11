@@ -797,7 +797,7 @@ def _default_record_scope(
             domain.value,
             kind,
             "memory_scope",
-            (value.memory_scope_digest,),
+            value.scope_components(value.memory_scope, value.transient_execution_id),
         )
     if isinstance(value, ToolOperationRecord):
         return scope_key(

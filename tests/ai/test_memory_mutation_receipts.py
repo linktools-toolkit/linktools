@@ -71,7 +71,7 @@ async def test_memory_receipt_real_repository_replay_and_conflicts(tmp_path: Pat
         assert not created.replayed and not created.existed
         assert created.version == "m1:" + canonical_sha256({
             "namespace": "receipt-test", "tenant_id": "tenant",
-            "scope": canonical_sha256("scope"), "path": "memory/a.md",
+            "scope": "scope", "transient_execution_id": None, "path": "memory/a.md",
             "identity": operation.id,
         })
         original = await store.read("memory/a.md", max_chars=100)
@@ -118,8 +118,12 @@ async def test_memory_receipt_real_repository_replay_and_conflicts(tmp_path: Pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transient", [False, True])
-async def test_memory_scope_shares_or_isolates_execution_receipts(transient: bool) -> None:
-    async with Persistence.open("memory-owner", storage=PersistenceStorage.in_memory()) as state:
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_memory_scope_shares_or_isolates_execution_receipts(
+    tmp_path: Path, transient: bool, backend: str,
+) -> None:
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with Persistence.open("memory-owner", storage=storage) as state:
         def store(execution_id: str) -> PersistentMemoryStore:
             return PersistentMemoryStore(
                 state.memory, object_store=state.object_store(PersistenceDomain.MEMORY),

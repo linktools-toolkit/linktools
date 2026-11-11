@@ -748,7 +748,8 @@ def test_snapshot_oversized_relation_owners_report_integrity_errors(family: str)
     oversized = "x" * 1024
     if family == "memory_scope":
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        value = MemoryRecord("memory", oversized, StoredPayload.inline_text("body"), {"path": "memory"}, 0, now, now)
+        value = MemoryRecord("memory", "scope", StoredPayload.inline_text("body"), {"path": "memory"}, 0, now, now)
+        object.__setattr__(value, "memory_scope", oversized)
         domain, kind, identity = PersistenceDomain.MEMORY, "memory", "memory"
     else:
         value = TaskGraphView("graph", TaskStatus.PENDING, ())

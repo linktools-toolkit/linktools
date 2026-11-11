@@ -3039,9 +3039,7 @@ def _request_digest(
             "parent_invocation_id": parent_invocation_id,
             "root_identity": root_execution_id or "$self",
             "lineage_kind": lineage_kind.value,
-            "memory_scope_digest": None
-            if request.memory_scope is None
-            else canonical_sha256(request.memory_scope),
+            "memory_scope": request.memory_scope,
             "mode": request.mode,
             "planning": request.planning,
             "thinking": request.thinking,
