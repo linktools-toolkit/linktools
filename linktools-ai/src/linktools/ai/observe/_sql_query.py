@@ -73,10 +73,9 @@ def sql_query_pushdown_supported(plan: _MetricQueryPushdownPlan) -> bool:
 async def execute_sql_metric_query(
     session: "AsyncSession",
     *,
-    namespace_key: str,
+    namespace: str,
     dialect_name: str,
     plan: _MetricQueryPushdownPlan,
-    namespace: str = "",
     verify: bool = False,
 ) -> _MetricQueryPushdownResult | None:
     if dialect_name not in {"sqlite", "mysql", "postgresql"}:
@@ -86,9 +85,7 @@ async def execute_sql_metric_query(
 
     from sqlalchemy import text
 
-    params = _base_params(namespace_key, dialect_name, plan)
-    if verify:
-        params["verified_namespace"] = namespace
+    params = _base_params(namespace, dialect_name, plan)
     if (
         not verify
         and plan.source_kind is MetricSourceKind.OBSERVATION_COUNT
@@ -191,7 +188,7 @@ SELECT COUNT(*)
 FROM (
     SELECT 1
     FROM ai_metric_observations
-    WHERE namespace_digest = :namespace_key
+    WHERE namespace = :namespace
       AND kind = :kind
       AND pruned_at IS NULL
       AND active_occurred_at >= :window_start
@@ -206,15 +203,14 @@ def _bounded_observations_sql(
 ) -> str:
     if verify:
         columns = tuple(dict.fromkeys((
-            *columns, "namespace_digest", "kind", "occurred_at",
-            "payload_digest", "payload_json",
-            "namespace", "observation_id", "active_occurred_at", "pruned_at",
+            *columns, "namespace", "kind", "occurred_at",
+            "payload_digest", "payload_json", "observation_id", "active_occurred_at", "pruned_at",
         )))
     projection = ", ".join(columns)
     bounded = f"""bounded_observations AS (
     SELECT {projection}
     FROM ai_metric_observations
-    WHERE namespace_digest = :namespace_key
+    WHERE namespace = :namespace
       AND kind = :kind
       AND pruned_at IS NULL
       AND active_occurred_at >= :window_start
@@ -232,8 +228,8 @@ def _bounded_observations_sql(
     SELECT scanned_count,
         CASE WHEN scanned_count < :scan_cap THEN (
             SELECT MAX(linktools_metric_verify(
-                :verified_namespace, :namespace_key, namespace_digest, payload_digest,
-                kind, occurred_at, payload_json, namespace, observation_id,
+                :namespace, namespace, payload_digest,
+                kind, occurred_at, payload_json, observation_id,
                 active_occurred_at, pruned_at
             )) FROM bounded_observations
         ) ELSE NULL END AS record_error
@@ -259,7 +255,7 @@ def _result_row_limit(plan: _MetricQueryPushdownPlan) -> int:
 
 
 def _base_params(
-    namespace_key: str,
+    namespace: str,
     dialect_name: str,
     plan: _MetricQueryPushdownPlan,
 ) -> dict[str, object]:
@@ -280,7 +276,7 @@ def _base_params(
         window_end = end_utc
 
     params: dict[str, object] = {
-        "namespace_key": namespace_key,
+        "namespace": namespace,
         "kind": plan.observation_kind,
         "window_start": window_start,
         "window_end": window_end,

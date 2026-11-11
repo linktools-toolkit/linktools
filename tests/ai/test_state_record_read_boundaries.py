@@ -101,6 +101,30 @@ def test_record_identity_still_validates_custom_mapping_behavior() -> None:
         validate_record_identity(record)
 
 
+@pytest.mark.parametrize("source", ("filesystem", "sql"))
+@pytest.mark.parametrize("field,value", (
+    ("key_digest", "ab" * 31),
+    ("scope_digest", "not-a-digest"),
+    ("parent_digest", "AB" * 32),
+    ("subject_digest", 1),
+    ("sort_key", "non-ascii-\N{LATIN SMALL LETTER E WITH ACUTE}"),
+))
+def test_record_readers_reject_malformed_physical_identity(
+    source: str, field: str, value: object,
+) -> None:
+    record = _record({"value": None})
+    with pytest.raises(AIError) as raised:
+        if source == "filesystem":
+            wire_field = {
+                "key_digest": "key", "scope_digest": "scope", "parent_digest": "parent",
+                "subject_digest": "subject", "sort_key": "sort",
+            }[field]
+            decode_record({**encode_record(record), wire_field: value})
+        else:
+            _record_from_row({**_record_values(record), field: value})
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 @pytest.fixture
 def interaction_archive() -> ModelInteractionStateStepArchive:
     return ModelInteractionStateStepArchive(

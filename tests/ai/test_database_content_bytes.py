@@ -53,7 +53,8 @@ async def test_archive_body_is_binary_in_database_and_round_trips_portable_codec
     try:
         identities = await archive.prepare_content((("text", body),), prepared)
         record, = prepared.records.values()
-        codec, digest, size, encoded = encode_payload_bytes(body)
+        codec, encoded = encode_payload_bytes(body)
+        digest, size = hashlib.sha256(body).hexdigest(), len(body)
         assert record.payload_bytes == encoded
         assert record.data == {"codec": "text", "compression": codec, "raw_digest": digest,
                                "raw_size": size, "payload": None}
@@ -82,7 +83,8 @@ async def test_archive_body_is_binary_in_database_and_round_trips_portable_codec
 @pytest.mark.parametrize("damage", ("truncated", "trailing", "size", "digest", "codec"))
 def test_binary_content_uses_existing_source_integrity_and_bounded_decode(damage: str) -> None:
     raw = b"compressible content" * 8192
-    codec, digest, size, body = encode_payload_bytes(raw)
+    codec, body = encode_payload_bytes(raw)
+    digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
     if damage == "truncated":
         body = body[:-1]
     elif damage == "trailing":
@@ -107,7 +109,7 @@ async def test_native_body_stays_binary_through_publication_and_portable_boundar
     frozen = MessageArchive().snapshot((ModelResponse(parts=[TextPart("message" * 20000)]),))
 
     async def prepare(raw: bytes) -> PreparedMessagePayload:
-        compression, _, _, encoded = encode_payload_bytes(raw)
+        compression, encoded = encode_payload_bytes(raw)
         return PreparedMessagePayload(raw, encoded=encoded, compression=compression, payload=None)
 
     try:

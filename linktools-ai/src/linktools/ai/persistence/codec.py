@@ -8,7 +8,6 @@ from ._message_root import NativeMessageRoot, NativeMessageSlice
 
 import base64
 import binascii
-import hashlib
 import json
 import math
 import types
@@ -219,7 +218,6 @@ from .state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    validate_record_identity,
 )
 
 CURRENT_DATA_VERSION = 1
@@ -1358,10 +1356,6 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
         )
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    try:
-        validate_record_identity(record)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     return record
 
 
@@ -1455,11 +1449,6 @@ def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
         )
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def canonical_digest(value: Mapping[str, JsonValue]) -> str:
-    """Return the digest used for replay and compact evidence."""
-    return hashlib.sha256(canonical_json_bytes(dict(value))).hexdigest()
 
 
 def wire_type_id(value: DomainT | type[DomainT]) -> str:
@@ -2828,4 +2817,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

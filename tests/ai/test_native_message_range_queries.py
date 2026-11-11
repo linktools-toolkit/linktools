@@ -31,7 +31,7 @@ _STAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 async def _payload(raw: bytes) -> PreparedMessagePayload:
-    compression, _, _, encoded = encode_payload_bytes(raw)
+    compression, encoded = encode_payload_bytes(raw)
     return PreparedMessagePayload(raw, encoded=encoded, compression=compression, payload=None)
 
 

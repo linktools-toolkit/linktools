@@ -30,8 +30,9 @@ async def _content(*, external: bool, text: str = ""):
         [text, BinaryContent(b"file bytes", media_type="application/octet-stream")] if external else text,
     )]),))
     payload = await store_attachment_payload(raw, format="model-messages", write_object=write)
-    compression, digest, size, encoded = encode_payload_bytes(raw)
-    content = (ContentRecord("model-message", hashlib.sha256(raw).hexdigest(), len(raw), "raw", payload)
+    compression, encoded = encode_payload_bytes(raw)
+    digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
+    content = (ContentRecord("model-message", digest, size, "raw", payload)
                if payload is not None else ContentRecord("model-message", digest, size, compression, body=encoded))
     row = {"store_digest": "c" * 64, "sha256": content.raw_digest, **content.to_native_values()}
     return content, raw, row, bodies

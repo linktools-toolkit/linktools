@@ -369,8 +369,13 @@ class ContentArchive:
     async def _prepare_content(self, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
                                existing: Mapping[bytes, StoredRecord] | None = None) -> tuple[str, ...]:
         self._bind(prepared)
-        identities = tuple(canonical_sha256([codec, hashlib.sha256(raw).hexdigest()]) for codec, raw in values)
-        unique = dict(zip(identities, values))
+        identities: list[str] = []
+        unique: dict[str, tuple[str, bytes, str]] = {}
+        for codec, raw in values:
+            digest = hashlib.sha256(raw).hexdigest()
+            identity = canonical_sha256([codec, digest])
+            identities.append(identity)
+            unique[identity] = (codec, raw, digest)
         keys = {identity: self._key("archive_content", identity) for identity in unique}
         missing = [key for key in keys.values() if key not in prepared.records]
         observed = {key: prepared._observed_content.pop(key) for key in keys.values()
@@ -379,7 +384,7 @@ class ContentArchive:
             unread = tuple(key for key in missing if key not in observed)
             existing = dict(await self.store.read_records(unread)) if unread else {}
             existing.update((key, record) for key, record in observed.items() if record is not None)
-        for identity, (codec, raw) in unique.items():
+        for identity, (codec, raw, digest) in unique.items():
             if not isinstance(codec, str) or not codec:
                 raise ValueError("content codec is required")
             key = keys[identity]
@@ -397,11 +402,10 @@ class ContentArchive:
                 prepared.records[key] = stored
                 continue
             compression, payload, encoded = await self.prepare_payload(raw, codec=codec)
-            digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
-            content = ContentRecord(codec, digest, size, compression, payload, encoded if payload is None else None)
+            content = ContentRecord(codec, digest, len(raw), compression, payload, encoded if payload is None else None)
             prepared.records[key] = self._record("archive_content", identity, content.to_json(), payload_bytes=content.body)
             prepared.verify_content(prepared.records[key])
-        return identities
+        return tuple(identities)
 
     async def prepare_payload(
         self, raw: bytes, *, existing: ContentRecord | None = None, codec: str = "model-message",
@@ -432,7 +436,7 @@ class ContentArchive:
             payload = await store_attachment_payload(raw, format="model-messages", write_object=write)
             if payload is not None:
                 return "raw", payload, raw
-        compression, _raw_digest, _size, encoded = encode_payload_bytes(raw)
+        compression, encoded = encode_payload_bytes(raw)
         return compression, None, encoded
 
     async def read_payload_object(self, reference: ObjectRef) -> bytes:

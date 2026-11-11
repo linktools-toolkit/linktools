@@ -22,7 +22,7 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot, InMemoryStepStore, RunRecord, SqliteStepStore,
     StepEvent, StepPersistence, StepStore, ToolEffectRecord, continue_run,
 )
-from sqlalchemy import event, text
+from sqlalchemy import Text, event, text
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -64,6 +64,45 @@ async def test_run_lineage_filters_sort_by_instant_and_keep_original_records(sto
     assert await store.list_runs(parent_run_id="parent", conversation_id="conversation") == [records[1], records[0]]
     with pytest.raises((ValueError, sqlite3.IntegrityError)):
         await store.register_run(records[0])
+
+
+@pytest.mark.asyncio
+async def test_sql_lineage_filters_preserve_wide_exact_identifiers_under_padded_comparisons(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lineage.db'}")
+    metadata = build_step_sql_metadata()
+    runs = metadata.tables["ai_step_runs"]
+    # SQLite RTRIM models MySQL PAD SPACE comparisons without limiting ID size.
+    for name in ("conversation_id", "parent_run_id"):
+        runs.c[name].type = Text(collation="RTRIM")
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    other = SqlStepStore(engine, namespace="steps", tenant_id="two")
+    prefix = "共同前缀" * 128
+    records = [
+        RunRecord(run_id="exact", conversation_id=prefix, parent_run_id=prefix),
+        RunRecord(run_id="padded-conversation", conversation_id=prefix + " ", parent_run_id=prefix),
+        RunRecord(run_id="padded-parent", conversation_id=prefix, parent_run_id=prefix + " "),
+        RunRecord(run_id="other-suffix", conversation_id=prefix + "x", parent_run_id=prefix + "x"),
+        RunRecord(run_id="empty", conversation_id="", parent_run_id=""),
+        RunRecord(run_id="missing"),
+    ]
+    try:
+        for record in records:
+            await store.register_run(record)
+        await other.register_run(records[0])
+        assert await store.list_runs(conversation_id=prefix, parent_run_id=prefix) == records[:1]
+        assert {record.run_id for record in await store.list_runs(conversation_id=prefix)} == {"exact", "padded-parent"}
+        assert {record.run_id for record in await store.list_runs(parent_run_id=prefix)} == {"exact", "padded-conversation"}
+        assert await store.list_runs(conversation_id=prefix + " ") == records[1:2]
+        assert await store.list_runs(parent_run_id=prefix + " ") == records[2:3]
+        assert await store.list_runs(conversation_id=prefix + "x", parent_run_id=prefix + "x") == records[3:4]
+        assert await store.list_runs(conversation_id="", parent_run_id="") == records[4:5]
+        assert len(await store.list_runs()) == len(records)
+    finally:
+        await store.close()
+        await other.close()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -399,6 +438,13 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
     assert metadata.tables["ai_step_snapshots"].c.messages.type.compile(dialect=dialect) == (
         "VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
     )
+    runs = metadata.tables["ai_step_runs"]
+    for name in ("conversation_id", "parent_run_id"):
+        index = next(index for index in runs.indexes
+                     if index.info.get("ddl_dialect") == "mysql"
+                     and tuple(column.name for column in index.columns) == ("store_digest", name))
+        assert not index.unique
+        assert f"{name}(128)" in str(CreateIndex(index).compile(dialect=dialect))
     for table in metadata.tables.values():
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert table.name.startswith("ai_") and table.comment

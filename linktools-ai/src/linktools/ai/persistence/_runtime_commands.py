@@ -3365,6 +3365,7 @@ class StateCommands:
                             next_cursor=next_cursor,
                             conversation_agent_run=conversation_agent_run,
                             conversation_checkpoint=conversation_checkpoint,
+                            prepared_conversation_checkpoint=prepared_conversation[0] if prepared_conversation else None,
                             execution_run=execution_run,
                             execution_events=execution_events,
                             execution_checkpoints=execution_checkpoints,
@@ -3670,6 +3671,7 @@ class StateCommands:
                 next_cursor=next_cursor,
                 conversation_agent_run=conversation_agent_run,
                 conversation_checkpoint=conversation_checkpoint,
+                prepared_conversation_checkpoint=prepared_conversation[0] if prepared_conversation else None,
                 execution_run=execution_run,
                 execution_events=execution_events,
                 execution_checkpoints=execution_checkpoints,
@@ -4208,6 +4210,7 @@ class StateCommands:
         next_cursor: ConversationCursor | None,
         conversation_agent_run: AgentRunRecord | None,
         conversation_checkpoint: AgentRunCheckpoint | None,
+        prepared_conversation_checkpoint: PreparedAgentRunCheckpoint | None,
         execution_run: AgentRunRecord | None,
         execution_events: Sequence[StepEvent],
         execution_checkpoints: Sequence[AgentRunCheckpoint],
@@ -4337,6 +4340,15 @@ class StateCommands:
                 and session.history_quality != "unavailable"
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (conversation_agent_run is not None and next_cursor is not None
+                    and next_cursor.checkpoint_sequence is None and next_cursor.projection_digest is None
+                    and prepared_conversation_checkpoint is not None):
+                archive = self._conversation_run_store
+                if archive is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                next_cursor = await self._pin_conversation_cursor(
+                    archive, next_cursor, prepared_conversation_checkpoint, None,
+                )
             if conversation_agent_run is not None and (
                 next_cursor is None or session.continuation != next_cursor
             ):

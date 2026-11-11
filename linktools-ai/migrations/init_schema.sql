@@ -154,7 +154,7 @@ CREATE TABLE ai_object_chunks (
 
 CREATE TABLE ai_metric_definitions (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 partition identity of the Metrics namespace.',
+    namespace VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Metrics namespace owning the definition.',
     metric_name VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Versioned metric definition name.',
     revision BIGINT NOT NULL COMMENT 'Metric semantic revision.',
     observation_kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind consumed by the metric.',
@@ -162,7 +162,7 @@ CREATE TABLE ai_metric_definitions (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id),
-    UNIQUE KEY uk_namespace_digest_metric_name_revision (namespace_digest, metric_name, revision),
+    UNIQUE KEY uk_namespace_metric_name_revision (namespace, metric_name, revision),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Custom metric definitions.';
 
@@ -170,7 +170,6 @@ CREATE TABLE ai_metric_observations (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     namespace VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Metrics namespace retained after pruning.',
     observation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original observation identity retained after pruning.',
-    namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 partition identity of the Metrics namespace.',
     payload_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical ObservationEnvelope payload.',
     kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind query projection.',
     occurred_at DATETIME(6) NOT NULL COMMENT 'Canonical UTC observation occurrence time.',
@@ -180,9 +179,9 @@ CREATE TABLE ai_metric_observations (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id),
-    UNIQUE KEY uk_namespace_digest_observation_id (namespace_digest, observation_id),
-    KEY ix_namespace_digest_kind_active_occurred_at (namespace_digest, kind, active_occurred_at),
-    KEY ix_namespace_digest_active_occurred_at (namespace_digest, active_occurred_at),
+    UNIQUE KEY uk_namespace_observation_id (namespace, observation_id),
+    KEY ix_namespace_kind_active_occurred_at (namespace(128), kind, active_occurred_at),
+    KEY ix_namespace_active_occurred_at (namespace(128), active_occurred_at),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable metric observations and retained pruning receipts.';
 
@@ -239,9 +238,7 @@ CREATE TABLE ai_step_runs (
 	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
 	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
-	conversation_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical conversation lookup digest.',
 	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
-	parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical parent run lookup digest.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
 	started_at VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 run start time.',
@@ -249,8 +246,8 @@ CREATE TABLE ai_step_runs (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_conversation_digest (store_digest, conversation_digest),
-	KEY ix_store_digest_parent_digest (store_digest, parent_digest),
+	KEY ix_store_digest_conversation_id (store_digest, conversation_id(128)),
+	KEY ix_store_digest_parent_run_id (store_digest, parent_run_id(128)),
 	UNIQUE KEY uk_store_digest_run_digest (store_digest, run_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;

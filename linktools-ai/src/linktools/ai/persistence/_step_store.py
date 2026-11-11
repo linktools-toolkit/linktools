@@ -283,8 +283,6 @@ class SqlStepStore:
         started: StepEvent | None = None,
     ) -> _RunFields:
         values = self._run_values(record.run_id) | self._record_values(record)
-        values["conversation_digest"] = _optional_digest(record.conversation_id)
-        values["parent_digest"] = _optional_digest(record.parent_run_id)
         result = await self._context.dialect.insert_ignore_conflict(
             session, table=self._table("runs"), values=values,
             index_elements=("store_digest", "run_digest"),
@@ -362,11 +360,16 @@ class SqlStepStore:
         table = self._table("runs")
         query = select(table).where(table.c.store_digest == self._store_digest)
         if parent_run_id is not None:
-            query = query.where(table.c.parent_digest == _digest(parent_run_id), table.c.parent_run_id == parent_run_id)
+            query = query.where(table.c.parent_run_id == parent_run_id)
         if conversation_id is not None:
-            query = query.where(table.c.conversation_digest == _digest(conversation_id), table.c.conversation_id == conversation_id)
+            query = query.where(table.c.conversation_id == conversation_id)
         async with self._context.sessions() as session:
             rows = (await self._context.run_statement(session.execute(query.order_by(table.c.id)))).mappings().all()
+        # MySQL PAD SPACE comparisons can include identifiers with trailing
+        # spaces; lineage filters retain the exact upstream string semantics.
+        rows = [row for row in rows
+                if (parent_run_id is None or row["parent_run_id"] == parent_run_id)
+                and (conversation_id is None or row["conversation_id"] == conversation_id)]
         records = [_RUN_ADAPTER.validate_python(self._record_data(row)) for row in rows]
         for row in rows:
             self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
@@ -744,10 +747,7 @@ class SqlStepStore:
                     raise ValueError("native backup contains duplicate owner identities")
                 seen.add(key)
                 if name == "runs":
-                    record = _RUN_ADAPTER.validate_python(cls._record_data(row))
-                    if (row["conversation_digest"] != _optional_digest(record.conversation_id)
-                            or row["parent_digest"] != _optional_digest(record.parent_run_id)):
-                        raise ValueError("native backup lineage identity is corrupt")
+                    _RUN_ADAPTER.validate_python(cls._record_data(row))
                     runs[run_id] = row
                     continue
                 replay = row["idempotency_key"]
@@ -1059,7 +1059,7 @@ class SqlStepStore:
         self, raw: bytes, existing: ContentRecord | None = None,
     ) -> PreparedMessagePayload:
         if self._message_archive is None:
-            compression, _digest, _size, encoded = encode_payload_bytes(raw)
+            compression, encoded = encode_payload_bytes(raw)
             payload = None
         else:
             compression, payload, encoded = (
@@ -1716,10 +1716,6 @@ def _snapshot_descriptor_json(value: Mapping[str, object]) -> str:
     if len(encoded.encode("utf-8")) > 1024:
         raise ValueError("snapshot message descriptor exceeds 1024 UTF-8 bytes")
     return encoded
-
-
-def _optional_digest(value: str | None) -> str | None:
-    return None if value is None else _digest(value)
 
 
 def _replay_digest(store_digest: str, run_digest: str, value: str | None) -> str:

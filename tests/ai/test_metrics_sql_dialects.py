@@ -41,35 +41,52 @@ def test_metrics_schema_compiles_for_supported_sql_dialects(
     assert {"ai_metric_definitions", "ai_metric_observations"} <= tables
     assert indexes
     observations = metadata.tables["ai_metric_observations"]
+    definitions = metadata.tables["ai_metric_definitions"]
     assert "observation_digest" not in observations.c
+    for table in (definitions, observations):
+        assert "namespace_digest" not in table.c
+        assert table.c.namespace.type.length == 256
+        if dialect_name == "postgresql":
+            assert 'COLLATE "C"' in str(table.c.namespace.type.compile(dialect=engine.dialect))
     if dialect_name == "postgresql":
         assert 'COLLATE "C"' in str(observations.c.observation_id.type.compile(dialect=engine.dialect))
 
 
-def test_metrics_retention_mysql_ddl_matches_canonical_metadata() -> None:
+@pytest.mark.parametrize("table_name", ("ai_metric_definitions", "ai_metric_observations"))
+def test_metrics_mysql_ddl_matches_canonical_metadata(table_name: str) -> None:
     from pathlib import Path
 
-    table = build_metrics_sql_metadata().tables["ai_metric_observations"]
+    table = build_metrics_sql_metadata().tables[table_name]
     dialect = mysql.dialect()
     migration = (
         Path(__file__).resolve().parents[2] / "linktools-ai" / "migrations" / "init_schema.sql"
     ).read_text(encoding="utf-8")
-    for name in ("namespace", "observation_id", "payload_json", "active_occurred_at", "pruned_at"):
-        column = table.c[name]
+    for column in table.c:
+        if column.name in {"id", "updated_at", "created_at"}:
+            continue
         nullability = "NULL" if column.nullable else "NOT NULL"
-        assert f"{name} {column.type.compile(dialect=dialect)} {nullability}" in migration
+        assert f"{column.name} {column.type.compile(dialect=dialect)} {nullability}" in migration
         assert f"COMMENT '{column.comment}'" in migration
     indexes = {
-        index.name: tuple(column.name for column in index.columns)
+        index.name: index
         for index in table.indexes if index.info.get("ddl_dialect") == "mysql"
     }
-    assert indexes["ix_namespace_digest_kind_active_occurred_at"] == (
-        "namespace_digest", "kind", "active_occurred_at",
+    expected = (
+        {"uk_namespace_metric_name_revision": ("namespace", "metric_name", "revision")}
+        if table_name == "ai_metric_definitions" else {
+            "uk_namespace_observation_id": ("namespace", "observation_id"),
+            "ix_namespace_kind_active_occurred_at": ("namespace", "kind", "active_occurred_at"),
+            "ix_namespace_active_occurred_at": ("namespace", "active_occurred_at"),
+        }
     )
-    assert indexes["ix_namespace_digest_active_occurred_at"] == (
-        "namespace_digest", "active_occurred_at",
-    )
-    assert indexes["uk_namespace_digest_observation_id"] == ("namespace_digest", "observation_id")
-    for name, columns in indexes.items():
+    for name, columns in expected.items():
+        assert tuple(column.name for column in indexes[name].columns) == columns
+    for name, index in indexes.items():
+        prefixes = index.dialect_options["mysql"]["length"] or {}
+        assert prefixes == ({"namespace": 128} if name.startswith("ix_namespace_") else {})
+        columns = (
+            f"{column.name}({prefixes[column.name]})" if column.name in prefixes else column.name
+            for column in index.columns
+        )
         assert f"KEY {name} ({', '.join(columns)})" in migration
     assert f"COMMENT='{table.comment}'" in migration

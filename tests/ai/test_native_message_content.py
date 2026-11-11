@@ -65,7 +65,7 @@ class _Traffic:
 
 
 async def _inline(raw: bytes) -> PreparedMessagePayload:
-    compression, _, _, encoded = encode_payload_bytes(raw)
+    compression, encoded = encode_payload_bytes(raw)
     return PreparedMessagePayload(raw, encoded=encoded, compression=compression,
                                   payload=None)
 
@@ -600,7 +600,7 @@ async def test_prepared_payload_reuse_preserves_current_database_encoding(
         assert first.compression == "zlib" and first.payload is None
 
         def uncompressed(raw):
-            return "raw", hashlib.sha256(raw).hexdigest(), len(raw), raw
+            return "raw", raw
 
         monkeypatch.setattr(_archive, "encode_payload_bytes", uncompressed)
         bundle = PreparedArchive()

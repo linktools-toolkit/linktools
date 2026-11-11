@@ -61,6 +61,33 @@ compressed. Existing unbounded opaque string contracts are not silently narrowed
 to fixed-width IDs. Snapshot pruning uses the `(store_digest, run_digest, pruned)`
 index and an equality predicate compatible with MySQL 5.7 index selection.
 
+## Native Step digest ownership
+
+Run lineage filters index the original `conversation_id` and `parent_run_id`
+columns directly. Their nonunique MySQL indexes use 128-character prefixes;
+readers still compare complete original strings, including trailing spaces.
+These lookup filters do not need separate digests or mirrored lineage checks.
+
+| Table | Retained digest or content reference | Contract |
+| --- | --- | --- |
+| `ai_step_runs` | `store_digest`, `run_digest` | Namespace/tenant partition and fixed-width uniqueness for an unbounded upstream run ID. The original ID remains available unchanged. |
+| `ai_step_events` | `store_digest`, `run_digest`, `key_digest` | Scoped run lookup and a unique composite replay key, or a distinct unkeyed append occurrence. |
+| `ai_step_events` | `body_sha256`, `fields_sha256` | Managed lifecycle source integrity. Full recovery authenticates metadata too; metadata-free Trace projections authenticate their fields without reading the large metadata body. |
+| `ai_step_snapshots` | `store_digest`, `run_digest`, `key_digest` | Scoped run lookup, retained replay identity and snapshot pruning. |
+| `ai_step_snapshots` | `sequence_root` | The sole stored root of the immutable message sequence. The bounded descriptor stores its count and checkpoint control, not another root. |
+| `ai_step_messages` | `store_digest`, `sha256` | Scoped anonymous content addressing and integrity of original uncompressed canonical message bytes. |
+| `ai_step_sequences` | `store_digest`, `sha256`, `message_sha256`, `left_sha256`, `right_sha256`, `next_sha256` | Scoped immutable ordered sequence addressing and references to its content, subtrees and next forest. Repeated messages remain distinct occurrences. |
+| `ai_native_content_edges` | None | Physical row IDs and publication/collection revisions form a rebuildable index, not another hashed content identity. |
+
+ContentArchive uses the existing StateStore tables rather than another SQL
+schema. Its `raw_digest` authenticates original content bytes across raw and
+compressed representations; the anonymous content address binds that digest
+to the codec. Sequence addresses bind content, count and ordered links. Archive
+scope and record keys bind those addresses to their owning namespace, tenant
+and content kind so recovery and collection cannot cross archive partitions.
+Typed attachment references keep their own byte-integrity checks. These are
+content, storage and source-proof contracts, not named behavior identities.
+
 ## Captures and history
 
 Input captures, invocations, graph templates and binding declarations belong to

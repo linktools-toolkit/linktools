@@ -2524,7 +2524,6 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             subject_digest=_row_digest_or_none(row["subject_digest"]),
             payload_bytes=row["payload_bytes"],
         )
-        validate_record_identity(record)
     except AIError:
         raise
     except (TypeError, ValueError, KeyError) as error:

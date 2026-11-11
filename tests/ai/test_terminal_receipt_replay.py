@@ -105,6 +105,27 @@ async def test_retained_terminal_replay_confirms_canonical_receipt(
                 assert await state.execution.executions.get(
                     commit.execution.execution_id, tenant_id=tenant_id,
                 ) == first.execution
+                if not split_release_ack:
+                    session_record = await sessions.get("session", tenant_id=tenant_id)
+                    cursor = session_record.continuation
+                    assert cursor.checkpoint_sequence is not None and cursor.projection_digest is not None
+                    supplied = kwargs["next_cursor"]
+                    for damaged_cursor in (
+                        replace(supplied, checkpoint_sequence=cursor.checkpoint_sequence + 1,
+                                projection_digest=cursor.projection_digest),
+                        replace(supplied, projection_digest="0" * 64),
+                    ):
+                        with pytest.raises(AIError) as invalid_cursor:
+                            await original(commands, commit, **{**kwargs, "next_cursor": damaged_cursor})
+                        assert invalid_cursor.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+                    checkpoint = kwargs["conversation_checkpoint"]
+                    with pytest.raises(AIError) as invalid_checkpoint:
+                        await original(commands, commit, **{**kwargs, "conversation_checkpoint": replace(
+                            checkpoint, timestamp=checkpoint.timestamp + timedelta(seconds=1),
+                        )})
+                    assert invalid_checkpoint.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+                    assert await receipt(commit.execution.execution_id) == before
+                    assert await sessions.get("session", tenant_id=tenant_id) == session_record
                 confirmed.append(second)
             except BaseException as error:
                 expected = replace(

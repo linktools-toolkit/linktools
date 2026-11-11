@@ -38,7 +38,8 @@ def _shared_record():
     data = record.data
     binding = data["value"]["payload"]["fields"]["binding"]
     raw = canonical_json_bytes(binding)
-    compression, digest, size, encoded = encode_payload_bytes(raw)
+    compression, encoded = encode_payload_bytes(raw)
+    digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
     content = ContentRecord("execution-binding", digest, size, compression, body=encoded)
     scope = canonical_sha256(["bindings", "tenant"])
     reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope}
