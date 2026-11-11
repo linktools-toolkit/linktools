@@ -18,7 +18,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
@@ -82,9 +82,17 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         assert result.output == {'text': 'answer'}
         assert len(commits) == 1
         assert len(cleanups) <= 1
-        assert set(commits[0].removeprefix('runtime.state.group[').removesuffix(']').split(',')) == {'execution', 'conversation', 'group_internal'}
         stored = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert stored is not None and stored.retention_closed and stored.conversation
+        committed_session = await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)
+        assert committed_session is not None and committed_session.active_execution_id is None
+        assert committed_session.continuation is not None and committed_session.history_id is not None
+        archive = persistence_43.run_store.read_store(PersistenceDomain.CONVERSATION)
+        messages = [message async for message in archive.iter_session_messages(
+            committed_session.history_id, tenant_id=runtime.tenant_id,
+        )]
+        assert [part.content for message in messages for part in message.parts
+                if isinstance(part, (UserPromptPart, TextPart))] == ['first', 'answer']
         total = (len(commits), len(cleanups))
         replay = await session.start('first', idempotency_key='first')
         assert replay.execution_id == execution.execution_id

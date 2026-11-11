@@ -274,13 +274,17 @@ async def test_archive_handle_without_transaction_enlistment_keeps_binding_inlin
 
 
 def _binding_manifest(copies: int):
+    from linktools.ai.persistence._archive import archive_scope_parts, decode_archive_scope
     from linktools.ai.persistence.codec import encode_record
     from linktools.ai.persistence.state import record_key
 
     _, _, compact, content, key = _shared_record()
-    archive_record = replace(compact, kind="archive_content", sort_key=key[2].encode("ascii"),
-        scope_key=bytes.fromhex(key[1]), data=content.to_json(), payload_bytes=content.body,
-        key=record_key("", "", "archive", "archive_content", [key[1], key[2]]))
+    scope = decode_archive_scope(key[1])
+    namespace, tenant_id = archive_scope_parts(scope)
+    archive_record = replace(compact, kind="archive_content", sort_key=key[2].encode("utf-8"),
+        scope_key=scope, data=content.to_json(), payload_bytes=content.body,
+        key=record_key(namespace, tenant_id, "archive", "archive_content", (key[2],)))
+    assert ContentRecord.from_record(archive_record) == content
     manifest = {
         "kind": "runtime-storage-snapshot", "format_version": 1,
         "namespace": "bindings", "tenant_id": "tenant",

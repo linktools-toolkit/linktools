@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 """Context metadata is captured together before loading any payloads."""
 
-import hashlib
-
 from linktools.ai.persistence import Persistence
 from pathlib import Path
 
@@ -12,7 +10,7 @@ from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.state import active_state_scope
+from linktools.ai.persistence.state import active_state_scope, record_key
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_history_projection import _materialize, _session
@@ -55,7 +53,7 @@ async def test_empty_context_batches_projection_and_head(
             event.remove(engine, "before_cursor_execute", capture_cold)
         assert cold.model_messages() == ()
         cold_selects = [(sql, parameters) for sql, parameters in cold_queries if sql.startswith("SELECT")]
-        scope_key = hashlib.sha256(b"archive_scope_id").hexdigest()
+        scope_key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
         assert sum(scope_key in parameters for _, parameters in cold_selects) == 1
         assert len(cold_selects) == 2
         assert not any(name in sql for sql, _ in cold_selects

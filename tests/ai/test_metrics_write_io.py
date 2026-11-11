@@ -14,7 +14,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistenceDomain
 from linktools.ai.core import RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -22,6 +22,7 @@ from linktools.ai.observe import (
     MetricAggregation, MetricDefinition, Metrics, MetricSource, MetricType, Observation,
 )
 from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.persistence.state import RecordReplacement, StateTransaction, StoredRecord
 
@@ -152,6 +153,7 @@ async def _assert_writes(engine: AsyncEngine) -> None:
 async def _assert_record_cas(engine: AsyncEngine) -> None:
     store = SqlStateStore(engine)
     await store.initialize()
+    table = build_runtime_sql_metadata(frozenset({PersistenceDomain.EXECUTION})).tables["ai_state_records"]
     records = tuple(StoredRecord(
         index.to_bytes(32, "big"), None, None, "owner", (str(index)).encode("ascii"), None,
         0, None, 0, None, {"index": index},
@@ -189,10 +191,12 @@ async def _assert_record_cas(engine: AsyncEngine) -> None:
             nonlocal injected
             if sql.startswith("UPDATE ai_state_records") and not injected:
                 injected = True
-                conn.exec_driver_sql(
-                    "UPDATE ai_state_records SET storage_revision = 2 WHERE key = X'"
-                    + records[-1].key.hex() + "'"
-                )
+                result = conn.execute(table.update().where(
+                    table.c.store_key == store.store_key,
+                    table.c.key == records[-1].key,
+                    table.c.storage_revision == 1,
+                ).values(storage_revision=2))
+                assert result.rowcount == 1
         event.listen(engine.sync_engine, "before_cursor_execute", stale_one_version)
         try:
             with pytest.raises(AIError, match="STORAGE_CONFLICT"):

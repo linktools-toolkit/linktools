@@ -254,7 +254,7 @@ async def test_terminal_updates_single_control_and_idempotency_without_extra_gua
 
         async def record_execute(transaction, statement, parameters=None):
             if getattr(statement, "is_update", False) and isinstance(parameters, list):
-                writes.extend(("member", bytes.fromhex(value["_replacement_key"])) for value in parameters)
+                writes.extend(("member", value["_replacement_key"]) for value in parameters)
             return await execute(transaction, statement, parameters)
 
         with monkeypatch.context() as patch:

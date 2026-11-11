@@ -89,7 +89,7 @@ def test_timestamp_sorting_preserves_chronology_and_stable_ties() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     first, second = _record("first").key, _record("second").key
     same_time = (sortable_timestamp(now, first), sortable_timestamp(now, second))
-    assert len(same_time[0]) == 40
+    assert len(same_time[0]) == 8 + len(first)
     assert same_time[0][8:] == first
     assert same_time[0] != same_time[1]
     assert same_time[0] == sortable_timestamp(now, first)

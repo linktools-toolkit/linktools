@@ -222,8 +222,8 @@ def test_native_snapshot_retention_rejects_unknown_checkpoint_shape(checkpoint: 
 @pytest.mark.parametrize("damage", ({"tree_count": "one"}, {"left_sha256": "b" * 64}, {"message_sha256": None}))
 def test_native_closure_rejects_malformed_known_node_fields(damage: dict[str, object]) -> None:
     node = ImmutableSequenceNode("1" * 64)
-    closure = NativeMessageClosure([{**_row(node), **damage}])
     with pytest.raises(AIError) as failure:
+        closure = NativeMessageClosure([{**_row(node), **damage}])
         closure.mark(native_store_key("a", "tenant"), (NativeMessageSlice(node.identity, 1, 0, 1),))
     assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
