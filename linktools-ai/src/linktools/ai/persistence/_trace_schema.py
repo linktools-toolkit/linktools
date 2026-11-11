@@ -65,7 +65,7 @@ def build_trace_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
         **sql_table_options(),
     )
     sql_unique(events, "store_key", "run_id", "sequence")
-    for field in ("order_key", "request_number", "request_identity", "message_identity", "tool_call_id", "step_index"):
+    for field in ("order_key", "request_identity", "message_identity", "tool_call_id"):
         sql_query_index(events, "store_key", "run_id", field)
     sql_audit_indexes(events)
     return metadata

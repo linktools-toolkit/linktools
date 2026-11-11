@@ -77,6 +77,9 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             text("metadata", "Upstream string metadata encoded as JSON.", nullable=False),
             Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
             text("registration_id", "Upstream registration invocation identifier."),
+            Column("managed_start_key", LargeBinary(NATIVE_REPLAY_KEY_MAX_BYTES).with_variant(
+                VARBINARY(NATIVE_REPLAY_KEY_MAX_BYTES), "mysql"), nullable=True,
+                comment="Exact first managed start identity; NULL means metadata admission only."),
         )
         sql_unique(runs, "store_locator", "run_id")
         sql_query_index(runs, "store_locator", "conversation_id")

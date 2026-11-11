@@ -3903,6 +3903,8 @@ class StateCommands:
         if await self._prepared_checkpoint_visible(archive, run, prepared):
             return
 
+        await archive.prepare_run_registration(run)
+
         async def materialize(transaction: StateTransaction) -> None:
             await archive.materialize_checkpoint_in_transaction(
                 transaction,

@@ -286,7 +286,11 @@ class SqlStepStore:
         self, session: "AsyncSession", record: RunRecord, *, replay: bool = False,
         started: StepEvent | None = None,
     ) -> _RunFields:
+        from sqlalchemy import update
+
+        start_key = None if started is None else encode_native_replay_key(started.idempotency_key)
         values = self._run_values(record.run_id) | self._record_values(record)
+        values["managed_start_key"] = start_key
         result = await self._context.dialect.insert_ignore_conflict(
             session, table=self._table("runs"), values=values,
             index_elements=("store_locator", "run_id"),
@@ -299,6 +303,27 @@ class SqlStepStore:
                 if row is not None and row["registration_id"] == record.registration_id:
                     source = _RunFields.from_row(row, engine=self._context.engine)
                     if started is not None:
+                        if row["managed_start_key"] is None:
+                            # Only an explicitly metadata-only header admits its
+                            # first start. Missing committed sources fail closed.
+                            actual = self.run_from_receipt(StepWriteReceipt((), (), source))
+                            if (actual != record or row["start_idempotency_key"] is not None
+                                    or row["terminal_idempotency_key"] is not None
+                                    or row["has_other_start"]):
+                                raise ValueError("first run_started differs from its admitted registration")
+                            table = self._table("runs")
+                            changed = await session.execute(update(table).where(
+                                *self._run_predicates(table, record.run_id),
+                                table.c.managed_start_key.is_(None),
+                            ).values(managed_start_key=start_key))
+                            if changed.rowcount == 1:
+                                return source
+                            # RR cannot see the winner in this snapshot. The
+                            # existing SQL boundary retries only after rollback.
+                            from ..storage import SqlSnapshotConflict
+                            raise SqlSnapshotConflict()
+                        if row["managed_start_key"] != start_key or row["start_idempotency_key"] is None:
+                            raise ValueError("managed start source is missing or has another identity")
                         event = self.decode_started_source(
                             {name: row["start_" + name] for name in source_names}, run=row,
                         )
@@ -322,9 +347,19 @@ class SqlStepStore:
 
         table, events = self._table("runs"), self._table("events")
         query = select(table.c.store_key, table.c.run_id, table.c.registration_id, table.c.started_at,
+                       table.c.managed_start_key,
                        *(table.c[name] for name in _EVENT_RUN_FIELDS))
         if started is not None:
-            query = query.add_columns(*(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS))
+            other_start = events.alias("other_start")
+            query = query.add_columns(
+                *(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS),
+                select(other_start.c.id).where(
+                    other_start.c.store_locator == table.c.store_locator,
+                    other_start.c.store_key == table.c.store_key,
+                    other_start.c.run_id == table.c.run_id,
+                    other_start.c.kind == "run_started",
+                ).exists().label("has_other_start"),
+            )
             joined = table.outerjoin(events, and_(
                 events.c.idempotency_key == encode_native_replay_key(started.idempotency_key),
                 events.c.store_locator == table.c.store_locator, events.c.store_key == table.c.store_key,
@@ -367,6 +402,21 @@ class SqlStepStore:
             raise TypeError("native SQL metadata requires a SQL state transaction")
         await transaction.run_sql(self._context, lambda session: self._import_run(session, record))
         # Provisional metadata is not a committed native receipt or cache entry.
+
+    async def get_run_in_transaction(self, transaction: StateTransaction, *, run_id: str) -> RunRecord | None:
+        """Read canonical metadata without opening a second connection or confirming it."""
+        from sqlalchemy import select
+
+        if not isinstance(transaction, SqlStateTransaction):
+            raise TypeError("native SQL metadata requires a SQL state transaction")
+        validate_resource_id(run_id)
+        table = self._table("runs")
+
+        async def read(session: "AsyncSession") -> RunRecord | None:
+            row = (await session.execute(select(table).where(*self._run_predicates(table, run_id)))).mappings().first()
+            return None if row is None else _RUN_ADAPTER.validate_python(self._record_data(row))
+
+        return await transaction.run_sql(self._context, read)
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         from sqlalchemy import select
@@ -793,6 +843,7 @@ class SqlStepStore:
         """Validate raw row identities and descriptors without opening SQL."""
         metadata = build_step_sql_metadata()
         runs = {}
+        managed_starts = {}
         for name in ("runs", "events", "snapshots"):
             table = metadata.tables[f"ai_step_{name}"]
             columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at"}
@@ -810,6 +861,9 @@ class SqlStepStore:
                     seen.add(key)
                 if name == "runs":
                     _RUN_ADAPTER.validate_python(cls._record_data(row))
+                    marker = row["managed_start_key"]
+                    if marker is not None and decode_native_replay_key(marker) is None:
+                        raise ValueError("managed start identity must be a public replay key")
                     runs[run_id] = row
                     continue
                 if name == "snapshots":
@@ -839,6 +893,13 @@ class SqlStepStore:
                 if (isinstance(event, NativeLifecycleEvent) or row["body_sha256"] is not None
                         or row["fields_sha256"] is not None):
                     cls.decode_started_row(row, expected_store_key=backup.store_key, run=run)
+                    if event.kind == "run_started":
+                        if run_id in managed_starts or run is None or run["managed_start_key"] != replay:
+                            raise ValueError("managed start differs from its registration identity")
+                        managed_starts[run_id] = replay
+        for run_id, row in runs.items():
+            if row["managed_start_key"] != managed_starts.get(run_id):
+                raise ValueError("native backup is missing its committed managed start")
 
     async def capture_backup(
         self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
@@ -874,8 +935,9 @@ class SqlStepStore:
                     value = {column.name: row[column.name] for column in columns}
                     if accept is not None:
                         encoded = dict(value, store_key=encode_native_store_key(value["store_key"]))
-                        if "idempotency_key" in encoded:
-                            encoded["idempotency_key"] = base64.b64encode(encoded["idempotency_key"]).decode("ascii")
+                        for key in ("idempotency_key", "managed_start_key"):
+                            if key in encoded and encoded[key] is not None:
+                                encoded[key] = base64.b64encode(encoded[key]).decode("ascii")
                         accept(encoded)
                     rows.append(value)
                 if len(page) < _BATCH_SIZE:
@@ -1020,6 +1082,17 @@ class SqlStepStore:
             # guarantee the generated ID order of executemany operations.
             for row in getattr(backup, name):
                 if name == "runs" and row["run_id"] in existing_runs:
+                    existing = existing_runs[row["run_id"]]
+                    if existing["managed_start_key"] is not None:
+                        raise ValueError("native restore requires metadata-only registrations")
+                    if row["managed_start_key"] is not None:
+                        from sqlalchemy import update
+                        changed = await session.execute(update(table).where(
+                            *self._run_predicates(table, row["run_id"]),
+                            table.c.managed_start_key.is_(None),
+                        ).values(managed_start_key=row["managed_start_key"]))
+                        if changed.rowcount != 1:
+                            raise ValueError("native restore registration changed concurrently")
                     continue
                 inserted = await session.execute(table.insert().values(**dict(row)))
                 if name == "snapshots" and not row["pruned"]:

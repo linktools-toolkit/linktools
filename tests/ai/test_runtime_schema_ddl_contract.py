@@ -58,6 +58,37 @@ def test_mysql_ddl_declares_all_indexes_in_each_create_table_and_matches_metadat
         assert sorted(table_indexes[name]) == sorted(expected), name
 
 
+@pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
+def test_trace_indexes_keep_history_association_and_chronological_paths(dialect_name: str) -> None:
+    from sqlalchemy import create_mock_engine
+    from sqlalchemy.schema import ExecutableDDLElement
+
+    table = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_trace_events"]
+    statements: list[str] = []
+
+    def emit(statement: ExecutableDDLElement, *_args: object, **_kwargs: object) -> None:
+        statements.append(" ".join(str(statement.compile(dialect=engine.dialect)).split()))
+
+    engine = create_mock_engine(f"{dialect_name}://", emit)
+    table.create(engine, checkfirst=False)
+    # Count emitted indexes, including those implied by PRIMARY and UNIQUE,
+    # rather than counting both dialect variants present in the metadata.
+    indexes = [statement for statement in statements if re.match(r"CREATE (?:UNIQUE )?INDEX ", statement)]
+    constraints = re.findall(r"\b(?:PRIMARY KEY|UNIQUE) \([^()]+\)", " ".join(statements))
+    assert len(table.c) == 17
+    assert len(indexes) + len(constraints) == 8
+    assert "PRIMARY KEY (id)" in constraints
+    unique_keys = [statement for statement in indexes if statement.startswith("CREATE UNIQUE INDEX ")]
+    unique_keys.extend(constraint for constraint in constraints if constraint.startswith("UNIQUE "))
+    assert len(unique_keys) == 1
+    assert unique_keys[0].endswith("(store_key, run_id, sequence)")
+    assert sorted(re.findall(r"\(([^()]+)\)$", statement)[0] for statement in indexes
+                  if not statement.startswith("CREATE UNIQUE INDEX ")) == [
+        "created_at", "store_key, run_id, message_identity", "store_key, run_id, order_key",
+        "store_key, run_id, request_identity", "store_key, run_id, tool_call_id", "updated_at",
+    ]
+
+
 def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     records = metadata.tables["ai_state_records"]

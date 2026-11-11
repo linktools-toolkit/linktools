@@ -287,6 +287,7 @@ CREATE TABLE ai_step_runs (
 	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
 	started_at VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 run start time.',
 	registration_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Upstream registration invocation identifier.',
+	managed_start_key VARBINARY(128) COMMENT 'Exact first managed start identity; NULL means metadata admission only.',
 	store_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete store_key; raw identity must also match.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
@@ -380,8 +381,6 @@ CREATE TABLE ai_trace_events (
 	KEY ix_store_key_run_id_message_identity (store_key, run_id, message_identity),
 	KEY ix_store_key_run_id_order_key (store_key, run_id, order_key),
 	KEY ix_store_key_run_id_request_identity (store_key, run_id, request_identity),
-	KEY ix_store_key_run_id_request_number (store_key, run_id, request_number),
-	KEY ix_store_key_run_id_step_index (store_key, run_id, step_index),
 	KEY ix_store_key_run_id_tool_call_id (store_key, run_id, tool_call_id),
 	KEY ix_updated_at (updated_at),
 	UNIQUE KEY uk_store_key_run_id_sequence (store_key, run_id, sequence)

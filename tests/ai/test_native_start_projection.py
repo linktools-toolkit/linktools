@@ -24,6 +24,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence._native_event_reference import NativeEventReferences
+from linktools.ai.persistence._run_registration import RunRegistrationReference
 from linktools.ai.persistence._snapshot import SnapshotLimits
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope, decode_fact
@@ -184,8 +185,10 @@ async def test_shared_start_preparation_has_one_timestamp_and_identity(native_fi
 
     registration.bind_registration(token)
     if native_first:
-        registration.prepare(conversation_id="conversation", registration_id=seed[0], started_at=seed[1])
+        await registration.prepare_registration(conversation_id="conversation")
     run, source = await registration.prepare_started(conversation_id="conversation", step_index=0)
+    assert run.registration_id == seed[0]
+    assert run.started_at == source.timestamp == seed[1]
     source.metadata["custom"] = "caller mutation"
     repeated_run, repeated = await registration.prepare_started(conversation_id="conversation", step_index=0)
     assert repeated_run == run
@@ -331,7 +334,8 @@ async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(t
         resources = SnapshotResources(namespace="native-start", tenant_id="default",
             durable_domains=frozenset({PersistenceDomain.TRACE}),
             stores={PersistenceDomain.TRACE: archive.state_store},
-            object_stores={domain: objects for domain in PersistenceDomain}, read_only=True)
+            object_stores={domain: objects for domain in PersistenceDomain}, read_only=True,
+            run_registrations=state.run_store.run_registrations)
         target = InMemoryObjectStore()
         traffic = _Traffic()
         engine = native.storage_context.engine
@@ -366,7 +370,9 @@ async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(t
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_first", (False, True))
 async def test_native_and_trace_publication_order_does_not_reinsert_source(tmp_path: Path, native_first: bool, record_property) -> None:
-    async with _source(tmp_path, confirmed=False) as (state, native, run, projected_run):
+    from linktools.ai.persistence._official_step_reader import OfficialStepReader
+
+    async with _shared_candidate_source(tmp_path) as (state, native, run, projected_run):
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         source = NativeEvent(run_id=run.run_id, kind="run_started", step_index=0,
             conversation_id=run.conversation_id, parent_run_id=run.parent_run_id,
@@ -388,7 +394,7 @@ async def test_native_and_trace_publication_order_does_not_reinsert_source(tmp_p
         if not native_first:
             assert native.confirmed_run(run.run_id) is None
             raw_run = await archive.state_store.read(lambda tx: tx.get_record(archive._agent_run_key(run.run_id)))
-            assert raw_run.data["value"]["type"] == "native_agent_run_reference"
+            assert RunRegistrationReference.from_data(raw_run.data).project(run) == OfficialStepReader.project_run(run)
             assert native.confirmed_run(run.run_id) is None
         receipts = archive.confirm_native_event_projection((projected,))
         inserts = [sql for sql in traffic.sql if sql.startswith("INSERT INTO ai_step_events ")]
@@ -486,7 +492,7 @@ async def test_concurrent_first_publishers_keep_receipt_proof_after_cache_evicti
     from dataclasses import replace
     from linktools.ai.persistence import _step_store
 
-    async with _source(tmp_path, confirmed=False) as (state, native, original, _):
+    async with _shared_candidate_source(tmp_path) as (state, native, original, _):
         run = replace(original, metadata={"large": "x" * (1024 * 1024 + 1)}) if large else original
         # This forces actual confirmation to evict rather than mocking the proof.
         monkeypatch.setattr(_step_store, "_RUN_CACHE_BYTES", 1)
@@ -712,7 +718,7 @@ async def test_replay_metadata_adopts_original_source_in_both_publication_orders
     from dataclasses import replace
     from linktools.ai.persistence._official_step_reader import OfficialStepReader
 
-    async with _source(tmp_path, confirmed=False) as (state, native, original_run, _):
+    async with _shared_candidate_source(tmp_path) as (state, native, original_run, _):
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         original_start = NativeEvent(run_id=original_run.run_id, kind="run_started", step_index=0,
             timestamp=original_run.started_at, conversation_id=original_run.conversation_id,
@@ -1007,8 +1013,7 @@ async def test_terminal_unknown_verification_checks_pending_source_in_original_r
         # Deliberately leave the receipt provisional, as at terminal ACK loss.
         assert native.confirmed_run("run") is None
         raw_run = await archive.state_store.read(lambda tx: tx.get_record(archive._agent_run_key("run")))
-        if not large:
-            assert raw_run.data["value"]["type"] != "native_agent_run_reference"
+        assert RunRegistrationReference.from_data(raw_run.data).project(original) == canonical
         head = await archive.execution_history_head_record("run")
         projection = PreparedExecutionProjection(run=canonical, events=(projected,), checkpoints=(),
             base_event_offset=0, base_checkpoint_offset=0, target_event_offset=head.event_count,

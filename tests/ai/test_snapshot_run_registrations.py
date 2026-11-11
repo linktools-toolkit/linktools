@@ -23,12 +23,12 @@ def test_native_backup_reuses_single_canonical_registration_body() -> None:
     owners = {run.run_id: run}
     wire = _encode_checkpoint_registration_refs(backup, owners)
     assert "runs" not in wire
-    assert wire["run_ids"] == [run.run_id]
+    assert wire["run_refs"] == [{"run_id": run.run_id, "managed_start_key": "c3RhcnQ="}]
     assert _decode_checkpoint_registration_refs(wire, owners) == backup
     with pytest.raises(AIError):
         _decode_checkpoint_registration_refs(wire, {})
     with pytest.raises(AIError):
-        _decode_checkpoint_registration_refs(dict(wire, run_ids=[run.run_id, run.run_id]), owners)
+        _decode_checkpoint_registration_refs(dict(wire, run_refs=wire["run_refs"] * 2), owners)
     with pytest.raises(AIError):
         _encode_checkpoint_registration_refs(backup, {run.run_id: replace(run, registration_id="other")})
 
@@ -64,7 +64,7 @@ async def test_native_restore_reuses_only_matching_published_registration(tmp_pa
 
     run, _, backup = _inventory()
     # No history bodies are required to exercise the registration ownership gate.
-    backup = replace(backup, events=())
+    backup = replace(backup, events=(), runs=(dict(backup.runs[0], managed_start_key=None),))
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'registrations.db'}")
     store = SqlStepStore(engine, namespace="portable", tenant_id="tenant")
     await store.initialize(local=True)
@@ -83,3 +83,29 @@ async def test_native_restore_reuses_only_matching_published_registration(tmp_pa
     finally:
         await store.close()
         await engine.dispose()
+
+
+@pytest.mark.parametrize("key", (None, b"", b"start"))
+def test_portable_run_ref_preserves_start_identity_and_checks_its_event(key) -> None:
+    from linktools.ai.persistence import SqlStepStore
+    from linktools.ai.persistence._step_backup import NativeStepBackup
+    from linktools.ai.steps import encode_native_replay_key
+
+    run, event, backup = _inventory()
+    if key is None:
+        backup = replace(backup, runs=(dict(backup.runs[0], managed_start_key=None),), events=())
+    elif key == b"":
+        event = replace(event, idempotency_key="")
+        import hashlib
+        raw = dict(backup.events[0], idempotency_key=encode_native_replay_key(""),
+                   body_sha256=hashlib.sha256(SqlStepStore._started_body(event).encode()).hexdigest(),
+                   fields_sha256=hashlib.sha256(SqlStepStore._started_fields_body(event).encode()).hexdigest())
+        backup = replace(backup, runs=(dict(backup.runs[0], managed_start_key=b""),), events=(raw,))
+    owners = {run.run_id: run}
+    restored = _decode_checkpoint_registration_refs(_encode_checkpoint_registration_refs(backup, owners), owners)
+    assert restored == backup
+    assert NativeStepBackup.from_json(backup.to_json()) == backup
+    SqlStepStore.validate_backup(restored)
+    if key is not None:
+        with pytest.raises(ValueError, match="missing.*managed start"):
+            SqlStepStore.validate_backup(replace(restored, events=()))

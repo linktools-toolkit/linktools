@@ -101,6 +101,27 @@ class RunRegistrationStore:
             lease_expires_at=None, data=data,
         ))
 
+    async def get_in_transaction(self, transaction: StateTransaction, run_id: str) -> RunRecord | None:
+        """Resolve an unprepared admission inside its already-enlisted owner."""
+        key = self.key(run_id)
+        if self._native is not None:
+            return await self._native.get_run_in_transaction(transaction, run_id=run_id)
+        owner = active_state_transaction(self._store, writable=True)
+        if owner is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        stored = await owner.get_record(key)
+        if stored is None:
+            return None
+        if stored.kind != "step_run":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            run = _RUN.validate_python(decode_envelope(stored.data).value)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if run.run_id != run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return run
+
     async def publish_in_transaction(self, transaction: StateTransaction, run: RunRecord) -> None:
         """Publish with the domain owner; never confirm provisional native data."""
         if self._native is not None:

@@ -27,7 +27,8 @@ def _digest(value: str) -> str:
 def _inventory():
     store = SqlStepStore.scope_key(namespace="portable", tenant_id="tenant")
     run = RunRecord(run_id="run", registration_id="registration", metadata={"native": "body"})
-    row = dict(SqlStepStore._record_values(run), store_key=store, store_locator=native_store_locator(store))
+    row = dict(SqlStepStore._record_values(run), store_key=store, store_locator=native_store_locator(store),
+               managed_start_key=b"start")
     event = StepEvent(run_id="run", kind="run_started", step_index=1, idempotency_key="start")
     event_row = dict(SqlStepStore._event_values(event), store_key=store, store_locator=native_store_locator(store),
                      idempotency_key=b"start", outcome=None, run_fields=0,

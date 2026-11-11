@@ -62,9 +62,13 @@ class NativeStepBackup:
             for row in getattr(self, name):
                 value = deepcopy(dict(row))
                 value["store_key"] = encode_native_store_key(value["store_key"])
-                if "idempotency_key" in value:
-                    decode_native_replay_key(value["idempotency_key"])
-                    value["idempotency_key"] = base64.b64encode(value["idempotency_key"]).decode("ascii")
+                for key in ("idempotency_key", "managed_start_key"):
+                    if key not in value or (key == "managed_start_key" and value[key] is None):
+                        continue
+                    replay = decode_native_replay_key(value[key])
+                    if key == "managed_start_key" and replay is None:
+                        raise ValueError("managed start identity must be a public replay key")
+                    value[key] = base64.b64encode(value[key]).decode("ascii")
                 rows.append(value)
             result[name] = rows
         return result
@@ -85,16 +89,20 @@ class NativeStepBackup:
                     raise ValueError("native backup row is invalid")
                 decoded = dict(row)
                 decoded["store_key"] = decode_native_store_key(decoded.get("store_key"))
-                if "idempotency_key" in decoded:
-                    token = decoded["idempotency_key"]
+                for key in ("idempotency_key", "managed_start_key"):
+                    if key not in decoded or (key == "managed_start_key" and decoded[key] is None):
+                        continue
+                    token = decoded[key]
                     try:
                         raw = base64.b64decode(token, validate=True)
                         if base64.b64encode(raw).decode("ascii") != token:
                             raise ValueError("native replay transport is invalid")
-                        decode_native_replay_key(raw)
+                        replay = decode_native_replay_key(raw)
+                        if key == "managed_start_key" and replay is None:
+                            raise ValueError("managed start identity must be a public replay key")
                     except (TypeError, binascii.Error) as error:
                         raise ValueError("native replay transport is invalid") from error
-                    decoded["idempotency_key"] = raw
+                    decoded[key] = raw
                 rows.append(decoded)
             batches.append(tuple(rows))
         return cls(decode_native_store_key(value["store_key"]), *batches)

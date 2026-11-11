@@ -37,6 +37,13 @@ _logger = environ.get_logger("ai.storage.database")
 ValueT = TypeVar("ValueT")
 
 
+class SqlSnapshotConflict(AIError):
+    """An optimistic SQL write proved this transaction's snapshot is stale."""
+
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.STORAGE_CONFLICT, "SQL publication snapshot changed")
+
+
 @dataclass(slots=True)
 class SqlStorageContext:
     """The borrowed-engine boundary used by SQL adapters."""
@@ -231,11 +238,12 @@ class SqlStorageContext:
                     result = await callback(session)
                 except BaseException as error:
                     _release_sqlite_error_frames(error)
-                    disposition = self.dialect.classify_transaction_error(
-                        error,
-                        phase=SqlTransactionPhase.BODY,
-                        connection_invalidated=_connection_invalidated(error),
-                    )
+                    disposition = (SqlTransactionDisposition.RETRYABLE_ABORTED
+                                   if isinstance(error, SqlSnapshotConflict) else
+                                   self.dialect.classify_transaction_error(
+                                       error, phase=SqlTransactionPhase.BODY,
+                                       connection_invalidated=_connection_invalidated(error),
+                                   ))
                     await transaction.__aexit__(*sys.exc_info())
                     if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and can_retry(error):
                         _logger.warning(
@@ -513,6 +521,7 @@ def _connection_invalidated(error: BaseException) -> bool:
 
 __all__ = [
     "SqlStorageContext",
+    "SqlSnapshotConflict",
     "create_sql_storage_context",
     "create_sqlite_storage_context",
     "provision_sql",

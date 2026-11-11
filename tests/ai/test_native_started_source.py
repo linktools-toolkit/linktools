@@ -426,3 +426,64 @@ async def test_managed_start_write_records_proof_encoding_cost(native, monkeypat
     async with engine.connect() as connection:
         row = (await connection.execute(text("SELECT body_sha256, fields_sha256 FROM ai_step_events"))).one()
     assert len(row.body_sha256) == len(row.fields_sha256) == 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ("start", ""))
+async def test_metadata_only_header_admits_exactly_one_managed_start(native, key: str) -> None:
+    store, engine = native
+    run, started = records()
+    started = replace(started, idempotency_key=key)
+    await store.import_run(run)
+    async with engine.connect() as connection:
+        assert (await connection.execute(select(store._table("runs").c.managed_start_key))).scalar_one() is None
+    receipt = await managed_commit(store, run=run, events=(started,))
+    assert store.started_from_receipt(receipt) == started
+    async with engine.connect() as connection:
+        assert (await connection.execute(select(store._table("runs").c.managed_start_key))).scalar_one() == key.encode()
+    cold = SqlStepStore(engine, namespace="native", tenant_id="one")
+    try:
+        with pytest.raises(ValueError):
+            await managed_commit(cold, run=run, events=(replace(started, idempotency_key="other"),))
+        assert await cold.list_events(run_id=run.run_id) == [started]
+    finally:
+        await cold.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_start_admission_retries_only_after_rolling_back_its_source(native) -> None:
+    from linktools.ai.storage import SqlSnapshotConflict
+    store, engine = native
+    run, started = records()
+    await store.import_run(run)
+    prepared = await store.prepare_step(run=run, events=(started,), managed_start=True)
+    attempts = []
+
+    async def publish(session):
+        attempts.append(session)
+        receipt = await store._write_prepared_step(session, prepared)
+        if len(attempts) == 1:
+            assert store.confirmed_started(run.run_id) is None
+            raise SqlSnapshotConflict()
+        return receipt
+
+    receipt = await store.storage_context.run_mutation(publish, domain="steps.boundary")
+    store.confirm_prepared_step(receipt)
+    assert len(attempts) == 2 and attempts[0] is not attempts[1]
+    assert await store.list_events(run_id=run.run_id) == [started]
+    assert store.started_from_receipt(receipt) == started
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ("start", ""))
+async def test_capture_budget_accepts_managed_start_identity_as_json(native, key: str) -> None:
+    from linktools.ai.core import canonical_json_bytes
+    from .test_native_step_backup import _Reader
+    store, engine = native
+    run, started = records()
+    await managed_commit(store, run=run, events=(replace(started, idempotency_key=key),))
+    accepted = []
+    async with store.storage_context.sessions() as session, session.begin():
+        backup = await store.capture_backup(_Reader(session), accept=lambda row: accepted.append(canonical_json_bytes(row)))
+    assert len(accepted) == 2
+    assert backup.runs[0]["managed_start_key"] == key.encode()

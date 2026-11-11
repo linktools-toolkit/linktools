@@ -878,7 +878,7 @@ async def _export_snapshot(
     for group_id, backup in (source.native_checkpoints or {}).items():
         native_roots.setdefault(group_id, []).extend(backup.message_roots(group_id))
         raw = _encode_checkpoint_registration_refs(backup, source.run_registrations or {})
-        for name in ("run_ids", "events", "snapshots"):
+        for name in ("run_refs", "events", "snapshots"):
             for row in raw[name]:
                 accept(row)
         native_checkpoints.append({"group_id": group_id, **raw})
@@ -1570,7 +1570,7 @@ def snapshot_manifest_usage(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             entries += len(values)
     for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages")),
-                         ("native_checkpoints", ("run_ids", "events", "snapshots")),
+                         ("native_checkpoints", ("run_refs", "events", "snapshots")),
                          ("native_projections", ("records", "facts"))):
         groups = manifest.get(name, [])
         if not isinstance(groups, list):
@@ -1798,7 +1798,8 @@ def _encode_checkpoint_registration_refs(backup: NativeStepBackup, runs: Mapping
     for row in backup.runs:
         if runs.get(row["run_id"]) != _run_from_native_row(row):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    result["run_ids"] = [row["run_id"] for row in backup.runs]
+    result["run_refs"] = [{"run_id": row["run_id"], "managed_start_key": row["managed_start_key"]}
+                          for row in result["runs"]]
     del result["runs"]
     return result
 
@@ -1806,16 +1807,19 @@ def _encode_checkpoint_registration_refs(backup: NativeStepBackup, runs: Mapping
 def _decode_checkpoint_registration_refs(entry: Mapping[str, object], runs: Mapping[str, RunRecord]) -> NativeStepBackup:
     from ..steps import decode_native_store_key
     value = {key: item for key, item in entry.items() if key != "group_id"}
-    identifiers = value.pop("run_ids", None)
+    identifiers = value.pop("run_refs", None)
     if ("runs" in value or not isinstance(identifiers, list)
-            or any(not isinstance(item, str) for item in identifiers)
-            or len(set(identifiers)) != len(identifiers)):
+            or any(not isinstance(item, Mapping) or set(item) != {"run_id", "managed_start_key"}
+                   or not isinstance(item["run_id"], str) for item in identifiers)
+            or len({item["run_id"] for item in identifiers}) != len(identifiers)):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         store_key = decode_native_store_key(value["store_key"])
         rows = []
-        for identity in identifiers:
+        for reference in identifiers:
+            identity = reference["run_id"]
             row = _run_json(runs[identity])
+            row["managed_start_key"] = reference["managed_start_key"]
             row.update(store_key=value["store_key"], store_locator=native_store_locator(store_key),
                        started_at=runs[identity].started_at.isoformat(), metadata=json.dumps(row["metadata"]))
             rows.append(row)

@@ -1273,7 +1273,9 @@ class StateStepArchive(AgentRunStore):
     async def prepare_run_registration(self, run: AgentRunRecord) -> None:
         """Prepare admission; same-owner metadata joins the domain publication."""
         owner = self._run_registrations
-        if owner is None:
+        if owner is None or owner.joins(self._store):
+            # Same-owner admissions are resolved atomically at the central
+            # domain insertion point, not during payload preparation.
             return
         source = self._registration_sources.get(run.agent_run_id)
         if source is None:
@@ -2611,7 +2613,8 @@ class StateStepArchive(AgentRunStore):
         # already have prepared its independent owner before opening its scope.
         if active_state_scope() is None:
             await self.prepare_run_registration(run)
-        elif run.agent_run_id not in self._registration_sources:
+        elif (run.agent_run_id not in self._registration_sources
+              and not self._run_registrations.joins(self._store)):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         values = tuple(checkpoints)
         if any(not isinstance(value, PreparedAgentRunCheckpoint) for value in values):
@@ -2955,7 +2958,12 @@ class StateStepArchive(AgentRunStore):
             if registrations is not None and registrations.joins(self._store) and source_receipt is None:
                 source = self._registration_sources.get(run.agent_run_id)
                 if source is None:
-                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                    source = await registrations.get_in_transaction(transaction, run.agent_run_id)
+                    if source is None:
+                        source = RunRecord(run_id=run.agent_run_id, conversation_id=run.agent_conversation_id,
+                                           parent_run_id=run.parent_agent_run_id, agent_name=run.agent_id,
+                                           metadata=dict(run.metadata), started_at=run.started_at)
+                    self.remember_run_registration(source)
                 await registrations.publish_in_transaction(transaction, source)
             stored_run = self._stored_agent_run(run, source_receipt=source_receipt)
             if self._native_runs is not None:
