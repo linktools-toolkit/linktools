@@ -291,7 +291,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     self._graph_key(graph_id), self._admission_key(graph_id),
                     self._prepared_key(graph_id),
                 ))
-                operation = await transaction.get_operation(operation_key(candidate.admission.operation_id))
+                operation = await transaction.get_operation(operation_key(self._namespace, self._tenant_id, self._domain.value, candidate.admission.operation_id))
                 if records or operation is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await transaction.insert_records((
@@ -406,10 +406,10 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 record = await self._submission_in_transaction(transaction, submission)
                 if record is None or record.state != "cancelled":
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                stored = await transaction.get_operation(operation_key(operation.operation_id))
+                stored = await transaction.get_operation(operation_key(self._namespace, self._tenant_id, self._domain.value, operation.operation_id))
                 if stored is None:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                if decode_operation(stored).request_digest != operation.request_digest:
+                if decode_operation(stored, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain).request_digest != operation.request_digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 graph = await transaction.get_record(self._graph_key(submission.graph_id))
                 return CommitObservation(DurableCommitState.COMMITTED, graph is not None)
@@ -645,7 +645,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stored_operation = await transaction.get_operation(
-                operation_key(admission.operation_id)
+                operation_key(self._namespace, self._tenant_id, self._domain.value, admission.operation_id)
             )
             if stored_operation is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -718,11 +718,11 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 stored_operation = await transaction.get_operation(
-                    operation_key(admission.operation_id)
+                    operation_key(self._namespace, self._tenant_id, self._domain.value, admission.operation_id)
                 )
                 if stored_operation is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                operation = decode_operation(stored_operation)
+                operation = decode_operation(stored_operation, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
                 self._validate_operation_identity(operation, admission)
                 if (
                     operation.request_digest != admission.initial_request_digest
@@ -779,7 +779,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             return TaskGraphView(graph.graph_id, TaskStatus.CANCELLED, ())
         graph_key = self._graph_key(graph.graph_id)
         admission_key = self._admission_key(graph.graph_id)
-        operation_key_value = operation_key(admission.operation_id)
+        operation_key_value = operation_key(self._namespace, self._tenant_id, self._domain.value, admission.operation_id)
         records = await transaction.get_records((graph_key, admission_key))
         graph_record = records.get(graph_key)
         admission_record = records.get(admission_key)
@@ -824,7 +824,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if graph_record is None or admission_record is None or stored_operation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        operation = decode_operation(stored_operation)
+        operation = decode_operation(stored_operation, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
         if operation.request_digest != admission.initial_request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         self._validate_operation_identity(operation, admission)
@@ -975,7 +975,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         graph_record = records.get(graph_key)
         admission_record = records.get(admission_key)
         stored_operation = await transaction.get_operation(
-            operation_key(admission.operation_id)
+            operation_key(self._namespace, self._tenant_id, self._domain.value, admission.operation_id)
         )
         definition_records = await transaction.list_records(
             RecordQuery(
@@ -1018,7 +1018,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                         error=AIError(ErrorCode.STORAGE_CONFLICT),
                     )
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            operation = decode_operation(stored_operation)
+            operation = decode_operation(stored_operation, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
             if operation.request_digest != admission.initial_request_digest:
                 return CommitObservation(
                     DurableCommitState.NOT_COMMITTED,
@@ -1056,7 +1056,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if existing.operation_id == candidate.operation_id:
             return False
         stored_operation = await transaction.get_operation(
-            operation_key(existing.operation_id)
+            operation_key(self._namespace, self._tenant_id, self._domain.value, existing.operation_id)
         )
         if stored_operation is None:
             return False
@@ -1087,11 +1087,11 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         persisted_graph = TaskGraph(current.graph_id, current.nodes)
         if stored_operation is None:
             stored_operation = await transaction.get_operation(
-                operation_key(existing.operation_id)
+                operation_key(self._namespace, self._tenant_id, self._domain.value, existing.operation_id)
             )
         if stored_operation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        operation = decode_operation(stored_operation)
+        operation = decode_operation(stored_operation, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
         self._validate_operation_identity(operation, existing)
         if operation.request_digest != existing.initial_request_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

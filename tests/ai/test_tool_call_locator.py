@@ -16,7 +16,8 @@ from linktools.ai.persistence import Persistence, PersistenceDomain, Persistence
 from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from linktools.ai.persistence.codec import decode_record, encode_record
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import RecordQuery, StateTransaction, alias_key
+from linktools.ai.persistence.state import RecordQuery, StateTransaction, StoredAlias, alias_key, record_key_digest
+from linktools.ai.persistence.repositories import ToolRepositoryImpl
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore
 
 from .test_runtime_record_cache import _record, _store
@@ -205,7 +206,7 @@ async def test_tool_aliases_preserve_exact_unicode_case_and_component_boundaries
         for (run_id, call_id), source in zip(pairs, expected, strict=True):
             assert await tools.get_by_call(run_id, call_id, tenant_id="tenant") == source
         aliases = await tools.state_store.read(lambda tx: tx.scan_aliases())
-        assert {value.alias_key for value in aliases} == {alias_key("tool_call", pair) for pair in pairs}
+        assert {value.alias_key for value in aliases} == {alias_key("tool-alias", "tenant", "checkpoint", "tool_call", pair) for pair in pairs}
         assert len(aliases) == len(pairs)
         for field in ("agent_run_id", "tool_call_id", "recovery_agent_run_id"):
             with pytest.raises(ValueError):
@@ -234,3 +235,43 @@ async def test_tool_recovery_alias_cannot_claim_two_targets(tmp_path: Path, back
         assert rejected.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert await tools.get_by_call("recovered", "call", tenant_id="tenant") == first
         assert await tools.get_operation("second", tenant_id="tenant") == second
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sql"))
+@pytest.mark.parametrize("custom", (False, True))
+async def test_public_tool_repositories_isolate_recovery_aliases_on_one_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, custom: bool,
+) -> None:
+    async with Persistence.open("host", tenant_id="host-tenant", storage=_storage(backend, tmp_path / "shared.db")) as state:
+        store = state.checkpoint.tools.state_store
+        if custom:
+            _custom_transactions(monkeypatch, backend, _WithoutSubjectReads)
+        scopes = (("namespace", "tenant"), ("other", "tenant"), ("namespace", "other"))
+        repositories = [ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant) for namespace, tenant in scopes]
+        sources = []
+        for index, (repository, (_, tenant)) in enumerate(zip(repositories, scopes, strict=True)):
+            assert await repository.get_operation("same-operation", tenant_id=tenant) is None
+            assert await repository.get_by_call("recovered", "call", tenant_id=tenant) is None
+            request = replace(_request(), tool_operation_id="same-operation", agent_run_id="source", execution_id=f"execution-{index}")
+            source = await repository.admit(request)
+            assert await repository.admit(replace(request, agent_run_id="recovered", recovery_agent_run_id="source")) == source
+            sources.append(source)
+        for repository, (_, tenant), source in zip(repositories, scopes, sources, strict=True):
+            assert await repository.get_operation("same-operation", tenant_id=tenant) == source
+            assert await repository.get_by_call("recovered", "call", tenant_id=tenant) == source
+        for namespace, tenant in scopes[1:]:
+            corrupt = StoredAlias(alias_key(namespace, tenant, "checkpoint", "tool_call", ("foreign", "call")),
+                                  record_key_digest("namespace", "tenant", "checkpoint", "tool_operation", "same-operation"))
+            async def insert_corrupt(transaction: StateTransaction) -> None:
+                target = await transaction.get_record(corrupt.record_key_digest)
+                assert target is not None
+                assert await transaction.guard_record(
+                    target.key_digest, expected_storage_revision=target.storage_revision,
+                )
+                await transaction.insert_alias(corrupt)
+
+            await store.mutate(insert_corrupt)
+            repository = ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant)
+            with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
+                await repository.get_by_call("foreign", "call", tenant_id=tenant)

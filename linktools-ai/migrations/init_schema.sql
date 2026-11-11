@@ -30,7 +30,7 @@ CREATE TABLE ai_state_records (
 CREATE TABLE ai_state_aliases (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
-    alias_key VARBINARY(512) NOT NULL COMMENT 'Store-local binary secondary lookup address with a maximum of 512 bytes.',
+    alias_key VARBINARY(1024) NOT NULL COMMENT 'Binary secondary lookup address with a maximum of 1024 bytes.',
     record_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record resolved by this alias.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
@@ -70,7 +70,7 @@ CREATE TABLE ai_state_sequences (
 CREATE TABLE ai_state_operations (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
-    operation_key VARBINARY(257) NOT NULL COMMENT 'Store-local binary operation address, at most 257 bytes.',
+    operation_key VARBINARY(1024) NOT NULL COMMENT 'Binary operation address, at most 1024 bytes.',
     stream_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the ordered operation stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current durable operation state used by replay and completion logic.',

@@ -349,7 +349,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             if observed is None:
                 stored = await transaction.get_record(self._tool_key(tool_operation_id))
                 if stored is None and recovery_agent_run_id is not None:
-                    alias = alias_key("tool_call", [effect.run_id, effect.tool_call_id])
+                    alias = alias_key(self._namespace, self._tenant_id, self._domain.value, "tool_call", [effect.run_id, effect.tool_call_id])
                     resolved = await transaction.resolve_alias(alias)
                     stored = None if resolved is None else await transaction.get_record(resolved)
                 if stored is None:
@@ -410,7 +410,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                      if stored.key_digest not in selected]
         if remaining:
             aliases = tuple(alias_key(
-                "tool_call", [alias_run_id, value.tool_call_id],
+                self._namespace, self._tenant_id, self._domain.value, "tool_call", [alias_run_id, value.tool_call_id],
             ) for _stored, value in remaining for alias_run_id in direct)
             resolved = await self._store.read(lambda transaction: transaction.resolve_aliases(aliases))
             selected.update(resolved.values())
@@ -445,7 +445,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         if known_new and (observed is not None or request.recovery_agent_run_id is not None):
             raise ValueError("known-new admission cannot carry recovery evidence")
         aliases = ((alias_key(
-            "tool_call",
+            self._namespace, self._tenant_id, self._domain.value, "tool_call",
             [request.agent_run_id, request.tool_call_id],
         ),) if request.recovery_agent_run_id is not None
             and request.recovery_agent_run_id != request.agent_run_id else ())
@@ -587,7 +587,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             _require_tenant(record, self._tenant_id)
             key = self._tool_key(record.tool_operation_id)
             replay_alias = alias_key(
-                "tool_call",
+                self._namespace, self._tenant_id, self._domain.value, "tool_call",
                 [record.agent_run_id, record.tool_call_id],
             )
 
@@ -849,7 +849,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                         if value.agent_run_id == agent_run_id and value.tool_call_id in ordered}
             missing = tuple(call_id for call_id in ordered if call_id not in selected)
             if missing:
-                aliases = tuple(alias_key("tool_call", [agent_run_id, call_id]) for call_id in missing)
+                aliases = tuple(alias_key(self._namespace, self._tenant_id, self._domain.value, "tool_call", [agent_run_id, call_id]) for call_id in missing)
                 resolved = await transaction.resolve_aliases(aliases)
                 keys = tuple(dict.fromkeys(resolved.values()))
                 sources = await transaction.get_records(keys) if keys else {}

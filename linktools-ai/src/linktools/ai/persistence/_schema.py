@@ -180,7 +180,7 @@ def build_runtime_sql_metadata(
             "alias_key",
             LargeBinary(ALIAS_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(ALIAS_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Store-local binary secondary lookup address with a maximum of 512 bytes.",
+            comment="Binary secondary lookup address with a maximum of 1024 bytes.",
         ),
         Column(
             "record_key_digest",
@@ -300,7 +300,7 @@ def build_runtime_sql_metadata(
             "operation_key",
             LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Store-local binary operation address, at most 257 bytes.",
+            comment="Binary operation address, at most 1024 bytes.",
         ),
         Column(
             "stream_digest",

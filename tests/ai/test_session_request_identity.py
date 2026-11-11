@@ -182,7 +182,7 @@ async def test_session_request_identity_reads_unmarked_receipt_without_rewriting
         action = manager.update if kind == "update" else manager.fork
         first = await action("agent", "session", request)
         data = json.loads((Path(__file__).parent / "fixtures/session_request_v1" / f"{kind}.json").read_text())
-        key = operation_key("request")
+        key = operation_key("session-identity", "tenant", "conversation", "request")
         store = state.conversation.sessions.state_store
 
         async def install(transaction):

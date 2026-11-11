@@ -26,9 +26,10 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.codec import decode_operation, encode_operation
 from linktools.ai.persistence.state import (
-    OperationScanCursor, StateTransaction, StoredOperation, operation_key, state_store_digest,
+    OperationScanCursor, StateTransaction, StoredOperation, operation_key,
 )
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence.repositories import OperationLedgerRepositoryImpl, build_repository_bundle
 from linktools.ai.storage import InMemoryObjectStore
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -289,7 +290,7 @@ async def test_operation_ids_keep_exact_utf8_addresses_replay_and_scan_order(sto
             break
         seen.extend(page)
         cursor = OperationScanCursor(page[-1].key)
-    assert [value.key for value in seen] == sorted(b"\x01" + value.encode("utf-8") for value in ids)
+    assert [value.key for value in seen] == sorted(operation_key("operations", "tenant", "conversation", value) for value in ids)
     for value in seen:
         assert decode_operation(encode_operation(value)) == value
         assert await operations.state_store.read(lambda tx: tx.get_operation(value.key)) == value
@@ -300,23 +301,41 @@ async def test_operation_ids_keep_exact_utf8_addresses_replay_and_scan_order(sto
 @pytest.mark.parametrize("identity", ("", "x" * 257, "界" * 86, " leading", "trailing ", "a\nb", "\ud800"))
 def test_operation_address_rejects_invalid_idempotency_ids(identity: str) -> None:
     with pytest.raises(AIError) as error:
-        operation_key(identity)
+        operation_key("operations", "tenant", "conversation", identity)
     assert error.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
 
 
 @pytest.mark.asyncio
-async def test_operation_addresses_are_scoped_by_namespace_tenant_and_domain(storage: Persistence) -> None:
-    group = storage.conversation.operations.state_store.storage_group
-    scopes = (("operations", "tenant", "conversation"), ("other", "tenant", "conversation"),
-              ("operations", "other", "conversation"), ("operations", "tenant", "execution"))
-    stores = [await group.open_partition(state_store_digest(*scope), create=True) for scope in scopes]
-    for index, store in enumerate(stores):
-        assert store is not None
-        value = StoredOperation(operation_key("same-ID"), b"s" * 32, 1, "pending", False, {"scope": index})
-        assert await store.read(lambda tx: tx.get_operation(value.key)) is None
-        await store.mutate(lambda tx: tx.insert_operation(value))
-    for index, store in enumerate(stores):
-        assert (await store.read(lambda tx: tx.get_operation(operation_key("same-ID")))).data == {"scope": index}
+@pytest.mark.parametrize("custom", (False, True))
+async def test_public_operation_repositories_isolate_scopes_on_one_store(
+    storage: Persistence, monkeypatch: pytest.MonkeyPatch, custom: bool,
+) -> None:
+    from .test_state_fact_reader import _LegacyTransaction, _custom_transactions
+
+    store = storage.conversation.operations.state_store
+    if custom:
+        from linktools.ai.persistence._memory import InMemoryStateStore
+        _custom_transactions(monkeypatch, "memory" if isinstance(store, InMemoryStateStore) else "sql", _LegacyTransaction)
+    scopes = (("operations", "tenant", PersistenceDomain.CONVERSATION),
+              ("other", "tenant", PersistenceDomain.CONVERSATION),
+              ("operations", "other", PersistenceDomain.CONVERSATION),
+              ("operations", "tenant", PersistenceDomain.EXECUTION))
+    repositories = [build_repository_bundle(store, namespace=namespace, tenant_id=tenant, domain=domain)["operations"]
+                    for namespace, tenant, domain in scopes]
+    values = []
+    for index, (repository, (_, tenant, _)) in enumerate(zip(repositories, scopes, strict=True)):
+        assert isinstance(repository, OperationLedgerRepositoryImpl)
+        assert await repository.get("same-ID", tenant_id=tenant) is None
+        value = replace(_operation(), operation_id="same-ID", tenant_id=tenant, resource_id=f"resource-{index}")
+        values.append(await repository.append(value))
+        assert await repository.append(value) == values[-1]
+    for repository, (_, tenant, _), value in zip(repositories, scopes, values, strict=True):
+        assert await repository.get("same-ID", tenant_id=tenant) == value
+        assert await repository.list_pending(ResourceKind.SESSION, value.resource_id, tenant_id=tenant, limit=10) == (value,)
+        updated = replace(value, status=OperationStatus.RUNNING)
+        assert await repository.compare_and_swap("same-ID", tenant_id=tenant, expected_status=value.status,
+                                                 next_record=updated) == updated
+        assert await repository.get("same-ID", tenant_id=tenant) == updated
 
 
 @pytest.mark.asyncio
@@ -342,7 +361,7 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
 
     store = storage.conversation.operations.state_store
     name = "capability-partitions"
-    ordinary = StoredOperation(operation_key(name), b"o" * 32, 0, "ordinary", False, {})
+    ordinary = StoredOperation(operation_key("operations", "tenant", "conversation", name), b"o" * 32, 0, "ordinary", False, {})
     await store.mutate(lambda tx: tx.insert_operation(ordinary))
     write_key = "界" * 256
     scopes = (("one", "tenant"), ("two", "tenant"), ("one", "other"))
@@ -351,7 +370,7 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
             "capability-write", namespace, tenant, "probe", 1, "run", write_key,
         ])).digest()
         # A digest-valued primitive and a textual digest ID cannot alias a receipt.
-        for key, stream in ((receipt_digest, b"p" * 32), (operation_key(receipt_digest.hex()), b"o" * 32)):
+        for key, stream in ((receipt_digest, b"p" * 32), (operation_key("operations", "tenant", "conversation", receipt_digest.hex()), b"o" * 32)):
             value = StoredOperation(key, stream, index + 1, "ordinary", False, {})
             await store.mutate(lambda tx: tx.insert_operation(value))
         writes = RuntimeCapabilityWrites(
@@ -377,17 +396,18 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("identity", ("other", "x" * 257, "a\nb"))
-async def test_operation_readers_reject_corrupt_persisted_identity(storage: Persistence, identity: str) -> None:
+@pytest.mark.parametrize(("field", "identity"), (("operation_id", "other"), ("operation_id", "x" * 257),
+                                                 ("operation_id", "a\nb"), ("tenant_id", "other")))
+async def test_operation_readers_reject_corrupt_persisted_identity(storage: Persistence, field: str, identity: str) -> None:
     from linktools.ai.persistence import PersistenceDomain
     from linktools.ai.persistence._repository_common import domain_data
     from linktools.ai.persistence._snapshot_validation import validate_snapshot_domain
 
     operations = storage.conversation.operations
     await operations.append(_operation())
-    key = operation_key("operation")
+    key = operation_key("operations", "tenant", "conversation", "operation")
     stored = await operations.state_store.read(lambda tx: tx.get_operation(key))
-    corrupted = replace(stored, data=domain_data(replace(_operation(), operation_id=identity)))
+    corrupted = replace(stored, data=domain_data(replace(_operation(), **{field: identity})))
     assert await operations.state_store.mutate(lambda tx: tx.replace_operation(corrupted, expected_state="PENDING"))
     with pytest.raises(AIError) as direct:
         await operations.get("operation", tenant_id="tenant")
@@ -400,3 +420,28 @@ async def test_operation_readers_reject_corrupt_persisted_identity(storage: Pers
                                  records=(), aliases=(), facts=(), operations=(corrupted,),
                                  sequences={corrupted.stream_digest: corrupted.sequence})
     assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("physical_field", ("key", "stream_digest"))
+@pytest.mark.parametrize("scope", (("other", "tenant", "conversation"),
+                                   ("operations", "other", "conversation"),
+                                   ("operations", "tenant", "execution")))
+async def test_operation_readers_reject_foreign_physical_scope(storage: Persistence, scope: tuple[str, str, str], physical_field: str) -> None:
+    from linktools.ai.persistence.repositories import decode_operation as decode_ledger_operation
+    from linktools.ai.persistence._snapshot_validation import validate_snapshot_domain
+
+    operations = storage.conversation.operations
+    await operations.append(_operation())
+    stored = await operations.state_store.read(lambda tx: tx.get_operation(
+        operation_key("operations", "tenant", "conversation", "operation")))
+    from linktools.ai.persistence.state import stream_digest
+    physical = (operation_key(*scope, "operation") if physical_field == "key"
+                else stream_digest(*scope, "operation", ["SESSION", "session"]))
+    corrupted = replace(stored, **{physical_field: physical})
+    with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
+        decode_ledger_operation(corrupted, namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION)
+    with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
+        validate_snapshot_domain(namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
+                                 records=(), aliases=(), facts=(), operations=(corrupted,),
+                                 sequences={corrupted.stream_digest: corrupted.sequence})

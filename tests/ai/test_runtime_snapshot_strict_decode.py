@@ -519,7 +519,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     )
 
     expected_alias = alias_key(
-        "tool_call",
+        "runtime", "tenant", "checkpoint", "tool_call",
         [operation.agent_run_id, operation.tool_call_id],
     )
     assert aliases == (StoredAlias(expected_alias, record.key_digest),)
@@ -584,7 +584,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
         updated_at=now,
     )
     stored = StoredOperation(
-        operation_key(operation.operation_id),
+        operation_key("runtime", "tenant", "conversation", operation.operation_id),
         stream_digest(
             "runtime",
             "tenant",
@@ -721,7 +721,7 @@ def test_snapshot_object_refs_reject_malformed_known_fields(codec, change) -> No
 
 
 @pytest.mark.parametrize("raw", ({"alias_key": "AA", "record_key_digest": "77" * 32},
-                                {"alias_key": "aa" * 513, "record_key_digest": "77" * 32},
+                                {"alias_key": "aa" * 1025, "record_key_digest": "77" * 32},
                                 {"alias_key": "aa", "record_key_digest": "77" * 31},
                                 {"alias_key": "aa"}))
 def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None:
@@ -731,7 +731,7 @@ def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None
 
 
 def test_snapshot_alias_binary_transport_roundtrips() -> None:
-    key = alias_key("tool_call", ("é", "e\u0301"))
+    key = alias_key("runtime", "tenant", "checkpoint", "tool_call", ("é", "e\u0301"))
     raw = {"alias_key": key.hex(), "record_key_digest": "77" * 32}
     assert runtime_storage_snapshot_module._decode_snapshot_aliases([raw]) == (StoredAlias(key, b"w" * 32),)
     with pytest.raises(AIError) as rejected:

@@ -206,7 +206,7 @@ def canonical_snapshot_indexes(
     validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
     _records_by_key, values = _decode_snapshot_records(domain, records)
     _validate_budget_projections(values)
-    aliases = _canonical_aliases(domain, values)
+    aliases = _canonical_aliases(namespace, tenant_id, domain, values)
     sequences = _canonical_sequences(
         namespace,
         tenant_id,
@@ -295,7 +295,7 @@ def validate_snapshot_domain(
         if not _same_physical_identity(record, expected):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    expected_aliases = _canonical_aliases(domain, values)
+    expected_aliases = _canonical_aliases(namespace, tenant_id, domain, values)
     if aliases != expected_aliases:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -408,6 +408,8 @@ def _decode_snapshot_records(
 
 
 def _canonical_aliases(
+    namespace: str,
+    tenant_id: str,
     domain: PersistenceDomain,
     values: Mapping[bytes, object],
 ) -> tuple[StoredAlias, ...]:
@@ -418,8 +420,8 @@ def _canonical_aliases(
         if not isinstance(value, ToolOperationRecord):
             continue
         try:
-            key = alias_key("tool_call", (value.agent_run_id, value.tool_call_id))
-        except (TypeError, ValueError) as error:
+            key = alias_key(namespace, tenant_id, domain.value, "tool_call", (value.agent_run_id, value.tool_call_id))
+        except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         current = aliases.get(key)
         if current is not None and current != record_key:
@@ -1223,8 +1225,8 @@ def _validate_operations(
     for operation in operations:
         value = _decode_enveloped_domain(operation.data, OperationLedgerInput)
         try:
-            expected_key = operation_key(value.operation_id)
-        except AIError as error:
+            expected_key = operation_key(namespace, tenant_id, domain.value, value.operation_id)
+        except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         expected_stream = stream_digest(
             namespace,

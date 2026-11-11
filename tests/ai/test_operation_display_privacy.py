@@ -19,7 +19,7 @@ def test_stored_operation_hides_identity_and_payload_without_changing_wire() -> 
     payload_key = "sensitive-payload-id-MUST-NOT-APPEAR-IN-REPR"
     data = _ReadableMapping({"operation_id": payload_key})
     assert payload_key in repr(data)
-    key = operation_key(raw_key)
+    key = operation_key("private-namespace", "private-tenant", "conversation", raw_key)
     operation = StoredOperation(key, b"s" * 32, 1, "PENDING", False, data)
 
     assert raw_key not in repr(operation)
@@ -30,19 +30,19 @@ def test_stored_operation_hides_identity_and_payload_without_changing_wire() -> 
     assert wire["key"] == key.hex()
     assert wire["data"] == {"operation_id": payload_key}
     assert decode_operation(wire) == operation
-    assert replace(operation, key=operation_key("different")) != operation
+    assert replace(operation, key=operation_key("private-namespace", "private-tenant", "conversation", "different")) != operation
     assert replace(operation, data={"operation_id": "different"}) != operation
 
 
 def test_operation_scan_cursor_hides_identity_without_changing_comparison() -> None:
     raw_key = "sensitive-cursor-key-MUST-NOT-APPEAR-IN-REPR"
-    key = operation_key(raw_key)
+    key = operation_key("private-namespace", "private-tenant", "conversation", raw_key)
     cursor = OperationScanCursor(key)
 
     assert raw_key not in repr(cursor)
     assert cursor.key == key
     assert cursor == OperationScanCursor(key)
-    assert cursor != OperationScanCursor(operation_key("different"))
+    assert cursor != OperationScanCursor(operation_key("private-namespace", "private-tenant", "conversation", "different"))
 
 
 def test_stored_record_hides_operation_payload_without_changing_wire() -> None:

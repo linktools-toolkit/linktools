@@ -149,7 +149,7 @@ async def test_state_group_partition_closing_one_handle_does_not_close_peers(tmp
 async def test_binary_alias_boundaries_remain_partition_local(tmp_path: Path, backend: str) -> None:
     scopes = (("namespace", "tenant", "checkpoint"), ("other", "tenant", "checkpoint"),
               ("namespace", "other", "checkpoint"), ("namespace", "tenant", "execution"))
-    alias_keys = (b"a", b"z" * 512)
+    alias_keys = (b"a", b"z" * 1024)
     async with Persistence.open("scope", storage=_storage(tmp_path, backend)) as persistence:
         owner = persistence.execution.executions.state_store
         stores = [await owner.storage_group.open_partition(state_store_digest(*scope), create=True) for scope in scopes]
@@ -163,9 +163,9 @@ async def test_binary_alias_boundaries_remain_partition_local(tmp_path: Path, ba
             assert page == (StoredAlias(alias_keys[1], _key("record")),)
             assert await store.read(lambda tx: tx.resolve_aliases(alias_keys)) == dict.fromkeys(alias_keys, _key("record"))
             with pytest.raises(ValueError):
-                await store.read(lambda tx: tx.resolve_alias(b"x" * 513))
+                await store.read(lambda tx: tx.resolve_alias(b"x" * 1025))
             with pytest.raises(ValueError):
-                await store.read(lambda tx: tx.scan_aliases_page(after=b"x" * 513, limit=1))
+                await store.read(lambda tx: tx.scan_aliases_page(after=b"x" * 1025, limit=1))
         await stores[0].mutate(lambda tx: tx.delete_record(_key("record")))
         assert await stores[0].read(lambda tx: tx.scan_aliases()) == ()
         for index, store in enumerate(stores[1:], 1):
@@ -175,7 +175,7 @@ async def test_binary_alias_boundaries_remain_partition_local(tmp_path: Path, ba
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", (b"", b"x" * 513, "text-in-binary-column"))
+@pytest.mark.parametrize("raw", (b"", b"x" * 1025, "text-in-binary-column"))
 async def test_sql_alias_reads_reject_invalid_persisted_addresses(tmp_path: Path, raw: object) -> None:
     async with Persistence.open("scope", storage=_storage(tmp_path, "sqlite")) as persistence:
         store = persistence.execution.executions.state_store

@@ -73,7 +73,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
             if owner == "fact":
                 await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key_digest, "chunk", None, "UNKNOWN", payload))
             elif owner == "operation":
-                await tx.insert_operation(StoredOperation(operation_key("界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
+                await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
 
         await state.mutate(publish)
         current = _snapshot("run", 2, "current")
@@ -82,7 +82,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
         assert (await native.read_message_roots((root,)))[0]
         if owner == "operation":
             async def transition(tx):
-                previous = await tx.get_operation(operation_key("界" * 85 + "x"))
+                previous = await tx.get_operation(operation_key("steps", "one", "execution", "界" * 85 + "x"))
                 assert await tx.replace_operation(replace(previous, state="DONE"), expected_state="UNKNOWN")
             await state.mutate(transition)
             assert (await native.read_message_roots((root,)))[0]
@@ -186,7 +186,7 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
                     if kind == "fact":
                         await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key_digest, "chunk", None, "UNKNOWN", payload))
                     elif kind == "operation":
-                        await tx.insert_operation(StoredOperation(operation_key("界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
+                        await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
                 except AIError:
                     # Catching the direct failure must not allow a partial commit.
                     pass

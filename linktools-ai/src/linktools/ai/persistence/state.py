@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_idempotency_key, validate_resource_id
+from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_idempotency_key, validate_persistence_namespace, validate_resource_id, validate_tenant_id
 from ..errors import AIError
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 
@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 
-ALIAS_KEY_MAX_BYTES = 512
-OPERATION_KEY_MAX_BYTES = 257
+ALIAS_KEY_MAX_BYTES = 1024
+OPERATION_KEY_MAX_BYTES = 1024
 
 
 class StateLockOrderError(RuntimeError):
@@ -1287,29 +1287,43 @@ def parent_digest(
     return _digest(["parent", namespace, tenant_id, runtime_domain, kind, relation, identity])
 
 
-def alias_key(relation: str, identity: Sequence[str]) -> bytes:
-    """Encode a store-local relation tuple without normalizing its text."""
+def _encode_key_components(values: Sequence[str], maximum: int) -> bytes:
+    components: list[bytes] = []
+    size = 0
+    for value in values:
+        if not isinstance(value, str):
+            raise TypeError("address components must be strings")
+        encoded = value.encode("utf-8")
+        size += 2 + len(encoded)
+        if size > maximum:
+            raise ValueError("address exceeds its byte limit")
+        components.append(len(encoded).to_bytes(2, "big") + encoded)
+    return b"".join(components)
+
+
+def alias_key(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    relation: str,
+    identity: Sequence[str],
+) -> bytes:
+    """Encode an exact scoped relation tuple, including for shared StateStores."""
     if not isinstance(relation, str) or not relation:
         raise ValueError("alias relation must be a non-empty string")
     if not isinstance(identity, Sequence) or isinstance(identity, (str, bytes)):
         raise TypeError("alias identity must be a sequence of strings")
-    components: list[bytes] = []
-    size = 0
-    for value in (relation, *identity):
-        if not isinstance(value, str):
-            raise TypeError("alias components must be strings")
-        encoded = value.encode("utf-8")
-        size += 2 + len(encoded)
-        if size > ALIAS_KEY_MAX_BYTES:
-            raise ValueError("alias key exceeds its byte limit")
-        components.append(len(encoded).to_bytes(2, "big") + encoded)
-    return b"".join(components)
+    return _encode_key_components(
+        (validate_persistence_namespace(namespace), validate_tenant_id(tenant_id),
+         runtime_domain, relation, *identity),
+        ALIAS_KEY_MAX_BYTES,
+    )
 
 
 def validate_alias_key(value: bytes) -> bytes:
     """Validate the bounded physical alias address, including custom keys."""
     if type(value) is not bytes or not 0 < len(value) <= ALIAS_KEY_MAX_BYTES:
-        raise ValueError("alias key must contain 1 to 512 bytes")
+        raise ValueError(f"alias key must contain 1 to {ALIAS_KEY_MAX_BYTES} bytes")
     return value
 
 
@@ -1323,9 +1337,18 @@ def stream_digest(
     return _digest(["stream", namespace, tenant_id, runtime_domain, relation, identity])
 
 
-def operation_key(identity: str) -> bytes:
-    """Address an ordinary ledger ID within its StateStore partition."""
-    return b"\x01" + validate_idempotency_key(identity).encode("utf-8")
+def operation_key(
+    namespace: str,
+    tenant_id: str,
+    runtime_domain: str,
+    identity: str,
+) -> bytes:
+    """Address an ordinary ledger ID independently of StateStore partitioning."""
+    return b"\x01" + _encode_key_components(
+        (validate_persistence_namespace(namespace), validate_tenant_id(tenant_id),
+         runtime_domain, validate_idempotency_key(identity)),
+        OPERATION_KEY_MAX_BYTES - 1,
+    )
 
 
 def sortable_timestamp(value: datetime, key: bytes) -> str:

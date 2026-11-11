@@ -305,7 +305,8 @@ class _RepositoryBase:
             payload_transform=lambda payload: _restore_lease_fields(payload, target),
         )
         if isinstance(value, ToolOperationRecord):
-            if record.subject_id != value.tool_call_id:
+            if (record.subject_id != value.tool_call_id
+                    or record.key_digest != self._key("tool_operation", value.tool_operation_id)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replace(value, owner=record.lease_owner, fence=record.lease_fence)
         if isinstance(value, TaskNodeView):
@@ -527,10 +528,10 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         value: OperationLedgerInput,
     ) -> OperationLedgerRecord:
         _require_tenant(value, self._tenant_id)
-        key = operation_key(value.operation_id)
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, value.operation_id)
         existing = await transaction.get_operation(key)
         if existing is not None:
-            current = _decode_operation(existing)
+            current = _decode_operation(existing, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
             if _operation_matches(current, value):
                 return current
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -549,11 +550,11 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
     ) -> OperationLedgerRecord | None:
         if tenant_id != self._tenant_id:
             return None
-        key = operation_key(operation_id)
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
         stored = await self._store.read(
             lambda transaction: transaction.get_operation(key)
         )
-        return None if stored is None else _decode_operation(stored)
+        return None if stored is None else _decode_operation(stored, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
 
     async def get_in_transaction(
         self,
@@ -563,9 +564,9 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         tenant_id: str,
     ) -> OperationLedgerRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        key = operation_key(operation_id)
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
         stored = await transaction.get_operation(key)
-        return None if stored is None else _decode_operation(stored)
+        return None if stored is None else _decode_operation(stored, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
 
     async def compare_and_swap(
         self,
@@ -578,7 +579,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
-        key = operation_key(operation_id)
+        key = operation_key(self._namespace, self._tenant_id, self._domain.value, operation_id)
 
         async def mutate(transaction: StateTransaction) -> OperationLedgerRecord:
             current = await transaction.get_operation(key)
@@ -595,7 +596,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if not operation_cas_immutable_matches(
-                _decode_operation(current), next_record
+                _decode_operation(current, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain), next_record
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             candidate = _stored_from_operation(next_record, current)
@@ -640,7 +641,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
                 )
             )
         )
-        return tuple(_decode_operation(value) for value in values)
+        return tuple(_decode_operation(value, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain) for value in values)
 
     async def compact_terminal(
         self,
@@ -1047,10 +1048,10 @@ async def _reserve_operation(
     repository: _RepositoryBase,
     value: OperationLedgerInput,
 ) -> tuple[OperationLedgerRecord | None, bool]:
-    key = operation_key(value.operation_id)
+    key = operation_key(repository._namespace, repository._tenant_id, repository._domain.value, value.operation_id)
     existing = await transaction.get_operation(key)
     if existing is not None:
-        current = _decode_operation(existing)
+        current = _decode_operation(existing, namespace=repository._namespace, tenant_id=repository._tenant_id, domain=repository._domain)
         if _operation_matches(current, value):
             return current, True
         raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1072,7 +1073,7 @@ async def _insert_operation(
     value: OperationLedgerInput,
     sequence: int,
 ) -> None:
-    key = operation_key(value.operation_id)
+    key = operation_key(repository._namespace, repository._tenant_id, repository._domain.value, value.operation_id)
     await transaction.insert_operation(
         StoredOperation(
             key,
@@ -1091,13 +1092,25 @@ async def _insert_operation(
     )
 
 
-def _decode_operation(value: StoredOperation) -> OperationLedgerRecord:
+def _decode_operation(
+    value: StoredOperation,
+    *,
+    namespace: str,
+    tenant_id: str,
+    domain: PersistenceDomain,
+) -> OperationLedgerRecord:
     candidate = _decode_enveloped_domain(value.data, OperationLedgerInput)
     try:
-        expected_key = operation_key(candidate.operation_id)
-    except AIError as error:
+        expected_key = operation_key(namespace, tenant_id, domain.value, candidate.operation_id)
+    except (AIError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if value.key != expected_key:
+    expected_stream = stream_digest(
+        namespace, tenant_id, domain.value, "operation",
+        [candidate.resource_kind.value, candidate.resource_id],
+    )
+    if (candidate.tenant_id != tenant_id or value.key != expected_key
+            or value.stream_digest != expected_stream or value.state != candidate.status.value
+            or value.compactable != candidate.compactable):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _operation_record(candidate, value.sequence)  # type: ignore[arg-type]
 

@@ -38,7 +38,7 @@ def _record(index: int) -> StoredRecord:
 
 
 def _alias(record: StoredRecord) -> StoredAlias:
-    return StoredAlias(alias_key("tool_call", ("run", record.sort_key)), record.key_digest)
+    return StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("run", record.sort_key)), record.key_digest)
 
 
 def _fact(record: StoredRecord, sequence: int = 1) -> StoredFact:
@@ -83,7 +83,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
     deleted = _record(1)
     retained = replace(_record(2), parent_digest=deleted.key_digest)
     staged = _record(3)
-    staged_alias = StoredAlias(alias_key("tool_call", ("recovery", "staged")), deleted.key_digest)
+    staged_alias = StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("recovery", "staged")), deleted.key_digest)
     counter = _digest("counter")
     operation = StoredOperation(_digest("operation"), counter, 1, "DONE", False, {})
     async with _open_store(backend, tmp_path / backend) as store:

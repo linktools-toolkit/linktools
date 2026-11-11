@@ -2572,7 +2572,7 @@ class TaskRepositoryImpl(RepositoryBase):
             if len(pending_operations) > _MAX_PENDING_TASK_OPERATIONS:
                 raise AIError(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
             for stored_operation in pending_operations:
-                operation = _decode_operation(stored_operation)
+                operation = _decode_operation(stored_operation, namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain)
                 if (
                     operation.operation_kind is OperationKind.TASK_CANCEL
                     and (

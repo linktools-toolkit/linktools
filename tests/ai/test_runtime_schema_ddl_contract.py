@@ -320,9 +320,9 @@ def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(diale
     from sqlalchemy.dialects import postgresql, sqlite
     table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})).tables["ai_state_operations"]
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
-    assert table.c.operation_key.type.length == 257
+    assert table.c.operation_key.type.length == 1024
     assert table.c.operation_key.type.compile(dialect=dialect) == {
-        "mysql": "VARBINARY(257)", "postgresql": "BYTEA", "sqlite": "BLOB",
+        "mysql": "VARBINARY(1024)", "postgresql": "BYTEA", "sqlite": "BLOB",
     }[dialect_name]
     assert any(index.unique and tuple(column.name for column in index.columns) == ("store_digest", "operation_key")
                for index in table.indexes)
@@ -333,7 +333,7 @@ def test_runtime_alias_schema_uses_partitioned_binary_indexes() -> None:
     from sqlalchemy.dialects import postgresql, sqlite
 
     table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CHECKPOINT})).tables["ai_state_aliases"]
-    assert table.c.alias_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(512)"
+    assert table.c.alias_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(1024)"
     assert table.c.alias_key.type.compile(dialect=postgresql.dialect()) == "BYTEA"
     assert table.c.alias_key.type.compile(dialect=sqlite.dialect()) == "BLOB"
     columns = {tuple(column.name for column in index.columns): index.unique for index in table.indexes}
@@ -341,5 +341,5 @@ def test_runtime_alias_schema_uses_partitioned_binary_indexes() -> None:
     assert not columns[("store_digest", "record_key_digest")]
     assert all(len(index.columns) <= 3 for index in table.indexes)
     # CHAR(64) utf8mb4 contributes up to 256 index bytes; the alias is binary.
-    assert table.c.store_digest.type.length * 4 + table.c.alias_key.type.length == 768
-    assert table.c.store_digest.type.length + table.c.alias_key.type.length == 576
+    assert table.c.store_digest.type.length * 4 + table.c.alias_key.type.length == 1280
+    assert table.c.store_digest.type.length + table.c.alias_key.type.length == 1088
