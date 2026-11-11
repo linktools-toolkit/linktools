@@ -26,6 +26,9 @@ from linktools.ai.persistence.state import (
 from linktools.ai.storage import CacheBackend, InMemoryCacheBackend, SqlStorageContext
 
 
+# Each key binds its locator and raw identity, alongside one partition bind.
+_FULL_PARTITION_KEYS = (999 - 1) // 2
+
 
 def _key(value: str) -> bytes:
     return hashlib.sha256(value.encode()).digest()
@@ -60,8 +63,9 @@ async def test_group_reads_bound_parameters_and_keep_partition_keys_exact(tmp_pa
         one, two = _record("one", key=key), _record("two", key=key)
         await first.mutate(lambda tx: tx.insert_record(one))
         await second.mutate(lambda tx: tx.insert_record(two))
-        requests = {first: (key, key, *(_key(f"first-{n}") for n in range(1100))),
-                    second: (key, *(_key(f"second-{n}") for n in range(600)))}
+        # Cross both partitions' boundaries, including a mixed batch and a tail.
+        requests = {first: (key, key, *(_key(f"first-{n}") for n in range(_FULL_PARTITION_KEYS))),
+                    second: (*(_key(f"second-{n}") for n in range(_FULL_PARTITION_KEYS - 2)), key)}
         parameter_counts: list[int] = []
 
         def capture(connection, cursor, statement, parameters, context, many) -> None:
@@ -425,8 +429,8 @@ async def test_unsupported_and_custom_groups_keep_original_transaction_reads() -
 @pytest.mark.asyncio
 async def test_group_batch_queries_compile_for_supported_sql_dialects(tmp_path: Path) -> None:
     async with _database(tmp_path / "compile.db") as (_, first, second):
-        requests = {first: tuple(_key(f"first-{n}") for n in range(1800)),
-                    second: tuple(_key(f"second-{n}") for n in range(1000))}
+        requests = {first: tuple(_key(f"first-{n}") for n in range(_FULL_PARTITION_KEYS + 1)),
+                    second: tuple(_key(f"second-{n}") for n in range(_FULL_PARTITION_KEYS - 1))}
         async def compile_queries(group: StateGroupTransaction) -> None:
             assert isinstance(group, _SqlGroupTransaction)
             dialects = (sqlite.dialect(), mysql.dialect(), postgresql.dialect())

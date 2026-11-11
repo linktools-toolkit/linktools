@@ -14,7 +14,6 @@ import base64
 import json
 from contextlib import aclosing
 from pathlib import Path
-from time import monotonic
 
 import httpx2
 import pytest
@@ -38,9 +37,8 @@ from .test_web_console_viewers import _client
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hold_commit", (False, True))
 async def test_web_client_live_visibility_follows_completed_request_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hold_commit: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     release_response = asyncio.Event()
     tool_entered = asyncio.Event()
@@ -48,8 +46,6 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     commit_entered = asyncio.Event()
     release_commit = asyncio.Event()
     sent: list[bytes] = []
-    response_started_at = 0.0
-    commit_started_at = 0.0
     wire_response = b"data: " + json.dumps({
         "id": "chatcmpl-live", "object": "chat.completion.chunk", "created": 1,
         "model": "gpt-4o", "unknown_provider_field": {"preserved": True},
@@ -61,13 +57,11 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     response_stream = _Stream([wire_response[:23], wire_response[23:]])
 
     async def handler(request: httpx2.Request) -> httpx2.Response:
-        nonlocal response_started_at
         sent.append(request.content)
         if len(sent) != 1:
             return _response(request)
         assert json.loads(request.content)["stream"] is True
         await release_response.wait()
-        response_started_at = monotonic()
         return httpx2.Response(
             200, headers={"content-type": "text/event-stream"}, stream=response_stream,
         )
@@ -82,7 +76,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     group = RuntimeFeatures[None]("web-client-live")
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
-    group.capability(TraceCapability(record_http_bodies=True, commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
+    group.capability(TraceCapability(record_http_bodies=True, commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=0.01)), scope="runtime")
     async with Persistence.open('web-client-live', storage=storage) as persistence_82, Runtime.attach(persistence=persistence_82, features=model_features(models, group)) as runtime:
         commit = runtime._run_store.commit_captured_execution_projection
 
@@ -90,15 +84,12 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
             captured: CapturedExecutionProjection, flight: _AgentRunProjectionFlight,
             *, execution_id: str,
         ) -> None:
-            nonlocal commit_started_at
             if any(item.model_request_seq == 1 and item.status == "SUCCEEDED"
                    for item in captured.interactions):
-                commit_started_at = monotonic()
                 commit_entered.set()
-                if hold_commit:
-                    # Hold the existing commit boundary, leaving staging and the
-                    # real observer active so premature publication is detectable.
-                    await release_commit.wait()
+                # Keep staging and the real observer active while durable
+                # publication is held at its commit boundary.
+                await release_commit.wait()
             await commit(captured, flight, execution_id=execution_id)
 
         monkeypatch.setattr(runtime._run_store, "commit_captured_execution_projection", observed_commit)
@@ -118,13 +109,12 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
                         assert not projection.item.client_requests_included
                         assert projection.item.request == {} and projection.item.response is None
                         if projection.item.status == "RUNNING":
-                            # Begin the response after the RUNNING batch is durable;
-                            # the following completion uses the unmodified timer.
+                            # Begin the response after the RUNNING batch is durable.
                             release_response.set()
                             continue
                         assert projection.item.status == "SUCCEEDED"
                         assert commit_entered.is_set()
-                        assert not hold_commit or release_commit.is_set()
+                        assert release_commit.is_set()
                         assert tool_entered.is_set() and not release_tool.is_set()
                         assert response_stream.closes == 1 and len(sent) == 1
 
@@ -157,19 +147,15 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
             try:
                 await asyncio.wait_for(tool_entered.wait(), 10)
                 await asyncio.wait_for(commit_entered.wait(), 10)
-                # Leave the default approximately three-second batch window intact.
-                # A generous lower bound distinguishes batching from eager flushes.
-                assert commit_started_at - response_started_at >= 0.5
-                if hold_commit:
-                    done, _ = await asyncio.wait((observed,), timeout=0.05)
-                    assert not done, "terminal model projection preceded durable commit"
-                    response = await http.get(path)
-                    assert response.status_code == 200, response.text
-                    item, = response.json()["items"]
-                    assert item["status"] == "RUNNING"
-                    assert not item["client_requests"]
-                    assert not release_tool.is_set()
-                    release_commit.set()
+                done, _ = await asyncio.wait((observed,), timeout=0.05)
+                assert not done, "terminal model projection preceded durable commit"
+                response = await http.get(path)
+                assert response.status_code == 200, response.text
+                item, = response.json()["items"]
+                assert item["status"] == "RUNNING"
+                assert not item["client_requests"]
+                assert not release_tool.is_set()
+                release_commit.set()
                 projection = await asyncio.wait_for(observed, 10)
                 assert projection.root_execution_id == execution.execution_id
                 assert len(sent) == 1

@@ -65,17 +65,18 @@ async def test_list_paths_pushes_prefix_and_limit_to_repository_once() -> None:
 
 
 async def test_list_paths_pages_for_large_harness_limit() -> None:
+    # Cross the 1,000-row page boundary and leave one result beyond the limit.
     records = _RecordingMemoryRepository(
-        tuple(f"memory/{index:04d}.md" for index in range(1600))
+        tuple(f"memory/{index:04d}.md" for index in range(1002))
     )
     store = _runtime_store(records)
 
-    paths = await store.list_paths("memory/", limit=1500)
+    paths = await store.list_paths("memory/", limit=1001)
 
-    assert len(paths) == 1500
+    assert len(paths) == 1001
     assert paths[0] == "memory/0000.md"
-    assert paths[-1] == "memory/1499.md"
-    assert [call["limit"] for call in records.calls] == [1000, 500]
+    assert paths[-1] == "memory/1000.md"
+    assert [call["limit"] for call in records.calls] == [1000, 1]
     assert records.calls[1]["cursor"] == "1000"
 
 
