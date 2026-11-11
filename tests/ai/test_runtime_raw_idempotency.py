@@ -13,20 +13,22 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import pytest
 
 from linktools.ai.core import (
-    ApprovalStatus, ExternalCallStatus, IdempotencyStatus, OperationStatus,
-    ResourceKind, canonical_json_bytes, canonical_sha256, deterministic_id,
+    ApprovalStatus, ExecutionEventType, ExecutionStatus, ExternalCallStatus, IdempotencyStatus, OperationStatus,
+    ResourceKind, StopReason, UsageMetrics, canonical_json_bytes, canonical_sha256, deterministic_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.execution import IdempotencyRecord, IdempotencyTerminalUpdate, OperationTerminalUpdate
+from linktools.ai.execution import (
+    ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, OperationTerminalUpdate, ResultRecord,
+)
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._repository_common import domain_data
-from linktools.ai.persistence.codec import (
-    _CURRENT_CODEC, _decode_domain, _decode_enveloped_domain, _encode_persisted_domain,
-    decode_envelope, encode_envelope,
-)
+from linktools.ai.persistence.codec import _decode_enveloped_domain, decode_envelope, encode_envelope
 from linktools.ai.persistence.contracts import ApprovalRecord, ExternalCallRecord, ExecutionEventRecord
 from linktools.ai.persistence.state import record_key
 from linktools.ai.runtime._execution import DefaultExecutionService, ExecutionStartIdentity
+from linktools.ai.storage import StoredPayload
+
+from .test_runtime_persistence_evidence import _execution
 
 
 NOW = datetime(2026, 11, 11, tzinfo=timezone.utc)
@@ -90,18 +92,28 @@ def test_raw_replay_wire_roundtrips_and_invalid_stored_keys_fail_closed(value: o
         assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_terminal_idempotency_plain_mapping_rejects_invalid_stored_keys() -> None:
-    value = IdempotencyTerminalUpdate("scope", KEY, IdempotencyStatus.STARTED,
+def test_terminal_commit_envelope_rejects_invalid_idempotency_keys() -> None:
+    identity = IdempotencyTerminalUpdate("scope", KEY, IdempotencyStatus.STARTED,
         IdempotencyStatus.COMPLETED, "a" * 64, "b" * 64, None)
-    assert KEY not in repr(value)
-    payload = _encode_persisted_domain(value)
-    assert payload["idempotency_key"] == KEY
-    assert _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True) == value
+    result = ResultRecord(StoredPayload.inline_json("done"), StopReason.END_TURN, UsageMetrics(), NOW)
+    execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, result=result, completed_at=NOW)
+    commit = ExecutionTerminalCommit(execution.revision, execution.event_seq, execution, result,
+        ExecutionEventType.EXECUTION_SUCCEEDED, {}, identity)
+    assert KEY not in repr(commit)
+    encoded = domain_data(commit)
+    assert _decode_enveloped_domain(encoded, ExecutionTerminalCommit) == commit
+    payload = deepcopy(decode_envelope(encoded).value)
+    fields = payload["payload"]["fields"]["idempotency"]
+    assert fields["idempotency_key"] == KEY
     for key in (KEY + "x", "", "bad\x00key", " key", "\ud800"):
         with pytest.raises(ValueError):
-            replace(value, idempotency_key=key)
+            replace(identity, idempotency_key=key)
+        if key == "\ud800":
+            # Invalid UTF-8 cannot reach a current persisted envelope writer.
+            continue
+        fields["idempotency_key"] = key
         with pytest.raises(AIError) as corrupt:
-            _decode_domain({**payload, "idempotency_key": key}, type(value), _CURRENT_CODEC, persisted=True)
+            _decode_enveloped_domain(encode_envelope(payload), ExecutionTerminalCommit)
         assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
