@@ -61,16 +61,23 @@ compressed. Existing unbounded opaque string contracts are not silently narrowed
 to fixed-width IDs. Snapshot pruning uses the `(store_digest, run_digest, pruned)`
 index and an equality predicate compatible with MySQL 5.7 index selection.
 
+The SQL digest simplification removes nine redundant columns overall. Native
+lineage lookup digests are retained for the index-size contract below.
+
 ## Native Step digest ownership
 
-Run lineage filters index the original `conversation_id` and `parent_run_id`
-columns directly. Their nonunique MySQL indexes use 128-character prefixes;
-readers still compare complete original strings, including trailing spaces.
-These lookup filters do not need separate digests or mirrored lineage checks.
+Run lineage keeps the original unbounded `conversation_id` and `parent_run_id`
+strings alongside fixed-width lookup digests. PostgreSQL B-tree entries cannot
+index arbitrarily large, incompressible text, so indexing these original columns
+directly would reject valid upstream IDs. Scoped digest indexes bound the entry
+size on every backend. Queries also compare the original strings; the digest
+predicate keeps trailing-space identities distinct under MySQL PAD SPACE
+comparisons. Backup validation checks that each lookup digest matches its source.
 
 | Table | Retained digest or content reference | Contract |
 | --- | --- | --- |
 | `ai_step_runs` | `store_digest`, `run_digest` | Namespace/tenant partition and fixed-width uniqueness for an unbounded upstream run ID. The original ID remains available unchanged. |
+| `ai_step_runs` | `conversation_digest`, `parent_digest` | Bounded lineage lookup indexes for opaque, unbounded source strings, including values too large for PostgreSQL B-tree entries. |
 | `ai_step_events` | `store_digest`, `run_digest`, `key_digest` | Scoped run lookup and a unique composite replay key, or a distinct unkeyed append occurrence. |
 | `ai_step_events` | `body_sha256`, `fields_sha256` | Managed lifecycle source integrity. Full recovery authenticates metadata too; metadata-free Trace projections authenticate their fields without reading the large metadata body. |
 | `ai_step_snapshots` | `store_digest`, `run_digest`, `key_digest` | Scoped run lookup, retained replay identity and snapshot pruning. |

@@ -3,6 +3,7 @@
 """Public upstream StepStore behavior over the project SQL adapter."""
 
 import asyncio
+import random
 import re
 import sqlite3
 from collections.abc import AsyncIterator
@@ -23,7 +24,7 @@ from pydantic_ai_harness.step_persistence import (
     StepEvent, StepPersistence, StepStore, ToolEffectRecord, continue_run,
 )
 from sqlalchemy import Text, event, text
-from sqlalchemy.dialects import mysql
+from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 
@@ -78,7 +79,8 @@ async def test_sql_lineage_filters_preserve_wide_exact_identifiers_under_padded_
         await connection.run_sync(metadata.create_all)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
     other = SqlStepStore(engine, namespace="steps", tenant_id="two")
-    prefix = "共同前缀" * 128
+    # High-entropy IDs exceed index-page capacity without relying on compression.
+    prefix = "共同前缀" + random.Random(304).randbytes(12 * 1024).hex()
     records = [
         RunRecord(run_id="exact", conversation_id=prefix, parent_run_id=prefix),
         RunRecord(run_id="padded-conversation", conversation_id=prefix + " ", parent_run_id=prefix),
@@ -431,6 +433,21 @@ async def test_sql_effect_binding_borrows_partition_without_owning_its_lifetime(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("dialect", (mysql.dialect(), postgresql.dialect(), sqlite.dialect()))
+def test_run_lineage_indexes_keep_unbounded_ids_out_of_btree_entries(dialect) -> None:
+    runs = build_step_sql_metadata().tables["ai_step_runs"]
+    kind = "mysql" if dialect.name == "mysql" else "portable"
+    indexes = tuple(index for index in runs.indexes if index.info.get("ddl_dialect") == kind)
+    for name in ("conversation_digest", "parent_digest"):
+        index = next(index for index in indexes
+                     if tuple(column.name for column in index.columns) == ("store_digest", name))
+        assert not index.unique
+        assert all(column.type.length == 64 for column in index.columns)
+        assert name in str(CreateIndex(index).compile(dialect=dialect))
+    assert not any(column.name in {"conversation_id", "parent_run_id"}
+                   for index in indexes for column in index.columns)
+
+
 def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy() -> None:
     metadata = build_step_sql_metadata()
     dialect = mysql.dialect()
@@ -438,13 +455,6 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
     assert metadata.tables["ai_step_snapshots"].c.messages.type.compile(dialect=dialect) == (
         "VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
     )
-    runs = metadata.tables["ai_step_runs"]
-    for name in ("conversation_id", "parent_run_id"):
-        index = next(index for index in runs.indexes
-                     if index.info.get("ddl_dialect") == "mysql"
-                     and tuple(column.name for column in index.columns) == ("store_digest", name))
-        assert not index.unique
-        assert f"{name}(128)" in str(CreateIndex(index).compile(dialect=dialect))
     for table in metadata.tables.values():
         ddl = str(CreateTable(table).compile(dialect=dialect))
         assert table.name.startswith("ai_") and table.comment

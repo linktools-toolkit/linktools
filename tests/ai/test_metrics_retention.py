@@ -110,7 +110,7 @@ async def _assert_namespace_partitions(store: MetricStore) -> None:
     definition = MetricDefinition(
         name="partition", revision=1, observation_kind="app.retention",
         source=MetricSource.observation_count(), metric_type=MetricType.COUNTER,
-        default_aggregation=MetricAggregation.COUNT,
+        unit="1", default_aggregation=MetricAggregation.COUNT,
     )
     observation = _observation("😀" * 32)
     for index, namespace in enumerate(namespaces):

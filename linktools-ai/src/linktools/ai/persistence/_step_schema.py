@@ -61,15 +61,17 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             digest("store_digest", "Physical namespace and tenant partition."),
             *run_columns(),
             text("conversation_id", "Original upstream conversation identifier."),
+            digest("conversation_digest", "Physical conversation lookup digest.", nullable=True),
             text("parent_run_id", "Original upstream parent run identifier."),
+            digest("parent_digest", "Physical parent run lookup digest.", nullable=True),
             text("agent_name", "Upstream agent name."),
             text("metadata", "Upstream string metadata encoded as JSON.", nullable=False),
             Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
             text("registration_id", "Upstream registration invocation identifier."),
         )
         sql_unique(runs, "store_digest", "run_digest")
-        sql_query_index(runs, "store_digest", "conversation_id", mysql_length=128)
-        sql_query_index(runs, "store_digest", "parent_run_id", mysql_length=128)
+        sql_query_index(runs, "store_digest", "conversation_digest")
+        sql_query_index(runs, "store_digest", "parent_digest")
 
     if "ai_step_events" not in metadata.tables:
         events = table(

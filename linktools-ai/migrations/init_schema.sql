@@ -238,7 +238,9 @@ CREATE TABLE ai_step_runs (
 	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
 	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
+	conversation_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical conversation lookup digest.',
 	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
+	parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical parent run lookup digest.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
 	started_at VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 run start time.',
@@ -246,8 +248,8 @@ CREATE TABLE ai_step_runs (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_conversation_id (store_digest, conversation_id(128)),
-	KEY ix_store_digest_parent_run_id (store_digest, parent_run_id(128)),
+	KEY ix_store_digest_conversation_digest (store_digest, conversation_digest),
+	KEY ix_store_digest_parent_digest (store_digest, parent_digest),
 	UNIQUE KEY uk_store_digest_run_digest (store_digest, run_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;

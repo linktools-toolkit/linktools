@@ -90,7 +90,7 @@ async def test_cold_replay_uses_existing_registration_select(native) -> None:
         selects = [sql for sql in statements if sql.startswith("SELECT")]
         assert len(selects) == 1 and "JOIN ai_step_events" in selects[0]
         selected_columns = selects[0].split("FROM", 1)[0]
-        for excluded in ("created_at", "updated_at"):
+        for excluded in ("created_at", "updated_at", "conversation_digest", "parent_digest"):
             assert excluded not in selected_columns
         assert "ai_step_events.id AS" not in selected_columns
         assert "ai_step_runs.id," not in selected_columns
