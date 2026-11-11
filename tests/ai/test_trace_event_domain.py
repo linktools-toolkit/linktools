@@ -262,9 +262,10 @@ async def test_inline_scalar_columns_preserve_values_without_json_duplicates(tmp
             assert row[name] == (None if value is None else value.encode("utf-8"))
             assert name not in fields
         assert await archive.list_events(agent_run_id=run_id) == [event]
+        payload = _encode_step_envelope(event)
+        payload["value"]["payload"]["fields"]["future_note"] = "extension"
         fact = StoredFact(archive._stream(run_id, "event"), 1, archive._agent_run_key(run_id),
-                          "step_event", None, event.event_type, _encode_step_envelope(event))
-        fact.data["value"]["payload"]["fields"]["future_note"] = "extension"
+                          "step_event", None, event.event_type, payload)
         projected = archive._trace_events.row_values(fact, event)
         restored = archive._trace_events.row_to_fact(projected)
         assert restored.data["value"]["payload"]["fields"]["future_note"] == "extension"
