@@ -54,7 +54,7 @@ def test_content_slots_include_their_metadata_dependencies() -> None:
     request = ArchiveNodeRead(_digest("node"), ArchiveNodeSlot(0), ArchiveNodeSlot.LEFT | ArchiveNodeSlot.NEXT)
     assert request.metadata_slots == ArchiveNodeSlot.SELF | ArchiveNodeSlot.LEFT | ArchiveNodeSlot.NEXT
     assert request.content_slots == ArchiveNodeSlot.LEFT | ArchiveNodeSlot.NEXT
-    for bad_key in (b"", b"short"):
+    for bad_key in (b"", "not-bytes", b"x" * 1153):
         with pytest.raises(ValueError):
             ArchiveNodeRead(bad_key)
     for invalid in (-1, 16, True):

@@ -521,7 +521,7 @@ async def test_batched_history_range_validates_descriptor_and_head(
 
         async def corrupt(transaction):
             kind = "conversation_history" if corruption == "descriptor" else "transcript_head"
-            key = histories._key(kind, history_id)
+            key = histories._key(kind, (history_id,))
             stored = await transaction.get_record(key)
             assert stored is not None
             if corruption in {"descriptor", "head"}:
@@ -532,7 +532,7 @@ async def test_batched_history_range_validates_descriptor_and_head(
                     replace(head, owner_id="another-history") if corruption == "owner"
                     else replace(head, owner_domain=TranscriptOwnerDomain.TRACE)
                 )
-                changed = histories._stored("transcript_head", history_id, head)
+                changed = histories._stored("transcript_head", (history_id,), head)
                 assert await transaction.replace_record(
                     replace(stored, data=changed.data, storage_revision=stored.storage_revision + 1),
                     expected_storage_revision=stored.storage_revision,
@@ -614,7 +614,7 @@ async def test_history_batch_preserves_head_decode_error_priority() -> None:
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
 
         async def corrupt(transaction):
-            stored = await transaction.get_record(histories._key("transcript_head", session.history_id))
+            stored = await transaction.get_record(histories._key("transcript_head", (session.history_id,)))
             assert stored is not None
             assert await transaction.delete_record(
                 stored.key, expected_storage_revision=stored.storage_revision,
