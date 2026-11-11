@@ -69,6 +69,11 @@ async def test_memory_receipt_real_repository_replay_and_conflicts(tmp_path: Pat
         operation = MemoryOperation("create", canonical_sha256({"content": "first"}))
         created = await store.write("memory/a.md", "first", expected_version=None, operation=operation)
         assert not created.replayed and not created.existed
+        assert created.version == "m1:" + canonical_sha256({
+            "namespace": "receipt-test", "tenant_id": "tenant",
+            "scope": canonical_sha256("scope"), "path": "memory/a.md",
+            "identity": operation.id,
+        })
         original = await store.read("memory/a.md", max_chars=100)
         assert original is not None and original.content == "first"
         replay = await store.write("memory/a.md", "first", expected_version=None, operation=operation)

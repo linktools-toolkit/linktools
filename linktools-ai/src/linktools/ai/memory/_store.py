@@ -612,7 +612,7 @@ def _version_token(
             "tenant_id": tenant_id,
             "scope": scope_digest,
             "path": path,
-            "identity": canonical_sha256(identity),
+            "identity": identity,
         }
     )
 
