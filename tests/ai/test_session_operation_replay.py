@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import OperationLedgerInput, idempotency_key_digest
+from linktools.ai.core import OperationLedgerInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.session import CreateSessionRequest, UpdateSessionRequest
@@ -30,7 +30,7 @@ async def test_session_replay_checks_owner_before_receipt(storage: PersistenceSt
         await manager.create("agent", CreateSessionRequest(_PRINCIPAL, "session", "create"))
         await manager.update("agent", "session", UpdateSessionRequest(_PRINCIPAL, 0, "update", {}))
         record = await state.conversation.sessions.get("session", tenant_id="tenant")
-        receipt = await state.conversation.operations.get(idempotency_key_digest("update"), tenant_id="tenant")
+        receipt = await state.conversation.operations.get("update", tenant_id="tenant")
         assert record is not None and receipt is not None
         operation = OperationLedgerInput(
             receipt.operation_id, receipt.tenant_id, receipt.resource_kind,
@@ -61,7 +61,7 @@ async def test_session_update_revision_race_rolls_back_losing_receipt(storage: P
         assert sum(not isinstance(result, BaseException) for result in results) == 1
         for request, result in zip(requests, results):
             receipt = await state.conversation.operations.get(
-                idempotency_key_digest(request.idempotency_key), tenant_id="tenant")
+                request.idempotency_key, tenant_id="tenant")
             if isinstance(result, BaseException):
                 assert isinstance(result, AIError)
                 assert result.code is ErrorCode.SESSION_REVISION_CONFLICT
