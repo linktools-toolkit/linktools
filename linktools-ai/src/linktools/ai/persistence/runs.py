@@ -444,6 +444,7 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def initialize(self) -> None:
         self.checkpoint_persistence.reader.clear_confirmed_runs()
+        self._run_sources.clear()
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
         self._atomic_step_runs.clear()
@@ -2300,6 +2301,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         self._publish_model_interaction_change(agent_run_id)
                         self._staging.release_agent_run_local(agent_run_id)
+                        self._run_sources.pop(agent_run_id, None)
                         producer = self._execution_producers.pop(agent_run_id, None)
                         self._step_boundaries.pop(agent_run_id, None)
                         self._step_boundary_guards.pop(agent_run_id, None)

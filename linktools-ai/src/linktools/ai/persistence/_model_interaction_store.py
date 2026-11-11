@@ -110,6 +110,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         _validate_interaction_page(after_model_request_seq, limit)
         sequence_key = self._stream(agent_run_id, "interaction")
         start = 1 if after_model_request_seq is None else after_model_request_seq + 1
+        registrations = await self.read_run_registrations((agent_run_id,)) if include_run else None
 
         async def read(transaction: StateTransaction) -> tuple[AgentRunRecord | None, list[object]]:
             high_water = (await transaction.get_sequences((sequence_key,))).get(sequence_key, 0)
@@ -119,7 +120,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             if not keys and run_key is None:
                 return None, []
             records = (await transaction.get_records(keys) if run_key is None
-                       else await self.read_run_records(transaction, (*keys, run_key)))
+                       else await self.read_run_records(transaction, (*keys, run_key), registrations=registrations))
             stored_run = records.get(run_key) if run_key is not None else None
             run = None if stored_run is None else _decode_step(stored_run.data)
             if run is not None and not isinstance(run, AgentRunRecord):
@@ -179,13 +180,14 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         """Close requests left in flight by a previous execution producer."""
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.interrupt_model_interactions")
+        registrations = await self.read_run_registrations((agent_run_id,))
 
         async def mutate(transaction: StateTransaction) -> None:
             await self.guard_execution_producer(
                 transaction, execution_id=execution_id, producer_generation=producer_generation,
             )
             owner_key = self._agent_run_key(agent_run_id)
-            owner = (await self.read_run_records(transaction, (owner_key,))).get(owner_key)
+            owner = (await self.read_run_records(transaction, (owner_key,), registrations=registrations)).get(owner_key)
             if owner is None:
                 return
             run = _decode_step(owner.data)

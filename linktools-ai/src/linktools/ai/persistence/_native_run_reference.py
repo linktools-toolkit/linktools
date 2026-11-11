@@ -116,11 +116,15 @@ class NativeRunReferences:
         return RunRegistrationReference.from_data(data).project(source)
 
     def remember_prepared(self, transaction: StateTransaction, record: StoredRecord, run: AgentRunRecord,
-                          *, source_receipt: StepWriteReceipt | None = None) -> None:
-        """Retain a source-proven projection only for its exact transaction row."""
+                          *, source_receipt: StepWriteReceipt | None = None,
+                          registration: RunRecord | None = None) -> None:
+        """Retain a projection proven by its receipt or prepared canonical owner."""
         if not is_native_run_reference(record.data):
             return
-        if self.encode(run, source_receipt=source_receipt) != record.data:
+        expected = (self.encode(run, source_receipt=source_receipt)
+                    if source_receipt is not None or registration is None
+                    else RunRegistrationReference.capture(registration, run).to_data())
+        if expected != record.data:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._projections.setdefault(transaction, {})[record.key] = (record.data, _encode_step_envelope(run))
 
