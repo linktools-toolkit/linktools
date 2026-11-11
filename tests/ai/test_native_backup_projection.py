@@ -30,7 +30,7 @@ def _inventory():
     row = dict(SqlStepStore._record_values(run), store_digest=store)
     event = StepEvent(run_id="run", kind="run_started", step_index=1, idempotency_key="start")
     event_row = dict(SqlStepStore._event_values(event), store_digest=store,
-                     key=_replay_digest(store, run.run_id, "start"), outcome=None, run_fields=0,
+                     key_digest=_replay_digest(store, run.run_id, "start"), outcome=None, run_fields=0,
                      body_sha256=_digest(SqlStepStore._started_body(event)),
                      fields_sha256=_digest(SqlStepStore._started_fields_body(event)))
     return run, event, NativeStepBackup(store, (row,), (event_row,), ())

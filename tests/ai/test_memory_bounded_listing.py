@@ -126,7 +126,7 @@ async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
         now,
     )
 
-    stored = repository._stored("memory", value.memory_id, value)
+    stored = repository._stored("memory", (value.memory_id,), value)
 
     assert stored.sort_key == b"memory/z.md"
 
@@ -149,7 +149,7 @@ async def test_memory_repository_accepts_full_harness_path_length() -> None:
         now,
     )
 
-    stored = repository._stored("memory", value.memory_id, value)
+    stored = repository._stored("memory", (value.memory_id,), value)
 
     assert len(logical_path) > 128
     assert stored.sort_key == logical_path.encode("ascii")
@@ -182,7 +182,7 @@ async def test_memory_repository_applies_prefix_before_limit() -> None:
             )
         )
         stored = tuple(
-            repository._stored("memory", value.memory_id, value) for value in values
+            repository._stored("memory", (value.memory_id,), value) for value in values
         )
         await state.mutate(lambda transaction: transaction.insert_records(stored))
 
@@ -258,7 +258,7 @@ async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
     async with Persistence.open("memory-bounded", storage=storage, tenant_id="tenant") as state:
         repository = state.memory.records
         await repository.state_store.mutate(lambda transaction: transaction.insert_records(
-            tuple(repository._stored("memory", value.memory_id, value) for value in values)
+            tuple(repository._stored("memory", (value.memory_id,), value) for value in values)
         ))
     async with Persistence.open("memory-bounded", storage=storage, tenant_id="tenant", read_only=True) as state:
         repository = state.memory.records

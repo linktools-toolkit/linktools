@@ -722,7 +722,8 @@ def test_snapshot_object_refs_reject_malformed_known_fields(codec, change) -> No
 
 @pytest.mark.parametrize("raw", ({"alias_key": "AA", "record_key": "77" * 32},
                                 {"alias_key": "aa" * 1025, "record_key": "77" * 32},
-                                {"alias_key": "aa", "record_key": "77" * 31},
+                                {"alias_key": "aa", "record_key": "77" * 1153},
+                                {"alias_key": "aa", "record_key": ""},
                                 {"alias_key": "aa"}))
 def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None:
     with pytest.raises(AIError) as rejected:
