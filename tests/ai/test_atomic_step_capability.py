@@ -287,7 +287,8 @@ async def test_inherited_run_scopes_preserve_nested_lineage_and_per_run_state(
         }
         for run in runs:
             events = await store.list_events(run_id=run.run_id)
-            assert events[0].idempotency_key == "0:0:run_started:"
+            from linktools.ai.core import deterministic_id
+            assert events[0].idempotency_key == deterministic_id(0, 0, "run_started", None)
             assert events[-1].kind == "run_completed"
             assert await continue_run(store, run_id=run.run_id)
         assert child_capability.compaction_transcript_handle() is None

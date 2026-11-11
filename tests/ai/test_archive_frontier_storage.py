@@ -136,9 +136,9 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         sql, parameters = statements[0]
         async with engine.connect() as connection:
             plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
-        assert any("SEARCH ai_state_records USING INDEX" in row[3] and "sort_key=?" in row[3] for row in plan), plan
+        assert any("SEARCH ai_state_records USING INDEX" in row[3] and "sort_prefix=?" in row[3] for row in plan), plan
         assert not any("SCAN ai_state_records" in row[3] for row in plan), plan
-        assert all("sort_key=?" in row[3] or "key=?" in row[3]
+        assert all("sort_prefix=?" in row[3] or "key_locator=?" in row[3]
                    for row in plan if "SEARCH" in row[3] and "ai_state_records" in row[3]), plan
 
 

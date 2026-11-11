@@ -10,7 +10,7 @@ from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 
 from ..errors import AIError, ErrorCode
-from ..steps import encode_native_replay_key
+from ..steps import encode_native_replay_key, decode_native_replay_key
 from ._native_run_reference import NativeRunReferences, is_native_run_reference
 from ._native_event_reference import NativeEventReferences
 from ._step_backup import NativeStepBackup
@@ -36,7 +36,7 @@ class NativeBackupProjections:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         self._runs = {row["run_id"]: row for row in backup.runs}
         self._events = {(row["run_id"], row["idempotency_key"]): row for row in backup.events
-                        if row["idempotency_key"] is not None}
+                        if decode_native_replay_key(row["idempotency_key"]) is not None}
 
     def validate(self, projected: StoredRecord | StoredFact,
                  physical_data: Mapping[str, object]) -> StoredRecord | StoredFact:

@@ -132,7 +132,7 @@ def test_control_idempotency_keys_are_bounded_utf8(request_type: type) -> None:
         fields.update(wait_id="wait", value={"value": "accepted"})
     elif request_type is TaskEffectResolutionRequest:
         fields.update(expected_fence=1, resolution=TaskEffectResolution("applied", "accepted"))
-    key = "恢" * 85 + "r"
+    key = "恢" * 42 + "rr"
     assert request_type(**fields, idempotency_key=key).idempotency_key == key
     with pytest.raises(AIError) as raised:
         request_type(**fields, idempotency_key=key + "x")
@@ -213,7 +213,7 @@ async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation_id", ("recover:resume", "恢" * 85 + "r"))
+@pytest.mark.parametrize("operation_id", ("recover:resume", "恢" * 42 + "rr"))
 async def test_explicit_recovery_rearms_original_graph(operation_id: str) -> None:
     state = PersistenceStorage.in_memory()
     state = Persistence(state)

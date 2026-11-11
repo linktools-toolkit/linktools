@@ -66,7 +66,7 @@ class _PacketCursor(Cursor):
     ) -> int:
         wire = self.mogrify(query, args) if args is not None else query
         if isinstance(wire, str):
-            wire = wire.encode("utf8")
+            wire = wire.encode("utf8", "surrogateescape")
         assert len(wire) + 1 <= _PACKET_LIMIT
         self.packets.append(bytes(wire))
         if self.duplicate and len(self.packets) == 2:
@@ -162,8 +162,18 @@ async def test_mysql_event_retry_does_not_replay_neighboring_unkeyed_events() ->
                        error="unkeyed-marker")
     keyed = [replace(unkeyed, idempotency_key=str(index), error="x" * (80 * 1024))
              for index in range(64)]
+    class EventSession(_PacketSession):
+        def all(self):
+            from types import SimpleNamespace
+            # The packet fake models the successful replay's existing keyed rows.
+            return [SimpleNamespace(run_id=value.run_id,
+                                    idempotency_key=value.idempotency_key.encode("utf-8"),
+                                    store_key=store.store_key) for value in keyed]
+
+    session = EventSession(cursor)
     try:
-        await store._write_events(_PacketSession(cursor), (unkeyed, *keyed, unkeyed))
+        await store._write_events(session, (unkeyed, *keyed, unkeyed))
+        assert session.selects == 1  # Complete raw identity proof after the conflict.
         assert any(b"ON DUPLICATE KEY UPDATE" in packet for packet in cursor.packets)
         assert sum(packet.count(b"unkeyed-marker") for packet in cursor.packets) == 2
         assert all(len(packet) <= cursor.max_stmt_length for packet in cursor.packets)

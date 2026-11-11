@@ -56,6 +56,7 @@ from ..model.attachments import read_attachment_payload, store_attachment_payloa
 from ._execution_buffer import _ExecutionPayloadBuffer, _ExecutionPayloadCapture
 from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
 from ..core import (
+    deterministic_id,
     CommitPolicy,
     ExecutionEventType,
     ExecutionMode,
@@ -2444,7 +2445,7 @@ class LocalExecutionBackend:
         request = ExecutionRequest(
             user_prompt=await self.restore_user_input(current),
             principal=principal,
-            idempotency_key=f"recovery:{current.execution_id}",
+            idempotency_key=deterministic_id("recovery", current.execution_id),
             memory_scope=current.memory_scope,
             mode=current.mode,
             planning=current.planning,

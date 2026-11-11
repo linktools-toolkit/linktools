@@ -1575,7 +1575,7 @@ class Evaluations:
                 continue
             try:
                 capture = await self._captures.capture_input(execution_id, CaptureInputRequest(principal,
-                    f"evaluation-evidence:{trial.target_experiment_id}:{trial.trial_id}:{execution_id}", "clean"))
+                    deterministic_id(trial.target_experiment_id, "evaluation-evidence", trial.trial_id, execution_id), "clean"))
                 sources[execution_id] = capture_mapping(capture)
                 content = ((await self._captures.read_agent(capture, principal=principal)).prompt
                            if isinstance(capture, AgentInputCaptureRef) else ())

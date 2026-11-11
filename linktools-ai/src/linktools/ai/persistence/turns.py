@@ -62,7 +62,7 @@ class _TurnRecords:
 
     def key(self, scope: str, kind: str, identity: str) -> bytes:
         TurnScopeIdentity.validate_scope(scope)
-        maximum = 393 if kind == "turn_session" else 385 if kind == "turn_request" else 128
+        maximum = 265 if kind == "turn_session" else 257 if kind == "turn_request" else 128
         if not isinstance(identity, str) or not identity or len(identity.encode("utf-8")) > maximum:
             raise ValueError("turn record identity exceeds its owner byte limit")
         return record_key(self.namespace, self.tenant_id, "execution", kind, (scope, identity))

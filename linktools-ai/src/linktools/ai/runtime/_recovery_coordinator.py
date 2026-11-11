@@ -20,6 +20,7 @@ from pydantic_ai.tools import (
 from ..agent import AgentBinding
 from ..capability import PydanticToolControlCapability
 from ..core import (
+    deterministic_id,
     ApprovalStatus,
     ExecutionStatus,
     ExternalCallStatus,
@@ -983,7 +984,7 @@ class _RecoveryCoordinator:
         request = ExecutionRequest(
             user_prompt=await self._port.restore_user_input(execution),
             principal=principal,
-            idempotency_key=f"recovery:{execution.execution_id}",
+            idempotency_key=deterministic_id("recovery", execution.execution_id),
             memory_scope=execution.memory_scope,
             mode=execution.mode,
             planning=execution.planning,

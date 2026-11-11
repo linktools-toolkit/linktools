@@ -492,14 +492,31 @@ async def test_joined_record_reader_rejects_writing_or_locking_select_plans(tmp_
 
 
 @pytest.mark.parametrize("dialect_name", ("sqlite", "postgresql", "mysql"))
-def test_native_join_preserves_full_record_key_bind_budget(dialect_name: str) -> None:
+@pytest.mark.asyncio
+async def test_native_join_batches_full_record_keys_within_bind_budget(dialect_name: str) -> None:
     from sqlalchemy.dialects import mysql, postgresql, sqlite
     from linktools.ai.persistence._native_run_reference import NativeRunReferences
 
     dialect = {"sqlite": sqlite, "postgresql": postgresql, "mysql": mysql}[dialect_name].dialect()
-    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect), store_key=b"state-partition")
+    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect, engine=SimpleNamespace(dialect=dialect)),
+                            store_key=b"state-partition")
     reader = NativeRunReferences(state, namespace="native-run-facts", tenant_id="tenant")
     keys = tuple(index.to_bytes(32, "big") for index in range(998))
-    compiled = reader.statement(keys=keys).compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
-    parameters = compiled.params if compiled.positiontup is None else compiled.positiontup
-    assert len(parameters) == 999
+    batches = []
+
+    class Transaction:
+        def cached_records(self, requested):
+            return {}
+
+        async def read_joined_records(self, context, statement, *, keys=()):
+            compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+            parameters = compiled.params if compiled.positiontup is None else compiled.positiontup
+            assert len(parameters) <= 999
+            sql = str(compiled)
+            assert "ai_state_records.key_locator IN" in sql and "ai_state_records.key IN" in sql
+            batches.append(tuple(keys))
+            return ()
+
+    assert await reader.read(Transaction(), keys=keys) == ()
+    assert tuple(key for batch in batches for key in batch) == keys
+    assert len(batches) == 2

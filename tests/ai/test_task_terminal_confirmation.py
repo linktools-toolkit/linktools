@@ -35,7 +35,7 @@ async def test_control_confirmation_retries_same_receipt_immediately(
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite", object_store=store)
     principal = Principal("actor", "tenant")
     calls = 0
-    operation_id = "控" * 85 + "r"
+    operation_id = "控" * 42 + "rr"
 
     async def body(ctx):
         nonlocal calls

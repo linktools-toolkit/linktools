@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from ..errors import AIError, ErrorCode
+from ..steps import native_store_locator
 from ._step_schema import build_step_sql_metadata
 
 if TYPE_CHECKING:
@@ -232,9 +233,10 @@ async def resolve_targets(
     table = messages if kind == "message" else sequences
     result = {}
     identities = tuple(sorted(set(identities)))
+    locator = native_store_locator(store)
     for offset in range(0, len(identities), 128):
         rows = (await session.execute(select(table.c.sha256, table.c.id).where(
-            table.c.store_key == store, table.c.sha256.in_(identities[offset:offset + 128]),
+            table.c.store_locator == locator, table.c.store_key == store, table.c.sha256.in_(identities[offset:offset + 128]),
         ))).all()
         result.update(rows)
     if required and len(result) != len(identities):
@@ -303,15 +305,17 @@ async def finish_publications(context: "SqlStorageContext", session: "AsyncSessi
 
 
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
+    import hashlib
     import json
-    from sqlalchemy import JSON, LargeBinary, column, select, table
+    from sqlalchemy import JSON, LargeBinary, String, column, select, table
     from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, STORE_KEY_MAX_BYTES, STATE_GROUP_METADATA_KEY, record_key
     pending = session.info.pop(_PENDING, {})
     if group_id is None and any(pending.values()):
-        records = table("ai_state_records", column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()))
+        records = table("ai_state_records", column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()), column("key_locator", String(64)))
+        scope_key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
         wire = await session.scalar(select(records.c.payload_json).where(
             records.c.store_key == STATE_GROUP_METADATA_KEY,
-            records.c.key == record_key("", "", "archive", "archive_scope", ("archive_scope_id",)),
+            records.c.key == scope_key, records.c.key_locator == hashlib.sha256(scope_key).hexdigest(),
         ))
         if wire is not None:
             group_id = json.loads(wire)["archive_scope_id"]
@@ -319,12 +323,13 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
         names = {"record": "ai_state_records", "fact": "ai_state_facts", "operation": "ai_state_operations"}
         key_column = "operation_key" if kind == "operation" else "key"
         owner = table(names[kind], column("id"), column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column(key_column, LargeBinary(RECORD_KEY_MAX_BYTES)),
-                      column("stream_key", LargeBinary(STREAM_KEY_MAX_BYTES)), column("sequence"))
+                      column("stream_key", LargeBinary(STREAM_KEY_MAX_BYTES)), column("sequence"),
+                      column("stream_locator", String(64)), column("operation_locator" if kind == "operation" else "key_locator", String(64)))
         conditions = (owner.c.store_key == store,)
         if kind == "fact":
-            conditions += (owner.c.stream_key == identity[0], owner.c.sequence == identity[1])
+            conditions += (owner.c.stream_key == identity[0], owner.c.stream_locator == hashlib.sha256(identity[0]).hexdigest(), owner.c.sequence == identity[1])
         else:
-            conditions += (owner.c[key_column] == identity[0],)
+            conditions += (owner.c[key_column] == identity[0], owner.c["operation_locator" if kind == "operation" else "key_locator"] == hashlib.sha256(identity[0]).hexdigest())
         sources = select(owner.c.id).where(*conditions)
         targets = []
         for root in roots:
@@ -341,15 +346,16 @@ async def collect_native_content(
     edges, sequences, messages = _tables()
     if not store_keys:
         return
+    locators = tuple(native_store_locator(store) for store in store_keys)
     scoped = or_(
         and_(edges.c.edge_kind == "candidate_sequence", or_(
             exists(select(sequences.c.id).where(
-                sequences.c.id == edges.c.target_id, sequences.c.store_key.in_(tuple(store_keys)),
+                sequences.c.id == edges.c.target_id, sequences.c.store_locator.in_(locators), sequences.c.store_key.in_(tuple(store_keys)),
             )), ~exists(select(sequences.c.id).where(sequences.c.id == edges.c.target_id)),
         )),
         and_(edges.c.edge_kind == "candidate_message", or_(
             exists(select(messages.c.id).where(
-                messages.c.id == edges.c.target_id, messages.c.store_key.in_(tuple(store_keys)),
+                messages.c.id == edges.c.target_id, messages.c.store_locator.in_(locators), messages.c.store_key.in_(tuple(store_keys)),
             )), ~exists(select(messages.c.id).where(messages.c.id == edges.c.target_id)),
         )),
     )
@@ -374,7 +380,7 @@ async def collect_native_content(
                 ))
                 removed = await session.execute(delete(table).where(
                     table.c.id == row["id"], table.c.gc_revision == row["gc_revision"],
-                    table.c.store_key.in_(tuple(store_keys)), ~inbound,
+                    table.c.store_locator.in_(locators), table.c.store_key.in_(tuple(store_keys)), ~inbound,
                 ))
                 if removed.rowcount == 1 and not is_message:
                     source = row["id"]

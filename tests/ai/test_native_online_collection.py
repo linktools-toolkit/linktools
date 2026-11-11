@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from linktools.ai.steps import native_store_locator
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice, SqlStepStore
@@ -73,7 +74,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
             if owner == "fact":
                 await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, "UNKNOWN", payload))
             elif owner == "operation":
-                await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
+                await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 42 + "xx"), b"s" * 32, 1, "UNKNOWN", False, payload))
 
         await state.mutate(publish)
         current = _snapshot("run", 2, "current")
@@ -82,7 +83,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
         assert (await native.read_message_roots((root,)))[0]
         if owner == "operation":
             async def transition(tx):
-                previous = await tx.get_operation(operation_key("steps", "one", "execution", "界" * 85 + "x"))
+                previous = await tx.get_operation(operation_key("steps", "one", "execution", "界" * 42 + "xx"))
                 assert await tx.replace_operation(replace(previous, state="DONE"), expected_state="UNKNOWN")
             await state.mutate(transition)
             assert (await native.read_message_roots((root,)))[0]
@@ -186,7 +187,7 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
                     if kind == "fact":
                         await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, "UNKNOWN", payload))
                     elif kind == "operation":
-                        await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
+                        await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 42 + "xx"), b"s" * 32, 1, "UNKNOWN", False, payload))
                 except AIError:
                     # Catching the direct failure must not allow a partial commit.
                     pass
@@ -541,7 +542,7 @@ async def test_state_owner_consumes_only_live_matching_publication_handoff(
             await state.mutate(write)
             assert await state.read(lambda transaction: transaction.get_record(record.key)) == record
             assert len(queries) == (1 if boundary == "same" else 3 if boundary == "savepoint_rollback" else 2)
-            assert all(parameters[0] == native.store_key and len(parameters) == 2 for _, parameters in queries)
+            assert all(parameters[:2] == (native_store_locator(native.store_key), native.store_key) and len(parameters) == 3 for _, parameters in queries)
             assert (await native.read_message_roots((retained,)))[0]
             if boundary == "other_root":
                 assert await _count(engine, "ai_step_messages") == 1

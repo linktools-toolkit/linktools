@@ -70,8 +70,14 @@ def test_raw_record_references_round_trip_at_bounds_without_repr_exposure() -> N
 
 
 def test_maximum_generated_turn_owner_fits_global_record_bound() -> None:
-    key = record_key("n" * 256, "t" * 128, "execution", "turn_session", ("s" * 256, "r" * 393))
-    assert len(key) == 1074
+    key = record_key("n" * 128, "t" * 128, "execution", "turn_session", ("s" * 128, "r" * 265))
+    assert len(key) == 690
+    prefix = ("n", "t", "execution", "probe")
+    overhead = len(record_key(*prefix, ("path/",)))
+    path = "path/" + "x" * (RECORD_KEY_MAX_BYTES - overhead)
+    assert len(record_key(*prefix, (path,))) == RECORD_KEY_MAX_BYTES
+    with pytest.raises(ValueError):
+        record_key(*prefix, (path + "x",))
 
 
 @pytest.mark.asyncio

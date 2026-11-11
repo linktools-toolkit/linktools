@@ -21,7 +21,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..steps import NativeStepSource, rekey_native_step_sources, encode_native_store_key
+from ..steps import native_store_locator, NativeStepSource, rekey_native_step_sources, encode_native_store_key
 from ._step_backup import NativeStepBackup
 from ._native_backup_projection import NativeBackupProjections
 from ..storage import ObjectRef, ObjectStore, read_object
@@ -1680,7 +1680,9 @@ async def _read_native_messages(
         partitions = sorted({root.store_key for root in roots})
         while True:
             limit = budget.page_size(128)
-            statement = select(*(nodes.c[name] for name in columns)).where(nodes.c.store_key.in_(partitions))
+            statement = select(*(nodes.c[name] for name in columns)).where(
+                nodes.c.store_locator.in_(tuple(native_store_locator(partition) for partition in partitions)),
+                nodes.c.store_key.in_(partitions))
             if after is not None:
                 statement = statement.where(or_(nodes.c.store_key > after[0],
                     and_(nodes.c.store_key == after[0], nodes.c.sha256 > after[1])))
@@ -1706,6 +1708,7 @@ async def _read_native_messages(
                 rows = await transaction.read_sql_rows(store.context, select(
                     table.c.store_key, table.c.sha256, table.c.message,
                     table.c.compression, table.c.raw_size, table.c.payload_json).where(
+                    table.c.store_locator == native_store_locator(partition),
                     table.c.store_key == partition, table.c.sha256.in_(batch)).order_by(table.c.sha256))
                 if len(rows) != len(batch):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1728,9 +1731,16 @@ async def _insert_native_messages(
         for sequences, messages in entries:
             for name, rows in (("ai_step_messages", messages), ("ai_step_sequences", sequences)):
                 table = metadata.tables[name]
-                for start in range(0, len(rows), 128):
-                    await store.context.run_statement(store.context.dialect.insert_ignore_conflict_many(
-                        session, table=table, rows=rows[start:start + 128], index_elements=("store_key", "sha256")))
+                if not rows:
+                    continue
+                # Include the derived locator in the per-row portable bind budget.
+                batch_size = min(128, 999 // (len(rows[0]) + 1))
+                for start in range(0, len(rows), batch_size):
+                    await store.context.run_statement(store.context.dialect.insert_immutable_many(
+                        session, table=table,
+                        rows=[dict(row, store_locator=native_store_locator(row["store_key"]))
+                              for row in rows[start:start + batch_size]],
+                        index_elements=("store_locator", "sha256"), conflict_column="id"))
             from ._native_content_index import index_nodes
             partitions = sorted({row["store_key"] for row in sequences})
             for partition in partitions:
