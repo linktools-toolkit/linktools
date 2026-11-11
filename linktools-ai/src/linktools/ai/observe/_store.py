@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
@@ -18,6 +19,8 @@ from ._model import (
     Observation,
 )
 
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 def _observation_pruned() -> AIError:
     return AIError(
