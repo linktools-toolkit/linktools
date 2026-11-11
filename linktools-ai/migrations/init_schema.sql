@@ -356,3 +356,33 @@ CREATE TABLE ai_native_content_edges (
 	KEY ix_updated_at (updated_at),
 	UNIQUE KEY uk_edge_kind_source_id_target_id (edge_kind, source_id, target_id)
 )ENGINE=InnoDB COMMENT='Rebuildable native content dependencies and reclamation candidates.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
+
+CREATE TABLE ai_trace_events (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_key VARBINARY(128) NOT NULL COMMENT 'Exact Trace store partition identity.',
+	run_id VARBINARY(128) NOT NULL COMMENT 'Original UTF-8 agent run identifier.',
+	sequence BIGINT NOT NULL COMMENT 'Committed position within the run event stream.',
+	event_index BIGINT NOT NULL COMMENT 'Original event index reported by its producer.',
+	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Trace event type.',
+	step_index BIGINT NOT NULL COMMENT 'Original agent graph step index.',
+	timestamp VARCHAR(64) NOT NULL COMMENT 'Original event timestamp encoded as ISO 8601.',
+	order_key VARBINARY(64) NOT NULL COMMENT 'UTC event timestamp and sequence for stable chronological paging.',
+	request_identity VARBINARY(128) NULL COMMENT 'Original model request correlation string; leading zeros remain significant.',
+	request_number VARBINARY(128) NULL COMMENT 'Canonical decimal request number used only for numeric filtering.',
+	message_identity VARBINARY(128) NULL COMMENT 'Original response message correlation string.',
+	tool_call_id VARBINARY(128) NULL COMMENT 'Original UTF-8 tool call identifier.',
+	error_code VARBINARY(128) NULL COMMENT 'Tool error code used to distinguish unresolved external effects.',
+	payload_json JSON NOT NULL COMMENT 'Remaining event fields or a Native source reference; query fields are stored in columns.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	KEY ix_created_at (created_at),
+	KEY ix_store_key_run_id_message_identity (store_key, run_id, message_identity),
+	KEY ix_store_key_run_id_order_key (store_key, run_id, order_key),
+	KEY ix_store_key_run_id_request_identity (store_key, run_id, request_identity),
+	KEY ix_store_key_run_id_request_number (store_key, run_id, request_number),
+	KEY ix_store_key_run_id_step_index (store_key, run_id, step_index),
+	KEY ix_store_key_run_id_tool_call_id (store_key, run_id, tool_call_id),
+	KEY ix_updated_at (updated_at),
+	UNIQUE KEY uk_store_key_run_id_sequence (store_key, run_id, sequence)
+)COMMENT='Immutable Trace events with direct history correlation and chronological queries.' ROW_FORMAT=DYNAMIC CHARSET=utf8mb4 ENGINE=InnoDB COLLATE utf8mb4_bin;

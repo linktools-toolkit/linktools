@@ -4,7 +4,6 @@
 
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import timezone
 from typing import cast
 
 from ..core import BudgetUsage, OperationLedgerInput
@@ -112,7 +111,6 @@ _ALLOWED_RECORD_KINDS = {
             "context_projection",
             "agent_run",
             "model_interaction",
-            "history_association",
         }
     ),
     PersistenceDomain.MEMORY: frozenset({"memory"}),
@@ -149,8 +147,8 @@ _ALLOWED_RECORD_KINDS = {
 _ARCHIVE_RECORD_KINDS = frozenset({
     "transcript_head", "transcript_seek", "context_projection", "agent_run", "model_interaction",
 })
-_ALLOWED_RECORD_KINDS[PersistenceDomain.TRACE] = _ARCHIVE_RECORD_KINDS | {"history_association"}
-_ALLOWED_RECORD_KINDS[PersistenceDomain.EXECUTION] -= _ARCHIVE_RECORD_KINDS | {"history_association"}
+_ALLOWED_RECORD_KINDS[PersistenceDomain.TRACE] = _ARCHIVE_RECORD_KINDS
+_ALLOWED_RECORD_KINDS[PersistenceDomain.EXECUTION] -= _ARCHIVE_RECORD_KINDS
 _ALLOWED_RECORD_KINDS[PersistenceDomain.EXECUTION] |= _TURN_RECORD_KINDS
 
 
@@ -207,6 +205,7 @@ def canonical_snapshot_indexes(
     validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
     _records_by_key, values = _decode_snapshot_records(domain, records)
     _validate_budget_projections(values)
+    _validate_trace_events(domain, facts, values)
     aliases = _canonical_aliases(namespace, tenant_id, domain, values)
     try:
         sequences = _canonical_sequences(
@@ -260,35 +259,9 @@ def validate_snapshot_domain(
             definition_parent = parent_key(namespace, tenant_id, domain.value, "task_node_definition", "graph", (graph.graph_id,))
             definitions = tuple(values[item.key] for item in records if item.kind == "task_node_definition" and item.parent_key == definition_parent)
             summary.validate(states, definitions)
-    associations = _history_association_records(namespace, tenant_id, domain, facts, values)
-    associations_by_owner: dict[bytes | None, dict[bytes, StoredRecord]] = {}
-    for key, association in associations.items():
-        associations_by_owner.setdefault(association.parent_key, {})[key] = association
-    event_counts: dict[bytes, int] = {}
-    for fact in facts:
-        if fact.kind == "step_event":
-            event_counts[fact.owner_key] = max(event_counts.get(fact.owner_key, 0), fact.sequence)
-    if domain is PersistenceDomain.TRACE:
-        covered_owners = {
-            record.parent_key for record in records
-            if record.kind == "history_association" and record.sort_key == b"coverage:event"
-        }
-        if set(event_counts) != covered_owners:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _validate_trace_events(domain, facts, values)
     for record in records:
         if record.kind in _TURN_RECORD_KINDS:
-            continue
-        if record.kind == "history_association":
-            if record.sort_key == b"coverage:event":
-                _validate_history_association_coverage(
-                    namespace, tenant_id, domain, record, records_by_key,
-                    event_counts.get(record.parent_key, 0), values,
-                    associations_by_owner.get(record.parent_key, {}),
-                )
-                continue
-            expected = associations.get(record.key)
-            if expected is None or not _same_physical_identity(record, expected) or record.data != expected.data:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             continue
         try:
             expected = _expected_record(
@@ -453,11 +426,6 @@ def _decode_record(record: StoredRecord) -> object:
         return record
     if record.kind == "session_turn_commit":
         return decode_session_turn_commit(record.data)
-    if record.kind == "history_association":
-        sequence = record.data.get("sequence")
-        if set(record.data) != {"sequence"} or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return dict(record.data)
     target = _RECORD_TYPES.get(record.kind)
     if target is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -484,87 +452,27 @@ def _decode_record(record: StoredRecord) -> object:
     return value
 
 
-def _history_association_records(
-    namespace: str,
-    tenant_id: str,
-    domain: PersistenceDomain,
-    facts: tuple[StoredFact, ...],
-    values: Mapping[bytes, object],
-) -> Mapping[bytes, StoredRecord]:
+def _validate_trace_events(
+    domain: PersistenceDomain, facts: tuple[StoredFact, ...], values: Mapping[bytes, object],
+) -> None:
+    from ._trace_event_store import history_identities
+
     if domain is not PersistenceDomain.TRACE:
-        return {}
-    result: dict[bytes, StoredRecord] = {}
+        return
+    identities: set[tuple[str, str, str]] = set()
     for fact in facts:
         if fact.kind != "step_event":
             continue
         run = values.get(fact.owner_key)
-        if not isinstance(run, AgentRunRecord):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         event = _decode_enveloped_domain(fact.data, StepEvent)
-        if event.agent_run_id != run.agent_run_id:
+        if (not isinstance(run, AgentRunRecord) or event.agent_run_id != run.agent_run_id
+                or fact.state != event.event_type or fact.subject_id is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        locators = (
-            [("trace", str(fact.sequence))]
-            if event.event_type.startswith(("MODEL_REQUEST_", "TOOL_CALL_")) else []
-        )
-        request = event.metadata.get("linktools.ai.model_request_seq")
-        message = event.metadata.get("linktools.ai.message_seq")
-        if event.event_type.startswith("MODEL_REQUEST_") and request is not None:
-            locators.append((f"request:{event.event_type}", request))
-        if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message is not None:
-            locators.append(("response", message))
-        if (event.event_type in {"TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}
-                and event.tool_call_id is not None
-                and not (event.event_type == "TOOL_CALL_FAILED"
-                         and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value)):
-            locators.append((event.event_type, event.tool_call_id))
-        for family, identity in locators:
-            key = record_key(
-                namespace, tenant_id, domain.value, "history_association",
-                (run.agent_run_id, family, identity),
-            )
-            sort_key = (
-                f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{fact.sequence:020d}"
-                if family == "trace" else f"{fact.sequence:020d}"
-            ).encode("ascii")
-            candidate = StoredRecord(
-                key, None, fact.owner_key, "history_association", sort_key,
-                None, 1, None, 0, None, {"sequence": fact.sequence},
-            )
-            previous = result.get(key)
-            if previous is not None and previous != candidate:
+        for family, identity in history_identities(event):
+            key = (run.agent_run_id, family, identity)
+            if key in identities:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result[key] = candidate
-    return result
-
-
-def _validate_history_association_coverage(
-    namespace: str,
-    tenant_id: str,
-    domain: PersistenceDomain,
-    record: StoredRecord,
-    records: Mapping[bytes, StoredRecord],
-    event_count: int,
-    values: Mapping[bytes, object],
-    associations: Mapping[bytes, StoredRecord],
-) -> None:
-    run = values.get(record.parent_key)
-    if domain is not PersistenceDomain.TRACE or not isinstance(run, AgentRunRecord):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    covered = cast(int, record.data["sequence"])
-    expected = StoredRecord(
-        record_key(namespace, tenant_id, domain.value, "history_association",
-                          (run.agent_run_id, "coverage", "event")),
-        None, record.parent_key, "history_association", b"coverage:event",
-        None, record.storage_revision, None, 0, None, {"sequence": covered},
-    )
-    if covered != event_count or record.storage_revision < 1 or not _same_physical_identity(record, expected):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for key, association in associations.items():
-        if association.data["sequence"] <= covered:
-            stored = records.get(key)
-            if stored is None or not _same_physical_identity(stored, association) or stored.data != association.data:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            identities.add(key)
 
 
 def _task_graph_parents(

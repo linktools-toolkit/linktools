@@ -5,7 +5,7 @@
 import hashlib
 import json
 from bisect import bisect_left, bisect_right
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -105,6 +105,12 @@ if TYPE_CHECKING:
 
 
 class _SnapshotReader(Protocol):
+    async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None: ...
+
+    async def scan_trace_events_page(
+        self, *, after: tuple[bytes, int] | None, limit: int,
+    ) -> tuple[tuple[bytes, int], tuple[StoredFact, ...]] | None: ...
+
     async def get_operation(self, key: bytes) -> StoredOperation | None: ...
 
     async def scan_records_page(
@@ -121,12 +127,41 @@ class _SnapshotReader(Protocol):
 
 
 class _StateSnapshotReader:
-    def __init__(self, store: StateStore, *, native_run_scope: tuple[str, str] | None = None) -> None:
+    def __init__(self, store: StateStore, *, native_run_scope: tuple[str, str] | None = None,
+                 trace_scope: tuple[str, str] | None = None) -> None:
+        from ._trace_event_store import SqlTraceEventStore
         self._store = store
+        scope = trace_scope or native_run_scope
+        self._trace_scope = scope
+        self._trace_events = (SqlTraceEventStore(store, namespace=scope[0], tenant_id=scope[1])
+                              if scope is not None and isinstance(store, SqlStateStore) else None)
         self._native_runs = (NativeRunReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
                              if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
         self._native_events = (NativeEventReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
                                if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
+
+    async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None:
+        from ._step_contracts import AgentRunRecord
+        from .state import stream_key
+        if self._trace_scope is None or self._native_runs is None and isinstance(self._store, SqlStateStore):
+            return
+        namespace, tenant_id = self._trace_scope
+        streams = tuple(stream_key(namespace, tenant_id, "trace", "event", (
+            _decode_enveloped_domain(record.data, AgentRunRecord).agent_run_id,
+        )) for record in records if record.kind == "agent_run")
+        counts = {}
+        for fact in facts:
+            if fact.kind == "step_event":
+                counts[fact.stream_key] = counts.get(fact.stream_key, 0) + 1
+                if fact.sequence != counts[fact.stream_key]:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(counts) - set(streams):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for offset in range(0, len(streams), 128):
+            batch = streams[offset:offset + 128]
+            high_water = await self._store.read(lambda tx: tx.get_sequences(batch))
+            if any(high_water.get(key, 0) != counts.get(key, 0) for key in batch):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return await self._store.read(lambda tx: tx.get_operation(key))
@@ -141,9 +176,22 @@ class _StateSnapshotReader:
     async def scan_facts_page(
         self, *, after: FactScanCursor | None, limit: int,
     ) -> tuple[StoredFact, ...]:
-        if self._native_events is not None:
-            return await self._store.read(lambda tx: self._native_events.read(tx, scan=(after, limit)))
         return await self._store.read(lambda tx: tx.scan_facts_page(after=after, limit=limit))
+
+    async def scan_trace_events_page(
+        self, *, after: tuple[bytes, int] | None, limit: int,
+    ) -> tuple[tuple[bytes, int], tuple[StoredFact, ...]] | None:
+        if self._trace_events is None:
+            return None
+        async def read(transaction: StateTransaction):
+            rows = await self._trace_events.scan(transaction, after=after, limit=limit)
+            if not rows:
+                return None
+            facts = tuple(self._trace_events.row_to_fact(row) for row in rows)
+            if self._native_events is not None:
+                facts = await self._native_events.resolve_trace_facts(transaction, facts, rows=rows, full_source=True)
+            return (rows[-1]["run_id"], rows[-1]["sequence"]), facts
+        return await self._store.read(read)
 
     async def scan_operations_page(
         self, *, after: OperationScanCursor | None, limit: int,
@@ -158,7 +206,16 @@ class _CapturedSnapshotReader:
     operations: tuple[StoredOperation, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "facts", tuple(sorted(self.facts, key=lambda value: (value.stream_key, value.sequence))))
         object.__setattr__(self, "records", tuple(sorted(self.records, key=lambda value: (value.kind, value.key))))
+
+    async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None:
+        return None
+
+    async def scan_trace_events_page(
+        self, *, after: tuple[bytes, int] | None, limit: int,
+    ) -> tuple[tuple[bytes, int], tuple[StoredFact, ...]] | None:
+        return None
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         index = bisect_left(self.operations, key, key=lambda value: value.key)
@@ -211,6 +268,8 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
         limit = budget.page_size(page_size)
         page = await reader.scan_records_page(after=cursor, limit=limit)
         for value in page:
+            if value.kind == "history_association":
+                continue
             budget.accept(encode_record(value))
             records.append(value)
         if len(page) < limit:
@@ -228,6 +287,18 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
         if len(page) < limit:
             break
         cursor = FactScanCursor(page[-1].stream_key, page[-1].sequence)
+    trace_cursor = None
+    while True:
+        limit = budget.page_size(page_size)
+        page = await reader.scan_trace_events_page(after=trace_cursor, limit=limit)
+        if page is None:
+            break
+        trace_cursor, events = page
+        for value in events:
+            budget.accept(encode_fact(value))
+            facts.append(value)
+        if len(events) < limit:
+            break
     cursor = None
     while True:
         limit = budget.page_size(page_size)
@@ -238,6 +309,7 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
         if len(page) < limit:
             break
         cursor = OperationScanCursor(page[-1].key)
+    await reader.validate_trace_prefix(records, facts)
     return _CapturedSnapshotReader(tuple(records), tuple(facts), tuple(operations))
 
 
@@ -449,7 +521,7 @@ class RuntimeSnapshotOperations:
                 if (opened is not None and opened[0] in native_checkpoints
                         and PersistenceDomain.TRACE in {domain for domain, _ in members}):
                     trace = self._resources.stores[PersistenceDomain.TRACE]
-                    physical = await _capture_snapshot_reader(_StateSnapshotReader(trace), budget=_SnapshotCaptureBudget(limits))
+                    physical = await _capture_snapshot_reader(_StateSnapshotReader(trace, trace_scope=(self._resources.namespace, self._resources.tenant_id)), budget=_SnapshotCaptureBudget(limits))
                     projected = readers[PersistenceDomain.TRACE]
                     records = {value.key: value for value in projected.records}
                     facts = {(value.stream_key, value.sequence): value for value in projected.facts}
@@ -1359,6 +1431,7 @@ async def restore_snapshot(
                     rekey_native_message_roots(rekey_archive_roots(dict(value) if isinstance(value, Mapping) else value, scope_mapping),
                                               native_mapping if native_groups else {}),
                     native_mapping if native_groups else {})
+            semantic_events = {(value.stream_key, value.sequence): value for value in facts if value.kind == "step_event"}
             if domain is PersistenceDomain.TRACE:
                 records = tuple(native_record_projections.get(value.key, value) for value in records)
                 facts = tuple(native_fact_projections.get((value.stream_key, value.sequence), value) for value in facts)
@@ -1400,7 +1473,31 @@ async def restore_snapshot(
                         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                     for backup in domain_checkpoints.values():
                         await transaction.run_sql(store.context, lambda session: native_restore.restore_backup(session, backup))
-                await _insert_snapshot_values(transaction, records, aliases, facts, operations, sequences)
+                state_facts = facts
+                store = resources.stores[domain]
+                if domain is PersistenceDomain.TRACE and isinstance(store, SqlStateStore):
+                    from ._trace_event_store import SqlTraceEventStore
+                    from ._step_contracts import StepEvent
+                    trace_events = SqlTraceEventStore(store, namespace=resources.namespace, tenant_id=resources.tenant_id)
+                    rows = tuple(trace_events.row_values(value, _decode_enveloped_domain(
+                        semantic_events[(value.stream_key, value.sequence)].data, StepEvent))
+                        for value in facts if value.kind == "step_event")
+                    await trace_events.restore(transaction, rows)
+                    state_facts = tuple(value for value in facts if value.kind != "step_event")
+                await _insert_snapshot_values(transaction, records, aliases, state_facts, operations, sequences)
+                if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
+                    from ._step_archive import StateStepArchive
+                    from ._step_contracts import AgentRunRecord, StepEvent
+                    trace = StateStepArchive(store, object_store=resources.object_stores[domain],
+                                             namespace=resources.namespace, tenant_id=resources.tenant_id,
+                                             runtime_domain=PersistenceDomain.TRACE)
+                    by_run = {}
+                    for fact in facts:
+                        if fact.kind == "step_event":
+                            event = _decode_enveloped_domain(fact.data, StepEvent)
+                            by_run.setdefault(event.agent_run_id, []).append((fact.sequence, event))
+                    for run_id, events in by_run.items():
+                        await trace.index_history_events_in_transaction(transaction, AgentRunRecord(run_id), events)
 
             try:
                 await resources.stores[domain].mutate(publish)

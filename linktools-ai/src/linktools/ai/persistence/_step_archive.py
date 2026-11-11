@@ -71,6 +71,7 @@ from ._history import (
 )
 from ._model_client import capture_client_requests, prepare_client_requests, resolve_client_requests
 from ._native_event_reference import NativeEventReferences
+from ._trace_event_store import SqlTraceEventStore, history_identities
 from ._native_run_reference import NativeRunReferences, is_native_run_reference
 from ._sql import SqlStateStore
 from ._step_store import SqlStepStore, StepWriteReceipt
@@ -78,7 +79,6 @@ from ._message_root import NativeMessageRoot
 from ._plan import PersistenceDomain
 from ._object_router import runtime_object_source_reads
 from ._step_contracts import (
-    TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
     AgentRunHistoryCapture,
     AgentRunRecord,
@@ -1177,6 +1177,8 @@ class StateStepArchive(AgentRunStore):
         self._closed = False
         self._native_runs: NativeRunReferences | None = None
         self._native_events: NativeEventReferences | None = None
+        self._trace_events = (SqlTraceEventStore(store, namespace=namespace, tenant_id=tenant_id)
+                              if runtime_domain is PersistenceDomain.TRACE and isinstance(store, SqlStateStore) else None)
 
     def enable_native_run_reads(self) -> None:
         """Use the co-located provisioned native schema for Trace source joins."""
@@ -1232,6 +1234,11 @@ class StateStepArchive(AgentRunStore):
     async def read_event_facts(self, transaction: StateTransaction, query: FactQuery,
                                *, sequences: Sequence[int] | None = None,
                                full_source: bool = False) -> tuple[StoredFact, ...]:
+        if self._trace_events is not None:
+            rows = await self._trace_events.read_rows(transaction, query, sequences=sequences)
+            facts = tuple(self._trace_events.row_to_fact(row) for row in rows)
+            return (await self._native_events.resolve_trace_facts(transaction, facts, rows=rows, full_source=full_source)
+                    if self._native_events is not None else facts)
         if self._native_events is not None:
             return await self._native_events.read(transaction, query=query, sequences=sequences, full_source=full_source)
         if sequences is not None and isinstance(transaction, FactReader):
@@ -2608,10 +2615,6 @@ class StateStepArchive(AgentRunStore):
             stream = streams[family]
             final = high_waters[stream]
             sequences = tuple(range(final - len(values) + 1, final + 1))
-            if family == "event":
-                await self.index_history_events_in_transaction(
-                    transaction, run, tuple(zip(sequences, events)),
-                )
             fact_kind = {
                 "event": "step_event",
                 "checkpoint": "step_checkpoint",
@@ -2655,7 +2658,14 @@ class StateStepArchive(AgentRunStore):
             expected_storage_revision=owner_record.storage_revision,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await _insert_facts(transaction, tuple(stored_facts))
+        event_facts = tuple(fact for fact in stored_facts if fact.kind == "step_event")
+        if self._trace_events is not None:
+            await self._trace_events.insert(transaction, event_facts, events)
+            await _insert_facts(transaction, tuple(fact for fact in stored_facts if fact.kind != "step_event"))
+        else:
+            await self.index_history_events_in_transaction(transaction, run, tuple(
+                (fact.sequence, event) for fact, event in zip(event_facts, events, strict=True)))
+            await _insert_facts(transaction, tuple(stored_facts))
         for checkpoint in checkpoints:
             await self._history.publish_native_archive(transaction, checkpoint.archive, owner_written=True)
         return created
@@ -3352,6 +3362,8 @@ class StateStepArchive(AgentRunStore):
             interactions = await transaction.list_records(RecordQuery(
                 parent_key=self._agent_run_key(agent_run_id),
             ))
+            if self._trace_events is not None:
+                await self._trace_events.delete(transaction, (agent_run_id,))
             await transaction.delete_records((
                 *(interaction.key for interaction in interactions),
                 self._agent_run_key(agent_run_id),
@@ -3405,12 +3417,16 @@ class StateStepArchive(AgentRunStore):
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             sequence = await transaction.next_sequence(stream)
-            await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, None, kind, data))
-            if isinstance(value, StepEvent):
-                run = _decode_step(owner_record.data)
-                if not isinstance(run, AgentRunRecord):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self.index_history_events_in_transaction(transaction, run, ((sequence, value),))
+            fact = StoredFact(stream, sequence, owner, fact_kind, None, kind, data)
+            if isinstance(value, StepEvent) and self._trace_events is not None:
+                await self._trace_events.insert(transaction, (fact,), (value,))
+            else:
+                if isinstance(value, StepEvent):
+                    run = _decode_step(owner_record.data)
+                    if not isinstance(run, AgentRunRecord):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    await self.index_history_events_in_transaction(transaction, run, ((sequence, value),))
+                await transaction.insert_fact(fact)
 
         await self._mutate(mutate)
 
@@ -3450,17 +3466,10 @@ class StateStepArchive(AgentRunStore):
                 [("trace", str(sequence))]
                 if event.event_type.startswith(("MODEL_REQUEST_", "TOOL_CALL_")) else []
             )
-            request = event.metadata.get("linktools.ai.model_request_seq")
-            message = event.metadata.get("linktools.ai.message_seq")
-            if event.event_type.startswith("MODEL_REQUEST_") and request is not None:
-                locators.append((f"request:{event.event_type}", request))
-            if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message is not None:
-                locators.append(("response", message))
-            if (event.event_type in {"TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}
-                    and event.tool_call_id is not None
-                    and not (event.event_type == "TOOL_CALL_FAILED"
-                             and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value)):
-                locators.append((event.event_type, event.tool_call_id))
+            locators.extend(
+                (f"request:{family}" if family.startswith("MODEL_REQUEST_") else family, identity)
+                for family, identity in history_identities(event)
+            )
             for family, identity in locators:
                 key = self._history_association_key(agent_run_id, family, identity)
                 record = StoredRecord(
@@ -3545,6 +3554,9 @@ class StateStepArchive(AgentRunStore):
     ) -> list[StepEvent]:
         """Resolve bounded immutable event references at a captured event cutoff."""
         require_no_run_history_lock("StateStepArchive.read_history_associations")
+        if self._trace_events is not None:
+            return await self._read_sql_history_associations(agent_run_id=agent_run_id,
+                message_seqs=message_seqs, tool_call_ids=tool_call_ids, event_high_water=event_high_water)
         keys = tuple(dict.fromkeys((
             *(self._history_association_key(agent_run_id, "response", str(value)) for value in message_seqs),
             *(self._history_association_key(agent_run_id, kind, value)
@@ -3607,6 +3619,32 @@ class StateStepArchive(AgentRunStore):
 
         return await self._store.read(read)
 
+    async def _read_sql_history_associations(
+        self, *, agent_run_id: str, message_seqs: Sequence[int],
+        tool_call_ids: Sequence[str], event_high_water: int,
+    ) -> list[StepEvent]:
+        """Resolve response/tool events, then their raw request identities at one cutoff."""
+        require_no_run_history_lock("StateStepArchive.read_history_associations")
+        if not message_seqs and not tool_call_ids:
+            return []
+
+        if self._trace_events is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        async def read(transaction: StateTransaction) -> list[StepEvent]:
+            if await transaction.get_sequence(self._stream(agent_run_id, "event")) < event_high_water:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
+                message_identities=tuple(map(str, message_seqs)), tool_call_ids=tool_call_ids, history=True)
+            selected = {fact.sequence: _decode_step(fact.data) for fact in facts}
+            requests = tuple(dict.fromkeys(event.metadata["linktools.ai.model_request_seq"]
+                for event in selected.values() if "linktools.ai.model_request_seq" in event.metadata))
+            for offset in range(0, len(requests), 32):
+                facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
+                    request_identities=requests[offset:offset + 32], history=True)
+                selected.update((fact.sequence, _decode_step(fact.data)) for fact in facts)
+            return [selected[sequence] for sequence in sorted(selected)]
+        return await self._store.read(read)
+
     async def _read_selected_history_facts(
         self, transaction: StateTransaction, agent_run_id: str, ordered: Sequence[int],
     ) -> dict[int, StoredFact]:
@@ -3640,6 +3678,10 @@ class StateStepArchive(AgentRunStore):
     ) -> list[tuple[int, StepEvent]]:
         """Read immutable events in timestamp order using their derived locators."""
         require_no_run_history_lock("StateStepArchive.list_trace_events")
+        if self._trace_events is not None:
+            return await self._list_sql_trace_events(agent_run_id=agent_run_id, event_high_water=event_high_water,
+                after_timestamp=after_timestamp, after_sequence=after_sequence, limit=limit,
+                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id)
         if event_high_water < 0 or after_sequence < 0 or limit < 1:
             raise AIError(ErrorCode.CURSOR_INVALID)
         after_sort_key = (
@@ -3730,6 +3772,29 @@ class StateStepArchive(AgentRunStore):
                 start = window_end
             return result
 
+        return await self._store.read(read)
+
+    async def _list_sql_trace_events(
+        self, *, agent_run_id: str, event_high_water: int,
+        after_timestamp: datetime | None, after_sequence: int, limit: int,
+        model_request_seq: int | None = None, step_index: int | None = None,
+        tool_call_id: str | None = None,
+    ) -> list[tuple[int, StepEvent]]:
+        """Filter before limiting, with stable timestamp/sequence pagination."""
+        require_no_run_history_lock("StateStepArchive.list_trace_events")
+        if event_high_water < 0 or after_sequence < 0 or limit < 1:
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        if event_high_water == 0:
+            return []
+        if self._trace_events is None:
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        async def read(transaction: StateTransaction) -> list[tuple[int, StepEvent]]:
+            if await transaction.get_sequence(self._stream(agent_run_id, "event")) < event_high_water:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
+                after_timestamp=after_timestamp, after_sequence=after_sequence, limit=limit,
+                model_request_seq=model_request_seq, step_index=step_index, tool_call_id=tool_call_id)
+            return [(fact.sequence, _decode_step(fact.data)) for fact in facts]
         return await self._store.read(read)
 
     async def capture_history(

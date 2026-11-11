@@ -338,46 +338,27 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
             checkpoints=(),
             execution_id="execution",
         )
-        records = await archive.state_store.read(lambda tx: tx.scan_records())
-        facts = await archive.state_store.read(lambda tx: tx.scan_facts())
-        operations = await archive.state_store.read(lambda tx: tx.scan_operations())
+        from linktools.ai.persistence.snapshots import (
+            _StateSnapshotReader, _SnapshotCaptureBudget, _capture_snapshot_reader, SnapshotLimits,
+        )
+        captured = await _capture_snapshot_reader(
+            _StateSnapshotReader(archive.state_store, native_run_scope=("request-lifecycle", "tenant")),
+            budget=_SnapshotCaptureBudget(SnapshotLimits(1000, 2**20)), page_size=1,
+        )
+        records, facts, operations = captured.records, captured.facts, captured.operations
         aliases, sequences = canonical_snapshot_indexes(
             namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=operations,
         )
-        validate_snapshot_domain(
-            namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-            records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
-        )
-        omitted = next(record for record in records
-                       if record.kind == "history_association" and record.sort_key != b"coverage:event")
-        with pytest.raises(AIError) as missing:
-            validate_snapshot_domain(
-                namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=tuple(record for record in records if record.key != omitted.key),
-                aliases=aliases, facts=facts, operations=operations, sequences=sequences,
-            )
-        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-        assert sum(record.kind == "history_association" and record.sort_key != b"coverage:event"
-                   for record in records) == 2
-        with pytest.raises(AIError) as uncovered:
-            validate_snapshot_domain(
-                namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=tuple(record for record in records
-                              if record.key != omitted.key and record.sort_key != b"coverage:event"),
-                aliases=aliases, facts=facts, operations=operations, sequences=sequences,
-            )
-        assert uncovered.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        corrupted = tuple(
-            replace(record, data={"sequence": 2}) if record.kind == "history_association" else record
-            for record in records
-        )
-        with pytest.raises(AIError) as raised:
-            validate_snapshot_domain(
-                namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=corrupted, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
-            )
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        arguments = dict(namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
+                         records=records, aliases=aliases, operations=operations, sequences=sequences)
+        validate_snapshot_domain(**arguments, facts=facts)
+        assert not any(record.kind == "history_association" for record in records)
+        assert len(facts) == 1
+        for corrupted in ((), (replace(facts[0], sequence=2),),
+                          (replace(facts[0], data={"invalid": True}),)):
+            with pytest.raises(AIError) as raised:
+                validate_snapshot_domain(**arguments, facts=corrupted)
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()

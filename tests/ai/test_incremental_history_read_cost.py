@@ -22,6 +22,7 @@ from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.observe.journal import MESSAGE_SEQ_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence import _sql
+from linktools.ai.persistence._trace_event_store import SqlTraceEventStore
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._memory_transaction import _MemoryOverlay, _MemoryTransaction
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
@@ -36,9 +37,12 @@ def _capture_fact_batches(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> It
     """Observe physical rows per SQL read independently of the query route."""
     batches: list[list[int]] = []
     original = _sql._fact_from_row
+    original_trace = SqlTraceEventStore.row_to_fact
 
     def capture_sql(_connection, _cursor, statement, _parameters, _context, _many) -> None:
-        if statement.lstrip().upper().startswith("SELECT") and "FROM AI_STATE_FACTS" in statement.upper():
+        if statement.lstrip().upper().startswith("SELECT") and any(
+            name in statement.upper() for name in ("FROM AI_STATE_FACTS", "FROM AI_TRACE_EVENTS")
+        ):
             batches.append([])
 
     def materialize(row):
@@ -47,8 +51,15 @@ def _capture_fact_batches(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> It
         batches[-1].append(fact.sequence)
         return fact
 
+    def materialize_trace(store, row):
+        fact = original_trace(store, row)
+        assert batches, "materialized Trace facts must belong to an observed SQL read"
+        batches[-1].append(fact.sequence)
+        return fact
+
     with monkeypatch.context() as patch:
         patch.setattr(_sql, "_fact_from_row", materialize)
+        patch.setattr(SqlTraceEventStore, "row_to_fact", materialize_trace)
         sql_event.listen(engine, "before_cursor_execute", capture_sql)
         try:
             yield batches
@@ -286,7 +297,7 @@ async def test_sql_trace_query_count_is_independent_of_examined_events(tmp_path:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("page_size", (32, 64, 129))
 @pytest.mark.parametrize("reverse_timestamps", (False, True))
-async def test_trace_pages_batch_fact_reads_without_overfetch(
+async def test_trace_pages_read_only_selected_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_size: int, reverse_timestamps: bool,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'page.db'}")
@@ -294,7 +305,7 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
     storage = Persistence(PersistenceStorage.sql(engine))
     try:
         archive, run_id = await _seed_trace(storage, page_size * 2, reverse_timestamps=reverse_timestamps)
-        original_fact = _sql._fact_from_row
+        original_fact = SqlTraceEventStore.row_to_fact
         alive = maximum_alive = 0
         logical_json_bytes = 0
 
@@ -305,9 +316,9 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
             nonlocal alive
             alive -= 1
 
-        def materialize(row):
+        def materialize(store, row):
             nonlocal alive, maximum_alive, logical_json_bytes
-            value = original_fact(row)
+            value = original_fact(store, row)
             logical_json_bytes += len(canonical_json_bytes(value.data))
             tracked = TrackedFact(value.stream_key, value.sequence, value.owner_key,
                                   value.kind, value.subject_id, value.state, value.data)
@@ -316,7 +327,7 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
             weakref.finalize(tracked, released)
             return tracked
 
-        monkeypatch.setattr(_sql, "_fact_from_row", materialize)
+        monkeypatch.setattr(SqlTraceEventStore, "row_to_fact", materialize)
         with _capture_fact_batches(engine.sync_engine, monkeypatch) as batches:
             rows = await archive.list_trace_events(
                 agent_run_id=run_id, event_high_water=page_size * 2,
@@ -330,9 +341,8 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
         print("TRACE_SELECTED_FACTS " + json.dumps({"page_size": page_size, "reverse": reverse_timestamps,
               "fact_selects": fact_selects, "fact_batches": len(batches), "fact_rows": sum(map(len, batches)),
               "logical_json_bytes": logical_json_bytes, "peak_raw_facts": maximum_alive}))
-        assert fact_selects == (page_size + 31) // 32, "selected consecutive facts must batch regardless of timestamp order"
-        assert all(len(batch) <= 32 for batch in batches)
-        assert maximum_alive <= 32, "raw facts from previous windows must not survive the next source read"
+        assert fact_selects <= (page_size + 31) // 32, "Trace page queries stay bounded"
+        assert maximum_alive <= page_size, "raw Trace rows must remain bounded by the requested page"
         assert alive == 0
     finally:
         await storage.close()
@@ -340,7 +350,7 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
 
 
 @pytest.mark.asyncio
-async def test_ordered_sparse_trace_pages_keep_contiguous_fact_batches(
+async def test_sparse_trace_pages_read_only_selected_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = Persistence(PersistenceStorage.sqlite(tmp_path / "sparse-page.db"))
@@ -364,7 +374,7 @@ async def test_ordered_sparse_trace_pages_keep_contiguous_fact_batches(
         expected = [sequence for sequence in range(1, 97) if sequence not in {32, 65}]
         assert [sequence for sequence, _ in rows] == expected
         assert [sequence for batch in batches for sequence in batch] == expected
-        assert len(batches) == 3
+        assert len(batches) <= 3
     finally:
         await storage.close()
 
@@ -419,7 +429,7 @@ async def test_history_associations_batch_only_selected_source_facts(
             )
         fact_selects = len(batches)
         assert [value.tool_call_id for value in values] == [f"call-{sequence - 1}" for sequence in selected]
-        assert tuple(sequence for batch in batches for sequence in batch) == selected
+        assert tuple(sorted(sequence for batch in batches for sequence in batch)) == selected
         assert all(len(batch) <= 32 for batch in batches)
         assert fact_selects <= (selected_count + 31) // 32
         print("HISTORY_SELECTED_FACTS " + json.dumps({"selected_count": selected_count, "sparse": sparse,

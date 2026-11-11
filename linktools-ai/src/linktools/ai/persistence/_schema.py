@@ -41,7 +41,7 @@ def build_runtime_sql_metadata(
     *,
     metadata: "MetaData | None" = None,
 ) -> "MetaData":
-    """Build the five canonical Runtime primitive tables."""
+    """Build Runtime primitive tables and the selected business-domain tables."""
     from sqlalchemy import (
         TIMESTAMP,
         BigInteger,
@@ -59,6 +59,11 @@ def build_runtime_sql_metadata(
 
     if metadata is None:
         metadata = MetaData()
+    trace_selected = (PersistenceDomain.TRACE in plan if isinstance(plan, frozenset)
+                      else plan.route(PersistenceDomain.TRACE).retention.value == "durable")
+    if trace_selected:
+        from ._trace_schema import build_trace_sql_metadata
+        build_trace_sql_metadata(metadata=metadata)
     if "ai_state_records" in metadata.tables:
         return metadata
     if isinstance(plan, frozenset) and not plan:
@@ -369,15 +374,16 @@ def required_runtime_sql_tables(plan: PersistencePlan) -> frozenset[str]:
         plan.route(domain).retention.value == "durable" for domain in PersistenceDomain
     ):
         return frozenset()
-    return frozenset(
-        {
-            "ai_state_records",
-            "ai_state_aliases",
-            "ai_state_facts",
-            "ai_state_sequences",
-            "ai_state_operations",
-        }
-    )
+    tables = {
+        "ai_state_records",
+        "ai_state_aliases",
+        "ai_state_facts",
+        "ai_state_sequences",
+        "ai_state_operations",
+    }
+    if plan.route(PersistenceDomain.TRACE).retention.value == "durable":
+        tables.add("ai_trace_events")
+    return frozenset(tables)
 
 
 def _audit() -> tuple[object, object]:

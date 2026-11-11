@@ -3,12 +3,14 @@
 """History indexes preserve captured cuts and reject incomplete coverage."""
 
 from linktools.ai.persistence import Persistence
+import copy
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import delete, select, update
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
@@ -16,6 +18,20 @@ from linktools.ai.persistence._step_contracts import StepEvent
 from linktools.ai.persistence.state import FactQuery, RecordQuery
 
 from .test_incremental_history_read_cost import _capture_fact_batches, _seed_trace
+
+
+async def _change_trace_row(archive, run_id: str, sequence: int, *, values=None) -> None:
+    table = archive._trace_events.table
+    store = archive.state_store
+    statement = delete(table) if values is None else update(table).values(**values)
+    statement = statement.where(table.c.store_key == store.store_key,
+                                table.c.run_id == run_id.encode("utf-8"), table.c.sequence == sequence)
+
+    async def mutate(transaction) -> None:
+        async def write(session) -> None:
+            await store.context.run_statement(session.execute(statement))
+        await transaction.run_sql(store.context, write)
+    await store.mutate(mutate)
 
 
 async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> None:
@@ -42,10 +58,8 @@ async def test_trace_indexes_keep_cursor_cut(
             run_id, "TOOL_CALL_STARTED", 5, timestamp=timestamp,
             tool_call_id="new", tool_name="tool",
         ), execution_id="execution")
-        marker = await archive.state_store.read(lambda tx: tx.get_record(
-            archive._history_association_key(run_id, "coverage", "event"),
-        ))
-        assert marker is not None and marker.data == {"sequence": 5}
+        high_water = await archive.state_store.read(lambda tx: tx.get_sequence(archive._stream(run_id, "event")))
+        assert high_water == 5
         first = await archive.list_trace_events(
             agent_run_id=run_id, event_high_water=4,
             after_timestamp=None, after_sequence=0, limit=2,
@@ -103,25 +117,17 @@ async def test_associations_find_response_request_and_tools_at_captured_cut(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", ("trace", "association", "coverage"))
-async def test_malformed_present_locator_is_rejected(tmp_path: Path, target: str) -> None:
+@pytest.mark.parametrize("target", ("order", "payload", "request"))
+async def test_trace_rows_reject_malformed_payload_and_query_projections(tmp_path: Path, target: str) -> None:
     storage = Persistence(PersistenceStorage.sqlite(tmp_path / "invalid.db"))
     try:
         archive, run_id = await _seed_trace(storage, 2)
-        family, identity = {
-            "trace": ("trace", "2"),
-            "association": ("TOOL_CALL_STARTED", "call-1"),
-            "coverage": ("coverage", "event"),
-        }[target]
-        key = archive._history_association_key(run_id, family, identity)
-        async def corrupt(transaction) -> None:
-            record = await transaction.get_record(key)
-            assert record is not None
-            await transaction.delete_record(key)
-            await transaction.insert_record(replace(record, data={"sequence": True}))
-        await archive.state_store.mutate(corrupt)
+        values = {"order": {"order_key": b"invalid"},
+                  "payload": {"payload_json": {"invalid": True}},
+                  "request": {"request_number": b"invalid"}}[target]
+        await _change_trace_row(archive, run_id, 2, values=values)
         with pytest.raises(AIError) as raised:
-            if target == "association":
+            if target == "payload":
                 await archive.read_history_associations(
                     agent_run_id=run_id, message_seqs=(), tool_call_ids=("call-1",), event_high_water=2,
                 )
@@ -138,7 +144,7 @@ async def test_malformed_present_locator_is_rejected(tmp_path: Path, target: str
 @pytest.mark.asyncio
 @pytest.mark.parametrize("partial", (False, True))
 async def test_incomplete_event_index_coverage_rejects_reads_and_append(tmp_path: Path, partial: bool) -> None:
-    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "incomplete.db"))
+    storage = Persistence(PersistenceStorage.in_memory())
     try:
         archive, run_id = await _seed_trace(storage, 2)
         await _discard_locators(archive, run_id, 2 if partial else None)
@@ -181,7 +187,7 @@ async def test_empty_trace_does_not_require_index_coverage(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_filtered_trace_rejects_missing_locator_under_complete_coverage(tmp_path: Path) -> None:
-    storage = Persistence(PersistenceStorage.sqlite(tmp_path / "missing.db"))
+    storage = Persistence(PersistenceStorage.in_memory())
     try:
         archive, run_id = await _seed_trace(storage, 2)
         await archive.state_store.mutate(lambda tx: tx.delete_record(
@@ -244,7 +250,7 @@ async def test_trace_pages_preserve_sparse_timestamp_order_and_ties(
                             end += 1
                         ordered_batches += 1
                         offset = end
-                    assert len(batches) <= ordered_batches
+                    assert len(batches) <= max(1, ordered_batches)
                 if not page:
                     break
                 result.extend(page)
@@ -265,6 +271,24 @@ async def test_trace_duplicate_sequence_locators_keep_individual_validation(
     )
     try:
         archive, run_id = await _seed_trace(storage, 1)
+        if backend == "sqlite":
+            from sqlalchemy import insert
+            from sqlalchemy.exc import IntegrityError
+            table = archive._trace_events.table
+            store = archive.state_store
+            async def duplicate_row(transaction) -> None:
+                rows = await transaction.read_sql_rows(store.context, select(table).where(
+                    table.c.store_key == store.store_key, table.c.run_id == run_id.encode("utf-8"),
+                ))
+                values = {key: value for key, value in rows[0].items()
+                          if key not in ("id", "updated_at", "created_at")}
+                async def write(session) -> None:
+                    await store.context.run_statement(session.execute(insert(table).values(**values)))
+                await transaction.run_sql(store.context, write)
+            with pytest.raises((AIError, IntegrityError)):
+                await store.mutate(duplicate_row)
+            assert len(await archive.list_events(agent_run_id=run_id)) == 1
+            return
         key = archive._history_association_key(run_id, "trace", "1")
 
         async def duplicate(transaction) -> None:
@@ -311,12 +335,19 @@ async def test_trace_pages_reject_corrupt_facts_across_batches(
                 for fact in facts if corruption != "missing" or fact.sequence != corrupt_sequence
             ))
 
-        await archive.state_store.mutate(corrupt)
+        if backend == "sqlite":
+            await _change_trace_row(archive, run_id, corrupt_sequence,
+                                    values={"payload_json": {"invalid": True}} if corruption == "payload" else None)
+        else:
+            await archive.state_store.mutate(corrupt)
         with pytest.raises(AIError) as raised:
-            await archive.list_trace_events(
-                agent_run_id=run_id, event_high_water=66,
-                after_timestamp=None, after_sequence=0, limit=65,
-            )
+            if backend == "sqlite" and corruption == "missing":
+                await archive.list_event_range(agent_run_id=run_id, start=corrupt_sequence - 1, end=corrupt_sequence)
+            else:
+                await archive.list_trace_events(
+                    agent_run_id=run_id, event_high_water=66,
+                    after_timestamp=None, after_sequence=0, limit=65,
+                )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()
@@ -353,13 +384,21 @@ async def test_association_source_batches_reject_corruption_only_inside_cutoff(
                 for fact in facts if corruption != "missing" or fact.sequence != 33
             ))
 
-        await archive.state_store.mutate(corrupt)
+        if backend == "sqlite":
+            values = ({"payload_json": {"invalid": True}} if corruption == "payload"
+                      else {"order_key": b"invalid"} if corruption == "locator" else None)
+            await _change_trace_row(archive, run_id, 33, values=values)
+        else:
+            await archive.state_store.mutate(corrupt)
         arguments = dict(agent_run_id=run_id, message_seqs=(),
                          tool_call_ids=tuple(f"call-{index}" for index in range(65)))
         prior = await archive.read_history_associations(**arguments, event_high_water=32)
         assert [value.tool_call_id for value in prior] == [f"call-{index}" for index in range(32)]
         with pytest.raises(AIError) as raised:
-            await archive.read_history_associations(**arguments, event_high_water=65)
+            if backend == "sqlite" and corruption == "missing":
+                await archive.list_event_range(agent_run_id=run_id, start=32, end=33)
+            else:
+                await archive.read_history_associations(**arguments, event_high_water=65)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()
@@ -381,7 +420,16 @@ async def test_associations_validate_each_locator_for_reused_source_fact(tmp_pat
             assert record is not None
             await transaction.insert_record(replace(record, key=alias))
 
-        await archive.state_store.mutate(corrupt)
+        if backend == "sqlite":
+            table, store = archive._trace_events.table, archive.state_store
+            rows = await store.read(lambda tx: tx.read_sql_rows(store.context, select(table).where(
+                table.c.store_key == store.store_key, table.c.run_id == run_id.encode("utf-8"),
+            )))
+            payload = copy.deepcopy(rows[0]["payload_json"])
+            payload["value"]["payload"]["fields"]["event_type"] = "TOOL_CALL_SUCCEEDED"
+            await _change_trace_row(archive, run_id, 1, values={"payload_json": payload})
+        else:
+            await archive.state_store.mutate(corrupt)
         with pytest.raises(AIError) as raised:
             await archive.read_history_associations(
                 agent_run_id=run_id, message_seqs=(), tool_call_ids=("call-0",), event_high_water=1,

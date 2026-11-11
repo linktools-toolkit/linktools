@@ -300,25 +300,10 @@ class NativeEventReferences:
         else:
             self._runs_pending.pop(run_id, None)
 
-    def statement(self, *, query: FactQuery | None = None, sequences: Sequence[int] | None = None,
-                  scan: tuple[FactScanCursor | None, int] | None = None,
-                  full_source: bool = False) -> "Select":
-        from ._sql import _key_matches
-        from sqlalchemy import JSON, Text, and_, bindparam, case, cast, func, or_, select, type_coerce
-        from sqlalchemy import literal_column
-        from sqlalchemy.sql import visitors
-        from sqlalchemy.sql.elements import BindParameter
-
-        facts, events, runs = self._facts, self._events, self._runs
-        encoded = type_coerce(facts.c.payload_json, JSON)[()].as_string()
-        payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
-        reference = payload["value"]["payload"]
-        replay = reference["replay"].as_string()
-        if self._state.context.dialect.name == "postgresql":
-            replay = func.convert_to(replay, "UTF8")
-        else:
-            from sqlalchemy import LargeBinary
-            replay = cast(replay, LargeBinary)
+    def _source_columns(self, *, full_source: bool):
+        """Share the source proof and inheritance rules across both readers."""
+        from sqlalchemy import Text, and_, case, cast, or_
+        events, runs = self._events, self._runs
         columns = {field.name: events.c[field.name] for field in fields(NativeStepEvent)
                    if full_source or field.name != "metadata"}
         columns["outcome"] = events.c.outcome
@@ -343,6 +328,105 @@ class NativeEventReferences:
             registration_columns = tuple(runs.c[name].label("registration_" + name) for name in (
                 "store_key", *(field.name for field in fields(RunRecord)),
             ))
+        return columns, registration_columns, inherited, invalid
+
+    async def resolve_trace_facts(
+        self, transaction: StateTransaction, facts: Sequence[StoredFact], *,
+        rows: Sequence[Mapping[str, object]], full_source: bool = False,
+    ) -> tuple[StoredFact, ...]:
+        """Resolve Native owners and verify the caller's original Trace rows."""
+        from datetime import timezone
+        from sqlalchemy import and_, or_, select
+        from .state import SqlStateRowReader
+        if not isinstance(transaction, SqlStateRowReader):
+            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+        if len(rows) != len(facts):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        references = {index: self.decode_reference(fact.data) for index, fact in enumerate(facts)
+                      if isinstance(fact.data.get("value"), Mapping)
+                      and fact.data["value"].get("type") == _TYPE}
+        if not references:
+            return tuple(facts)
+        events, runs = self._events, self._runs
+        columns, registration_columns, inherited, invalid = self._source_columns(full_source=full_source)
+        resolved = {}
+        identities = tuple(dict.fromkeys((ref["run"], encode_native_replay_key(ref["replay"]))
+                                         for ref in references.values()))
+        for offset in range(0, len(identities), 32):
+            predicates = tuple(and_(events.c.run_id == run, events.c.idempotency_key == replay)
+                               for run, replay in identities[offset:offset + 32])
+            statement = select(*(column.label(name) for name, column in columns.items()),
+                *registration_columns, or_(*invalid).label("invalid_native_reference")).select_from(
+                events.outerjoin(runs, and_(
+                    *(() if full_source else (inherited != 0,)),
+                    runs.c.store_locator == events.c.store_locator, runs.c.store_key == events.c.store_key,
+                    runs.c.run_id == events.c.run_id,
+                ))).where(events.c.store_locator == self._store_locator, events.c.store_key == self._store_key,
+                          or_(*predicates))
+            for source_row in await transaction.read_sql_rows(self._state.context, statement):
+                resolved[(source_row["run_id"], source_row["idempotency_key"])] = source_row
+        output = list(facts)
+        for index, reference in references.items():
+            source_row = resolved.get((reference["run"], encode_native_replay_key(reference["replay"])))
+            if source_row is None or source_row["invalid_native_reference"]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                if full_source:
+                    registration = {key.removeprefix("registration_"): entry for key, entry in source_row.items()
+                                    if key.startswith("registration_")}
+                    source = SqlStepStore.decode_started_row(source_row, expected_store_key=self._store_key, run=registration)
+                else:
+                    source = SqlStepStore.decode_started_fields(source_row, expected_store_key=self._store_key)
+                event = self.project(source, event_index=reference["index"])
+                fact, row = facts[index], rows[index]
+                expected = dict(store_key=self._state.store_key, run_id=event.agent_run_id.encode("utf-8"),
+                    sequence=fact.sequence, event_index=event.event_index, kind=event.event_type,
+                    step_index=event.step_index, timestamp=event.timestamp.isoformat(),
+                    order_key=f"{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{fact.sequence:020d}".encode("ascii"),
+                    request_identity=None, request_number=None, message_identity=None, tool_call_id=None, error_code=None)
+                payload = json.loads(row["payload_json"]) if isinstance(row["payload_json"], str) else row["payload_json"]
+                if (any(row[name] != value for name, value in expected.items()) or payload != dict(fact.data)
+                        or (reference["run"], reference["replay"]) != (source.run_id, source.idempotency_key)
+                        or fact.kind != "step_event" or fact.state != event.event_type or fact.subject_id is not None
+                        or fact.owner_key != record_key(self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,))
+                        or fact.stream_key != stream_key(self._namespace, self._tenant_id, "trace", "event", (source.run_id,))):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if full_source:
+                    publication = self._runs_pending.get(reference["run"])
+                    pending = None if publication is None else publication.pending.get(reference["replay"])
+                    if pending is not None:
+                        if isinstance(registration.get("metadata"), str):
+                            registration["metadata"] = json.loads(registration["metadata"])
+                        native_run = _RUN_ADAPTER.validate_python(registration)
+                        expected_run = (pending.prepared.run if pending.receipt is None
+                                        else self._native.run_from_receipt(pending.receipt))
+                        if pending.prepared.events[0] != source or expected_run != native_run:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                output[index] = replace(fact, data=_encode_step_envelope(event))
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return tuple(output)
+
+    def statement(self, *, query: FactQuery | None = None, sequences: Sequence[int] | None = None,
+                  scan: tuple[FactScanCursor | None, int] | None = None,
+                  full_source: bool = False) -> "Select":
+        from ._sql import _key_matches
+        from sqlalchemy import JSON, and_, bindparam, cast, func, or_, select, type_coerce
+        from sqlalchemy import literal_column
+        from sqlalchemy.sql import visitors
+        from sqlalchemy.sql.elements import BindParameter
+
+        facts, events, runs = self._facts, self._events, self._runs
+        encoded = type_coerce(facts.c.payload_json, JSON)[()].as_string()
+        payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
+        reference = payload["value"]["payload"]
+        replay = reference["replay"].as_string()
+        if self._state.context.dialect.name == "postgresql":
+            replay = func.convert_to(replay, "UTF8")
+        else:
+            from sqlalchemy import LargeBinary
+            replay = cast(replay, LargeBinary)
+        columns, registration_columns, inherited, invalid = self._source_columns(full_source=full_source)
         statement = select(facts, *(column.label("native_" + name) for name, column in columns.items()),
                            *registration_columns, or_(*invalid).label("invalid_native_reference")).select_from(
             facts.outerjoin(events, and_(facts.c.kind == "step_event", events.c.store_locator == self._store_locator, events.c.store_key == self._store_key,
