@@ -75,11 +75,12 @@ def test_raw_replay_wire_roundtrips_and_invalid_stored_keys_fail_closed(value: o
     encoded = domain_data(value)
     assert _decode_enveloped_domain(encoded, type(value)) == value
     payload = deepcopy(decode_envelope(encoded).value)
-    assert payload["payload"]["fields"]["idempotency_key"] == KEY
+    fields = payload["payload"] if isinstance(value, IdempotencyTerminalUpdate) else payload["payload"]["fields"]
+    assert fields["idempotency_key"] == KEY
     for key in (KEY + "x", "", "bad\x00key", " key", "\ud800"):
         with pytest.raises(ValueError):
             replace(value, idempotency_key=key)
-        payload["payload"]["fields"]["idempotency_key"] = key
+        fields["idempotency_key"] = key
         if key == "\ud800":
             # Invalid UTF-8 cannot reach a current persisted envelope writer.
             continue
