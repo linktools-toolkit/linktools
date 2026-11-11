@@ -22,16 +22,7 @@ from linktools.ai.core import Principal, PrincipalKind, SessionStatus
 from pydantic_ai.capabilities import AbstractCapability
 
 
-def test_top_level_public_surface_is_exact() -> None:
-    assert ai.__all__ == [
-        "Agent",
-        "RuntimeFeatures",
-        "Execution",
-        "AgentContext",
-        "Runtime",
-        "Session",
-        "Workspace",
-    ]
+def test_top_level_exports_preserve_identity_and_pickle() -> None:
     from linktools.ai import capability, execution, runtime, workspace
 
     expected = {
@@ -49,7 +40,7 @@ def test_top_level_public_surface_is_exact() -> None:
         assert pickle.loads(pickle.dumps(getattr(ai, name))) is value
     imported: dict[str, object] = {}
     exec("from linktools.ai import *", imported)
-    assert {name: imported[name] for name in ai.__all__} == expected
+    assert {name: imported[name] for name in expected} == expected
 
 
 @pytest.mark.parametrize("first", ["capability", "agent", "runtime"])

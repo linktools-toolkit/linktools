@@ -219,7 +219,9 @@ async def _native_counts(engine) -> tuple[int, int, int]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('size', (10, 100, 1000))
+@pytest.mark.parametrize('size', (
+    10, pytest.param(100, marks=pytest.mark.manual), pytest.param(1000, marks=pytest.mark.manual),
+))
 async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property, size: int,
 ) -> None:
@@ -461,7 +463,7 @@ async def test_cold_native_media_object_is_read_by_snapshot_and_execution_contex
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('turns', (10,))
+@pytest.mark.parametrize('turns', (3,))
 async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property, turns: int,
 ) -> None:

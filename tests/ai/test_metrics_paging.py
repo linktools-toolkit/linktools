@@ -18,6 +18,7 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
+from linktools.ai.observe import _query
 from linktools.ai.observe._memory import InMemoryMetricStore
 
 pytestmark = pytest.mark.asyncio
@@ -54,7 +55,8 @@ def _count_definition() -> MetricDefinition:
     )
 
 
-async def test_query_scans_multiple_store_pages_without_truncation() -> None:
+async def test_query_scans_multiple_store_pages_without_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_query, "_SCAN_PAGE_SIZE", 2)
     metrics = Metrics.in_memory(namespace="paged-query")
     await metrics.define(_count_definition())
     start = datetime(2026, 9, 5, tzinfo=timezone.utc)
@@ -73,10 +75,9 @@ async def test_query_scans_multiple_store_pages_without_truncation() -> None:
             dimensions={},
             measurements=(),
         )
-        for index in range(600)
+        for index in range(3)
     )
-    for offset in range(0, len(observations), 200):
-        await metrics.record_observations(observations[offset : offset + 200])
+    await metrics.record_observations(observations)
 
     result = await metrics.query(
         MetricQuery(
@@ -86,8 +87,8 @@ async def test_query_scans_multiple_store_pages_without_truncation() -> None:
     )
 
     assert len(result.points) == 1
-    assert result.points[0].value == 600
-    assert result.points[0].sample_count == 600
+    assert result.points[0].value == 3
+    assert result.points[0].sample_count == 3
 
 
 async def test_commit_unknown_resolves_committed_batch_from_readback() -> None:

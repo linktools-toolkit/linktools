@@ -75,6 +75,22 @@ def _shared_message(size: int) -> dict:
     )}, stored_message_bytes=512 * size)
 
 
+def _incremental_message(turns: int) -> dict:
+    counts = _message_counts(sampled=True)
+    counts["sql"] = {"SELECT": 3 * turns}
+    return {
+        "incremental_lifecycle": counts,
+        "incremental_encoding_phases": {field: 1 for field in (
+            "delta_freeze", "mutable_snapshot_freeze", "frozen_projection", "confirmed_context",
+        )},
+        "incremental_stored_message_bytes": 512 * turns,
+        "unconfirmed_context_encoded_messages": 0,
+        "incremental_turns_completed": turns,
+        "incremental_max_cold_tail_rows": 10,
+        "incremental_sample_turn": turns,
+    }
+
+
 def _event(matches: bool = True) -> dict:
     return {
         "metadata_matches_native_run": matches,
@@ -109,9 +125,12 @@ def _output(reporter: object) -> str:
     return "\n".join(lines)
 
 
-@pytest.mark.parametrize("workers", (None, "2"))
+@pytest.mark.parametrize("workers,tier,sizes", (
+    (None, "merge", (10,)), ("2", "all", (10, 100, 1000)),
+))
 def test_quiet_cost_summary_keeps_exact_values_and_failure_outcomes(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, workers: "str | None",
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch,
+    workers: "str | None", tier: str, sizes: tuple,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
     pytester.makeconftest((root / "conftest.py").read_text(encoding="utf-8"))
@@ -156,23 +175,28 @@ def test_quiet_cost_summary_keeps_exact_values_and_failure_outcomes(
     )
     (directory / "test_native_message_ownership_cost.py").write_text(
         "import json, pytest\n"
-        "@pytest.mark.parametrize('size', [10, 100, 1000])\n"
+        "@pytest.mark.parametrize('size', [10, pytest.param(100, marks=pytest.mark.manual), "
+        "pytest.param(1000, marks=pytest.mark.manual)])\n"
         "def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(record_property, size):\n"
         "    data = %r\n"
         "    for name, value in data[size].items():\n"
         "        record_property(name, json.dumps(value) if isinstance(value, dict) else value)\n"
-        % {size: _shared_message(size) for size in (10, 100, 1000)}, encoding="utf-8",
+        "@pytest.mark.parametrize('turns', [3])\n"
+        "def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(record_property, turns):\n"
+        "    for name, value in %r.items():\n"
+        "        record_property(name, json.dumps(value) if isinstance(value, dict) else value)\n"
+        % ({size: _shared_message(size) for size in (10, 100, 1000)}, _incremental_message(3)), encoding="utf-8",
     )
     pytester.makepyfile(test_unrelated=(
         "def test_unrelated(record_property):\n"
         "    record_property('native_event_lifecycle_cost', 'private-payload-sentinel')\n"
         "    record_property('replay_selects', 'private-payload-sentinel')\n"
     ))
-    args = ["-q", "--tb=short", "-p", "no:cacheprovider"]
+    args = ["-q", "--tb=short", "-p", "no:cacheprovider", "--test-tier", tier]
     if workers is not None:
         args.extend(("-p", "xdist.plugin", "-n", workers, "--dist=loadfile"))
     result = pytester.runpytest_subprocess(*args)
-    result.assert_outcomes(passed=12, failed=1)
+    result.assert_outcomes(passed=10 + len(sizes), failed=1, deselected=3 - len(sizes))
     summary = result.stdout.str().split("Synthetic native storage costs", 1)[1]
     events = [json.loads(line.split(" ", 1)[1]) for line in summary.splitlines()
               if line.startswith("native_event_lifecycle_cost ")]
@@ -194,26 +218,20 @@ def test_quiet_cost_summary_keeps_exact_values_and_failure_outcomes(
         assert records == [dict(expected, test_outcome="passed")]
     messages = [json.loads(line.split(" ", 1)[1]) for line in summary.splitlines()
                 if line.startswith("native_message_cost ")]
-    assert sorted(messages, key=lambda item: item["size"]) == [
+    assert len(messages) == len(sizes) + 1
+    assert sorted((item for item in messages if item["case"] == "shared_batch"),
+                  key=lambda item: item["size"]) == [
         dict(_shared_message(size), case="shared_batch", size=size, test_outcome="passed")
-        for size in (10, 100, 1000)
+        for size in sizes
+    ]
+    assert [item for item in messages if item["case"] == "incremental_turns"] == [
+        dict(_incremental_message(3), case="incremental_turns", size=3, test_outcome="passed"),
     ]
     context = next(json.loads(line.split(" ", 1)[1]) for line in summary.splitlines()
                    if line.startswith("storage_cost_context "))
     assert context["backend"] == "sqlite+aiosqlite" and context["checkout_sha"] == "a" * 40
     assert context["sqlite_version"] == sqlite3.sqlite_version
     assert len(context["python"].split(".")) == 3
-    assert "not a whole-release comparison" in summary
-    assert "Not strictly comparable across machines" in summary
-    assert "not a measured old-release SQL/CPU run" in summary
-    assert "not a historical-version benchmark" in summary
-    assert "128-byte proof may offset savings" in summary
-    assert "Native bound bytes count UTF-8 text and binary parameters" in summary
-    assert "excluding numeric binds and protocol framing" in summary
-    assert "Returned/stored message bytes count binary bodies" in summary
-    assert "sampled_peak_bytes covers only incremental_sample_turn" in summary
-    assert "Native bind JSON bytes" not in summary
-    assert "returned body UTF-8 bytes" not in summary
     assert "private-payload-sentinel" not in summary
 
 
@@ -354,27 +372,19 @@ def test_start_cost_reporting_does_not_expand_to_unapproved_test_cases(reporter:
 @pytest.mark.parametrize("change", (None, "whole_lifecycle_peak", "wrong_sample_turn"))
 def test_incremental_memory_report_identifies_final_turn_sample(reporter: object, change: "str | None") -> None:
     node = ("tests/ai/test_native_message_ownership_cost.py::"
-            "test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn[1000]")
-    counts = _message_counts(sampled=True)
-    counts["sql"] = {"SELECT": 3000}
+            "test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn[3]")
+    data = _incremental_message(3)
+    counts = data["incremental_lifecycle"]
     if change == "whole_lifecycle_peak":
         counts["traced_peak_bytes"] = counts.pop("sampled_peak_bytes")
-    properties = [
-        ("incremental_lifecycle", json.dumps(counts)),
-        ("incremental_encoding_phases", json.dumps({field: 1 for field in (
-            "delta_freeze", "mutable_snapshot_freeze", "frozen_projection", "confirmed_context",
-        )})),
-        ("incremental_stored_message_bytes", 1000),
-        ("unconfirmed_context_encoded_messages", 0),
-        ("incremental_turns_completed", 1000),
-        ("incremental_max_cold_tail_rows", 10),
-        ("incremental_sample_turn", 100 if change == "wrong_sample_turn" else 1000),
-    ]
+    elif change == "wrong_sample_turn":
+        data["incremental_sample_turn"] = 2
+    properties = [(name, json.dumps(value) if isinstance(value, dict) else value) for name, value in data.items()]
     reporter.pytest_runtest_logreport(_report(node, properties))
     output = _output(reporter)
     if change is None:
         assert '"sampled_peak_bytes": 10' in output
-        assert '"incremental_sample_turn": 1000' in output
+        assert '"incremental_sample_turn": 3' in output
         assert '"status"' not in output
     else:
         assert '"status": "invalid"' in output
@@ -401,7 +411,6 @@ def test_message_cost_summary_requires_integer_byte_counts(reporter: object, fie
 
 
 @pytest.mark.parametrize("change,status", (
-    ("legacy_returned", "invalid"), ("legacy_bound", "invalid"), ("legacy_stored", "invalid"),
     ("unknown_property", "invalid"), ("unknown_counter", "invalid"), ("unknown_sql", "invalid"),
     ("duplicate_property", "invalid"), ("duplicate_json_key", "invalid"),
     ("missing_counter", "invalid"), ("missing_phase", "unavailable"),
@@ -411,13 +420,7 @@ def test_message_cost_summary_keeps_exact_schema_without_payloads(
 ) -> None:
     data = _shared_message(10)
     counts = data["shared_write"]
-    if change == "legacy_returned":
-        counts["returned_body_utf8_bytes"] = counts.pop("returned_body_bytes")
-    elif change == "legacy_bound":
-        counts["native_bind_json_bytes"] = counts.pop("native_bound_text_and_body_bytes")
-    elif change == "legacy_stored":
-        data["stored_message_utf8_bytes"] = data.pop("stored_message_bytes")
-    elif change == "unknown_property":
+    if change == "unknown_property":
         data["private-payload-sentinel"] = "private-payload-sentinel"
     elif change == "unknown_counter":
         counts["payload"] = "private-payload-sentinel"

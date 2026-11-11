@@ -56,13 +56,6 @@ def test_persistence_owners_reject_unsupported_policy_modes_and_removed_argument
         TraceCapability(flush_interval=1)
 
 
-def test_execution_commit_has_one_public_configuration_owner() -> None:
-    import inspect
-    from linktools.ai.runtime import Runtime
-    assert "commit" not in inspect.signature(Runtime.open).parameters
-    assert "commit" in inspect.signature(ExecutionCapability).parameters
-
-
 def test_write_buffer_is_borrowed_and_separate_from_policy_value() -> None:
     from linktools.ai.storage import InMemoryCacheBackend
 

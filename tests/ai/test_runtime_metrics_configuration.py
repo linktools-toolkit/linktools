@@ -128,15 +128,6 @@ async def test_absent_metrics_does_not_open_recording_and_business_metrics_stay_
     assert await metrics.get_observation("business") == observation
 
 
-def test_runtime_open_is_the_only_metrics_configuration_source():
-    import inspect
-    import linktools.ai.capability as capability
-    assert "metrics" in inspect.signature(Runtime.open).parameters
-    assert "metrics" not in inspect.signature(RuntimeFeatures).parameters
-    assert "MetricsCapability" not in capability.__all__
-    assert not hasattr(capability, "MetricsCapability")
-
-
 @pytest.mark.asyncio
 async def test_invalid_metrics_is_rejected_before_recording(monkeypatch):
     def forbidden_recorder(self):

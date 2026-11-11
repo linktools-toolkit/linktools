@@ -26,23 +26,30 @@ def package_checks(packages: "typing.Iterable[str]") -> "typing.List[typing.Dict
 
     for package, bundle in bundles.items():
         config = configs[bundle[0]]
-        groups = config.get("pytest", {}).get("groups", {"all": ()})
+        pytest = config.get("pytest", {})
+        groups = pytest.get("groups", {"all": ()})
         for group in groups:
-            checks.append({
-                "package": package,
-                "packages": " ".join(bundle),
-                "group": group,
-                # Core checks exercise every installed package's command entry points.
-                "install": "" if "linktools" in bundle else " ".join(bundle),
-                "name": "%s checks%s" % (
-                    " + ".join(bundle), " (%s)" % group if group != "all" else "",
-                ),
-                "pytest-args": "-n 4 --dist=loadfile --capture=fd -r%s --test-group=%s%s%s" % (
-                    "a" if group != "all" else "s", group,
-                    " --durations=50" if group != "all" else "",
-                    " --tb=long -o verbosity_assertions=2 -o faulthandler_timeout=90" if group != "all" else "",
-                ),
-            })
+            count = pytest.get("shards", {}).get(group, 1)
+            for index in range(1, count + 1):
+                shard = "%d/%d" % (index, count) if count > 1 else ""
+                label = "%s shard %s" % (group, shard) if shard else group
+                checks.append({
+                    "package": package,
+                    "packages": " ".join(bundle),
+                    "group": group,
+                    "shard": shard,
+                    # Core checks exercise every installed package's command entry points.
+                    "install": "" if "linktools" in bundle else " ".join(bundle),
+                    "name": "%s checks%s" % (
+                        " + ".join(bundle), " (%s)" % label if label != "all" else "",
+                    ),
+                    "pytest-args": "-n 4 --dist=loadfile --capture=fd -r%s --test-group=%s%s%s%s" % (
+                        "a" if group != "all" else "s", group,
+                        " --test-shard=" + shard if shard else "",
+                        " --durations=50" if group != "all" else "",
+                        " --tb=long -o verbosity_assertions=2 -o faulthandler_timeout=90" if group != "all" else "",
+                    ),
+                })
     return checks
 
 

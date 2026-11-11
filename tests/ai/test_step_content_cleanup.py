@@ -227,7 +227,8 @@ async def test_cleanup_reads_only_retained_bodies_in_bounded_batches(tmp_path: P
         await store.save_snapshot(_snapshot("run", 1, "orphan"))
         async with engine.connect() as connection:
             orphan_id = await connection.scalar(text("SELECT sha256 FROM ai_step_messages"))
-        current = _snapshot("run", 2, *(f"retained-{index}" for index in range(260)))
+        # One full validation batch and one tail message exercise bounded reads.
+        current = _snapshot("run", 2, *(f"retained-{index}" for index in range(129)))
         await store.save_snapshot(current)
         async with engine.connect() as connection:
             all_ids = set((await connection.execute(text("SELECT sha256 FROM ai_step_messages"))).scalars())
@@ -235,10 +236,10 @@ async def test_cleanup_reads_only_retained_bodies_in_bounded_batches(tmp_path: P
         result = await store.purge_unreferenced_content(exclusive=_Offline())
         event.remove(engine.sync_engine, "before_cursor_execute", observe)
         assert result.deleted_messages == 1
-        assert result.retained_messages == 260
+        assert result.retained_messages == 129
         assert body_batches and max(map(len, body_batches)) <= 128
         assert set.union(*body_batches) == all_ids - {orphan_id}
-        assert sum(map(len, body_batches)) == 260
+        assert sum(map(len, body_batches)) == 129
         assert await store.latest_snapshot(run_id="run") == current
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", observe):
@@ -253,13 +254,16 @@ async def test_cleanup_validates_late_retained_batch_before_deleting(tmp_path: P
     store = SqlStepStore(engine, namespace="steps", tenant_id="one", max_snapshots_per_run=1)
     await store.initialize(local=True)
     deletions = []
+    body_batches = []
 
     def observe(connection, cursor, statement, parameters, context, many):
         if statement.lstrip().upper().startswith("DELETE"):
             deletions.append(statement)
+        if statement.lstrip().upper().startswith("SELECT") and "ai_step_messages.message" in statement:
+            body_batches.append(set(parameters) - {store.store_key, native_store_locator(store.store_key)})
 
     try:
-        current = _snapshot("run", 1, *(f"retained-{index}" for index in range(130)))
+        current = _snapshot("run", 1, *(f"retained-{index}" for index in range(129)))
         await store.save_snapshot(current)
         async with engine.begin() as connection:
             # The highest digest belongs to the last bounded validation batch.
@@ -272,9 +276,11 @@ async def test_cleanup_validates_late_retained_batch_before_deleting(tmp_path: P
         with pytest.raises(AIError) as failure:
             await store.purge_unreferenced_content(exclusive=_Offline())
         assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert len(body_batches) > 1 and body_batches[-1] == {damaged}
+        assert sum(map(len, body_batches)) == 129
         assert not deletions
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 131
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 130
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", observe):
             event.remove(engine.sync_engine, "before_cursor_execute", observe)

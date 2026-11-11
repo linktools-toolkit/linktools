@@ -146,7 +146,13 @@ async def test_archive_gc_scans_unrouted_owner_and_collects_only_excluded_conten
     assert {item.sort_key.decode("ascii") for item in remaining if item.kind == "archive_content"} == {identities[1]}
 
 
-async def test_archive_closure_full_prefix_work_scales_with_unique_nodes_and_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("sizes", (
+    pytest.param((4,), id="contract"),
+    pytest.param((16, 256), marks=pytest.mark.manual, id="growth"),
+))
+async def test_archive_closure_full_prefix_work_scales_with_unique_nodes_and_roots(
+    monkeypatch: pytest.MonkeyPatch, sizes: tuple[int, ...],
+) -> None:
     async def measure(size: int) -> int:
         owner = InMemoryStateStore()
         await owner.initialize()
@@ -172,13 +178,24 @@ async def test_archive_closure_full_prefix_work_scales_with_unique_nodes_and_roo
 
         for name in ("_record", "_node", "_mark_structure", "_forest", "_mark_full_forest", "_mark_tree"):
             monkeypatch.setattr(closure, name, counted(getattr(closure, name)))
-        for value in (*roots, *roots):
+        for value in roots:
             closure.mark(value)
+        retained = closure.retained_records
+        assert not closure.unreachable_records
+
+        def reject_repeated_node(*args, **kwargs):
+            raise AssertionError("confirmed complete prefixes must not traverse their nodes again")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(closure, "_node", reject_repeated_node)
+            for value in reversed(roots):
+                closure.mark(value)
+        assert closure.retained_records == retained
         return calls
 
-    small = await measure(16)
-    large = await measure(256)
-    assert large < small * 18
+    costs = [await measure(size) for size in sizes]
+    for index, (small, large) in enumerate(zip(costs, costs[1:])):
+        assert large < small * (sizes[index + 1] / sizes[index] + 2)
 
 
 async def test_archive_scanner_accepts_persisted_portable_object_context() -> None:

@@ -136,9 +136,9 @@ def test_snapshot_active_lookup_uses_full_partition_index() -> None:
                 "store_locator": native_store_locator(native_store_key("s", "tenant")),
                 "run_id": "run", "step_index": index, "timestamp": "timestamp",
                 "state": "interrupted", "messages": "{}",
-                "idempotency_key": str(index).encode("utf-8"), "pruned": index < 2000,
-            } for index in range(2008)])
-            query = select(snapshots.c.id).where(
+                "idempotency_key": str(index).encode("utf-8"), "pruned": pruned,
+            } for index, pruned in enumerate((False, True, False, False))])
+            query = select(snapshots.c.id, snapshots.c.step_index).where(
                 snapshots.c.store_locator == native_store_locator(native_store_key("s", "tenant")),
                 snapshots.c.store_key == native_store_key("s", "tenant"),
                 snapshots.c.run_id == "run",
@@ -148,7 +148,10 @@ def test_snapshot_active_lookup_uses_full_partition_index() -> None:
             plan = " ".join(row[-1] for row in connection.exec_driver_sql("EXPLAIN QUERY PLAN " + compiled, tuple(query.compile(dialect=engine.dialect).params[name] for name in query.compile(dialect=engine.dialect).positiontup)))
             assert "store_locator=? AND run_id=? AND pruned=?" in plan
             assert "TEMP B-TREE" not in plan
-            assert len(connection.execute(query).all()) == 2
+            first_page = connection.execute(query).all()
+            assert [row.step_index for row in first_page] == [3, 2]
+            next_page = connection.execute(query.where(snapshots.c.id < first_page[-1].id)).all()
+            assert [row.step_index for row in next_page] == [0]
     finally:
         engine.dispose()
 
@@ -279,8 +282,8 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     selected = captured[0]
     assert set(selected.tables) == {
         "ai_state_records", "ai_state_aliases", "ai_state_facts",
-        "ai_state_sequences", "ai_state_operations", "ai_step_messages", "ai_step_sequences", "ai_native_content_edges",
-    } | ({"ai_step_runs", "ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
+        "ai_state_sequences", "ai_state_operations", "ai_step_runs", "ai_step_messages", "ai_step_sequences", "ai_native_content_edges",
+    } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
     def compile_ddl(metadata: MetaData) -> list[str]:
         statements: list[str] = []

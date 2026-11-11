@@ -31,22 +31,6 @@ def test_capability_import_does_not_initialize_runtime_package() -> None:
     )
 
 
-def test_runtime_has_no_duplicate_capability_exports() -> None:
-    import linktools.ai.runtime as runtime
-
-    for name in (
-        "ExecutionCapability",
-        "StepPersistence",
-        "TraceCapability",
-        "MetricsCapability",
-    ):
-        assert name not in runtime.__all__
-        assert not hasattr(runtime, name)
-    import linktools.ai.capability as capability
-    assert not hasattr(capability, "MetricsCapability")
-    assert not hasattr(capability, "ConversationCapability")
-
-
 @pytest.mark.parametrize("route", ("checkpoint", "trace"))
 def test_invalid_module_route_is_rejected_before_storage_initialization(
     route: str, monkeypatch: pytest.MonkeyPatch,

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Test selection and allowlisted synthetic storage cost reporting."""
 
+import hashlib
 import json
 import math
 import os
@@ -22,11 +23,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addoption(
         "--test-tier", choices=("daily", "merge", "all"), default="merge",
-        help="daily: representative regressions; merge: automatic acceptance; all: include manual probes",
+        help="daily: representative regressions; merge: automatic acceptance; all: include local manual probes",
     )
     parser.addoption(
         "--test-group", default="all",
         help="Select a package test group declared in linktools.yml via manage.py check",
+    )
+    parser.addoption(
+        "--test-shard", default=None,
+        help="Select a 1-based file shard INDEX/TOTAL declared for the package test group",
     )
 
 
@@ -126,10 +131,10 @@ class _StorageCostReports:
     _MESSAGE_SOURCE = "tests/ai/test_native_message_ownership_cost.py::"
     _MESSAGE_CASES = {
         "%s[%d]" % (name, size): (case, size)
-        for name, case in (
-            ("test_shared_owner_writes_and_cold_reads_have_linear_message_cost", "shared_batch"),
-            ("test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn", "incremental_turns"),
-        ) for size in (10, 100, 1000)
+        for name, case, sizes in (
+            ("test_shared_owner_writes_and_cold_reads_have_linear_message_cost", "shared_batch", (10, 100, 1000)),
+            ("test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn", "incremental_turns", (3,)),
+        ) for size in sizes
     }
     _MESSAGE_PHASES = {
         "shared_batch": {"shared_write", "cold_read", "checkpoint_publication", "checkpoint_recovery"},
@@ -441,9 +446,24 @@ class _ManifestGroups:
             )
         self.roots = tuple(Path(path) for path in check.get("paths", ()))
         self.fallback = next((name for name, patterns in self.groups.items() if not patterns), None)
+        self.shard = None
+        shard = config.getoption("--test-shard")
+        if shard is not None:
+            if not re.fullmatch(r"[1-9][0-9]*/[1-9][0-9]*", shard):
+                raise pytest.UsageError("Invalid test shard %r; expected INDEX/TOTAL with 1 <= INDEX <= TOTAL" % shard)
+            index, total = (int(part) for part in shard.split("/"))
+            if index > total:
+                raise pytest.UsageError("Invalid test shard %r; INDEX exceeds TOTAL" % shard)
+            expected = check.get("shards", {}).get(self.group, 1)
+            if not self.roots or total != expected:
+                raise pytest.UsageError(
+                    "Test shard %r does not match manifest shard count %s for group %r; use manage.py check"
+                    % (shard, expected, self.group)
+                )
+            self.shard = index - 1, total
 
     def _excludes(self, path: Path, validate: bool = True) -> bool:
-        if not self.groups or not any(root == path or root in path.parents for root in self.roots):
+        if not any(root == path or root in path.parents for root in self.roots):
             return False
         matches = [
             name for name, patterns in self.groups.items()
@@ -455,13 +475,21 @@ class _ManifestGroups:
             # Collect conflicts so item validation still fails, without rejecting support files.
             return False
         family = matches[0] if matches else self.fallback
-        return self.group != "all" and family != self.group
+        if self.group != "all" and family != self.group:
+            return True
+        if self.shard is not None:
+            index, total = self.shard
+            # Keep file ownership independent of collection order, machine paths and Python hash seeds.
+            relative = path.relative_to(Path(__file__).resolve().parent).as_posix()
+            owner = int.from_bytes(hashlib.sha256(relative.encode("utf-8")).digest(), "big") % total
+            return owner != index
+        return False
 
     def _ignore_collect(self, path: Path) -> "typing.Optional[bool]":
         # Filename groups cannot exclude directories, which may contain other families.
         # Older pytest also needs __init__.py to establish package collectors and setup.
         if (
-            self.group != "all" and path.name != "__init__.py"
+            (self.group != "all" or self.shard is not None) and path.name != "__init__.py"
             and path.is_file() and self._excludes(path, validate=False)
         ):
             return True

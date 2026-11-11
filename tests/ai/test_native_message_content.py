@@ -89,9 +89,10 @@ async def test_frozen_append_prepares_only_delta_and_keeps_bounded_knowledge(tmp
     native = SqlStepStore(engine, namespace="messages", tenant_id="one")
     await native.initialize(local=True)
     content = NativeMessageContent(native.storage_context, group_id="execution", store_key=native.store_key,
-                                   max_cached_messages=2, max_cached_bytes=4096, max_cached_nodes=4)
+                                   max_cached_messages=2, max_cached_bytes=4096, max_cached_nodes=1)
     archive, traffic, proof = MessageArchive(), _Traffic(), None
     calls = 0
+    reused_evicted_frontier = False
 
     async def prepare(raw):
         nonlocal calls
@@ -100,7 +101,9 @@ async def test_frozen_append_prepares_only_delta_and_keeps_bounded_knowledge(tmp
 
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     try:
-        for index in range(40):
+        for index in range(5):
+            if proof is not None and any(node.identity not in content._known_nodes for node in proof.frontier):
+                reused_evicted_frontier = True
             prepared = await content.prepare_append(archive.snapshot(_messages(str(index))),
                                                     prepare_payload=prepare, base=proof)
             assert len(prepared.nodes) == 1
@@ -110,13 +113,14 @@ async def test_frozen_append_prepares_only_delta_and_keeps_bounded_knowledge(tmp
             with pytest.raises(ValueError, match="committed proof"):
                 await content.prepare_append(archive.snapshot([]), prepare_payload=prepare, base=receipt)
             proof = content.confirm_committed(receipt)
-        assert calls == 40
+        assert reused_evicted_frontier
+        assert calls == 5
         assert traffic.body_reads == 0
-        assert traffic.submitted_rows == {"ai_step_messages": 40, "ai_step_sequences": 40}
+        assert traffic.submitted_rows == {"ai_step_messages": 5, "ai_step_sequences": 5}
         assert traffic.bound_bytes > 0
         assert len(content._known_messages) <= 2 and content._cache_bytes <= 4096
-        assert len(content._known_nodes) <= 4
-        assert proof.root.count == 40
+        assert len(content._known_nodes) <= 1
+        assert proof.root.count == 5
         content.invalidate()
         with pytest.raises(ValueError, match="committed proof"):
             await content.prepare_append(archive.snapshot([]), prepare_payload=prepare, base=proof)

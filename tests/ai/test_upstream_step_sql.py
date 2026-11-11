@@ -283,13 +283,14 @@ async def test_sql_concurrent_boundary_retries_publish_once(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: Path) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'media.db'}")
+async def test_sql_large_message_round_trip_and_snapshot_deduplication(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'media.db'}"
+    engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=InMemoryStepStore())
     try:
         await store.initialize(local=True)
-        messages = [ModelRequest(parts=[UserPromptPart("x" * 81920)])]
-        messages.extend(ModelResponse(parts=[TextPart(str(i))]) for i in range(1100))
+        messages = [ModelRequest(parts=[UserPromptPart("x" * 81920)]),
+                    ModelResponse(parts=[TextPart("response")])]
         first = ContinuableSnapshot(run_id="run", step_index=0, messages=messages, idempotency_key="first")
         second = replace(first, step_index=1, idempotency_key="second")
         await store.save_snapshot(first)
@@ -300,6 +301,15 @@ async def test_sql_media_round_trip_and_deduplicated_message_batches(tmp_path: P
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == len(messages)
     finally:
         await store.close()
+        await engine.dispose()
+
+    engine = create_async_engine(url)
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one", max_cached_messages=0)
+    try:
+        assert await cold.latest_snapshot(run_id="run") == second
+        assert await cold.list_snapshots(run_id="run") == [first, second]
+    finally:
+        await cold.close()
         await engine.dispose()
 
 

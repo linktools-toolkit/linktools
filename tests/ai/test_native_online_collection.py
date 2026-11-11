@@ -304,20 +304,27 @@ async def test_collection_budget_bounds_deleted_rows_and_preserves_pending_work(
         pass
     monkeypatch.setattr(index, "maintain_native_content", defer)
     try:
-        await store.save_snapshot(_snapshot("run", 1, *(str(i) for i in range(12))))
+        await store.save_snapshot(_snapshot("run", 1, "first", "second"))
         await store.save_snapshot(_snapshot("run", 2))
         before = await _count(engine, "ai_step_messages") + await _count(engine, "ai_step_sequences")
         await store.storage_context.run_mutation(lambda session: index.collect_native_content(
-            store.storage_context, session, store_keys=(store.store_key,), budget=3,
+            store.storage_context, session, store_keys=(store.store_key,), budget=1,
         ))
         after = await _count(engine, "ai_step_messages") + await _count(engine, "ai_step_sequences")
-        assert 0 < before - after <= 3
+        assert 0 < before - after <= 1
+        assert after > 0
         assert await _count(engine, "ai_native_content_edges") > 0
-        for _ in range(12):
+        for _ in range(after):
+            before = after
             await store.storage_context.run_mutation(lambda session: index.collect_native_content(
-                store.storage_context, session, store_keys=(store.store_key,), budget=3,
+                store.storage_context, session, store_keys=(store.store_key,), budget=1,
             ))
+            after = await _count(engine, "ai_step_messages") + await _count(engine, "ai_step_sequences")
+            assert 0 < before - after <= 1
+            if after == 0:
+                break
         assert await _count(engine, "ai_step_messages") == await _count(engine, "ai_step_sequences") == 0
+        assert await _count(engine, "ai_native_content_edges") == 0
         assert await _count(engine, "ai_step_snapshots") == 2
     finally:
         await store.close()

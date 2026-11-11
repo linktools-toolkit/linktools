@@ -103,10 +103,10 @@ async def _inspect_without_payload_reads(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("conversation", (False, True), ids=("independent-executions", "session-history"))
-async def test_execution_payload_runtime_ten_turns_keep_control_writes_compact(
+async def test_execution_payload_runtime_keeps_control_writes_compact_across_turns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conversation: bool,
 ) -> None:
-    prompts = ["first small request", *(f"request-{index}: {_INPUT}" for index in range(1, 10))]
+    prompts = ["first small request", f"second request: {_INPUT}", f"third request: {_INPUT}"]
     calls = 0
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -147,7 +147,7 @@ async def test_execution_payload_runtime_ten_turns_keep_control_writes_compact(
                     assert record.result.output.kind == "inline"
                     assert record.result.output.decode() == {"text": _OUTPUT}
                     await _inspect_without_payload_reads(runtime, execution.execution_id, monkeypatch)
-                assert calls == 10
+                assert calls == len(prompts)
                 for index, execution_id in enumerate(ids):
                     writes = [row for row in bindings if row["fields"]["execution_id"] == execution_id]
                     assert len(writes) > 1, "the real producer must exercise control updates"
@@ -159,7 +159,7 @@ async def test_execution_payload_runtime_ten_turns_keep_control_writes_compact(
                 if conversation:
                     history = (await target.history()).items
                     assert [item.content for item in history if item.item_kind == "user"] == prompts
-                    assert [item.content for item in history if item.item_kind == "assistant"] == [_OUTPUT] * 10
+                    assert [item.content for item in history if item.item_kind == "assistant"] == [_OUTPUT] * len(prompts)
 
     # A fresh Runtime cannot satisfy inspect or result reads from the producer's caches.
     async with Persistence.open("execution-payload-runtime", storage=PersistenceStorage.sqlite(database)) as state:
@@ -170,7 +170,7 @@ async def test_execution_payload_runtime_ten_turns_keep_control_writes_compact(
                 assert result.output == {"text": _OUTPUT}
             if conversation:
                 assert (await runtime.agents.get().session("session").history()).items == history
-            assert calls == 10
+            assert calls == len(prompts)
 
 
 @pytest.mark.asyncio

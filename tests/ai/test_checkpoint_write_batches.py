@@ -99,11 +99,13 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
                 if native_messages is not None:
                     archive.transcript_repository.bind_native_message_store(native_messages)
             archives.append(archive)
-        messages = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(133)]
+        # Cross the 128-message seek boundary, then append and replay checkpoints.
+        initial_message_count = 129
+        messages = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(initial_message_count + 3)]
         checkpoints = (
-            AgentRunCheckpoint("run", 1, messages[:130], transcript_message_count_before=0),
-            AgentRunCheckpoint("run", 2, messages, transcript_message_count_before=130),
-            AgentRunCheckpoint("run", 3, messages, transcript_message_count_before=133),
+            AgentRunCheckpoint("run", 1, messages[:initial_message_count], transcript_message_count_before=0),
+            AgentRunCheckpoint("run", 2, messages, transcript_message_count_before=initial_message_count),
+            AgentRunCheckpoint("run", 3, messages, transcript_message_count_before=len(messages)),
         )
         run = AgentRunRecord("run")
         counts = [Counter(), Counter()]
