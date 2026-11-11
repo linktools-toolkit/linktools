@@ -217,7 +217,10 @@ def test_fixed_frontier_compiles_for_supported_server_dialects_with_bounded_para
             assert "WITH RECURSIVE" not in str(compiled).upper()
             sql = str(compiled).upper()
             assert "NOT IN" not in sql
-            if dialect.name == "postgresql":
-                assert "CONVERT_TO(" in sql
-            else:
-                assert " AS BINARY)" in sql if dialect.name == "mysql" else " AS BLOB)" in sql
+            identities = statement.get_final_froms()[0].left
+            assert identities.c.identity.type.dialect_impl(dialect).python_type is bytes
+            if nodes:
+                if dialect.name == "postgresql":
+                    assert "CONVERT_TO(" in sql
+                else:
+                    assert " AS BINARY)" in sql if dialect.name == "mysql" else " AS BLOB)" in sql

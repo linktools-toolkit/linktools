@@ -294,10 +294,10 @@ async def test_fixture_asset_preflight_is_authorized_and_precedes_admission(auth
 async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_original_on_failure(path: str) -> None:
     from types import SimpleNamespace
 
-    from linktools.ai.core import ExternalCallStatus
+    from linktools.ai.core import ExternalCallStatus, StopReason, UsageMetrics
     from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
     from linktools.ai.persistence.contracts import (
-        PendingDeferredCall, PendingToolContinuation, ExecutionRecoveryDetail, ExecutionRecoveryState,
+        PendingDeferredCall, PendingToolContinuation, ExecutionRecoveryDetail, ExecutionRecoveryState, ResultRecord,
     )
     from linktools.ai.storage import StoredPayload
 
@@ -316,6 +316,21 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
     pending = (PendingToolContinuation("run", calls=(
         PendingDeferredCall("call", "lookup", StoredPayload.inline_json({})),
     )) if state is ExecutionRecoveryState.WAITING else None)
+    if path != "terminal_cleanup":
+        accepted = ExecutionRecord(
+            execution_id=accepted.execution_id, session_id=None, parent_execution_id=None,
+            root_execution_id=accepted.execution_id, previous_execution_id=None, fork_base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN, status=status, revision=0, event_seq=0,
+            agent_run_seq=0 if state is ExecutionRecoveryState.ADMITTED else 1,
+            error_code=None, safe_error_details={}, created_at=accepted.created_at, updated_at=accepted.created_at,
+            mode=accepted.mode, planning=accepted.planning, thinking=accepted.thinking, binding=accepted.binding,
+            principal_id=accepted.principal_id, principal_kind=accepted.principal_kind,
+            stored_user_input=accepted.stored_user_input, native_step_source=accepted.native_step_source,
+            restart_checkpoints=accepted.restart_checkpoints, durable_trace=accepted.durable_trace,
+            started_at=None if status is ExecutionStatus.PENDING_START else accepted.created_at,
+            recovery=ExecutionRecoveryDetail(agent_run_id=None if state is ExecutionRecoveryState.ADMITTED else "run",
+                                             pending_tools=pending),
+        )
     execution = replace(accepted, session_id=None, status=status, tool_response_ref=_reference(),
                         recovery=ExecutionRecoveryDetail(agent_run_id=None if state is ExecutionRecoveryState.ADMITTED else "run",
                                                          pending_tools=pending))
@@ -372,7 +387,9 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
 
         async def _complete_recovered_cancel(self, *args: object, **kwargs: object) -> ExecutionRecord:
             mutations.append("cancel")
-            return replace(execution, status=ExecutionStatus.CANCELLED)
+            return replace(execution, status=ExecutionStatus.CANCELLED).finalize_terminal(
+                ResultRecord(None, StopReason.CANCELLED, UsageMetrics(), execution.updated_at),
+            )
 
         async def _finish_execution_recovery(self, value: ExecutionRecord) -> None:
             mutations.append("terminal-cleanup")
