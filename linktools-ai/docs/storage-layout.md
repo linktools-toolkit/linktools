@@ -57,7 +57,7 @@ production DBA approval or a deployed migration.
 | `ai_native_content_edges` | Rebuildable dependency and collection queue metadata, not another durable semantic owner. |
 
 Identity, sequence, state, lease, CAS, revision, ordering and time columns are not
-compressed. Snapshot pruning uses the `(store_digest, run_id, pruned)` index and
+compressed. Snapshot pruning uses the `(store_key, run_id, pruned)` index and
 an equality predicate compatible with MySQL 5.7 index selection.
 
 ## State subject identities
@@ -102,16 +102,17 @@ bytes, preserving the generated request-backed session identity. At maximum
 namespace256, tenant128 and scope256, a turn session key occupies 1074 bytes.
 
 SQL uses MySQL `VARBINARY(1152)`, PostgreSQL `BYTEA` and SQLite `BLOB` for
-record references. Default sort is the raw key; timestamp sorts validate the
-complete eight-byte prefix plus key against the same 1152-byte sort limit.
-Parent references also permit 1152 bytes. The two-column parent/sort index
-therefore has at most 2304 field bytes, below ordinary backend index limits.
+record references. Default sort is the raw key; timestamp sorts prepend eight
+bytes without imposing a separate identity bound on ordering data. Parent
+references also permit 1152 bytes. Sort indexes follow the backend limits
+and MySQL prefix policy described below.
 The record unique index has at most 1920 MySQL declared key bytes with the
-current store key. Independent native Step digests retain their own contracts.
+current store key. Native Step byte-integrity and anonymous-content checksums
+retain their separate contracts, not hashed store or run locators.
 
 Current wire record references are canonical lowercase hex decoded back to
-bytes. The record cursor frames sort and key with two-byte lengths before one
-canonical URL-safe Base64 position encoding. Cache batch digests frame each
+bytes. The record cursor frames the bounded key with a two-byte length, followed
+by the complete sort bytes, before canonical URL-safe Base64 encoding. Cache batch digests frame each
 sorted, deduplicated key by its length, keeping variable component boundaries
 and single-record/batch families distinct. Raw record, target, owner and
 cursor addresses are omitted from object representations.
@@ -134,7 +135,8 @@ capability maximum of670 bytes and a dynamic maximum of664 bytes. Generic
 custom binary partitions need not parse as these tuples but must obey the
 complete768-byte bound. No normalization, hash, fallback, shadow lookup or
 schema version bump is used. All families reopen at the exact same bytes.
-Group archive scope UUIDs and native Step/message store digests are unchanged.
+Archive group UUIDs remain separate from the raw Archive scope (at most 403
+bytes) and raw Native Step store scope (at most 402 bytes).
 
 All five State table columns are MySQL `VARBINARY(768)`, PostgreSQL `BYTEA`
 and SQLite `BLOB`, never hex text. Current SQL readers validate the same raw
@@ -143,14 +145,16 @@ bytes without another query; native ownership edges remain existing row IDs.
 The record cache's string transport uses an injective hex rendering of the
 same raw address. Raw partition names are not included in mutation log context.
 
-Store plus record or operation consumes at most1920 index field bytes; store
-plus alias1792; store plus stream and sequence2056; store plus kind and sort2048.
-All indexes have at most three physical columns. Global scope/parent indexes
-remain unchanged because their addresses already contain complete scope.
-These budgets fit MySQL3072 and ordinary PostgreSQL approximately2704-byte
-B-tree tuples with overhead, not every PostgreSQL page-size configuration.
-Direct tuples can exceed the former64 SQL hex bytes, so this is not a claim
-of universal byte savings or measured latency improvement.
+Store plus record or operation consumes at most 1920 index field bytes; store
+plus alias 1792; store plus stream and sequence 2056. These bounded identity
+budgets fit MySQL's 3072-byte limit and ordinary PostgreSQL approximately
+2704-byte B-tree tuples with overhead, not every PostgreSQL page configuration.
+The MySQL store/kind/sort index declares 768 + 128 + 128 = 1024 field bytes
+using its nonunique sort prefix. PostgreSQL indexes the complete sort bytes,
+which have no application-level maximum, so that index has no fixed global
+field budget. All indexes have at most three physical columns. Direct tuples
+can exceed the former 64 SQL hex bytes, so this is not a claim of universal
+byte savings or measured latency improvement.
 
 ## State operation addresses
 
@@ -260,52 +264,66 @@ namespace/tenant pair, representative sizes at these component budgets are:
 
 Other direct resource relations use the same framing with their existing owner
 components; custom primitive relations are bounded by the complete 1024-byte
-limit. The existing memory-scope digest is a component, not recomputed as a
-second relation hash. Reused record parents are the full binary record
-references described above. ContentArchive's independent scope digest remains
-32 bytes. Store identities and native Step scopes retain their separate digest contracts.
+limit. Memory's query scope instead hashes the complete validated tuple once to
+32 raw SHA-256 bytes: namespace, tenant, memory domain/kind, scope role,
+persistent/transient discriminator, raw memory scope and optional execution ID.
+Writers, list/capture queries and snapshot reconstruction use the same projection;
+the DTO retains both raw owner fields. No inner owner hash, mapping or extra SQL
+is introduced. The compact composite scope leaves more index space for full
+paths: its 32 bytes do not exceed the previous 64-byte hex scope. This is a
+physical query-scope tradeoff, not a second logical identity. It does not promise
+the same capacity for every historical PostgreSQL row, because the separate
+store/kind/sort index and PostgreSQL's real tuple limits still apply.
+Reused record parents are the full binary record references described above.
+ContentArchive scope, State store and Native Step store addresses are raw tuples
+bounded to 403, 768 and 402 bytes respectively. They are not content checksums;
+body integrity and anonymous-content hashes retain their separate contracts.
 
 SQL binds raw bytes as MySQL `VARBINARY(1024)` for scopes and
 `VARBINARY(1152)` for parents, PostgreSQL `BYTEA` or SQLite `BLOB`.
 `(scope_key, sort_key)` and `(parent_key, sort_key)` remain two-column
-indexes, with complete field payloads of 2176 and 2304 bytes. Allowing
-40 bytes for headers, alignment and tuple overhead still fits PostgreSQL's
-ordinary approximately 2704-byte B-tree limit and MySQL's 3072-byte limit.
+indexes. MySQL indexes the complete relation and a nonunique 128-byte sort
+prefix. PostgreSQL and SQLite index the complete sort value; PostgreSQL's
+B-tree tuple size limit still applies to the actual indexed bytes. The generic
+sort contract does not guarantee that arbitrarily long values fit that index.
 `(scope_key, subject_id)` has at most 1152 field bytes. SQL still filters the
-store partition; no new mapping, SQL round trip, index prefix or compatibility
-encoding is introduced. Portable wire keeps canonical lowercase hex for these
-bounded binary values, with the existing format version. Snapshot readers
-recompute direct keys against the manifest scope rather than the destination.
+store partition; no mapping or SQL round trip is introduced. Portable wire
+keeps canonical lowercase hex for bounded relation values, with the existing
+format version. Snapshot readers recompute direct keys against the manifest
+scope rather than the destination.
 
 ## State record ordering
 
 `StoredRecord.sort_key`, query prefixes and pagination boundaries are nonempty
-binary values of at most 1152 bytes, including every prefix. Writers and readers
-validate the same bound. Ordinary record order reuses the complete record key directly. Chronological
-order adds eight big-endian epoch-microsecond bytes before that key; the complete
-value must still fit the 1152-byte sort bound. Explicit path, sequence and trace
-orders retain their ASCII semantics as ASCII bytes. No hex or Base64 encoding
-participates in SQL ordering.
+binary ordering data, not bounded resource identities. Ordinary record order
+reuses the complete record key directly. Chronological order adds eight
+big-endian epoch-microsecond bytes before that key. Explicit path, sequence
+and trace orders retain their ASCII semantics as ASCII bytes. Memory paths
+retain their 200-character ASCII segment rule with no aggregate path limit.
+No hex or Base64 encoding participates in SQL ordering.
 
-State uses `VARBINARY(1152)` on MySQL, `BYTEA` on PostgreSQL and `BLOB` on SQLite.
-Its indexes cover the full sort value, never a text or binary prefix. The
-three-column sort index is `(store_key, kind, sort_key)`. MySQL's declared
-field budget is 768 + 128 + 1152 = 2048 bytes, below 3072 even allowing 32 bytes
-for variable-length and record overhead. PostgreSQL's maximum actual field
-payload is 768 + 128 + 1152 = 2048 bytes; a conservative 40-byte allowance for
-field headers, alignment and the index tuple remains below its approximately
-2704-byte B-tree entry limit. The wider two-column relation indexes have the
-2176-byte field budget described above. These are size calculations, not
-measurements on a deployed server.
+State uses `LONGBLOB` on MySQL, `BYTEA` on PostgreSQL and `BLOB` on SQLite.
+MySQL's nonunique sort indexes use a 128-byte prefix without truncating stored
+values or query bounds. Blob ordering remains subject to the server's
+`max_sort_length`; deployments must account for that setting when ordering
+long paths, as with the previous text column. The three-column sort index is
+`(store_key, kind, sort_key)`, with at most 768 + 128 + 128 = 1024 declared
+MySQL key bytes. Parent/sort and scope/sort indexes have at most 1280 and
+1152 declared key bytes respectively. Record, operation and other identity
+bounds and their full unique indexes are unchanged. PostgreSQL retains full
+B-tree indexes, so its deployed page size and actual index tuple size constrain
+accepted values. No unlimited PostgreSQL path support is implied by the
+unbounded application-level sort contract or by DDL compilation.
 
 Binary prefixes use a lexicographic lower bound and their least upper bound;
 an all-`ff` prefix has no finite upper bound. Pagination uses `(sort, record
 key)`, or strictly greater sort when the query omits an after-key. There is no
 fabricated maximum record key. Record cursor transport contains a two-byte
-sort length, raw sort, two-byte key length and raw key, then canonical unpadded
-URL-safe Base64. Current 32-byte keys give at most 1188 framed bytes and 1584
-encoded characters. Portable record JSON transports sort bytes as Base64 and
-returns raw bytes before comparison. The current format version is unchanged.
+key length, raw key and the remaining complete sort bytes, then canonical
+unpadded URL-safe Base64. Only the already bounded identity uses fixed-width
+length framing. Portable record JSON transports sort bytes as canonical
+Base64 and returns raw bytes before comparison. The current format version
+is unchanged, with no obsolete reader or fallback encoding.
 
 ## Native Step identities and digest ownership
 
@@ -317,33 +335,34 @@ truncation or digest substitution. The same limit applies to writes, lookups,
 Runtime projections and backup restore. Generated Runtime run/conversation IDs
 are 66 ASCII bytes; native SDK UUIDs also fit this contract.
 
-The original IDs are indexed directly. Runs are unique by `(store_digest,
-run_id)`; lineage indexes use `(store_digest, conversation_id)` and `(store_digest,
-parent_run_id)`. Step tables and native Trace run references do not store another
-run-identity hash. Rejecting edge whitespace keeps these IDs exact under MySQL
-PAD SPACE comparisons too.
+The original IDs are indexed directly. Runs are unique by `(store_key,
+run_id)`; lineage indexes use `(store_key, conversation_id)` and `(store_key,
+parent_run_id)`. Native `store_key` is the exact namespace/tenant tuple of at
+most 402 raw bytes, not a digest. Events and snapshots retain the original
+UTF-8 replay key as at most 512 binary bytes; `NULL` appends a distinct unkeyed
+occurrence. Their unique key is `(store_key, run_id, idempotency_key)`.
+Rejecting edge whitespace keeps run IDs exact under MySQL PAD SPACE comparisons.
 
-SQL declares the IDs as `VARCHAR(128)`, whose width counts characters rather than
-UTF-8 bytes; application validation enforces the tighter byte bound on every
-backend, including SQLite. With `utf8mb4`, a scope `CHAR(64)` plus an ID declares
-768 key bytes, or 769 with the snapshot boolean. These fit InnoDB's 3072-byte
-large-prefix budget, not its legacy 767-byte configuration. Existing Runtime
-indexes already exceed 767 bytes, including `(store_key, kind, sort_key)`.
-Provision MySQL 5.7 with the applicable large-prefix row format/settings; this
-contract adds no fallback for legacy index settings. The same bounded IDs stay
-well below PostgreSQL's ordinary B-tree entry limit. DDL compilation is distinct
-from validation on a deployed database server.
+SQL declares run IDs as `VARCHAR(128)`, whose width counts characters rather
+than UTF-8 bytes; application validation enforces the tighter byte bound on
+every backend, including SQLite. With `utf8mb4`, the raw 402-byte store plus
+an ID declares 914 MySQL key bytes, or 915 with the snapshot boolean. Adding
+a full replay key gives 1426 bytes. These fit InnoDB's 3072-byte large-prefix
+budget, not its legacy 767-byte configuration. Provision MySQL 5.7 with the
+applicable large-prefix row format/settings; this contract adds no fallback
+for legacy settings. PostgreSQL's actual tuple limits still apply. DDL
+compilation is distinct from validation on a deployed database server.
 
-| Table | Retained digest or content reference | Contract |
+| Table | Address, checksum or content reference | Contract |
 | --- | --- | --- |
-| `ai_step_runs` | `store_digest` | Composite namespace/tenant partition. The original run and lineage IDs are direct lookup keys. |
-| `ai_step_events` | `store_digest`, `key_digest` | Partition and a unique composite of the original run ID with its replay key, or a distinct unkeyed append occurrence. |
+| `ai_step_runs` | `store_key`, original run and lineage IDs | Direct scoped lookup keys, without a second run-identity hash. |
+| `ai_step_events` | `store_key`, `run_id`, `idempotency_key` | Direct scoped replay identity; NULL replay keys append distinct occurrences. |
 | `ai_step_events` | `body_sha256`, `fields_sha256` | Managed lifecycle source integrity. Full recovery authenticates metadata too; metadata-free Trace projections authenticate their fields without reading the large metadata body. |
-| `ai_step_snapshots` | `store_digest`, `key_digest` | Partition and retained composite replay identity. Snapshot pruning uses the original run ID. |
+| `ai_step_snapshots` | `store_key`, `run_id`, `idempotency_key` | Direct scoped replay identity. Snapshot pruning uses the original run ID. |
 | `ai_step_snapshots` | `sequence_root` | The sole stored root of the immutable message sequence. The bounded descriptor stores its count and checkpoint control, not another root. |
-| `ai_step_messages` | `store_digest`, `sha256` | Scoped anonymous content addressing and integrity of original uncompressed canonical message bytes. |
-| `ai_step_sequences` | `store_digest`, `sha256`, `message_sha256`, `left_sha256`, `right_sha256`, `next_sha256` | Scoped immutable ordered sequence addressing and references to its content, subtrees and next forest. Repeated messages remain distinct occurrences. |
-| `ai_native_content_edges` | None | Physical row IDs and publication/collection revisions form a rebuildable index, not another hashed content identity. |
+| `ai_step_messages` | `store_key`, `sha256` | Raw scope plus anonymous-content addressing and integrity of original uncompressed canonical message bytes. |
+| `ai_step_sequences` | `store_key`, `sha256`, `message_sha256`, `left_sha256`, `right_sha256`, `next_sha256` | Raw scope plus immutable ordered sequence addressing and references to its content, subtrees and next forest. Repeated messages remain distinct occurrences. |
+| `ai_native_content_edges` | Physical row IDs and revisions | Rebuildable publication/collection index, not another hashed content identity. |
 
 ContentArchive uses the existing StateStore tables rather than another SQL
 schema. Its `raw_digest` authenticates original content bytes across raw and

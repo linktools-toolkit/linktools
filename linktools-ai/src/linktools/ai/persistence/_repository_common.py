@@ -3,6 +3,7 @@
 """Shared backend-neutral repository primitives."""
 
 import base64
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -51,7 +52,6 @@ from ._evaluation_records import (
 from ._plan import PersistenceDomain
 from .state import (
     OperationQuery,
-    SORT_KEY_MAX_BYTES,
     RECORD_KEY_MAX_BYTES,
     validate_record_key,
     validate_sort_key,
@@ -741,6 +741,19 @@ def project_record(
     )
 
 
+def _memory_scope_key(
+    namespace: str,
+    tenant_id: str,
+    memory_scope: str,
+    transient_execution_id: str | None,
+) -> bytes:
+    """Keep Memory's query scope compact so its index can retain full paths."""
+    return hashlib.sha256(scope_key(
+        namespace, tenant_id, PersistenceDomain.MEMORY.value, "memory", "memory_scope",
+        MemoryRecord.scope_components(memory_scope, transient_execution_id),
+    )).digest()
+
+
 def _default_record_scope(
     namespace: str,
     tenant_id: str,
@@ -790,14 +803,7 @@ def _default_record_scope(
             (value.execution_id,),
         )
     if isinstance(value, MemoryRecord):
-        return scope_key(
-            namespace,
-            tenant_id,
-            domain.value,
-            kind,
-            "memory_scope",
-            value.scope_components(value.memory_scope, value.transient_execution_id),
-        )
+        return _memory_scope_key(namespace, tenant_id, value.memory_scope, value.transient_execution_id)
     if isinstance(value, ToolOperationRecord):
         return scope_key(
             namespace,
@@ -1184,8 +1190,8 @@ def _operation_matches(
 
 def _record_cursor(record: StoredRecord) -> str:
     sort_key = validate_sort_key(record.sort_key)
-    payload = (len(sort_key).to_bytes(2, "big") + sort_key
-               + len(record.key).to_bytes(2, "big") + record.key)
+    key = validate_record_key(record.key)
+    payload = len(key).to_bytes(2, "big") + key + sort_key
     return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
 
 
@@ -1193,16 +1199,15 @@ def _decode_record_cursor(cursor: str | None) -> tuple[bytes | None, bytes | Non
     if cursor is None:
         return None, None
     try:
-        if not isinstance(cursor, str) or not 1 <= len(cursor) <= ((4 + SORT_KEY_MAX_BYTES + RECORD_KEY_MAX_BYTES + 2) // 3) * 4:
+        if not isinstance(cursor, str) or not cursor:
             raise ValueError("cursor length")
         raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
-        size = int.from_bytes(raw[:2], "big")
-        key_size = int.from_bytes(raw[2 + size:4 + size], "big")
-        if not 1 <= key_size <= RECORD_KEY_MAX_BYTES or len(raw) != 4 + size + key_size:
+        key_size = int.from_bytes(raw[:2], "big")
+        if not 1 <= key_size <= RECORD_KEY_MAX_BYTES or len(raw) <= 2 + key_size:
             raise ValueError("cursor identity")
         if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != cursor:
             raise ValueError("cursor encoding")
-        return validate_sort_key(raw[2:2 + size]), validate_record_key(raw[4 + size:])
+        return validate_sort_key(raw[2 + key_size:]), validate_record_key(raw[2:2 + key_size])
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
@@ -1214,6 +1219,7 @@ decode_operation = _decode_operation
 decode_record_cursor = _decode_record_cursor
 canonical_record_identity = _canonical_record_identity
 domain_data = _domain_data
+memory_scope_key = _memory_scope_key
 insert_operation = _insert_operation
 projected_record = _projected_record
 record_cursor = _record_cursor
@@ -1238,6 +1244,7 @@ __all__ = [
     "decode_record_cursor",
     "canonical_record_identity",
     "domain_data",
+    "memory_scope_key",
     "insert_operation",
     "projected_record",
     "record_cursor",

@@ -13,7 +13,6 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.memory import PersistentMemoryStore
 from linktools.ai.memory._store import _MutationReceipt, _normalize_path, _normalize_prefix
-from linktools.ai.persistence.state import SORT_KEY_MAX_BYTES
 from linktools.ai.persistence.contracts import MemoryRecord
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.persistence.repositories import MemoryRepositoryImpl
@@ -289,12 +288,13 @@ async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
         assert [value.metadata["path"] for value in second.items] == ["memory/001.md"]
 
 
-async def test_memory_path_and_prefix_respect_complete_sort_byte_limit() -> None:
-    path = ("x" * 199 + "/") * 5 + "x" * (SORT_KEY_MAX_BYTES - 1000)
-    assert len(path) == SORT_KEY_MAX_BYTES
+async def test_memory_path_and_prefix_keep_segment_bounds_without_a_total_limit() -> None:
+    path = "/".join("x" * 200 for _ in range(6))
+    assert len(path) == 1205
     assert _normalize_path(path) == path
     assert _normalize_prefix(path) == path
+    assert _normalize_prefix(path + "/") == path + "/"
     with pytest.raises(ValueError):
         _normalize_path(path + "x")
     with pytest.raises(ValueError):
-        _normalize_prefix(path + "/")
+        _normalize_prefix(path + "x")

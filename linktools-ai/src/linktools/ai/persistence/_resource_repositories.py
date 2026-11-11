@@ -20,6 +20,7 @@ from .state import RecordQuery, StateStore, StateTransaction, StoredRecord
 from ._repository_common import (
     ResourceRepository as _ResourceRepository,
     insert_operation as _insert_operation,
+    memory_scope_key as _memory_scope_key,
     projected_record as _projected_record,
     record_cursor as _record_cursor,
     replace_checked as _replace_checked,
@@ -76,9 +77,9 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
     def _validate_record_identity(self, record: StoredRecord, value: MemoryRecord) -> None:
         super()._validate_record_identity(record, value)
         try:
-            scope = self._scope("memory", "memory_scope", value.scope_components(
-                value.memory_scope, value.transient_execution_id,
-            ))
+            scope = _memory_scope_key(
+                self._namespace, self._tenant_id, value.memory_scope, value.transient_execution_id,
+            )
         except ValueError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         path = value.metadata.get("path")
@@ -92,9 +93,9 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
     ) -> tuple[MemoryRecord, ...]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        scope = self._scope("memory", "memory_scope", MemoryRecord.scope_components(
-            memory_scope, transient_execution_id,
-        ))
+        scope = _memory_scope_key(
+            self._namespace, self._tenant_id, memory_scope, transient_execution_id,
+        )
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
             rows: list[StoredRecord] = []
             while True:
@@ -187,9 +188,9 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         if tenant_id != self._tenant_id:
             return Page(())
         _validate_page_limit(limit)
-        scope = self._scope("memory", "memory_scope", MemoryRecord.scope_components(
-            memory_scope, transient_execution_id,
-        ))
+        scope = _memory_scope_key(
+            self._namespace, self._tenant_id, memory_scope, transient_execution_id,
+        )
         records = await self._records(
             "memory",
             scope=scope,

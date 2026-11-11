@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Memory scope ownership survives full-length paths and durable round trips."""
 
+import hashlib
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from linktools.ai.persistence.codec import _decode_enveloped_domain, decode_enve
 from linktools.ai.persistence.contracts import MemoryRecord
 from linktools.ai.persistence.repositories import MemoryRepositoryImpl
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import SORT_KEY_MAX_BYTES, scope_key
+from linktools.ai.persistence.state import scope_key
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 
@@ -36,17 +37,21 @@ def _store(state: Persistence, scope: str, execution: str | None = None) -> Pers
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_memory_maximum_scope_and_path_preserve_capture_replay(
+async def test_memory_maximum_scope_and_long_path_preserve_capture_replay(
     tmp_path: Path, backend: str,
 ) -> None:
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "memory.db")
     namespace, tenant, scope, execution = "n" * 256, "t" * 128, "é" * 128, "e" * 128
-    path = ("x" * 199 + "/") * 5 + "x" * (SORT_KEY_MAX_BYTES - 1000)
-    assert len(path.encode()) == 1152 and len(("capture:" + path).encode()) == 1160
+    path = "/".join("x" * 200 for _ in range(6))
+    assert len(path.encode()) == 1205
     async with Persistence.open(namespace, tenant_id=tenant, storage=storage) as state:
         persistent, transient, other = _store(state, scope), _store(state, scope, execution), _store(state, scope, "other")
         operation = MemoryOperation("create", canonical_sha256({"content": "note"}))
         created = await persistent.write(path, "note", expected_version=None, operation=operation)
+        assert (await persistent.read(path, max_chars=100)).content == "note"
+        assert await persistent.list_paths(path, limit=1) == [path]
+        replay = await persistent.write(path, "note", expected_version=None, operation=operation)
+        assert replay.version == created.version and replay.replayed
         capture = await persistent.capture()
         assert await transient.read(path, max_chars=100) is None
         assert await other.capture() == {}
@@ -92,7 +97,12 @@ async def test_memory_global_scope_isolates_shared_bare_state_store() -> None:
                 StoredPayload.inline_text(namespace + tenant + scope), {"path": "memory/note"},
                 1, now, now, transient_execution_id=execution,
             )
-            await state.mutate(lambda tx: tx.insert_record(repository._stored("memory", (value.memory_id,), value)))
+            stored = repository._stored("memory", (value.memory_id,), value)
+            complete_scope = scope_key(namespace, tenant, "memory", "memory", "memory_scope",
+                                       value.scope_components(scope, execution))
+            assert stored.scope_key == hashlib.sha256(complete_scope).digest()
+            assert len(stored.scope_key) == 32
+            await state.mutate(lambda tx: tx.insert_record(stored))
         for namespace, tenant, scope, execution in owners:
             repository = MemoryRepositoryImpl(state, namespace=namespace, tenant_id=tenant)
             values = await repository.capture_scope(tenant_id=tenant, memory_scope=scope, transient_execution_id=execution)
@@ -153,11 +163,12 @@ async def test_memory_repository_rejects_mismatched_scope_projection(change: str
 @pytest.mark.asyncio
 async def test_memory_scope_snapshot_restores_current_records_and_receipts(tmp_path: Path) -> None:
     storage = PersistenceStorage.from_root(tmp_path / "source")
+    path = "/".join("x" * 200 for _ in range(6))
     operation = MemoryOperation("write", "a" * 64)
     async with Persistence.open("memory-snapshot", tenant_id="tenant", storage=storage) as state:
         source = _store(state, "é", "execution")
-        await source.write("memory/note", "note", expected_version=None, operation=operation)
-        expected = await source.read("memory/note", max_chars=100)
+        await source.write(path, "note", expected_version=None, operation=operation)
+        expected = await source.read(path, max_chars=100)
     archive = InMemoryObjectStore()
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     async with Persistence.open("memory-snapshot", tenant_id="tenant", storage=storage, read_only=True) as state:
@@ -166,7 +177,7 @@ async def test_memory_scope_snapshot_restores_current_records_and_receipts(tmp_p
     await Persistence.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
     async with Persistence.open("memory-snapshot", tenant_id="tenant", storage=PersistenceStorage.from_root(root)) as state:
         restored = _store(state, "é", "execution")
-        assert await restored.read("memory/note", max_chars=100) == expected
+        assert await restored.read(path, max_chars=100) == expected
         assert (await restored.get_operation(operation)).replayed
         assert await _store(state, "é").capture() == {}
         assert await _store(state, "é", "other").capture() == {}

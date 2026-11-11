@@ -68,7 +68,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     assert "partition_digest" not in records.c
     assert (
         records.c.sort_key.type.compile(dialect=dialect)
-        == "VARBINARY(1152)"
+        == "LONGBLOB"
     )
 
     mysql_indexes = {
@@ -82,8 +82,8 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         "ix_parent_key_sort_key",
     ):
         ddl = str(CreateIndex(mysql_indexes[name]).compile(dialect=dialect))
-        assert "sort_key)" in ddl
-        assert "sort_key(" not in ddl
+        assert "sort_key(128))" in ddl
+        assert not mysql_indexes[name].unique
 
     assert not mysql_indexes["ix_scope_key_subject_id"].unique
     migration = (
@@ -93,15 +93,15 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         / "init_schema.sql"
     ).read_text(encoding="utf-8")
     assert (
-        "sort_key VARBINARY(1152) NOT NULL"
+        "sort_key LONGBLOB NOT NULL"
         in migration
     )
     assert "sort_key VARCHAR(128)" not in migration
     assert "partition_digest" not in migration
     for fragment in (
-        "ix_store_key_kind_sort_key (store_key, kind, sort_key)",
-        "ix_scope_key_sort_key (scope_key, sort_key)",
-        "ix_parent_key_sort_key (parent_key, sort_key)",
+        "ix_store_key_kind_sort_key (store_key, kind, sort_key(128))",
+        "ix_scope_key_sort_key (scope_key, sort_key(128))",
+        "ix_parent_key_sort_key (parent_key, sort_key(128))",
         "ix_scope_key_subject_id (scope_key, subject_id)",
     ):
         assert fragment in migration
@@ -398,7 +398,7 @@ def test_mysql_all_table_columns_and_comments_match_reviewed_ddl() -> None:
 
 
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
-def test_raw_store_indexes_fit_complete_binary_byte_budgets(dialect_name: str) -> None:
+def test_raw_store_identity_indexes_fit_complete_binary_byte_budgets(dialect_name: str) -> None:
     from sqlalchemy import BigInteger, Integer, LargeBinary, String
     from sqlalchemy.dialects import postgresql, sqlite
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
@@ -411,7 +411,7 @@ def test_raw_store_indexes_fit_complete_binary_byte_budgets(dialect_name: str) -
         }[dialect_name]
         for index in table.indexes:
             assert len(index.columns) <= 3
-            if "store_key" not in index.columns:
+            if "store_key" not in index.columns or "sort_key" in index.columns:
                 continue
             size = 0
             for column in index.columns:
@@ -429,4 +429,3 @@ def test_raw_store_indexes_fit_complete_binary_byte_budgets(dialect_name: str) -
     assert maxima[("store_key", "alias_key")] == 1792
     assert maxima[("store_key", "operation_key")] == 1920
     assert maxima[("store_key", "stream_key", "sequence")] == 2056
-    assert maxima[("store_key", "kind", "sort_key")] == 2048

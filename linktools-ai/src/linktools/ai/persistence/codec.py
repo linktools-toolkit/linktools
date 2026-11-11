@@ -228,7 +228,6 @@ from .state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    SORT_KEY_MAX_BYTES,
     validate_sort_key,
 )
 
@@ -1326,8 +1325,6 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
 
 
 def _decode_record_sort(value: str) -> bytes:
-    if not 1 <= len(value) <= ((SORT_KEY_MAX_BYTES + 2) // 3) * 4:
-        raise ValueError("record sort encoding length is invalid")
     raw = base64.b64decode(value, validate=True)
     if base64.b64encode(raw).decode("ascii") != value:
         raise ValueError("record sort encoding is not canonical")
