@@ -749,14 +749,16 @@ def test_snapshot_oversized_relation_owners_report_integrity_errors(family: str)
     if family == "memory_scope":
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         value = MemoryRecord("memory", "scope", StoredPayload.inline_text("body"), {"path": "memory"}, 0, now, now)
-        object.__setattr__(value, "memory_scope", oversized)
         domain, kind, identity = PersistenceDomain.MEMORY, "memory", "memory"
+        field = "memory_scope"
     else:
         value = TaskGraphView("graph", TaskStatus.PENDING, ())
-        object.__setattr__(value, "graph_id", oversized)
-        domain, kind, identity = PersistenceDomain.TASK, "task_graph", oversized
+        domain, kind, identity = PersistenceDomain.TASK, "task_graph", "graph"
+        field = "graph_id"
     record = project_record(namespace="namespace", tenant_id="tenant", domain=domain,
-                            kind=kind, identity=(identity,), value=value, scope=b"s" * 32)
+                            kind=kind, identity=(identity,), value=value)
+    object.__setattr__(value, field, oversized)
+    record = replace(record, data=domain_data(value))
     with pytest.raises(AIError) as error:
         validate_snapshot_domain(namespace="namespace", tenant_id="tenant", domain=domain,
                                  records=(record,), aliases=(), facts=(), operations=(), sequences={})

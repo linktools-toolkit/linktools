@@ -15,6 +15,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.steps import native_store_locator
 from linktools.ai.persistence import SqlStepStore
 
 
@@ -220,7 +221,7 @@ async def test_cleanup_reads_only_retained_bodies_in_bounded_batches(tmp_path: P
             # Observe the SQL boundary: no query may materialize orphan bodies
             # or the entire retained message corpus in one result.
             assert "ai_step_messages.sha256 IN" in statement
-            body_batches.append(set(parameters[1:]))
+            body_batches.append(set(parameters) - {store.store_key, native_store_locator(store.store_key)})
 
     try:
         await store.save_snapshot(_snapshot("run", 1, "orphan"))

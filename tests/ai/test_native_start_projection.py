@@ -1073,8 +1073,9 @@ def test_terminal_source_join_keeps_explicit_locator_bind_budget(dialect_name: s
     assert locators <= compiled.params.keys()
     assert compiled.params["source_run_id"] == "run"
     assert compiled.params["source_event_key"] == source.idempotency_key.encode("utf-8")
-    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 4
-    ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(998))).compile(
+    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 5
+    # Each record binds its indexed locator and exact key beside the partition.
+    ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(499))).compile(
         dialect=dialect, compile_kwargs={"render_postcompile": True})
     assert not locators.intersection(ordinary.params)
     assert len(ordinary.params if ordinary.positiontup is None else ordinary.positiontup) == 999

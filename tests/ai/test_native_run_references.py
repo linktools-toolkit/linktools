@@ -513,7 +513,8 @@ async def test_native_join_batches_full_record_keys_within_bind_budget(dialect_n
             parameters = compiled.params if compiled.positiontup is None else compiled.positiontup
             assert len(parameters) <= 999
             sql = str(compiled)
-            assert "ai_state_records.key_locator IN" in sql and "ai_state_records.key IN" in sql
+            raw_key = dialect.identifier_preparer.quote("key")
+            assert "ai_state_records.key_locator IN" in sql and f"ai_state_records.{raw_key} IN" in sql
             batches.append(tuple(keys))
             return ()
 

@@ -1255,9 +1255,18 @@ class SqlStepStore:
         """
         if not isinstance(transaction, SqlStateTransaction):
             raise TypeError("native SQL records require a SQL state transaction")
+        # A reusable preparation is not an append occurrence. Keep each public
+        # publication's physical keys fixed for its writer, not for later calls.
+        values = prepared.snapshot_values
+        if prepared.snapshot is not None and prepared.snapshot.idempotency_key is None and values is not None:
+            values = {**values, "idempotency_key": encode_native_replay_key(None)}
+        publication = replace(prepared, snapshot_values=values, event_keys=tuple(
+            encode_native_replay_key(None) if event.idempotency_key is None else key
+            for event, key in zip(prepared.events, prepared.event_keys, strict=True)
+        ))
         return await transaction.run_sql(
             self._context, lambda session: self._write_prepared_step(
-                session, prepared, confirmed=confirmed,
+                session, publication, confirmed=confirmed,
             ),
         )
 
