@@ -15,7 +15,7 @@ from ..task import TaskDependencyCapture, TaskGraphCaptureRef, TaskGraphTemplate
 from ..storage import ObjectRef, PayloadPolicy, StoredPayload
 from ..model import StoredUserInput
 from ..model.attachments import store_attachment_payload, read_attachment_payload
-from ._archive import ContentArchive, ContentRecord, PreparedArchive
+from ._archive import archive_content_scope, decode_archive_scope, validate_archive_content_identity, validate_archive_group_id, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
 from .codec import decode_domain, encode_domain, decode_envelope, encode_envelope
 from .state import StateStore, StoredRecord, record_key, scope_key
@@ -376,9 +376,9 @@ def task_binding_content_reference(value: object) -> tuple[str, str, str] | None
     if set(value) != {"$task_graph_binding", "archive_scope", "content_scope"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     scope, content_scope, identity = value["archive_scope"], value["content_scope"], value["$task_graph_binding"]
-    if (not isinstance(scope, str) or not scope or any(not isinstance(item, str) or len(item) != 64
-            or any(character not in "0123456789abcdef" for character in item) for item in (content_scope, identity))):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    validate_archive_group_id(scope)
+    decode_archive_scope(content_scope)
+    validate_archive_content_identity(identity)
     return scope, content_scope, identity
 
 
@@ -405,7 +405,7 @@ async def read_task_binding_value(store: StateStore, value: JsonValue, *,
     if reference is None:
         return value
     opened = await store.storage_group.open_archive()
-    if opened is None or reference[:2] != (opened[0], canonical_sha256([namespace, tenant_id])):
+    if opened is None or reference[:2] != (opened[0], archive_content_scope(namespace, tenant_id)):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     archive = ContentArchive(opened[1], opened[0], namespace=namespace, tenant_id=tenant_id, object_store=None)
     raw, = await archive.read_contents((reference[2],), codec=TASK_BINDING_CODEC)
@@ -431,7 +431,7 @@ def expand_snapshot_capture(record: StoredRecord, contents: Mapping[tuple[str, s
     if reference is None:
         return record
     content = contents.get(reference)
-    if (reference[1] != canonical_sha256([namespace, tenant_id]) or content is None
+    if (reference[1] != archive_content_scope(namespace, tenant_id) or content is None
             or content.codec != TASK_BINDING_CODEC or content.identity != reference[2]
             or content.payload is not None or content.body is None):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

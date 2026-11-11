@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence.runs import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
-from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, PreparedArchive
+from linktools.ai.persistence._archive import decode_archive_scope, ArchiveRoot, ContentArchive, PreparedArchive
 from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
@@ -40,7 +40,7 @@ async def _archive_database(path: Path) -> AsyncIterator[tuple[AsyncEngine, Cont
     await store.initialize()
     archive = ContentArchive(store, "frontier", namespace="namespace", tenant_id="tenant", object_store=None)
     prepared = PreparedArchive()
-    identities = await archive.prepare_content(tuple(("bytes", f"body-{index}".encode()) for index in range(10)), prepared)
+    identities = await archive.prepare_content(tuple(("scheme:a/b:界", f"body-{index}".encode()) for index in range(10)), prepared)
     root = await archive.append(archive.empty_root(), identities, prepared)
     await store.mutate(lambda transaction: archive.publish(transaction, prepared))
     try:
@@ -119,7 +119,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         async def read(transaction: StateTransaction) -> Mapping[bytes, StoredRecord]:
             assert isinstance(transaction, ArchiveFrontierReader)
             records = await transaction.read_archive_frontiers(
-                scope_key=bytes.fromhex(archive.content_scope),
+                scope_key=decode_archive_scope(archive.content_scope),
                 requests=(ArchiveNodeRead(first_key, ALL, ArchiveNodeSlot.SELF),),
             )
             assert records is not None
@@ -132,7 +132,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         event.remove(engine.sync_engine, "before_cursor_execute", record_query)
         assert set(records) == expected_nodes | {expected_content}
         assert len(statements) == 1
-        assert all(record.scope_key == bytes.fromhex(archive.content_scope) for record in records.values())
+        assert all(record.scope_key == decode_archive_scope(archive.content_scope) for record in records.values())
         sql, parameters = statements[0]
         async with engine.connect() as connection:
             plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
@@ -159,7 +159,7 @@ async def test_frontier_unions_overlaps_direct_keys_and_preserves_scope(tmp_path
             return await transaction.read_archive_frontiers(scope_key=scope, requests=requests,
                                                             content_keys=(direct, extra, extra, _digest("missing")))
 
-        records = await archive.store.read(lambda tx: read(tx, bytes.fromhex(archive.content_scope)))
+        records = await archive.store.read(lambda tx: read(tx, decode_archive_scope(archive.content_scope)))
         expected = {first_key, archive._key("archive_sequence", first.next_forest), direct, extra,
                     archive._key("archive_content", prepared.nodes[first.next_forest].content_id)}
         assert set(records) == expected
@@ -167,7 +167,7 @@ async def test_frontier_unions_overlaps_direct_keys_and_preserves_scope(tmp_path
         other = SqlStateStore(engine, group=archive.store.storage_group, store_key=_digest("other-store"))
         await other.initialize()
         try:
-            assert await other.read(lambda tx: read(tx, bytes.fromhex(archive.content_scope))) == {}
+            assert await other.read(lambda tx: read(tx, decode_archive_scope(archive.content_scope))) == {}
         finally:
             await other.close()
 
@@ -190,7 +190,7 @@ async def test_sql_frontier_batches_stay_within_999_parameters(tmp_path: Path) -
 
         async def read(transaction: StateTransaction) -> Mapping[bytes, StoredRecord] | None:
             assert isinstance(transaction, ArchiveFrontierReader)
-            return await transaction.read_archive_frontiers(scope_key=bytes.fromhex(archive.content_scope),
+            return await transaction.read_archive_frontiers(scope_key=decode_archive_scope(archive.content_scope),
                                                             requests=requests, content_keys=contents)
 
         records = await archive.store.read(read)

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Group-owned immutable content and exact persistent sequence ranges."""
 
+import base64
+import binascii
 import hashlib
 import json
 from collections import defaultdict, deque
@@ -9,11 +11,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256
+from ..core import JsonValue, canonical_json_bytes, canonical_sha256, validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload, store_attachment_payload, validate_attachment_payload
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
+from ._record_key import decode_key_components, encode_key_components
 from ._payload import decode_payload_bytes, encode_payload_bytes
 from .state import RECORD_KEY_MAX_BYTES, StateStore, StateTransaction, StoredRecord, record_key
 
@@ -36,6 +39,77 @@ def _digest(value: object) -> str:
     except ValueError as error:
         raise _integrity() from error
     return value
+
+
+def validate_archive_group_id(value: str) -> str:
+    """Keep an exact nonempty storage-group identity of at most 128 UTF-8 bytes."""
+    try:
+        if not isinstance(value, str) or not 1 <= len(value.encode("utf-8")) <= 128:
+            raise _integrity()
+    except UnicodeError as error:
+        raise _integrity() from error
+    return value
+
+
+def archive_scope_key(namespace: str, tenant_id: str) -> bytes:
+    """Encode the physical archive partition directly from its exact owners."""
+    return encode_key_components(("archive_scope", validate_persistence_namespace(namespace),
+                                  validate_tenant_id(tenant_id)), 403)
+
+
+def archive_scope_parts(value: bytes) -> tuple[str, str]:
+    """Validate persisted archive scope bytes and recover their exact owners."""
+    try:
+        parts = decode_key_components(value, 403)
+        if len(parts) != 3 or parts[0] != "archive_scope":
+            raise _integrity()
+        namespace, tenant_id = parts[1:]
+        if archive_scope_key(namespace, tenant_id) != value:
+            raise _integrity()
+        return namespace, tenant_id
+    except (AIError, TypeError, ValueError, UnicodeError) as error:
+        raise _integrity() from error
+
+
+def archive_scope_token(value: bytes) -> str:
+    archive_scope_parts(value)
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def decode_archive_scope(value: str) -> bytes:
+    """Accept only the single canonical unpadded URL-safe scope transport."""
+    try:
+        if not isinstance(value, str) or not 1 <= len(value) <= 538:
+            raise _integrity()
+        raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+        if archive_scope_token(raw) != value:
+            raise _integrity()
+        return raw
+    except (AIError, TypeError, ValueError, UnicodeError, binascii.Error) as error:
+        raise _integrity() from error
+
+
+def archive_content_scope(namespace: str, tenant_id: str) -> str:
+    return archive_scope_token(archive_scope_key(namespace, tenant_id))
+
+
+def _content_codec(value: str) -> str:
+    try:
+        if not isinstance(value, str) or not 1 <= len(value.encode("utf-8")) <= 64:
+            raise _integrity()
+    except UnicodeError as error:
+        raise _integrity() from error
+    return value
+
+
+def archive_content_identity(codec: str, raw_digest: str) -> str:
+    return _content_codec(codec) + ":" + _digest(raw_digest)
+
+
+def validate_archive_content_identity(value: str) -> str:
+    if not isinstance(value, str) or len(value) < 66 or value[-65] != ":":
+        raise _integrity()
+    return archive_content_identity(value[:-65], value[-64:])
 
 
 def _count(value: object) -> int:
@@ -70,13 +144,12 @@ class ArchiveSlice:
 @dataclass(frozen=True, slots=True)
 class ArchiveRoot:
     scope_id: str
-    content_scope: str
+    content_scope: str = field(repr=False)
     slices: tuple[ArchiveSlice, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scope_id, str) or not self.scope_id:
-            raise _integrity()
-        _digest(self.content_scope)
+        validate_archive_group_id(self.scope_id)
+        decode_archive_scope(self.content_scope)
 
     @property
     def count(self) -> int:
@@ -93,7 +166,7 @@ class ArchiveRoot:
                 raise _integrity()
             if not all(isinstance(item, Mapping) for item in slices):
                 raise _integrity()
-            return cls(scope, _digest(value["content_scope"]), tuple(ArchiveSlice.from_json(item) for item in slices))
+            return cls(scope, value["content_scope"], tuple(ArchiveSlice.from_json(item) for item in slices))
         except (KeyError, TypeError) as error:
             raise _integrity() from error
 
@@ -122,7 +195,11 @@ class ImmutableSequenceNode:
     next_forest: str | None = None
 
     def __post_init__(self) -> None:
-        _digest(self.content_id)
+        # Native message nodes retain their raw byte checksum as content identity.
+        if isinstance(self.content_id, str) and len(self.content_id) == 64:
+            _digest(self.content_id)
+        else:
+            validate_archive_content_identity(self.content_id)
         if _count(self.tree_count) < 1 or self.tree_count & (self.tree_count + 1):
             raise _integrity()
         for value in (self.left, self.right, self.next_forest):
@@ -166,7 +243,7 @@ class ImmutableSequenceNode:
     @classmethod
     def from_json(cls, value: Mapping[str, JsonValue]) -> "ImmutableSequenceNode":
         try:
-            return cls(_digest(value["content"]), _count(value["count"]),
+            return cls(validate_archive_content_identity(value["content"]), _count(value["count"]),
                        None if value["left"] is None else _digest(value["left"]),
                        None if value["right"] is None else _digest(value["right"]),
                        None if value["next"] is None else _digest(value["next"]))
@@ -184,7 +261,8 @@ class ContentRecord:
     body: bytes | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.codec, str) or not self.codec or self.compression not in {"raw", "zlib"}:
+        _content_codec(self.codec)
+        if self.compression not in {"raw", "zlib"}:
             raise _integrity()
         _digest(self.raw_digest)
         _count(self.raw_size)
@@ -198,7 +276,7 @@ class ContentRecord:
 
     @property
     def identity(self) -> str:
-        return canonical_sha256([self.codec, self.raw_digest])
+        return archive_content_identity(self.codec, self.raw_digest)
 
     def object_refs(self) -> tuple[ObjectRef, ...]:
         return () if self.payload is None else self.payload.object_refs()
@@ -218,9 +296,12 @@ class ContentRecord:
 
     @classmethod
     def from_record(cls, record: StoredRecord) -> "ContentRecord":
-        if record.scope_key is None or len(record.scope_key) != 32:
+        namespace, tenant_id = archive_scope_parts(record.scope_key)
+        content = cls.from_json(record.data, body=record.payload_bytes)
+        if (record.kind != "archive_content" or record.sort_key != content.identity.encode("utf-8")
+                or record.key != record_key(namespace, tenant_id, "archive", record.kind, (content.identity,))):
             raise _integrity()
-        return cls.from_json(record.data, body=record.payload_bytes)
+        return content
 
     def to_native_values(self) -> dict[str, object]:
         return {"message": self.body, "compression": self.compression, "raw_size": self.raw_size,
@@ -311,12 +392,13 @@ class ContentArchive:
                  object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None) -> None:
         self._message_publisher: Callable[[StateTransaction, PreparedArchive], Awaitable[None]] | None = None
         self.store = store
-        self.scope_id = scope_id
+        self.scope_id = validate_archive_group_id(scope_id)
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._objects = object_store
         self._object_reader = object_reader
-        self.content_scope = canonical_sha256([namespace, tenant_id])
+        self._scope_key = archive_scope_key(namespace, tenant_id)
+        self.content_scope = archive_scope_token(self._scope_key)
         self._object_prefix = "v1/archive/" + scope_id + "/" + self.content_scope + "/"
 
     def _bind(self, prepared: PreparedArchive) -> None:
@@ -330,16 +412,16 @@ class ContentArchive:
         return ArchiveRoot(self.scope_id, self.content_scope)
 
     def _key(self, kind: str, identity: str) -> bytes:
-        return record_key("", "", "archive", kind, (self.content_scope, identity))
+        return record_key(self._namespace, self._tenant_id, "archive", kind, (identity,))
 
     def _record(self, kind: str, identity: str, data: Mapping[str, JsonValue],
                 *, payload_bytes: bytes | None = None) -> StoredRecord:
-        return StoredRecord(self._key(kind, identity), bytes.fromhex(self.content_scope), None, kind, identity.encode("ascii"),
+        return StoredRecord(self._key(kind, identity), self._scope_key, None, kind, identity.encode("utf-8"),
                             None, 0, None, 0, None, data, payload_bytes=payload_bytes)
 
     def content_record_keys(self, values: Sequence[tuple[str, bytes]]) -> tuple[bytes, ...]:
-        return tuple(dict.fromkeys(self._key("archive_content", canonical_sha256(
-            [codec, hashlib.sha256(raw).hexdigest()])) for codec, raw in values))
+        return tuple(dict.fromkeys(self._key("archive_content", archive_content_identity(
+            codec, hashlib.sha256(raw).hexdigest())) for codec, raw in values))
 
     def observe_content(
         self, prepared: PreparedArchive, requested_keys: Sequence[bytes],
@@ -353,10 +435,10 @@ class ContentArchive:
             raise _integrity()
         for key, record in records.items():
             if (record.key != key or record.kind != "archive_content"
-                    or record.scope_key != bytes.fromhex(self.content_scope)):
+                    or record.scope_key != self._scope_key):
                 raise _integrity()
-            content = ContentRecord.from_record(record)
-            if record.sort_key != content.identity.encode("ascii") or self._key("archive_content", content.identity) != key:
+            content = self._decode_content_record(record)
+            if record.sort_key != content.identity.encode("utf-8") or self._key("archive_content", content.identity) != key:
                 raise _integrity()
         observed = {key: records.get(key) for key in keys}
         for key, record in observed.items():
@@ -375,7 +457,7 @@ class ContentArchive:
         unique: dict[str, tuple[str, bytes, str]] = {}
         for codec, raw in values:
             digest = hashlib.sha256(raw).hexdigest()
-            identity = canonical_sha256([codec, digest])
+            identity = archive_content_identity(codec, digest)
             identities.append(identity)
             unique[identity] = (codec, raw, digest)
         keys = {identity: self._key("archive_content", identity) for identity in unique}
@@ -387,14 +469,12 @@ class ContentArchive:
             existing = dict(await self.store.read_records(unread)) if unread else {}
             existing.update((key, record) for key, record in observed.items() if record is not None)
         for identity, (codec, raw, digest) in unique.items():
-            if not isinstance(codec, str) or not codec:
-                raise ValueError("content codec is required")
             key = keys[identity]
             stored = existing.get(key) or prepared.records.get(key)
             if stored is not None:
                 if stored.kind != "archive_content":
                     raise _integrity()
-                content = ContentRecord.from_record(stored)
+                content = self._decode_content_record(stored)
                 if content.identity != identity or content.raw_size != len(raw):
                     raise _integrity()
                 if not prepared.content_verified(stored):
@@ -413,6 +493,7 @@ class ContentArchive:
         self, raw: bytes, *, existing: ContentRecord | None = None, codec: str = "model-message",
     ) -> tuple[str, StoredPayload | None, bytes]:
         """Prepare the shared representation without reading or publishing SQL rows."""
+        _content_codec(codec)
         if existing is not None:
             if (existing.codec != codec or existing.raw_size != len(raw)
                     or existing.raw_digest != hashlib.sha256(raw).hexdigest()):
@@ -458,7 +539,7 @@ class ContentArchive:
     ) -> Mapping[bytes, StoredRecord]:
         if isinstance(transaction, ArchiveFrontierReader):
             result = await transaction.read_archive_frontiers(
-                scope_key=bytes.fromhex(self.content_scope), requests=requests,
+                scope_key=self._scope_key, requests=requests,
                 content_keys=content_keys,
             )
             if result is not None:
@@ -497,11 +578,16 @@ class ContentArchive:
             result.update(await transaction.get_records(missing))
         return result
 
+    def _decode_content_record(self, record: StoredRecord) -> ContentRecord:
+        if record.scope_key != self._scope_key:
+            raise _integrity()
+        return ContentRecord.from_record(record)
+
     def _decode_node_record(self, record: StoredRecord) -> ImmutableSequenceNode:
-        if record.kind != "archive_sequence" or record.scope_key != bytes.fromhex(self.content_scope):
+        if record.kind != "archive_sequence" or record.scope_key != self._scope_key:
             raise _integrity()
         node = ImmutableSequenceNode.from_json(record.data)
-        if record.sort_key != node.identity.encode("ascii") or record.key != self._key(record.kind, node.identity):
+        if record.sort_key != node.identity.encode("utf-8") or record.key != self._key(record.kind, node.identity):
             raise _integrity()
         return node
 
@@ -625,7 +711,7 @@ class ContentArchive:
             raise _integrity()
         slices = list(root.slices)
         for content_id in contents:
-            _digest(content_id)
+            validate_archive_content_identity(content_id)
             tail = slices[-1] if slices and slices[-1].start == 0 and slices[-1].end == slices[-1].count else None
             first_id = None if tail is None else tail.first
             first = second = None
@@ -660,7 +746,7 @@ class ContentArchive:
         selected: list[int | None] = []
         cursor = 0
         for codec, raw in values:
-            identity = canonical_sha256([codec, hashlib.sha256(raw).hexdigest()])
+            identity = archive_content_identity(codec, hashlib.sha256(raw).hexdigest())
             candidates = positions[identity]
             while candidates and candidates[0] < cursor:
                 candidates.popleft()
@@ -875,14 +961,14 @@ class ContentArchive:
                     return None
                 rows = await self._frontiers(transaction, tuple(requests.values()))
                 for key, record in rows.items():
-                    if key != record.key or record.scope_key != bytes.fromhex(self.content_scope):
+                    if key != record.key or record.scope_key != self._scope_key:
                         raise _integrity()
                     if record.kind == "archive_sequence":
                         node = self._decode_node_record(record)
                         nodes[node.identity] = node
                     elif record.kind == "archive_content":
-                        content = ContentRecord.from_record(record)
-                        if (record.sort_key != content.identity.encode("ascii")
+                        content = self._decode_content_record(record)
+                        if (record.sort_key != content.identity.encode("utf-8")
                                 or key != self._key(record.kind, content.identity)):
                             raise _integrity()
                         contents[content.identity] = content
@@ -900,7 +986,7 @@ class ContentArchive:
                     content_id = nodes[identity].content_id
                     record = prepared.records.get(self._key("archive_content", content_id))
                     if record is not None:
-                        content = ContentRecord.from_record(record)
+                        content = self._decode_content_record(record)
                         if content.identity != content_id:
                             raise _integrity()
                         contents[content_id] = content
@@ -932,14 +1018,14 @@ class ContentArchive:
 
     async def content_records(self, identities: Sequence[str]) -> tuple[ContentRecord, ...]:
         """Read content metadata in a batch without opening object bodies."""
-        keys = {identity: self._key("archive_content", _digest(identity)) for identity in identities}
+        keys = {identity: self._key("archive_content", validate_archive_content_identity(identity)) for identity in identities}
         records = await self.store.read_records(tuple(keys.values())) if keys else {}
         values: dict[str, ContentRecord] = {}
         for identity, key in keys.items():
             record = records.get(key)
             if record is None or record.kind != "archive_content":
                 raise _integrity()
-            content = ContentRecord.from_record(record)
+            content = self._decode_content_record(record)
             if content.identity != identity:
                 raise _integrity()
             values[identity] = content
@@ -981,14 +1067,14 @@ class ContentArchive:
 
     async def read_contents(self, identities: Sequence[str], *, codec: str,
                             reserve: Callable[[str, int], None] | None = None) -> tuple[bytes, ...]:
-        keys = {identity: self._key("archive_content", _digest(identity)) for identity in identities}
+        keys = {identity: self._key("archive_content", validate_archive_content_identity(identity)) for identity in identities}
         records = await self.store.read_records(tuple(keys.values())) if keys else {}
         decoded: dict[str, bytes] = {}
         for identity, key in keys.items():
             record = records.get(key)
             if record is None or record.kind != "archive_content":
                 raise _integrity()
-            content = ContentRecord.from_record(record)
+            content = self._decode_content_record(record)
             if content.identity != identity or content.codec != codec:
                 raise _integrity()
             if reserve is not None:
@@ -1003,4 +1089,4 @@ class ContentArchive:
                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
 
 
-__all__ = ["ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive"]
+__all__ = ["ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive", "archive_content_scope", "archive_scope_key", "archive_scope_parts", "archive_scope_token", "decode_archive_scope", "archive_content_identity", "validate_archive_content_identity", "validate_archive_group_id"]

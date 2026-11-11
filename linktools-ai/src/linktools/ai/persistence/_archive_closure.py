@@ -9,7 +9,9 @@ from collections.abc import Iterator, Mapping, Sequence
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, StoredPayload
-from ._archive import ArchiveRoot, ArchiveSlice, ContentRecord, ImmutableSequenceNode
+from ._archive import (ArchiveRoot, ArchiveSlice, ContentRecord, ImmutableSequenceNode,
+                       archive_scope_parts, archive_scope_token, decode_archive_scope,
+                       validate_archive_content_identity, validate_archive_group_id)
 from ._message_root import NativeMessageRoot, NativeMessageSlice
 from ._payload import decode_payload_bytes
 from .codec import (
@@ -80,8 +82,9 @@ def _context_references(manifest: Mapping[str, object]) -> Iterator[tuple[str, s
         if not isinstance(value, Mapping) or set(value) != {"archive_scope", "content_scope", "content_id"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         scope, content_scope, identity = value["archive_scope"], value["content_scope"], value["content_id"]
-        if not all(isinstance(item, str) and item for item in (scope, content_scope, identity)):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        validate_archive_group_id(scope)
+        decode_archive_scope(content_scope)
+        validate_archive_content_identity(identity)
         yield scope, content_scope, identity
 
 
@@ -327,7 +330,7 @@ class ArchiveClosure(_SequenceClosure):
 
     def __init__(self, scope_id: str, records: Sequence[StoredRecord]) -> None:
         super().__init__()
-        self.scope_id = scope_id
+        self.scope_id = validate_archive_group_id(scope_id)
         self._has_roots = False
         self._records: dict[tuple[str, str, str], StoredRecord] = {}
         self._nodes: dict[tuple[str, str], ImmutableSequenceNode] = {}
@@ -335,15 +338,14 @@ class ArchiveClosure(_SequenceClosure):
         for record in records:
             if record.kind not in {"archive_content", "archive_sequence"}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if record.scope_key is None or len(record.scope_key) != 32:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            scope = record.scope_key.hex()
+            namespace, tenant_id = archive_scope_parts(record.scope_key)
+            scope = archive_scope_token(record.scope_key)
             try:
-                sort = record.sort_key.decode("ascii")
+                sort = record.sort_key.decode("utf-8")
             except UnicodeError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             identity = scope, record.kind, sort
-            if record.key != record_key("", "", "archive", record.kind, (scope, sort)):
+            if record.key != record_key(namespace, tenant_id, "archive", record.kind, (sort,)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if identity in self._records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -379,7 +381,7 @@ class ArchiveClosure(_SequenceClosure):
         content = ContentRecord.from_record(record)
         if content.identity != identity:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if any(not reference.key.startswith(f"v1/archive/{scope_id}/{content_scope}/")
+        if any(reference.store_id != "runtime" or reference.key != f"v1/archive/{scope_id}/{content_scope}/{reference.digest}"
                for reference in content.object_refs()):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._retained.add(record.key)
@@ -436,7 +438,7 @@ class NativeMessageClosure(_SequenceClosure):
                 "left_sha256", "right_sha256", "next_sha256",
             }.issubset(row):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for field in ("store_digest", "sha256"):
+            for field in ("store_digest", "sha256", "message_sha256"):
                 value = row[field]
                 if (not isinstance(value, str) or len(value) != 64
                         or any(char not in "0123456789abcdef" for char in value)):
@@ -542,15 +544,24 @@ class NativeMessageClosure(_SequenceClosure):
 
 def validate_native_message_content(
     row: Mapping[str, object], *, group_id: str | None = None, verify_inline: bool = True,
+    content_scope: str | None = None,
 ) -> ContentRecord:
     """Verify native metadata and inline bytes without reinterpreting SDK JSON."""
     try:
         content = ContentRecord.from_native_row(row)
         if content.codec != "model-message" or content.raw_digest != row["sha256"]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (group_id is not None and any(not reference.key.startswith(f"v1/archive/{group_id}/")
-                for reference in content.object_refs())):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if group_id is not None:
+            validate_archive_group_id(group_id)
+            prefix = f"v1/archive/{group_id}/"
+            for reference in content.object_refs():
+                if reference.store_id != "runtime" or not reference.key.startswith(prefix):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                token, separator, digest = reference.key[len(prefix):].rpartition("/")
+                decode_archive_scope(token)
+                if (not separator or digest != reference.digest
+                        or content_scope is not None and token != content_scope):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if content.payload is None:
             if verify_inline:
                 decode_payload_bytes(content.body, codec=content.compression,

@@ -220,7 +220,7 @@ async def test_native_publication_uses_raw_state_owner_and_native_target_without
     monkeypatch.setattr(index, "_owner_targets", targets)
     monkeypatch.setattr(index, "replace_owner_edges", edges)
     session = SimpleNamespace(info={}, scalar=scalar)
-    index.stage_owner(session, kind, store_key, identity, ArchivedContextBlock(root, "d" * 64, 1))
+    index.stage_owner(session, kind, store_key, identity, ArchivedContextBlock(root, "d" * 64, 2))
     await index.flush_owners(SimpleNamespace(), session, group_id=group_id if known_group else None)
     assert len(selects) == (0 if known_group else 1)
     assert len(selected_owners) == 1

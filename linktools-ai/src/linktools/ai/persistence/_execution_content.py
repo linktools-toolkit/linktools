@@ -9,14 +9,14 @@ from weakref import ref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256
+from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import PayloadPolicy, StoredPayload
 from ..execution import ExecutionRecord, ExecutionTimelineRecord
 from ..model import StoredUserInput
 from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
-from ._archive import ContentArchive, ContentRecord, PreparedArchive
+from ._archive import archive_content_scope, archive_content_identity, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
 from .codec import (binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
     encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, map_execution_payload_slots)
@@ -60,7 +60,7 @@ def _content(record: StoredRecord, contents: Mapping[tuple[str, str, str], Conte
 
 
 def _decode_payload(raw: bytes, identity: str) -> StoredPayload | StoredUserInput:
-    if canonical_sha256([PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()]) != identity:
+    if archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()) != identity:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         value = json.loads(raw)
@@ -99,7 +99,7 @@ def _with_binding(record: StoredRecord, binding: JsonValue) -> StoredRecord:
 def expand_binding(record: StoredRecord, raw: bytes) -> StoredRecord:
     """Restore the original wire bytes only after checking their content identity."""
     reference = binding_reference(_binding(record))
-    if reference is None or canonical_sha256([BINDING_CODEC, hashlib.sha256(raw).hexdigest()]) != reference[2]:
+    if reference is None or archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest()) != reference[2]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         binding = json.loads(raw)
@@ -118,7 +118,7 @@ def snapshot_execution_content_size(record: StoredRecord, contents: Mapping[tupl
 def expand_snapshot_execution_content(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord],
                                      *, namespace: str, tenant_id: str,
                                      reserve: Callable[[int], None] | None = None) -> StoredRecord:
-    return _expand_execution_content(record, contents, content_scope=canonical_sha256([namespace, tenant_id]),
+    return _expand_execution_content(record, contents, content_scope=archive_content_scope(namespace, tenant_id),
                                      reserve=reserve)
 
 
@@ -267,7 +267,7 @@ class ExecutionContent:
         raw = canonical_json_bytes(encode_domain(payload))
         if len(raw) <= PayloadPolicy().inline_limit_bytes:
             return None
-        identity = canonical_sha256([PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()])
+        identity = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
         self._payload_encodings[key] = (ref(payload, lambda _value: self._payload_encodings.pop(key, None)), identity, raw)
         return identity, raw
 
@@ -279,7 +279,7 @@ class ExecutionContent:
         raw = canonical_json_bytes(_encode_persisted_domain(binding))
         if len(raw) <= PayloadPolicy().inline_limit_bytes:
             return None
-        identity = canonical_sha256([BINDING_CODEC, hashlib.sha256(raw).hexdigest()])
+        identity = archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest())
         self._binding_encodings[key] = (ref(binding, lambda _value: self._binding_encodings.pop(key, None)), identity, raw)
         return identity, raw
 

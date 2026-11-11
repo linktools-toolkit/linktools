@@ -3,7 +3,7 @@
 """Canonical versioned codecs for Runtime persistence values."""
 
 from ..storage import StorageRetentionMode
-from ._archive import ArchiveRoot, ArchiveSlice
+from ._archive import ArchiveRoot, ArchiveSlice, decode_archive_scope, validate_archive_content_identity, validate_archive_group_id
 from ._message_root import NativeMessageRoot, NativeMessageSlice
 
 import base64
@@ -2023,11 +2023,9 @@ def binding_reference(value: object) -> tuple[str, str, str] | None:
     if set(value) != {"$execution_binding", "archive_scope", "content_scope"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     identity, scope, content_scope = value["$execution_binding"], value["archive_scope"], value["content_scope"]
-    if not isinstance(scope, str) or not scope:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for digest in (identity, content_scope):
-        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    validate_archive_group_id(scope)
+    decode_archive_scope(content_scope)
+    validate_archive_content_identity(identity)
     return scope, content_scope, identity
 
 

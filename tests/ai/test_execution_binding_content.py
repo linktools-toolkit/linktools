@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import canonical_json_bytes, canonical_sha256
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain
-from linktools.ai.persistence._archive import ContentRecord
+from linktools.ai.persistence._archive import ContentRecord, archive_content_scope
 from linktools.ai.persistence._archive_closure import iter_archive_content_refs, rekey_archive_roots
 from linktools.ai.persistence._execution_content import expand_snapshot_execution_content
 from linktools.ai.persistence._payload import encode_payload_bytes
@@ -41,7 +41,7 @@ def _shared_record():
     compression, encoded = encode_payload_bytes(raw)
     digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
     content = ContentRecord("execution-binding", digest, size, compression, body=encoded)
-    scope = canonical_sha256(["bindings", "tenant"])
+    scope = archive_content_scope("bindings", "tenant")
     reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope}
     compact = replace(record, data={**data, "value": {**data["value"], "payload": {
         **data["value"]["payload"], "fields": {**data["value"]["payload"]["fields"], "binding": reference},

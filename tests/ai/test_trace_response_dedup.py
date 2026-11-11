@@ -31,7 +31,7 @@ from linktools.ai.persistence import NativeMessageRoot, PersistenceStorage
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_message_content import NativeMessageContent
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, ContentRecord
+from linktools.ai.persistence._archive import decode_archive_scope, ArchiveRoot, ContentArchive, ContentRecord
 from linktools.ai.persistence.contracts import ArchivedContextBlock, ContextProjection, ModelInteractionRecord
 from linktools.ai.persistence._history import encode_model_messages
 from linktools.ai.persistence._step_archive import StateStepArchive
@@ -93,7 +93,7 @@ async def _stored_message_records(
         return tuple(ContentRecord.from_native_row(body) for body in bodies)
     content = await archive.transcript_repository.content_archive()
     records = await content.store.read(lambda tx: tx.list_records(RecordQuery(
-        kind="archive_content", scope_key=bytes.fromhex(root.content_scope),
+        kind="archive_content", scope_key=decode_archive_scope(root.content_scope),
     )))
     return tuple(value for record in records for value in (ContentRecord.from_record(record),)
                  if value.codec == "model-message" and value.raw_digest in raw_ids)

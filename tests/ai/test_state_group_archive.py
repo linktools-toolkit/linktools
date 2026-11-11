@@ -16,7 +16,7 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStorageGroup, SqlStateStore
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import STATE_GROUP_METADATA_KEY, StateGroupTransaction, StoredRecord
+from linktools.ai.persistence.state import STATE_GROUP_METADATA_KEY, StateGroupTransaction, StoredRecord, record_key
 from linktools.ai.storage import create_sql_storage_context
 
 pytestmark = pytest.mark.asyncio
@@ -241,11 +241,11 @@ async def test_sql_archive_rejects_missing_identity_with_existing_content(tmp_pa
         await archive.mutate(lambda tx: tx.insert_record(_record("content")))
         metadata = None
         for store in await owner.storage_group.scan_stores():
-            if await store.read(lambda tx: tx.get_record(hashlib.sha256(b"archive_scope_id").digest())) is not None:
+            if await store.read(lambda tx: tx.get_record(record_key("", "", "archive", "archive_scope", ("archive_scope_id",)))) is not None:
                 metadata = store
                 break
         assert metadata is not None
-        await metadata.mutate(lambda tx: tx.delete_record(hashlib.sha256(b"archive_scope_id").digest()))
+        await metadata.mutate(lambda tx: tx.delete_record(record_key("", "", "archive", "archive_scope", ("archive_scope_id",))))
         for create in (False, True):
             with pytest.raises(AIError) as error:
                 await owner.storage_group.open_archive(create=create)

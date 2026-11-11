@@ -10,10 +10,9 @@ from contextlib import asynccontextmanager
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
-from linktools.ai.core import canonical_sha256
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
+from linktools.ai.persistence._archive import archive_content_scope, decode_archive_scope, archive_scope_key, ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._archive_closure import (
     ArchiveClosure,
     iter_archive_content_refs,
@@ -25,7 +24,7 @@ from linktools.ai.persistence.contracts import ArchivedContextBlock, RuntimePayl
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._object_cleanup import _capture_closure, purge_unreferenced_objects
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import RELATION_KEY_MAX_BYTES, StoredRecord, record_key
+from linktools.ai.persistence.state import RELATION_KEY_MAX_BYTES, StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
 
 pytestmark = pytest.mark.asyncio
@@ -79,7 +78,7 @@ async def test_archive_closure_keys_content_roots_by_logical_tenant_scope(field:
     await _prepare(second, (b"same",))
     records = await store.read(lambda tx: tx.scan_records())
     closure = ArchiveClosure(scope, records)
-    direct = {"archive_scope": scope, "content_scope": canonical_sha256(["archive", "first"]), "content_id": identities[0]}
+    direct = {"archive_scope": scope, "content_scope": archive_content_scope("archive", "first"), "content_id": identities[0]}
     manifest = {"kind": "execution-context", "version": 1, "history": root.to_json(),
                 "session_metadata": {"value": direct} if field == "session_metadata" else {},
                 "preload_skills": [direct] if field == "preload_skills" else [],
@@ -91,7 +90,7 @@ async def test_archive_closure_keys_content_roots_by_logical_tenant_scope(field:
     assert tuple(iter_archive_content_refs(wire)) == ((scope, direct["content_scope"], identities[0]),)
     closure.mark_content(*tuple(iter_archive_content_refs(wire))[0])
     assert len(closure.retained_records) == 1
-    assert closure.retained_records[0].scope_key.hex() == direct["content_scope"]
+    assert closure.retained_records[0].scope_key == decode_archive_scope(direct["content_scope"])
     rewritten = rekey_archive_roots(wire, {scope: "restored"})
     assert tuple(iter_archive_content_refs(rewritten))[0][0] == "restored"
     repaired = decode_domain(rewritten["fields"]["input_context"], RuntimePayloadRef)
@@ -198,8 +197,8 @@ async def test_capture_cleanup_ignores_other_kinds_binary_sort_material() -> Non
                             namespace="archive", tenant_id="tenant") == frozenset()
 
 
-async def test_archive_closure_rejects_non_ascii_owned_sort_as_integrity_error() -> None:
-    record = StoredRecord(b"r" * 32, b"s" * 32, None, "archive_content", b"\xff", None,
+async def test_archive_closure_rejects_invalid_utf8_owned_sort_as_integrity_error() -> None:
+    record = StoredRecord(b"r" * 32, archive_scope_key("archive", "tenant"), None, "archive_content", b"\xff", None,
                           0, None, 0, None, {})
     with pytest.raises(AIError) as error:
         ArchiveClosure("scope", (record,))
@@ -207,7 +206,7 @@ async def test_archive_closure_rejects_non_ascii_owned_sort_as_integrity_error()
 
 
 @pytest.mark.parametrize("scope", (b"x", b"x" * RELATION_KEY_MAX_BYTES))
-async def test_archive_scope_keeps_its_digest_contract_with_bounded_relation_primitives(scope: bytes) -> None:
+async def test_archive_scope_rejects_malformed_owner_tuple_with_bounded_relation_primitives(scope: bytes) -> None:
     owner = InMemoryStateStore()
     await owner.initialize()
     try:
@@ -216,9 +215,7 @@ async def test_archive_scope_keeps_its_digest_contract_with_bounded_relation_pri
         await _prepare(archive, (b"body",))
         records = await store.read(lambda tx: tx.scan_records())
         for original in records:
-            record = replace(original, scope_key=scope,
-                             key=record_key("", "", "archive", original.kind,
-                                                          [scope.hex(), original.sort_key.decode("ascii")]))
+            record = replace(original, scope_key=scope)
             with pytest.raises(AIError) as error:
                 ArchiveClosure(scope_id, (record,))
             assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

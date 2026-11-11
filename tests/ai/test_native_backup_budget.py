@@ -10,7 +10,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.attachments import store_attachment_payload
 from linktools.ai.model.messages import encode_model_messages
-from linktools.ai.persistence._archive import ContentRecord
+from linktools.ai.persistence._archive import ContentRecord, archive_content_scope
 from linktools.ai.persistence._payload import encode_payload_bytes
 from linktools.ai.persistence._snapshot import encode_native_message_row
 from linktools.ai.persistence.snapshots import _SnapshotCaptureBudget, _capture_native_payloads, SnapshotLimits
@@ -22,7 +22,7 @@ async def _content(*, external: bool, text: str = ""):
 
     async def write(data):
         digest = hashlib.sha256(data).hexdigest()
-        ref = ObjectRef("objects", "v1/archive/group/" + digest, digest, len(data))
+        ref = ObjectRef("runtime", "v1/archive/group/" + archive_content_scope("budget", "tenant") + "/" + digest, digest, len(data))
         bodies[ref.key] = data
         return ref
 

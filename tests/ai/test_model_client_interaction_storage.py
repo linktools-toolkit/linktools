@@ -29,7 +29,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ModelInteractionRecord, RuntimePayloadRef
 from linktools.ai.persistence._model_client import resolve_client_requests
-from linktools.ai.persistence._archive import ArchiveRoot, ContentRecord, PreparedArchive
+from linktools.ai.persistence._archive import archive_content_scope, ArchiveRoot, ContentRecord, PreparedArchive
 from linktools.ai.persistence._step_contracts import AgentRunRecord
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
@@ -213,7 +213,7 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
                                                expected_storage_revision=record.storage_revision)
             await contents.store.mutate(damage)
         else:
-            body = replace(body, content=replace(body.content, content_scope="0" * 64))
+            body = replace(body, content=replace(body.content, content_scope=archive_content_scope("other", "tenant")))
         invalid = replace(record, client_requests=(replace(request, body=body),))
         with pytest.raises(AIError) as raised:
             await archive.resolve_model_interaction(invalid, include_client_requests=True)

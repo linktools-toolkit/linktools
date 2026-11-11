@@ -7,7 +7,8 @@ from dataclasses import replace
 from datetime import timezone
 from typing import cast
 
-from ..core import BudgetUsage, OperationLedgerInput, canonical_sha256
+from ..core import BudgetUsage, OperationLedgerInput
+from ._archive import archive_content_scope
 from ._budget_records import BudgetModelReservation, BudgetToolReservation
 from ..errors import AIError, ErrorCode
 from ..evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
@@ -1102,7 +1103,7 @@ def _fact_stream(
         scope_matches = (
             chunk.content.store_digest == SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
             if isinstance(chunk.content, NativeMessageRoot)
-            else chunk.content.content_scope == canonical_sha256([namespace, tenant_id])
+            else chunk.content.content_scope == archive_content_scope(namespace, tenant_id)
         )
         if not scope_matches or chunk.content.count != chunk.message_count:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

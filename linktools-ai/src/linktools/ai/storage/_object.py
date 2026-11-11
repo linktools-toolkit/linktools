@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
@@ -21,7 +21,7 @@ _OBJECT_KEY_MAX_BYTES = 1024
 @dataclass(frozen=True, slots=True)
 class ObjectRef:
     store_id: str
-    key: str
+    key: str = field(repr=False)
     digest: str
     size: int
 
@@ -35,7 +35,7 @@ class ObjectRef:
 
 @dataclass(frozen=True, slots=True)
 class ObjectStat:
-    key: str
+    key: str = field(repr=False)
     digest: str
     size: int
 

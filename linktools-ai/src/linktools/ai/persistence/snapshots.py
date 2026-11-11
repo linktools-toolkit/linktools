@@ -30,7 +30,7 @@ from ._runtime_identity import task_graph_binding_capture_key
 from ._native_run_reference import NativeRunReferences
 from ._native_event_reference import NativeEventReferences
 from ._sql import SqlStateStore
-from ._archive import ContentRecord
+from ._archive import archive_content_scope, ContentRecord
 from ._message_root import NativeMessageRoot
 from ..model.messages import decode_model_message_payloads
 from ..model.attachments import read_attachment_payload, attachment_payload_objects
@@ -1212,7 +1212,8 @@ async def restore_snapshot(
         sequence_keys = [(row["store_digest"], row["sha256"]) for row in entry["sequences"]]
         message_keys = []
         for row in entry["messages"]:
-            content = validate_native_message_content(row, group_id=group_id)
+            content = validate_native_message_content(row, group_id=group_id,
+                content_scope=archive_content_scope(namespace, tenant_id))
             message_keys.append((row["store_digest"], row["sha256"]))
             async def resolve(reference: ObjectRef) -> bytes:
                 identity = entry["domain"], reference.key, reference.digest, reference.size
@@ -1502,10 +1503,10 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         ref = _object_ref_from_payload(value)
         key = ref.key
         if key.startswith("v1/archive/"):
-            parts = key.split("/", 3)
-            if len(parts) != 4 or parts[2] not in groups:
+            parts = key[len("v1/archive/"):].rsplit("/", 2)
+            if len(parts) != 3 or parts[0] not in groups:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            key = f"v1/archive/{neutral}/{parts[3]}"
+            key = f"v1/archive/{neutral}/{parts[1]}/{parts[2]}"
         return dict(_object_ref_payload(replace(ref, key=key)))
 
     def content(parsed: ContentRecord) -> dict[str, object]:

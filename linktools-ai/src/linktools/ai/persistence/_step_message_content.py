@@ -475,7 +475,7 @@ class NativeMessageContent:
             if table is self._messages:
                 ContentRecord.from_native_row(row)
             else:
-                node = ImmutableSequenceNode(row["message_sha256"], _count(row["tree_count"]),
+                node = ImmutableSequenceNode(_digest(row["message_sha256"]), _count(row["tree_count"]),
                                              row["left_sha256"], row["right_sha256"], row["next_sha256"])
                 if node.identity != row["sha256"]:
                     raise ValueError("native message sequence identity is invalid")
@@ -750,7 +750,7 @@ class NativeMessageContent:
                         raise ValueError("native range sequence is incomplete")
                     consumed.add(key)
                     try:
-                        node = ImmutableSequenceNode(row["message_sha256"], row["tree_count"],
+                        node = ImmutableSequenceNode(_digest(row["message_sha256"]), row["tree_count"],
                                                      row["left_sha256"], row["right_sha256"], row["next_sha256"])
                     except AIError as error:
                         raise ValueError("native range sequence is corrupt") from error
@@ -855,7 +855,7 @@ class NativeMessageContent:
                 position = 0
                 for count in ImmutableSequenceNode.forest_weights(tail.count):
                     row = indexed[(*source, position)]
-                    frontier.append(ImmutableSequenceNode(row["message_sha256"], row["tree_count"],
+                    frontier.append(ImmutableSequenceNode(_digest(row["message_sha256"]), row["tree_count"],
                                                          row["left_sha256"], row["right_sha256"], row["next_sha256"]))
                     position += count
             result = NativeMessageReadback(sequence, values, tuple(frontier), self._generation)

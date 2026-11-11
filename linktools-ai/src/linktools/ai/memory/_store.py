@@ -28,6 +28,7 @@ from ..core import (
     ResourceKind,
     canonical_sha256,
     validate_tenant_id,
+    validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, StoredPayload
@@ -144,6 +145,8 @@ class PersistentMemoryStore:
     ) -> None:
         try:
             validate_tenant_id(tenant_id)
+            if transient:
+                validate_resource_id(execution_id)
             MemoryRecord.scope_components(memory_scope, execution_id if transient else None)
         except AIError as error:
             raise ValueError("memory store identity is invalid") from error

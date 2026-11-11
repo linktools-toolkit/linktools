@@ -206,3 +206,15 @@ def test_memory_scope_codec_uses_only_declared_optional_execution_default() -> N
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(encode_envelope(payload), MemoryRecord)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("execution_id", (None, "", "x" * 129))
+async def test_transient_memory_requires_an_execution_owner(execution_id: str | None) -> None:
+    async with Persistence.open("memory-owner", storage=PersistenceStorage.in_memory()) as state:
+        with pytest.raises(ValueError):
+            PersistentMemoryStore(
+                state.memory, object_store=state.object_store(PersistenceDomain.MEMORY),
+                namespace=state.namespace, tenant_id=state.tenant_id,
+                execution_id=execution_id, memory_scope="scope", transient=True,
+            )

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_c
 from ..core import validate_capability_id, validate_capability_revision, validate_capability_write_key, ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_idempotency_key, validate_persistence_namespace, validate_resource_id, validate_tenant_id
 from ..errors import AIError
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
-from ._record_key import RECORD_KEY_MAX_BYTES, validate_record_key
+from ._record_key import encode_key_components as _encode_key_components, RECORD_KEY_MAX_BYTES, validate_record_key
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -1352,20 +1352,6 @@ def validate_relation_key(value: bytes) -> bytes:
     if type(value) is not bytes or not 1 <= len(value) <= RELATION_KEY_MAX_BYTES:
         raise ValueError(f"relation key must contain 1..{RELATION_KEY_MAX_BYTES} bytes")
     return value
-
-
-def _encode_key_components(values: Sequence[str], maximum: int) -> bytes:
-    components: list[bytes] = []
-    size = 0
-    for value in values:
-        if not isinstance(value, str):
-            raise TypeError("address components must be strings")
-        encoded = value.encode("utf-8")
-        size += 2 + len(encoded)
-        if size > maximum:
-            raise ValueError("address exceeds its byte limit")
-        components.append(len(encoded).to_bytes(2, "big") + encoded)
-    return b"".join(components)
 
 
 def alias_key(

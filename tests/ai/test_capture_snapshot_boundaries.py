@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import BinaryContent, TextContent
 
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence._archive import ArchiveRoot
+from linktools.ai.persistence._archive import archive_content_scope, ArchiveRoot
 from linktools.ai.persistence.codec import encode_domain
 from linktools.ai.persistence.snapshots import SnapshotLimits, snapshot_manifest_identity
 from linktools.ai.steps import NativeStepSource
@@ -24,7 +24,7 @@ async def test_capture_snapshot_preserves_opaque_markers_and_attachment_bytes(tm
     namespace = "capture-opaque"
     metadata = {
         "invalid_root": {"$dataclass": "archive_root", "fields": {}},
-        "valid_root": encode_domain(ArchiveRoot("business-scope", "a" * 64)),
+        "valid_root": encode_domain(ArchiveRoot("business-scope", archive_content_scope("business", "tenant"))),
         "native_root": {"$dataclass": "transcript_chunk", "fields": {}},
         "native_source": encode_domain(NativeStepSource("b" * 32, "c" * 64)),
         "payload": {"kind": "binary", "digest": "a" * 64, "size": 3},

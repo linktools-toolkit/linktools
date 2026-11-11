@@ -106,7 +106,7 @@ record references. Default sort is the raw key; timestamp sorts validate the
 complete eight-byte prefix plus key against the same 1152-byte sort limit.
 Parent references also permit 1152 bytes. The two-column parent/sort index
 therefore has at most 2304 field bytes, below ordinary backend index limits.
-The record unique index has at most 1408 MySQL declared key bytes with the
+The record unique index has at most 1920 MySQL declared key bytes with the
 current store key. Independent native Step digests retain their own contracts.
 
 Current wire record references are canonical lowercase hex decoded back to
@@ -347,10 +347,28 @@ from validation on a deployed database server.
 
 ContentArchive uses the existing StateStore tables rather than another SQL
 schema. Its `raw_digest` authenticates original content bytes across raw and
-compressed representations; the anonymous content address binds that digest
-to the codec. Sequence addresses bind content, count and ordered links. Archive
-scope and record keys bind those addresses to their owning namespace, tenant
-and content kind so recovery and collection cannot cross archive partitions.
+compressed representations. Its content ID is the exact codec plus `:` plus
+that 64-character lowercase checksum, split at the final 65 ASCII characters.
+Codecs retain exact UTF-8 (including colons and slashes), bounded to 64 bytes;
+`model-message:<checksum>` is 78 bytes, versus 64 for the former derived hash.
+This removes one redundant hash, not storage bytes. Sequence addresses still
+hash content, count and ordered links to authenticate immutable structure.
+
+Archive scopes are the fixed-u16 tuple `("archive_scope", namespace, tenant_id)`:
+at most 403 raw bytes for the existing 256/128-byte owner bounds. SQL stores
+those bytes directly. Roots, references and object prefixes use one canonical,
+unpadded URL-safe Base64 token (at most 538 characters). Record addresses encode
+the actual namespace and tenant once, followed by archive kind and content or
+sequence identity; they do not embed the transport token as a second owner.
+The separately owned system `archive_scope` metadata keeps its empty binding.
+There is no old digest reader or migration.
+
+Archive group IDs retain exact UTF-8 with an explicit 1..128-byte limit. Object
+keys remain `v1/archive/<group>/<scope-token>/<raw-object-checksum>`, never the
+logical codec-bearing content ID. Their maximum is 743 UTF-8 bytes (647 for a
+32-character UUID group), within the unchanged 1024-byte ObjectStore limit.
+Restore changes the storage group only and retains the manifest namespace and
+tenant. Roots and object reference/stat representations hide reversible paths.
 Typed attachment references keep their own byte-integrity checks. These are
 content, storage and source-proof contracts, not named behavior identities.
 

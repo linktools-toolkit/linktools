@@ -16,13 +16,13 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence._snapshot import encode_native_message_row, decode_native_message_row
-from linktools.ai.persistence._archive import ContentRecord, ImmutableSequenceNode
+from linktools.ai.persistence._archive import archive_content_scope, archive_scope_key, ContentRecord, ImmutableSequenceNode
 from linktools.ai.persistence.codec import encode_domain, encode_record
 from linktools.ai.persistence.contracts import ArchivedContextBlock
 from linktools.ai.persistence.snapshots import (
     SnapshotLimits, _SnapshotCaptureBudget, _capture_snapshot_reader, snapshot_manifest_identity,
 )
-from linktools.ai.persistence.state import StoredRecord
+from linktools.ai.persistence.state import record_key, StoredRecord
 from linktools.ai.snapshot._snapshot import _storage_snapshot_usage
 from linktools.ai.storage import ObjectRef, StoredPayload
 
@@ -41,7 +41,7 @@ def _content(group: str, *, external: bool, compressed: bool = False) -> Content
         return ContentRecord("model-message", digest, len(raw), "zlib" if compressed else "raw",
                              body=zlib.compress(raw) if compressed else raw)
     file_digest = hashlib.sha256(b"[]").hexdigest()
-    ref = ObjectRef("runtime", f"v1/archive/{group}/scope/{file_digest}", file_digest, 2)
+    ref = ObjectRef("runtime", f"v1/archive/{group}/{archive_content_scope('archive', 'tenant')}/{file_digest}", file_digest, 2)
     value = json.loads(raw)
     value[0]["parts"][0]["content"][0]["data"] = None
     payload = StoredPayload("inline", "json-attachments", digest, len(raw), {
@@ -115,7 +115,8 @@ def test_manifest_identity_includes_native_closure(component: str) -> None:
 def test_manifest_identity_includes_archive_records() -> None:
     original = _manifest("1" * 32)
     content = ContentRecord("bytes", hashlib.sha256(b"x").hexdigest(), 1, "raw", body=b"x")
-    record = StoredRecord(b"a" * 32, b"b" * 32, None, "archive_content", (content.identity).encode("ascii"),
+    record = StoredRecord(record_key("archive", "tenant", "archive", "archive_content", (content.identity,)),
+                          archive_scope_key("archive", "tenant"), None, "archive_content", content.identity.encode("utf-8"),
                           None, 0, None, 0, None, content.to_json(), payload_bytes=content.body)
     original["archives"] = [{"scope_id": "1" * 32, "domain": "trace", "records": [encode_record(record)]}]
     changed = deepcopy(original)
@@ -222,7 +223,8 @@ def test_native_representation_normalization_keeps_shared_archive_object_depende
     source = _manifest("1" * 32)
     content = ContentRecord.from_native_row(decode_native_message_row(
         source["native_messages"][0]["messages"][0]))
-    record = StoredRecord(b"a" * 32, b"b" * 32, None, "archive_content", (content.identity).encode("ascii"),
+    record = StoredRecord(record_key("archive", "tenant", "archive", "archive_content", (content.identity,)),
+                          archive_scope_key("archive", "tenant"), None, "archive_content", content.identity.encode("utf-8"),
                           None, 0, None, 0, None, content.to_json(), payload_bytes=content.body)
     source["archives"] = [{"scope_id": "1" * 32, "domain": "trace", "records": [encode_record(record)]}]
     changed = deepcopy(source)
@@ -247,7 +249,7 @@ def test_native_semantic_identity_still_rejects_corrupt_inline_bytes() -> None:
 @pytest.mark.asyncio
 async def test_captured_record_pages_use_kind_order_independently_of_source_key_order() -> None:
     from linktools.ai.persistence.snapshots import _CapturedSnapshotReader
-    from linktools.ai.persistence.state import RecordScanCursor, record_key
+    from linktools.ai.persistence.state import RecordScanCursor
 
     def record(kind: str) -> StoredRecord:
         key = record_key("namespace", "tenant", "execution", kind, ("owner",))

@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
-from linktools.ai.persistence._archive import ContentArchive, ContentRecord
+from linktools.ai.persistence._archive import archive_scope_token, ContentArchive, ContentRecord
 from linktools.ai.persistence._archive_closure import iter_archive_content_refs, rekey_archive_roots
 from linktools.ai.persistence._execution_content import expand_snapshot_execution_content, snapshot_execution_content_size
 from linktools.ai.persistence.codec import _decode_enveloped_domain
@@ -91,7 +91,7 @@ async def test_payload_reference_snapshot_scope_integrity_and_budget(tmp_path: P
         record = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
         scope, archive = repository.state_store.storage_group.opened_archive
         rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
-        contents = {(scope, row.scope_key.hex(), row.sort_key.decode("ascii")): ContentRecord.from_record(row) for row in rows}
+        contents = {(scope, archive_scope_token(row.scope_key), row.sort_key.decode("utf-8")): ContentRecord.from_record(row) for row in rows}
         assert snapshot_execution_content_size(record, contents) == sum(item.raw_size for item in contents.values())
         semantic = expand_snapshot_execution_content(record, contents, namespace="payloads", tenant_id="tenant")
         assert _decode_enveloped_domain(semantic.data, ExecutionRecord) == value
