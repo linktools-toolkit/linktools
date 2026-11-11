@@ -88,8 +88,10 @@ class StateRecordCache:
         return records
 
     def _cache_key(self, ordered: Sequence[bytes]) -> str:
+        if len(ordered) == 1:
+            return f"runtime-record:{self._scope}:record:{ordered[0].hex()}"
         key_digest = hashlib.sha256(canonical_json_bytes([key.hex() for key in ordered])).hexdigest()
-        return f"runtime-record:{self._scope}:{key_digest}"
+        return f"runtime-record:{self._scope}:batch:{key_digest}"
 
     def publish_record(self, record: StoredRecord, *, captured_at: float) -> None:
         """Offer one complete committed record; busy publishers discard the offer."""
