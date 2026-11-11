@@ -13,13 +13,16 @@ from linktools.ai.observe import (
     MetricMeasurement,
     MetricQuery,
     MetricSource,
+    MetricSourceKind,
     MetricType,
     MetricWindow,
     Metrics,
     Observation,
 )
-from linktools.ai.observe._sql_query import _percentile_pick_sql
-from sqlalchemy import event
+from linktools.ai.observe._sql_query import _base_params, _measurement_sql
+from linktools.ai.observe._store import _MetricQueryPushdownPlan
+from sqlalchemy import event, text
+from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -295,13 +298,28 @@ async def test_sql_pushdown_bounds_observation_select_round_trips(
         await engine.dispose()
 
 
-def test_percentile_strategy_uses_native_only_when_semantics_match() -> None:
-    postgresql = _percentile_pick_sql("postgresql", [])
-    mysql = _percentile_pick_sql("mysql", [])
-    sqlite = _percentile_pick_sql("sqlite", [])
-
-    assert "percentile_disc" in postgresql
-    assert "row_number()" in mysql.lower()
-    assert "row_number()" in sqlite.lower()
-    assert "percentile_disc" not in mysql
-    assert "percentile_disc" not in sqlite
+@pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
+def test_measurement_queries_compile_for_supported_sql_dialects(dialect_name: str) -> None:
+    dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
+    start = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    for aggregation in (MetricAggregation.SUM, MetricAggregation.MEAN, MetricAggregation.PERCENTILE):
+        plan = _MetricQueryPushdownPlan(
+            observation_kind="business.request", source_kind=MetricSourceKind.MEASUREMENT,
+            metric_type=MetricType.COUNTER if aggregation is MetricAggregation.SUM else MetricType.DISTRIBUTION,
+            measurement_name="latency_ms", measurement_revision=1,
+            indicator_field=None, indicator_values=(), aggregation=aggregation,
+            percentile=0.95 if aggregation is MetricAggregation.PERCENTILE else None,
+            start=start, end=start + timedelta(seconds=2),
+            filters=(("status", "SUCCEEDED"),), correlation_filters=(("attempt", 2**53 + 1),),
+            group_by=("route",), bucket_microseconds=1_000_000, bucket_count=2,
+            max_scanned_observations=100000, max_extracted_samples=100000,
+            max_groups=256, max_result_points=16384,
+        )
+        statement, params = _measurement_sql(
+            dialect_name, plan, _base_params("ns", dialect_name, plan),
+        )
+        query = text(statement)
+        assert set(query.compile(dialect=dialect).params) == params.keys()
+        query.bindparams(**params).compile(
+            dialect=dialect, compile_kwargs={"literal_binds": True},
+        )

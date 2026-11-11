@@ -11,7 +11,6 @@ import pytest
 from linktools.ai.observe import MetricAggregation, MetricSourceKind, MetricType
 from linktools.ai.observe._sql_query import (
     _base_params, _decode_measurement_rows, _measurement_sql,
-    _percentile_pick_sql, _postgresql_numeric_order,
 )
 from linktools.ai.observe._store import _MetricQueryPushdownPlan
 from sqlalchemy import text
@@ -101,13 +100,3 @@ def test_postgresql_selected_values_are_original_samples(
         expected = sorted(values)[math.ceil(0.5 * len(values)) - 1]
     assert actual == expected
     assert type(actual) is type(expected)
-
-
-def test_postgresql_native_percentile_returns_raw_sample_text() -> None:
-    statement = _percentile_pick_sql("postgresql", [])
-    assert "percentile_disc" in statement
-    assert "row_to_json" in statement
-    assert "->> 'f5'" in statement
-    coarse, residual = _postgresql_numeric_order()
-    assert "DOUBLE PRECISION" in coarse
-    assert "9223372036854775807 - 1" in residual

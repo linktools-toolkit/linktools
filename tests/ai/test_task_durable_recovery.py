@@ -20,6 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
+from linktools.ai.persistence.codec import encode_domain
 from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.persistence.state import OperationQuery, stream_digest
@@ -110,7 +111,7 @@ def test_task_admission_freezes_initial_request_digest_without_raw_key() -> None
 
     assert admission.initial_request_digest == _expected_request_digest(request)
     assert admission.operation_id != request.idempotency_key
-    assert not hasattr(admission, "idempotency_key")
+    assert request.idempotency_key not in str(encode_domain(admission))
     assert request.idempotency_key not in repr(admission)
 
 

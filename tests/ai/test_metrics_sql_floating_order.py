@@ -5,6 +5,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
@@ -164,7 +165,7 @@ async def test_floating_counter_preserves_integer_prefix(
     pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
 ))
 async def test_floating_reduction_uses_one_observation_statement(
-    tmp_path: Path, sample_count: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample_count: int,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'io.db'}")
     metrics = Metrics.sql(engine, namespace="floating-io")
@@ -189,6 +190,10 @@ async def test_floating_reduction_uses_one_observation_statement(
             )
             # The three-value fold loses the unit term; insertion order does not.
             await metrics.record_observations(observations[::2] + observations[1::2])
+        monkeypatch.setattr(
+            metrics._store, "scan_observations",
+            AsyncMock(side_effect=AssertionError("SQL aggregation must not scan raw observations")),
+        )
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         result = await metrics.query(MetricQuery(
             definition.name, MetricWindow.between(_START, _START + timedelta(seconds=1)),
@@ -196,7 +201,6 @@ async def test_floating_reduction_uses_one_observation_statement(
         assert result.points[0].sample_count == sample_count
         assert result.points[0].value == 0.0
         assert len(statements) == 1
-        assert "WITH RECURSIVE totals" in statements[0]
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", capture):
             event.remove(engine.sync_engine, "before_cursor_execute", capture)

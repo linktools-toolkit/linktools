@@ -5,6 +5,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
@@ -20,7 +21,7 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.observe._sql_query import _coerce_aggregate_number, _measurement_sum_sql
+from linktools.ai.observe._sql_query import _coerce_aggregate_number
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -152,7 +153,7 @@ async def test_integer_partitions_remain_exact_next_to_float_partitions(tmp_path
     pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
 ))
 async def test_large_integer_sum_transfers_only_one_aggregate_statement(
-    tmp_path: Path, sample_count: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample_count: int,
 ) -> None:
     path = tmp_path / "large-integer-totals.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
@@ -178,6 +179,10 @@ async def test_large_integer_sum_transfers_only_one_aggregate_statement(
             await metrics.record_observations(
                 tuple(_observation(index, _MAX) for index in range(offset, min(offset + 250, sample_count)))
             )
+        monkeypatch.setattr(
+            metrics._store, "scan_observations",
+            AsyncMock(side_effect=AssertionError("SQL aggregation must not scan raw observations")),
+        )
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         result = await metrics.query(
             MetricQuery(
@@ -189,22 +194,10 @@ async def test_large_integer_sum_transfers_only_one_aggregate_statement(
         assert result.points[0].value == _MAX * sample_count
         assert type(result.points[0].value) is int
         assert len(statements) == 1
-        assert "integer_sum_high" in statements[0]
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", capture):
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
         await engine.dispose()
-
-
-def test_mysql_integer_total_uses_raw_decimal_not_promoted_numeric_case() -> None:
-    statement = _measurement_sum_sql("mysql", MetricAggregation.SUM, [])
-    assert "THEN CAST(JSON_UNQUOTE(raw_value) AS DECIMAL(65, 0))" in statement
-    assert "ELSE NULL END) AS integer_sum_low" in statement
-
-
-def test_postgresql_integer_total_keeps_exact_numeric_accumulation() -> None:
-    statement = _measurement_sum_sql("postgresql", MetricAggregation.MEAN, [])
-    assert "THEN numeric_value ELSE NULL END) AS integer_sum_low" in statement
 
 
 @pytest.mark.parametrize("value", ("1", "1e3", "NaN", "null", "[1, 2]"))

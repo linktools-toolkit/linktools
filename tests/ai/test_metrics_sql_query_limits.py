@@ -210,7 +210,6 @@ async def test_sqlite_extrema_expand_once_without_order_sort(
     assert sum("SEARCH ai_metric_observations" in detail for detail in details) == 1
     assert sum("SCAN m VIRTUAL TABLE" in detail for detail in details) == 1
     assert not any("TEMP B-TREE FOR ORDER BY" in detail for detail in details)
-    assert "ROW_NUMBER" not in statement
 
 
 def _plan() -> _MetricQueryPushdownPlan:

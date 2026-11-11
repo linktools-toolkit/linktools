@@ -4,6 +4,7 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
@@ -329,6 +330,7 @@ async def test_measurement_pushdown_preserves_metric_type_integrity_checks(
 ))
 async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     sample_count: int,
 ) -> None:
     path = tmp_path / "measurement-statements.db"
@@ -367,6 +369,10 @@ async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
     try:
         await provision_metrics_database(engine)
         await _seed(metrics, observations)
+        monkeypatch.setattr(
+            metrics._store, "scan_observations",
+            AsyncMock(side_effect=AssertionError("SQL aggregation must not scan raw observations")),
+        )
         event.listen(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
         window = MetricWindow.between(start, start + timedelta(seconds=1))
 
@@ -378,7 +384,6 @@ async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
             if query.aggregation is MetricAggregation.PERCENTILE:
                 assert result.points[0].value == (sample_count - 1) // 2 + 0.25
             assert len(statements) == 1
-            assert "with bounded_observations" in statements[0]
     finally:
         if event.contains(
             engine.sync_engine,
