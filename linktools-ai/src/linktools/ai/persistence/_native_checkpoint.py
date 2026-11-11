@@ -52,9 +52,16 @@ class NativeCheckpoint(ContinuableSnapshot):
         return restored
 
     @classmethod
-    def encode(cls, snapshot: ContinuableSnapshot, *, output_retries_used: int) -> ContinuableSnapshot:
+    def from_snapshot(cls, snapshot: ContinuableSnapshot, *, output_retries_used: int) -> "NativeCheckpoint":
+        """Bind retry state without rebuilding an already captured message sequence."""
         if type(output_retries_used) is not int or output_retries_used < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return cls(**{field.name: getattr(snapshot, field.name) for field in fields(ContinuableSnapshot)},
+                   output_retries_used=output_retries_used)
+
+    @classmethod
+    def encode(cls, snapshot: ContinuableSnapshot, *, output_retries_used: int) -> ContinuableSnapshot:
+        snapshot = cls.from_snapshot(snapshot, output_retries_used=output_retries_used)
         messages = snapshot.messages
         last = messages[-1] if messages else ModelRequest(parts=[])
         # The native snapshot has no extension field. Message metadata is the

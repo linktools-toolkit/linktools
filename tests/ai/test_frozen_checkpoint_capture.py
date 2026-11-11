@@ -102,8 +102,9 @@ async def test_terminal_confirmation_compares_logical_reference_messages() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('runtime', (False, True))
 async def test_frozen_snapshot_batches_do_not_revisit_committed_bodies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime: bool,
 ) -> None:
     from sqlalchemy.ext.asyncio import create_async_engine
     from linktools.ai.persistence import SqlStepStore
@@ -111,6 +112,8 @@ async def test_frozen_snapshot_batches_do_not_revisit_committed_bodies(
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batches.db'}")
     native = SqlStepStore(engine, namespace='batches', tenant_id='tenant', max_cached_messages=2)
     await native.initialize(local=True)
+    writer = (RuntimeStepStore(native, SimpleNamespace(), output_retries_used=lambda: 3)
+              if runtime else native)
     archive = MessageArchive()
     messages = archive.snapshot([
         ModelRequest(parts=[UserPromptPart(f'history-{index}' * 1024)]) for index in range(7)
@@ -124,19 +127,26 @@ async def test_frozen_snapshot_batches_do_not_revisit_committed_bodies(
             yield payload
 
     try:
-        await native.save_snapshot(ContinuableSnapshot(run_id='run', step_index=0, messages=messages))
+        await writer.save_snapshot(ContinuableSnapshot(run_id='run', step_index=0, messages=messages))
         monkeypatch.setattr(MessageSnapshot, '_payloads', observed)
         for step in range(1, 3):
             committed = set(original(messages))
             visited.clear()
             for index in range(2):
                 messages = archive.append(messages, [ModelRequest(parts=[UserPromptPart(f'{step}-{index}')])])
-            await native.save_snapshot(ContinuableSnapshot(run_id='run', step_index=step, messages=messages))
+            await writer.save_snapshot(ContinuableSnapshot(run_id='run', step_index=step, messages=messages))
             # The body budget observes actual traversal, including digest input,
             # rather than counting calls that might return cached digest values.
             assert not committed.intersection(visited)
         monkeypatch.setattr(MessageSnapshot, '_payloads', original)
-        assert (await native.latest_snapshot(run_id='run')).messages == list(messages)
+        restored = await writer.latest_snapshot(run_id='run')
+        assert restored.messages == list(messages)
+        if runtime:
+            assert restored.output_retries_used == 3
+        changed = list(messages)
+        changed[0].parts[0].content = 'changed historical content'
+        await writer.save_snapshot(ContinuableSnapshot(run_id='run', step_index=3, messages=changed))
+        assert (await writer.latest_snapshot(run_id='run')).messages == changed
         native.invalidate_message_content()
         assert not native._message_snapshots
     finally:

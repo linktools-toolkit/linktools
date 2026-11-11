@@ -1086,6 +1086,7 @@ class SqlStepStore:
             archive=archive,
             reuse_payload=self._prepare_message_payload,
         )
+        messages.encoded_digest()
         self._prepared_messages[prepared] = messages
         candidate = ref(prepared)
 
@@ -1375,10 +1376,13 @@ class SqlStepStore:
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
     ) -> "tuple[dict[str, SqlValue], PreparedNativeMessages]":
-        if isinstance(snapshot, NativeCheckpoint):
-            snapshot = NativeCheckpoint.encode(snapshot, output_retries_used=snapshot.output_retries_used)
-        values = self._record_values(snapshot)
         decoded = NativeCheckpoint.decode(snapshot)
+        if isinstance(snapshot, NativeCheckpoint):
+            # Only the tail carries the retry envelope; the captured history is
+            # already independent and must retain its structural prefix proof.
+            snapshot = NativeCheckpoint.encode(replace(snapshot, messages=snapshot.messages[-1:]),
+                                               output_retries_used=snapshot.output_retries_used)
+        values = self._record_values(snapshot)
         checkpoint = None
         if isinstance(decoded, NativeCheckpoint):
             checkpoint = {

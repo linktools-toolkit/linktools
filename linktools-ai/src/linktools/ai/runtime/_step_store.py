@@ -17,7 +17,7 @@ from pydantic_ai_harness.step_persistence import (
 from ._tool import RuntimeToolOperationBridge, ToolOperationBridge
 from ..model.messages import native_checkpoint_messages
 from ..capability.steps import AtomicStepStore
-from ..persistence import MessageArchive, SqlStepStore, StepWriteReceipt
+from ..persistence import MessageArchive, MessageSnapshot, SqlStepStore, StepWriteReceipt
 from ..persistence.runs import NativeCheckpoint
 
 if TYPE_CHECKING:
@@ -48,6 +48,7 @@ class RuntimeStepStore:
         self._native_boundary = native_boundary
         self._output_retries_used = output_retries_used
         self._message_archive = MessageArchive()
+        self._checkpoint_messages: tuple[MessageSnapshot, MessageSnapshot] | None = None
         if native_boundary and isinstance(tool_operations, RuntimeToolOperationBridge):
             tool_operations.bind_native_step_store(store)
 
@@ -148,14 +149,24 @@ class RuntimeStepStore:
         return replace(snapshot, messages=self._message_archive.snapshot(snapshot.messages))
 
     def _encode_snapshot(self, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
-        messages = native_checkpoint_messages(snapshot.messages)
-        # Caller-owned SDK stores serialize the published list contract directly.
-        # Only our native content owner accepts an immutable encoded sequence.
-        snapshot = replace(snapshot, messages=(self._message_archive.snapshot(messages)
-                           if isinstance(self._store, SqlStepStore) else messages))
+        native = isinstance(self._store, SqlStepStore)
+        if native:
+            source = self._message_archive.snapshot(snapshot.messages)
+            previous = self._checkpoint_messages
+            shared = 0 if previous is None else source.shared_prefix_length(previous[0])
+            messages = self._message_archive.concatenate(
+                () if previous is None else previous[1][:shared],
+                native_checkpoint_messages(source[shared:]),
+            )
+            self._checkpoint_messages = source, messages
+        else:
+            # Caller-owned SDK stores serialize the published list contract directly.
+            messages = native_checkpoint_messages(snapshot.messages)
+        snapshot = replace(snapshot, messages=messages)
         if self._output_retries_used is None:
             return snapshot
-        return NativeCheckpoint.encode(snapshot, output_retries_used=self._output_retries_used())
+        encode = NativeCheckpoint.from_snapshot if native else NativeCheckpoint.encode
+        return encode(snapshot, output_retries_used=self._output_retries_used())
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         stored_snapshot = self._encode_snapshot(snapshot)
