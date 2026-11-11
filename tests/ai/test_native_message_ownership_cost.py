@@ -23,6 +23,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 from sqlalchemy import event, select, text
 
+from linktools.ai.steps import native_store_locator
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.inputs import ExecutionContextArchive
 from linktools.ai.inputs import _context_archive
@@ -89,13 +90,13 @@ class _Traffic:
         identities: Counter[str] = Counter()
         collectors = 0
         for statement, parameters in self.reads[start:]:
-            projection = " ".join(statement.split("FROM", 1)[0].split())
+            projection = " ".join(statement.split("FROM", 1)[0].split()).replace('"', '').replace('`', '')
             for table in ("ai_step_sequences", "ai_step_messages"):
                 if projection == f"SELECT {table}.sha256, {table}.id":
                     assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[0] == store_key and 0 < len(parameters) - 1 <= 128
+                    assert parameters[:2] == (native_store_locator(store_key), store_key) and 0 < len(parameters) - 2 <= 128
                     lookups[table] += 1
-                    identities[table] += len(parameters) - 1
+                    identities[table] += len(parameters) - 2
                     break
             else:
                 columns = projection.removeprefix("SELECT ").split(", ")
@@ -116,15 +117,18 @@ class _Traffic:
     ) -> None:
         kinds: Counter[str] = Counter()
         for statement, parameters in self.reads[start:]:
-            projection = " ".join(statement.split("FROM", 1)[0].split())
+            projection = " ".join(statement.split("FROM", 1)[0].split()).replace('"', '').replace('`', '')
             if projection.startswith("SELECT ai_state_records.id,"):
                 identifiers = statement.replace('"', '').replace('`', '')
-                assert "ai_state_records.store_key =" in identifiers and "ai_state_records.key =" in identifiers
+                assert "ai_state_records.store_key =" in identifiers and "ai_state_records.key_locator =" in identifiers
+                # The lookup returns the complete raw identity for owner validation.
+                assert "ai_state_records.key," in projection and "ai_state_records.key_locator," in projection
                 assert parameters[0] == record_store and len(parameters) == 2
+                assert isinstance(parameters[1], str) and re.fullmatch(r"[0-9a-f]{64}", parameters[1])
                 kinds['owner'] += 1
             elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
                 assert "ai_step_sequences.sha256 IN" in statement
-                assert parameters == (store_key, root)
+                assert parameters == (native_store_locator(store_key), store_key, root)
                 kinds['root'] += 1
             elif projection.startswith("SELECT ai_native_content_edges.id,"):
                 columns = projection.removeprefix("SELECT ").split(", ")

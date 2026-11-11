@@ -16,7 +16,7 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from linktools.ai.steps import native_store_key
+from linktools.ai.steps import native_store_locator, native_store_key
 from linktools.ai.migrate import provision_database
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
@@ -94,7 +94,7 @@ def test_mysql_tiny_ranges_do_not_expand_the_entire_forest_height() -> None:
                                  (NativeMessageSlice("b" * 64, count, count - 1, count),))
         plan = content.range_query((tail,))
         assert plan.depth == 0 and plan.path_units == 1
-        assert plan.bind_parameters <= 4 and plan.sql_bytes < 2048
+        assert plan.bind_parameters <= 5 and plan.sql_bytes < 2048
     first = replace(tail, slices=(NativeMessageSlice("b" * 64, 1_000_000, 0, 1),))
     plan = content.range_query((first,))
     assert plan.path_units >= plan.depth + 1
@@ -116,7 +116,7 @@ def test_repeated_span_work_is_shared_and_singleton_batches_fit_one_read(dialect
     for count in (128, 446):
         distinct = tuple(replace(single, slices=(NativeMessageSlice(f"{index:064x}", 1, 0, 1),)) for index in range(count))
         batch = content.range_query(distinct)
-        assert batch.path_units == count and batch.bind_parameters < count + 4
+        assert batch.path_units == count and batch.bind_parameters <= count + 4
         assert batch.sql_bytes < 32 * 1024
 
 
@@ -129,8 +129,10 @@ async def test_immutable_content_insert_compares_winners_without_body_reads(dial
     ]), prepare_payload=_payload)
     identity, body = prepared.messages[0]
     node_id, node = prepared.nodes[0]
-    rows = ((content._messages, {"store_key": native_store_key("a", "tenant"), "sha256": identity, **body.to_native_values()}),
-            (content._nodes, {"store_key": native_store_key("a", "tenant"), "sha256": node_id,
+    rows = ((content._messages, {"store_key": native_store_key("a", "tenant"),
+                               "store_locator": native_store_locator(native_store_key("a", "tenant")), "sha256": identity, **body.to_native_values()}),
+            (content._nodes, {"store_key": native_store_key("a", "tenant"),
+                               "store_locator": native_store_locator(native_store_key("a", "tenant")), "sha256": node_id,
                 "message_sha256": node.content_id, "tree_count": node.tree_count,
                 "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}))
 
@@ -299,6 +301,7 @@ async def _check_native_cas_and_range_execution(engine: AsyncEngine) -> None:
                 (sequence_ids, message_ids), strict=True,
             ):
                 expected = select(table.c.sha256, table.c.id).where(
+                    table.c.store_locator == native_store_locator(native.store_key),
                     table.c.store_key == native.store_key, table.c.sha256.in_(identities),
                 )
                 assert str(actual.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
@@ -404,12 +407,12 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
             normalized = " ".join(sql.split())
             assert re.fullmatch(
                 r"SELECT (AI_STEP_MESSAGES|AI_STEP_SEQUENCES)\.SHA256, \1\.ID "
-                r"FROM \1 WHERE \1\.STORE_KEY = \? AND \1\.SHA256 IN \([?, ]+\)",
+                r"FROM \1 WHERE \1\.STORE_LOCATOR = \? AND \1\.STORE_KEY = \? AND \1\.SHA256 IN \([?, ]+\)",
                 normalized,
             ), normalized
-            assert parameters[0] == native.store_key
-            assert 1 <= len(parameters[1:]) <= 4
-            assert set(parameters[1:]) <= allowed
+            assert parameters[:2] == (native_store_locator(native.store_key), native.store_key)
+            assert 1 <= len(parameters[2:]) <= 4
+            assert set(parameters[2:]) <= allowed
         selected = cold.adopt_read(readbacks[1])
         branch = await cold.prepare_append(frozen[:1], prepare_payload=_payload, base=selected)
         assert len(branch.root.slices) == 2 and len(branch.nodes) == 1

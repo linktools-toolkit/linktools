@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from linktools.ai.storage import InsertResult, PostgreSQLDialect, SQLiteDialect, SqlValue
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.storage import InsertResult, MySQLDialect, PostgreSQLDialect, SQLiteDialect, SqlValue
 from sqlalchemy import (
     Column, DateTime, Integer, MetaData, String, Table, UniqueConstraint,
     event, func, select,
@@ -59,6 +60,9 @@ class _Result:
         return ("13",)
 
     def scalar_one(self) -> str:
+        return "17"
+
+    def scalar_one_or_none(self) -> str | None:
         return "17"
 
     def all(self) -> list[tuple[str | int, str | int]]:
@@ -388,3 +392,123 @@ async def test_counter_batch_returns_binary_identity_without_text_conversion(dia
     result = await dialect.upsert_increment_many(Session(), table=table, rows=[{"key": key, "value": 3}],
         column="value", index_elements=("key",), returning_key="key")
     assert result == {key: 3}
+
+
+def _identity_counter_table() -> Table:
+    return Table(
+        "ai_identity_counters", MetaData(),
+        Column("locator", String(32), primary_key=True),
+        Column("stream_key", String(128), nullable=False),
+        Column("value", Integer, nullable=False),
+        Column("updated_at", DateTime, nullable=False),
+    )
+
+
+async def _increment_identity_counter(
+    dialect: SQLiteDialect | MySQLDialect, session: AsyncSession | _Session,
+    table: Table, rows: list[dict[str, SqlValue]], *, batch: bool,
+) -> int | dict[SqlValue, int]:
+    if batch:
+        return dict(await dialect.upsert_increment_many(
+            session, table=table, rows=rows, column="value", returning_key="locator",
+            index_elements=("locator",), identity_columns=("stream_key",),
+        ))
+    return await dialect.upsert_increment(
+        session, table=table, values=rows[0], column="value", step=3,
+        index_elements=("locator",), identity_columns=("stream_key",),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", (False, True), ids=("single", "batch"))
+async def test_sqlite_counter_identity_match_increments_and_collision_rolls_back(batch: bool) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    table = _identity_counter_table()
+    row = {"locator": "shared", "stream_key": "original-stream", "value": 3, "updated_at": _OLD_TIME}
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(table.metadata.create_all)
+            await connection.execute(table.insert(), {**row, "value": 10})
+        async with AsyncSession(engine) as session, session.begin():
+            result = await _increment_identity_counter(SQLiteDialect(), session, table, [row], batch=batch)
+            assert result == ({"shared": 13} if batch else 13)
+        async with AsyncSession(engine) as session:
+            before = dict((await session.execute(select(table))).mappings().one())
+        assert before["stream_key"] == "original-stream" and before["value"] == 13
+        assert before["updated_at"] > _OLD_TIME
+        collision = {**row, "stream_key": "different-stream"}
+        # A preceding fresh row must not survive the batch's later identity collision.
+        rows = [{**row, "locator": "fresh"}, collision] if batch else [collision]
+        with pytest.raises(AIError) as caught:
+            async with AsyncSession(engine) as session, session.begin():
+                await _increment_identity_counter(SQLiteDialect(), session, table, rows, batch=batch)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        async with AsyncSession(engine) as session:
+            after = [dict(value) for value in (await session.execute(select(table))).mappings()]
+        assert after == [before]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialect,compiler", (
+    (SQLiteDialect(), sqlite.dialect()),
+    (PostgreSQLDialect(), postgresql.dialect()),
+), ids=("sqlite", "postgresql"))
+@pytest.mark.parametrize("batch", (False, True), ids=("single", "batch"))
+async def test_counter_conflict_predicate_checks_complete_raw_identity(
+    dialect: SQLiteDialect, compiler: Dialect, batch: bool,
+) -> None:
+    class IdentityResult(_Result):
+        def all(self) -> list[tuple[str, int]]:
+            return [("shared", 17)]
+
+    class IdentitySession(_Session):
+        async def execute(self, statement: ClauseElement, parameters: object = None) -> IdentityResult:
+            self.statements.append(statement)
+            return IdentityResult()
+
+    session = IdentitySession()
+    await _increment_identity_counter(dialect, session, _identity_counter_table(), [
+        {"locator": "shared", "stream_key": "whole/raw/stream", "value": 3, "updated_at": _OLD_TIME},
+    ], batch=batch)
+    sql = str(session.statements[0].compile(dialect=compiler))
+    predicate = sql.split(" WHERE ", 1)[1].split(" RETURNING ", 1)[0]
+    assert "ai_identity_counters.stream_key" in predicate
+    assert "excluded.stream_key" in predicate
+    assert ("convert_to" if dialect.name == "postgresql" else "CAST") in predicate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", (False, True), ids=("single", "batch"))
+async def test_mysql_counter_collision_uses_noop_updates_and_raw_identity_readback(batch: bool) -> None:
+    from sqlalchemy.dialects import mysql
+
+    class MissingIdentityResult(_Result):
+        def all(self) -> list[tuple[str, int]]:
+            return []
+
+    class MissingIdentitySession(_Session):
+        async def execute(self, statement: ClauseElement, parameters: object = None) -> MissingIdentityResult:
+            self.statements.append(statement)
+            return MissingIdentityResult()
+
+        async def scalar(self, statement: ClauseElement) -> None:
+            self.statements.append(statement)
+            return None
+
+    session = MissingIdentitySession()
+    with pytest.raises(AIError) as caught:
+        await _increment_identity_counter(MySQLDialect(), session, _identity_counter_table(), [
+            {"locator": "shared", "stream_key": "different-stream", "value": 3, "updated_at": _OLD_TIME},
+        ], batch=batch)
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    update, readback = [statement.compile(dialect=mysql.dialect()) for statement in session.statements]
+    update_sql = str(update).replace("`", "")
+    assert "ai_identity_counters.stream_key" in update_sql
+    assert "VALUES(stream_key)" in update_sql
+    assert "CASE WHEN" in update_sql and "<=>" in update_sql
+    assert "ELSE ai_identity_counters.value END" in update_sql
+    assert "ELSE ai_identity_counters.updated_at END" in update_sql
+    assert "ai_identity_counters.stream_key =" in str(readback)
+    assert "different-stream" in readback.params.values()

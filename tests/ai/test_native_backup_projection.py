@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent
 
+from linktools.ai.steps import native_store_locator
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError
 from linktools.ai.persistence import SqlStepStore
@@ -26,9 +27,9 @@ def _digest(value: str) -> str:
 def _inventory():
     store = SqlStepStore.scope_key(namespace="portable", tenant_id="tenant")
     run = RunRecord(run_id="run", registration_id="registration", metadata={"native": "body"})
-    row = dict(SqlStepStore._record_values(run), store_key=store)
+    row = dict(SqlStepStore._record_values(run), store_key=store, store_locator=native_store_locator(store))
     event = StepEvent(run_id="run", kind="run_started", step_index=1, idempotency_key="start")
-    event_row = dict(SqlStepStore._event_values(event), store_key=store,
+    event_row = dict(SqlStepStore._event_values(event), store_key=store, store_locator=native_store_locator(store),
                      idempotency_key=b"start", outcome=None, run_fields=0,
                      body_sha256=_digest(SqlStepStore._started_body(event)),
                      fields_sha256=_digest(SqlStepStore._started_fields_body(event)))

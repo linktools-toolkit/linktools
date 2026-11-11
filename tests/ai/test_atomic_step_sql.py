@@ -340,20 +340,61 @@ async def test_native_boundary_failure_rolls_back_control_and_native_rows(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_unkeyed_prepared_boundary_appends_on_each_publication(tmp_path: Path) -> None:
+@pytest.mark.parametrize("publication", ("sequential", "concurrent", "retry"))
+async def test_unkeyed_prepared_boundary_appends_on_each_publication(tmp_path: Path, publication: str) -> None:
+    import sqlite3
     from .test_state_group_record_batch import _database
 
-    async with _database(tmp_path / "append-prepared.db") as (_, state, _):
+    async with _database(tmp_path / "append-prepared.db") as (engine, state, _):
         native = SqlStepStore(state.context, namespace="steps", tenant_id="one")
         snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[])
         event_record = StepEvent(run_id="run", kind="model_request_started", step_index=0)
+        prepared = await native.prepare_step(events=(event_record,), snapshot=snapshot)
+        aborted = False
+
+        def fail_snapshot_once(_connection, _cursor, statement, parameters, _context, _many):
+            nonlocal aborted
+            if publication == "retry" and not aborted and statement.startswith("INSERT INTO ai_step_snapshots "):
+                aborted = True
+                error = sqlite3.OperationalError("database is locked")
+                error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                raise OperationalError(statement, parameters, error)
+
+        async def publish():
+            receipt = await state.mutate(lambda transaction: native.write_prepared_step(transaction, prepared))
+            native.confirm_prepared_step(receipt)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", fail_snapshot_once)
+        try:
+            if publication == "concurrent":
+                await asyncio.gather(publish(), publish())
+            else:
+                await publish()
+                await publish()
+            assert aborted == (publication == "retry")
+            assert await native.list_events(run_id="run") == [event_record, event_record]
+            assert await native.list_snapshots(run_id="run") == [snapshot, snapshot]
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", fail_snapshot_once)
+            await native.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ("", "replay"))
+async def test_keyed_prepared_boundary_replays_on_each_publication(tmp_path: Path, key: str) -> None:
+    from .test_state_group_record_batch import _database
+
+    async with _database(tmp_path / "replay-prepared.db") as (_, state, _):
+        native = SqlStepStore(state.context, namespace="steps", tenant_id="one")
+        snapshot = ContinuableSnapshot(run_id="run", step_index=0, messages=[], idempotency_key=key)
+        event_record = StepEvent(run_id="run", kind="model_request_started", step_index=0, idempotency_key=key)
         prepared = await native.prepare_step(events=(event_record,), snapshot=snapshot)
         try:
             for _ in range(2):
                 receipt = await state.mutate(lambda transaction: native.write_prepared_step(transaction, prepared))
                 native.confirm_prepared_step(receipt)
-            assert await native.list_events(run_id="run") == [event_record, event_record]
-            assert await native.list_snapshots(run_id="run") == [snapshot, snapshot]
+            assert await native.list_events(run_id="run") == [event_record]
+            assert await native.list_snapshots(run_id="run") == [snapshot]
         finally:
             await native.close()
 

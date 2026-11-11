@@ -53,7 +53,7 @@ def test_mysql_selected_value_matches_python(
     ))
     script = """DROP TABLE IF EXISTS ai_metric_observations;
 CREATE TABLE ai_metric_observations (
-    namespace VARCHAR(256), kind VARCHAR(128), occurred_at DATETIME(6),
+    namespace VARCHAR(128), kind VARCHAR(128), occurred_at DATETIME(6),
     observation_id VARCHAR(64), payload_json JSON, pruned_at DATETIME(6), active_occurred_at DATETIME(6)
 );
 """

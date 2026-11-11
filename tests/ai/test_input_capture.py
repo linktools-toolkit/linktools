@@ -112,6 +112,8 @@ async def test_agent_capture_fixed_and_reproject_inputs(tmp_path: Path) -> None:
         assert ((await rerun.wait()).result).status is TaskStatus.SUCCEEDED
         assert calls == ["Ada"]
         reproject = await runtime_engine.inputs.task_input(capture, principal=principal, input_mode="reproject_input")
+        assert await runtime_engine.inputs.task_input(capture, principal=principal, input_mode="reproject_input") == reproject
+        assert reproject != fixed
         rerun = await engine.start(TaskGraph("agent-reproject", (TaskNode("a", task=task, input_capture=reproject),)), principal=principal, idempotency_key="agent-capture-reproject-0001")
         assert ((await rerun.wait()).result).status is TaskStatus.SUCCEEDED
         assert calls == ["Ada", "Ada"]
@@ -152,7 +154,12 @@ async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path: Path)
         capture_service = runtime_engine.inputs
         second = await engine.start(TaskGraph("consumer", (TaskNode("read", task=consumer, input_capture=input_ref),)), principal=principal, idempotency_key="capture-consumer-0001")
         assert ((await second.wait()).result).status is TaskStatus.SUCCEEDED
-        graph_capture = await runtime_engine.inputs.capture_graph("consumer", CaptureGraphRequest(principal, "capture-graph-0001"))
+        request = CaptureGraphRequest(principal, "界" * 42 + "ab")
+        graph_capture = await runtime_engine.inputs.capture_graph("consumer", request)
+        assert await runtime_engine.inputs.capture_graph("consumer", request) == graph_capture
+        independent = await runtime_engine.inputs.capture_graph(
+            "consumer", CaptureGraphRequest(principal, "界" * 42 + "ac"))
+        assert independent != graph_capture
         template = await capture_service.read_graph(graph_capture, principal=principal)
         assert template.task_contracts
     async with Persistence.open('graph-capture', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True)) as persistence_148, Runtime.attach(persistence=persistence_148, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_148, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
@@ -352,6 +359,8 @@ async def test_task_capture_preserves_raw_input_and_projects_only_when_requested
         assert await fixed.result("node") == {"value": 2}
         assert counts["candidate"] == 0
         reproject = await runtime_engine.inputs.task_input(capture, principal=principal, input_mode="reproject_input")
+        assert await runtime_engine.inputs.task_input(capture, principal=principal, input_mode="reproject_input") == reproject
+        assert reproject != fixed
         rerun = await engine.start(TaskGraph("raw-reproject", (TaskNode("node", task=target, input_capture=reproject),)),
             principal=principal, idempotency_key="raw-reproject-0001")
         assert ((await rerun.wait()).result).status is TaskStatus.SUCCEEDED

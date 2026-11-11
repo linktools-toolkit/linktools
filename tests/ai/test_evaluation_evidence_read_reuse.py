@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from hashlib import sha256
 
 import pytest
 from sqlalchemy import event
@@ -143,10 +144,11 @@ async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preser
         await evaluations.close()
         source = await storage.evaluation.records.get(source_id, tenant_id=PRINCIPAL.tenant_id)
         source_key = storage.evaluation.records._key("evaluation", (source_id,))
+        source_locator = sha256(source_key).hexdigest()
         statements = []
 
         def capture(_connection, _cursor, sql, parameters, _context, _many):
-            if sql.startswith("SELECT") and source_key in parameters:
+            if sql.startswith("SELECT") and (source_key in parameters or source_locator in parameters):
                 statements.append(sql)
 
         engine = storage.evaluation.records.state_store.context.engine.sync_engine

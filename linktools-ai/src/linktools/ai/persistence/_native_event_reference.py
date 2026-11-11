@@ -20,8 +20,8 @@ from ._step_contracts import AgentRunRecord, StepEvent
 from ._official_step_reader import OfficialStepReader
 from ._step_schema import build_step_sql_metadata
 from ._step_store import PreparedStep, SqlStepStore, StepWriteReceipt
-from ..core import validate_resource_id
-from ..steps import NativeLifecycleEvent, validate_native_replay_key, encode_native_replay_key
+from ..core import deterministic_id, validate_resource_id
+from ..steps import native_store_locator, NativeLifecycleEvent, validate_native_replay_key, encode_native_replay_key
 from .codec import _encode_step_envelope, decode_envelope, encode_envelope
 from .state import FactQuery, FactScanCursor, SqlStateFactReader, StateTransaction, StoredFact, record_key, stream_key
 
@@ -60,6 +60,7 @@ class NativeEventReferences:
     def __init__(self, state: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
         self._state, self._namespace, self._tenant_id = state, namespace, tenant_id
         self._store_key = SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
+        self._store_locator = native_store_locator(self._store_key)
         self._native: SqlStepStore | None = None
         self._runs_pending: dict[str, _RunPublication] = {}
         metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE}))
@@ -95,7 +96,7 @@ class NativeEventReferences:
             timestamp=source.timestamp, agent_conversation_id=source.conversation_id,
             parent_agent_run_id=source.parent_run_id, agent_id=source.agent_name,
             error=source.error, metadata={}, event_index=event_index,
-            idempotency_key=f"{event_index}:{source.step_index}:{event_type}:",
+            idempotency_key=deterministic_id(event_index, source.step_index, event_type, None),
         )
 
     @classmethod
@@ -302,6 +303,7 @@ class NativeEventReferences:
     def statement(self, *, query: FactQuery | None = None, sequences: Sequence[int] | None = None,
                   scan: tuple[FactScanCursor | None, int] | None = None,
                   full_source: bool = False) -> "Select":
+        from ._sql import _key_matches
         from sqlalchemy import JSON, Text, and_, bindparam, case, cast, func, or_, select, type_coerce
         from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
@@ -343,10 +345,10 @@ class NativeEventReferences:
             ))
         statement = select(facts, *(column.label("native_" + name) for name, column in columns.items()),
                            *registration_columns, or_(*invalid).label("invalid_native_reference")).select_from(
-            facts.outerjoin(events, and_(facts.c.kind == "step_event", events.c.store_key == self._store_key,
+            facts.outerjoin(events, and_(facts.c.kind == "step_event", events.c.store_locator == self._store_locator, events.c.store_key == self._store_key,
                                          events.c.run_id == reference["run"].as_string(),
                                          events.c.idempotency_key == replay)).outerjoin(runs, and_(
-                *(() if full_source else (inherited != 0,)), runs.c.store_key == events.c.store_key,
+                *(() if full_source else (inherited != 0,)), runs.c.store_locator == events.c.store_locator, runs.c.store_key == events.c.store_key,
                 runs.c.run_id == events.c.run_id,
             )))
         def inline_constant(node):
@@ -361,7 +363,7 @@ class NativeEventReferences:
 
         statement = visitors.replacement_traverse(statement, {}, inline_constant).where(facts.c.store_key == self._state.store_key)
         if query is not None:
-            conditions = [facts.c.stream_key == query.stream_key]
+            conditions = [_key_matches(facts.c.stream_key, query.stream_key)]
             if query.after_sequence is not None:
                 conditions.append(facts.c.sequence > query.after_sequence)
             if query.subject_id is not None:
@@ -372,7 +374,7 @@ class NativeEventReferences:
                 latest = select(func.max(facts.c.sequence)).where(
                     facts.c.store_key == self._state.store_key, *conditions,
                 ).group_by(facts.c.subject_id)
-                conditions = [facts.c.stream_key == query.stream_key, facts.c.sequence.in_(latest)]
+                conditions = [_key_matches(facts.c.stream_key, query.stream_key), facts.c.sequence.in_(latest)]
             statement = statement.where(*conditions).order_by(facts.c.sequence.desc() if query.latest else facts.c.sequence)
             if query.limit is not None or query.latest:
                 statement = statement.limit(1 if query.latest else query.limit)

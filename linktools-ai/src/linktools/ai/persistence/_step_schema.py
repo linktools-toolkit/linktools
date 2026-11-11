@@ -48,13 +48,15 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
 
     def replay() -> "Column":
         return Column("idempotency_key", LargeBinary(NATIVE_REPLAY_KEY_MAX_BYTES).with_variant(
-            VARBINARY(NATIVE_REPLAY_KEY_MAX_BYTES), "mysql"), nullable=True,
-                      comment="Original bounded replay key; NULL appends a distinct occurrence.")
+            VARBINARY(NATIVE_REPLAY_KEY_MAX_BYTES), "mysql"), nullable=False,
+                      comment="Exact UTF-8 replay key or a reserved unique occurrence key for an unkeyed append.")
 
     def digest(name: str, comment: str, *, nullable: bool = False) -> "Column":
         return Column(name, sql_sha256(), nullable=nullable, comment=comment)
 
     def table(name: str, comment: str, *columns: "Column") -> "Table":
+        if any(column.name == "store_key" for column in columns):
+            columns += (digest("store_locator", "Single SHA-256 lookup projection of the complete store_key; raw identity must also match."),)
         result = Table(
             name, metadata, sql_id_column(),
             *columns, *sql_audit_columns(), comment=comment,
@@ -76,9 +78,9 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("started_at", String(64), nullable=False, comment="Original ISO 8601 run start time."),
             text("registration_id", "Upstream registration invocation identifier."),
         )
-        sql_unique(runs, "store_key", "run_id")
-        sql_query_index(runs, "store_key", "conversation_id")
-        sql_query_index(runs, "store_key", "parent_run_id")
+        sql_unique(runs, "store_locator", "run_id")
+        sql_query_index(runs, "store_locator", "conversation_id")
+        sql_query_index(runs, "store_locator", "parent_run_id")
 
     if "ai_step_events" not in metadata.tables:
         events = table(
@@ -104,9 +106,9 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             digest("fields_sha256", "Integrity digest of managed lifecycle fields excluding metadata.", nullable=True),
             replay(),
         )
-        sql_unique(events, "store_key", "run_id", "idempotency_key")
+        sql_unique(events, "store_locator", "run_id", "idempotency_key")
         # Replay order differs from occurrence order; this index serves ordered run reads.
-        sql_query_index(events, "store_key", "run_id")
+        sql_query_index(events, "store_locator", "run_id")
 
     if "ai_step_snapshots" not in metadata.tables:
         snapshots = table(
@@ -125,8 +127,8 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             replay(),
             Column("pruned", Boolean, nullable=False, default=False, comment="Retired snapshot identity without retained message references."),
         )
-        sql_unique(snapshots, "store_key", "run_id", "idempotency_key")
-        sql_query_index(snapshots, "store_key", "run_id", "pruned")
+        sql_unique(snapshots, "store_locator", "run_id", "idempotency_key")
+        sql_query_index(snapshots, "store_locator", "run_id", "pruned")
 
     if "ai_step_messages" not in metadata.tables:
         messages = table(
@@ -141,7 +143,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("gc_revision", BigInteger, nullable=False, server_default=sql_text("0"),
                    comment="Optimistic native dependency publication fence."),
         )
-        sql_unique(messages, "store_key", "sha256")
+        sql_unique(messages, "store_locator", "sha256")
 
     if "ai_step_sequences" not in metadata.tables:
         sequences = table(
@@ -156,7 +158,7 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             Column("gc_revision", BigInteger, nullable=False, server_default=sql_text("0"),
                    comment="Optimistic native dependency publication fence."),
         )
-        sql_unique(sequences, "store_key", "sha256")
+        sql_unique(sequences, "store_locator", "sha256")
 
     if "ai_native_content_edges" not in metadata.tables:
         edges = table(

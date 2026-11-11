@@ -440,7 +440,7 @@ def test_checkpoint_boundary_rejects_invalid_explicit_values(value: object) -> N
 
 
 @pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * OPERATION_KEY_MAX_BYTES,
-                                 operation_key("界" * 85 + "x", "é" * 64, "conversation", "界" * 85 + "x")))
+                                 operation_key("界" * 42 + "ab", "é" * 64, "conversation", "界" * 42 + "ab")))
 def test_operation_wire_roundtrips_bounded_binary_addresses(key: bytes) -> None:
     from linktools.ai.persistence.state import OperationScanCursor, StoredOperation
     value = StoredOperation(key, b"s" * 32, 1, "pending", True, {})
@@ -469,13 +469,16 @@ def test_alias_tuple_is_injective_and_bounds_encoded_bytes() -> None:
     assert alias_key("namespace", "tenant", "checkpoint", "tool_call", ("a:b", "c")) != alias_key("namespace", "tenant", "checkpoint", "tool_call", ("a", "b:c"))
     assert alias_key("namespace", "tenant", "checkpoint", "a", ("b", "c")) != alias_key("namespace", "tenant", "checkpoint", "a", ("bc",))
     assert len(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("r" * 128, "界" * 42 + "ab"))) == 302
-    assert len(alias_key("namespace", "tenant", "checkpoint", "r", ("界" * 329 + "a",))) == ALIAS_KEY_MAX_BYTES
+    overhead = len(alias_key("namespace", "tenant", "checkpoint", "r", ("x",))) - 1
+    count, remainder = divmod(ALIAS_KEY_MAX_BYTES - overhead, 3)
+    maximum = "界" * count + "x" * remainder
+    assert len(alias_key("namespace", "tenant", "checkpoint", "r", (maximum,))) == ALIAS_KEY_MAX_BYTES
     with pytest.raises(ValueError):
-        alias_key("namespace", "tenant", "checkpoint", "r", ("界" * 329 + "ab",))
+        alias_key("namespace", "tenant", "checkpoint", "r", (maximum + "x",))
     with pytest.raises(ValueError):
         alias_key("namespace", "tenant", "checkpoint", "r", ("x" * 65536,))
-    assert len(operation_key("n" * 256, "t" * 128, "conversation", "o" * 256)) == 661
-    assert len(alias_key("n" * 256, "t" * 128, "checkpoint", "tool_call", ("r" * 128, "c" * 128))) == 671
+    assert len(operation_key("n" * 128, "t" * 128, "conversation", "o" * 128)) == 405
+    assert len(alias_key("n" * 128, "t" * 128, "checkpoint", "tool_call", ("r" * 128, "c" * 128))) == 543
 
 
 @pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * ALIAS_KEY_MAX_BYTES,

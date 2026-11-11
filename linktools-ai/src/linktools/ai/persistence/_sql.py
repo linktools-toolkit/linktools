@@ -3,6 +3,7 @@
 """SQL implementation of the backend-neutral Runtime StateStore."""
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -75,20 +76,22 @@ if TYPE_CHECKING:
 ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
-_RECORD_DELETE_BATCH_SIZE = 256
-# Each immutable record contributes thirteen bound values.
-_IMMUTABLE_RECORD_BATCH_SIZE = 64
-# One store and one stream predicate leave 997 SQLite sequence binds.
-_FACT_READ_BATCH_SIZE = 997
+_RECORD_DELETE_BATCH_SIZE = 192
+# One partition bind plus a locator and raw identity per key fits SQLite 999.
+_RAW_KEY_BATCH_SIZE = 499
+# Each immutable record contributes seventeen bound values.
+_IMMUTABLE_RECORD_BATCH_SIZE = 48
+# One store and two stream predicates leave 996 SQLite sequence binds.
+_FACT_READ_BATCH_SIZE = 996
 # Seven CASE assignments and seven identity/CAS binds plus the IN key
 # require at most 22 binds per row and one shared store bind.
-_RECORD_REPLACE_BATCH_SIZE = 45
+_RECORD_REPLACE_BATCH_SIZE = 40
 # Store, scope, and kind predicates leave 996 SQLite subject binds.
-_RECORD_SUBJECT_READ_BATCH_SIZE = 996
+_RECORD_SUBJECT_READ_BATCH_SIZE = 995
 _GROUP_RECORD_BIND_BUDGET = 999
 _ARCHIVE_READ_BIND_BUDGET = 999
-# Fixed predicates and JSON-path bindings across all eight edge branches.
-_ARCHIVE_READ_FIXED_BINDS = 106
+# MySQL repeats fixed predicates/JSON paths across eight branches plus direct content.
+_ARCHIVE_READ_FIXED_BINDS = 145
 
 
 class _SqlGroupTransaction:
@@ -162,13 +165,13 @@ class _SqlGroupTransaction:
         for store, keys in requests.items():
             offset = 0
             while offset < len(keys):
-                if _GROUP_RECORD_BIND_BUDGET - used < 2:
+                if _GROUP_RECORD_BIND_BUDGET - used < 3:
                     yield batch
                     batch, used = {}, 0
-                count = min(len(keys) - offset, _GROUP_RECORD_BIND_BUDGET - used - 1)
+                count = min(len(keys) - offset, (_GROUP_RECORD_BIND_BUDGET - used - 1) // 2)
                 batch[store] = tuple(keys[offset:offset + count])
                 offset += count
-                used += count + 1
+                used += 2 * count + 1
                 if offset < len(keys):
                     yield batch
                     batch, used = {}, 0
@@ -183,7 +186,7 @@ class _SqlGroupTransaction:
         table = self._group.metadata.tables["ai_state_records"]
         return select(table).where(or_(*(and_(
             table.c.store_key == self.transaction(store)._store_key,
-            table.c.key.in_(tuple(validate_record_key(key) for key in keys)),
+            _keys_match(table.c.key, tuple(validate_record_key(key) for key in keys)),
         ) for store, keys in requests.items())))
 
 
@@ -355,7 +358,7 @@ class SqlStateStorageGroup:
         await self._context.run_statement(self._context.dialect.insert_ignore_conflict(
             session, table=self._metadata.tables["ai_state_records"],
             values={**_record_values(record), "store_key": metadata_key},
-            index_elements=("store_key", "key"),
+            index_elements=("store_key", "key_locator"),
         ))
 
     async def _open_partition(self, key: bytes) -> "SqlStateStore":
@@ -790,7 +793,7 @@ class SqlStateStore:
             sequence_rows = (
                 (
                     await transaction._execute(
-                        select(sequences.c.stream_key, sequences.c.value).where(
+                        select(sequences.c.stream_key, sequences.c.stream_locator, sequences.c.value).where(
                             sequences.c.store_key == transaction._store_key
                         )
                     )
@@ -799,12 +802,13 @@ class SqlStateStore:
                 .all()
             )
             for row in sequence_rows:
+                _validate_locators(row, "stream_key")
                 _row_stream_key(row["stream_key"])
                 _row_nonnegative_int(row["value"])
             alias_rows = (
                 (
                     await transaction._execute(
-                        select(aliases.c.alias_key, aliases.c.record_key).where(
+                        select(aliases.c.alias_key, aliases.c.alias_locator, aliases.c.record_key, aliases.c.record_locator).where(
                             aliases.c.store_key == transaction._store_key
                         )
                     )
@@ -813,6 +817,7 @@ class SqlStateStore:
                 .all()
             )
             for row in alias_rows:
+                _validate_locators(row, "alias_key", "record_key")
                 _row_alias_key(row["alias_key"])
                 _row_record_key(row["record_key"])
             orphan_alias = (await transaction._execute(
@@ -821,6 +826,7 @@ class SqlStateStore:
                     aliases.outerjoin(
                         records,
                         and_(
+                            aliases.c.record_locator == records.c.key_locator,
                             aliases.c.record_key == records.c.key,
                             records.c.store_key == transaction._store_key,
                         ),
@@ -838,6 +844,7 @@ class SqlStateStore:
                     facts.outerjoin(
                         records,
                         and_(
+                            facts.c.owner_locator == records.c.key_locator,
                             facts.c.owner_key == records.c.key,
                             records.c.store_key == transaction._store_key,
                         ),
@@ -1083,7 +1090,7 @@ class _SqlTransaction:
     async def _retire_native_facts(self, owner_keys: Sequence[bytes]) -> None:
         table = self._table("ai_state_facts")
         await self._retire_native_rows("fact", table,
-            table.c.store_key == self._store_key, table.c.owner_key.in_(owner_keys))
+            table.c.store_key == self._store_key, _keys_match(table.c.owner_key, owner_keys))
 
     def _abort_mutation(self, error: BaseException) -> None:
         if self._mutation_error is None:
@@ -1118,7 +1125,7 @@ class _SqlTransaction:
                 await self._execute(
                     select(table).where(
                         table.c.store_key == self._store_key,
-                        table.c.key == validate_record_key(key),
+                        _locator_column(table.c.key) == _key_locator(validate_record_key(key)),
                     )
                 )
             )
@@ -1128,6 +1135,8 @@ class _SqlTransaction:
         if row is None:
             self._record_cache[key] = None
             return None
+        if row is not None and row["key"] != key:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = _record_from_row(row)
         self._record_cache[key] = value
         return value
@@ -1148,13 +1157,15 @@ class _SqlTransaction:
                     await self._execute(
                         select(table).where(
                             table.c.store_key == self._store_key,
-                            table.c.key.in_(tuple(validate_record_key(key) for key in missing))
+                            _locator_column(table.c.key).in_(tuple(_key_locator(key) for key in missing))
                         )
                     )
                 )
                 .mappings()
                 .all()
             )
+        if any(row["key"] not in missing for row in rows):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values = tuple(_record_from_row(row) for row in rows)
         self._record_cache.update({value.key: value for value in values})
         for key in missing:
@@ -1179,7 +1190,7 @@ class _SqlTransaction:
         records: list[StoredRecord] = []
         for offset in range(0, len(subjects), _RECORD_SUBJECT_READ_BATCH_SIZE):
             matches = select(table.c.id).where(
-                table.c.scope_key == scope_key,
+                _key_matches(table.c.scope_key, scope_key),
                 table.c.subject_id.in_(
                     subject_values[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]
                 ),
@@ -1239,7 +1250,7 @@ class _SqlTransaction:
         used = 0
         for request in requests:
             # Each enabled branch contains the input key once, regardless of depth.
-            cost = int(request.metadata_slots).bit_count() + int(request.content_slots).bit_count()
+            cost = 2 * (int(request.metadata_slots).bit_count() + int(request.content_slots).bit_count())
             if cost > available:
                 raise ValueError("archive read parameter budget cannot fit one node")
             if used + cost > available:
@@ -1248,11 +1259,11 @@ class _SqlTransaction:
             nodes.append(request)
             used += cost
         for key in content_keys:
-            if used + 1 > available:
+            if used + 2 > available:
                 yield tuple(nodes), tuple(contents)
                 nodes, contents, used = [], [], 0
             contents.append(key)
-            used += 1
+            used += 2
         if nodes or contents:
             yield tuple(nodes), tuple(contents)
 
@@ -1277,12 +1288,12 @@ class _SqlTransaction:
     def _archive_read_statement(
         self, scope_key: bytes, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
     ) -> "Select":
-        from sqlalchemy import and_, literal, select, union
+        from sqlalchemy import and_, func, literal, select, union
 
         table = self._table("ai_state_records")
         current = table.alias("archive_current")
         current_scope = and_(current.c.store_key == self._store_key,
-                             current.c.scope_key == scope_key, current.c.kind == "archive_sequence")
+                             _key_matches(current.c.scope_key, scope_key), current.c.kind == "archive_sequence")
         branches = []
         for slot, field in ((ArchiveNodeSlot.SELF, None), (ArchiveNodeSlot.LEFT, "left"),
                             (ArchiveNodeSlot.RIGHT, "right"), (ArchiveNodeSlot.NEXT, "next")):
@@ -1293,7 +1304,7 @@ class _SqlTransaction:
             identity = current.c.sort_key if field is None else self._archive_link(current.c.payload_json, field)
             if metadata_keys:
                 branches.append(select(literal("archive_sequence").label("kind"), identity.label("identity")).where(
-                    current_scope, current.c.key.in_(metadata_keys),
+                    current_scope, _keys_match(current.c.key, metadata_keys),
                 ))
             if not body_keys:
                 continue
@@ -1301,23 +1312,25 @@ class _SqlTransaction:
             if field is not None:
                 node = table.alias("archive_" + field)
                 joined = current.outerjoin(node, and_(
-                    node.c.store_key == self._store_key, node.c.scope_key == scope_key,
-                    node.c.kind == "archive_sequence", node.c.sort_key == identity,
+                    node.c.store_key == self._store_key, _key_matches(node.c.scope_key, scope_key),
+                    node.c.kind == "archive_sequence", node.c.sort_prefix == func.substr(identity, 1, 128),
+                    node.c.sort_key == identity,
                 ))
             branches.append(select(literal("archive_content").label("kind"),
                                    self._archive_link(node.c.payload_json, "content").label("identity"))
-                            .select_from(joined).where(current_scope, current.c.key.in_(body_keys)))
+                            .select_from(joined).where(current_scope, _keys_match(current.c.key, body_keys)))
         if content_keys:
             content = table.alias("archive_direct_content")
             branches.append(select(content.c.kind.label("kind"), content.c.sort_key.label("identity")).where(
-                content.c.store_key == self._store_key, content.c.scope_key == scope_key,
-                content.c.kind == "archive_content", content.c.key.in_(tuple(validate_record_key(key) for key in content_keys)),
+                content.c.store_key == self._store_key, _key_matches(content.c.scope_key, scope_key),
+                content.c.kind == "archive_content", _keys_match(content.c.key, tuple(validate_record_key(key) for key in content_keys)),
             ))
         keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
         # Keep the bounded identity set on the driving side of the row lookup.
         return select(table).select_from(keys.outerjoin(table, and_(
-            table.c.store_key == self._store_key, table.c.scope_key == scope_key,
-            table.c.kind == keys.c.kind, table.c.sort_key == keys.c.identity,
+            table.c.store_key == self._store_key, _key_matches(table.c.scope_key, scope_key),
+            table.c.kind == keys.c.kind, table.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
+            table.c.sort_key == keys.c.identity,
         )))
 
     async def insert_record(self, record: StoredRecord) -> None:
@@ -1364,7 +1377,7 @@ class _SqlTransaction:
                         for record in values[offset:offset + _IMMUTABLE_RECORD_BATCH_SIZE]]
                 await self._context.run_statement(self._context.dialect.insert_immutable_many(
                     self._session, table=self._table("ai_state_records"), rows=rows,
-                    index_elements=("store_key", "key"), conflict_column="storage_revision",
+                    index_elements=("store_key", "key_locator"), conflict_column="storage_revision",
                 ))
         except BaseException as error:
             self._abort_mutation(error)
@@ -1398,7 +1411,7 @@ class _SqlTransaction:
         result = await self._execute(
             update(table).where(
                 table.c.store_key == self._store_key,
-                table.c.key == validate_record_key(key),
+                _key_matches(table.c.key, validate_record_key(key)),
                 table.c.storage_revision == expected_storage_revision,
             ).values(storage_revision=expected_storage_revision + 1)
         )
@@ -1460,6 +1473,7 @@ class _SqlTransaction:
             if executemany:
                 statement = update(table).where(
                     table.c.store_key == self._store_key,
+                    table.c.key_locator == bindparam("_replacement_locator"),
                     table.c.key == bindparam("_replacement_key"),
                     table.c.storage_revision == bindparam("_replacement_expected_storage_revision"),
                     *self._record_identity_conditions(table, {
@@ -1468,7 +1482,7 @@ class _SqlTransaction:
                 ).values(**{column: bindparam(f"_replacement_{column}") for column in columns},
                          updated_at=func.current_timestamp())
                 parameters = [
-                    {"_replacement_key": row["key"],
+                    {"_replacement_key": row["key"], "_replacement_locator": row["key_locator"],
                      "_replacement_expected_storage_revision": value.expected_storage_revision,
                      **{f"_identity_{column}": row[column] for column in identity_columns},
                      **{f"_replacement_{column}": row[column] for column in columns}}
@@ -1476,7 +1490,7 @@ class _SqlTransaction:
                 ]
             else:
                 cas_conditions = [and_(
-                    table.c.key == row["key"],
+                    _key_matches(table.c.key, row["key"]),
                     table.c.storage_revision == value.expected_storage_revision,
                     *self._record_identity_conditions(table, row),
                 ) for row, value in zip(rows, batch)]
@@ -1491,7 +1505,7 @@ class _SqlTransaction:
                 }
                 statement = update(table).where(
                     table.c.store_key == self._store_key,
-                    table.c.key.in_([row["key"] for row in rows]),
+                    _keys_match(table.c.key, [row["key"] for row in rows]),
                     or_(*cas_conditions),
                 ).values(**updates, updated_at=func.current_timestamp())
             try:
@@ -1599,7 +1613,7 @@ class _SqlTransaction:
             update(table)
             .where(
                 table.c.store_key == self._store_key,
-                table.c.key == validate_record_key(key),
+                _key_matches(table.c.key, validate_record_key(key)),
                 table.c.storage_revision == expected_storage_revision,
             )
             .values(
@@ -1651,7 +1665,7 @@ class _SqlTransaction:
                 # Fact writers must advance this same revision before insertion.
                 guarded = await self._execute(update(table).where(
                     table.c.store_key == self._store_key,
-                    table.c.key.in_(record_keys),
+                    _keys_match(table.c.key, record_keys),
                     tuple_(table.c.key, table.c.storage_revision).in_(cas_conditions),
                 ).values(storage_revision=table.c.storage_revision + 1))
                 if guarded.rowcount != len(current):
@@ -1659,12 +1673,12 @@ class _SqlTransaction:
                 cas_conditions = tuple((key, revision + 1) for key, revision in cas_conditions)
                 await self._retire_native_facts(record_keys)
                 await self._retire_native_rows("record", table,
-                    table.c.store_key == self._store_key, table.c.key.in_(record_keys))
+                    table.c.store_key == self._store_key, _keys_match(table.c.key, record_keys))
                 # Deleting the CAS-matched owners fences concurrent alias/fact writers.
                 result = await self._execute(
                     delete(table).where(
                         table.c.store_key == self._store_key,
-                        table.c.key.in_(record_keys),
+                        _keys_match(table.c.key, record_keys),
                         tuple_(table.c.key, table.c.storage_revision).in_(cas_conditions),
                     )
                 )
@@ -1673,13 +1687,13 @@ class _SqlTransaction:
                 await self._execute(
                     delete(aliases).where(
                         aliases.c.store_key == self._store_key,
-                        aliases.c.record_key.in_(record_keys),
+                        _keys_match(aliases.c.record_key, record_keys),
                     )
                 )
                 await self._execute(
                     delete(facts).where(
                         facts.c.store_key == self._store_key,
-                        facts.c.owner_key.in_(record_keys),
+                        _keys_match(facts.c.owner_key, record_keys),
                     )
                 )
                 for key in current:
@@ -1726,25 +1740,25 @@ class _SqlTransaction:
         table = self._table("ai_state_records")
         statement = delete(table).where(
             table.c.store_key == self._store_key,
-            table.c.key == validate_record_key(key),
+            _key_matches(table.c.key, validate_record_key(key)),
             table.c.storage_revision == guarded.storage_revision,
         )
         children_changed = False
         try:
             await self._retire_native_facts((validate_record_key(key),))
             await self._retire_native_rows("record", table,
-                table.c.store_key == self._store_key, table.c.key == validate_record_key(key))
+                table.c.store_key == self._store_key, _key_matches(table.c.key, validate_record_key(key)))
             await self._execute(
                 delete(self._table("ai_state_aliases")).where(
                     self._table("ai_state_aliases").c.store_key == self._store_key,
-                    self._table("ai_state_aliases").c.record_key == validate_record_key(key),
+                    _key_matches(self._table("ai_state_aliases").c.record_key, validate_record_key(key)),
                 )
             )
             children_changed = True
             await self._execute(
                 delete(self._table("ai_state_facts")).where(
                     self._table("ai_state_facts").c.store_key == self._store_key,
-                    self._table("ai_state_facts").c.owner_key == validate_record_key(key),
+                    _key_matches(self._table("ai_state_facts").c.owner_key, validate_record_key(key)),
                 )
             )
             result = await self._execute(statement)
@@ -1770,18 +1784,21 @@ class _SqlTransaction:
         table = self._table("ai_state_records")
         conditions = [table.c.store_key == self._store_key]
         if query.scope_key is not None:
-            conditions.append(table.c.scope_key == query.scope_key)
+            conditions.append(_key_matches(table.c.scope_key, query.scope_key))
         if query.parent_key is not None:
-            conditions.append(table.c.parent_key == query.parent_key)
+            conditions.append(_key_matches(table.c.parent_key, query.parent_key))
         if query.kind is not None:
             conditions.append(table.c.kind == query.kind)
         if query.states is not None:
             conditions.append(table.c.state.in_(tuple(query.states)))
         if query.sort_key_prefix is not None:
+            conditions.append(table.c.sort_prefix >= query.sort_key_prefix[:128])
             conditions.append(table.c.sort_key >= query.sort_key_prefix)
             prefix_end = _sort_key_prefix_upper_bound(query.sort_key_prefix)
             if prefix_end is not None:
                 conditions.append(table.c.sort_key < prefix_end)
+        if query.after_sort_key is not None:
+            conditions.append(table.c.sort_prefix >= query.after_sort_key[:128])
         if query.after_sort_key is not None and query.after_key is not None:
             conditions.append(
                 or_(
@@ -1798,6 +1815,7 @@ class _SqlTransaction:
             select(table)
             .where(*conditions)
             .order_by(
+                table.c.sort_prefix,
                 table.c.sort_key,
                 table.c.key,
             )
@@ -1860,13 +1878,16 @@ class _SqlTransaction:
                     await self._execute(
                         select(
                             table.c.alias_key,
+                            table.c.alias_locator,
                             table.c.record_key,
+                            table.c.record_locator,
                             records.c.id,
                         )
                         .select_from(
                             table.outerjoin(
                                 records,
                                 and_(
+                                    table.c.record_locator == records.c.key_locator,
                                     table.c.record_key == records.c.key,
                                     records.c.store_key == self._store_key,
                                 ),
@@ -1874,13 +1895,17 @@ class _SqlTransaction:
                         )
                         .where(
                             table.c.store_key == self._store_key,
-                            table.c.alias_key.in_(missing),
+                            _locator_column(table.c.alias_key).in_(tuple(_key_locator(key) for key in missing)),
                         )
                     )
                 )
                 .mappings()
                 .all()
             )
+            if any(row["alias_key"] not in missing for row in rows):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for row in rows:
+                _validate_locators(row, "alias_key", "record_key")
             if any(row["id"] is None for row in rows):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values = {
@@ -1910,6 +1935,7 @@ class _SqlTransaction:
         ).mappings().all()
         for row in rows:
             _row_store_key(row["store_key"])
+            _validate_locators(row, "alias_key", "record_key")
         return tuple(
             StoredAlias(
                 _row_alias_key(row["alias_key"]),
@@ -1938,6 +1964,7 @@ class _SqlTransaction:
         ).mappings().all()
         for row in rows:
             _row_store_key(row["store_key"])
+            _validate_locators(row, "alias_key", "record_key")
         return tuple(
             StoredAlias(
                 _row_alias_key(row["alias_key"]),
@@ -1980,6 +2007,8 @@ class _SqlTransaction:
                 {
                     "store_key": self._store_key,
                     "alias_key": alias.alias_key,
+                    "alias_locator": _key_locator(alias.alias_key),
+                    "record_locator": _key_locator(alias.record_key),
                     "record_key": validate_record_key(alias.record_key),
                 }
             )
@@ -2014,13 +2043,17 @@ class _SqlTransaction:
                     await self._execute(
                         select(table).where(
                             table.c.store_key == self._store_key,
-                            table.c.stream_key.in_(tuple(validate_stream_key(key) for key in missing))
+                            _locator_column(table.c.stream_key).in_(tuple(_key_locator(key) for key in missing))
                         )
                     )
                 )
                 .mappings()
                 .all()
             )
+            if any(row["stream_key"] not in missing for row in rows):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for row in rows:
+                _validate_locators(row, "stream_key")
             self._sequence_cache.update(
                 {
                     _row_stream_key(row["stream_key"]): _row_nonnegative_int(row["value"])
@@ -2044,6 +2077,7 @@ class _SqlTransaction:
         ).mappings().all()
         for row in rows:
             _row_store_key(row["store_key"])
+            _validate_locators(row, "stream_key")
         return {
             _row_stream_key(row["stream_key"]): _row_nonnegative_int(row["value"])
             for row in rows
@@ -2069,6 +2103,7 @@ class _SqlTransaction:
         ).mappings().all()
         for row in rows:
             _row_store_key(row["store_key"])
+            _validate_locators(row, "stream_key")
         return {
             _row_stream_key(row["stream_key"]): _row_nonnegative_int(row["value"])
             for row in rows
@@ -2080,18 +2115,21 @@ class _SqlTransaction:
     async def reserve_sequence(self, key: bytes, count: int) -> int:
         return (await self.reserve_sequences({key: count}))[key]
 
-    async def reserve_sequences(
-        self, requests: Mapping[bytes, int]
-    ) -> Mapping[bytes, int]:
-        if any(
-            isinstance(count, bool) or not isinstance(count, int) or count < 1
-            for count in requests.values()
-        ):
+    async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 1
+               for count in requests.values()):
             raise ValueError("sequence reservation count must be a positive integer")
         for key in requests:
             validate_stream_key(key)
         if not requests:
             return {}
+        try:
+            return await self._reserve_sequences(requests)
+        except BaseException as error:
+            self._abort_mutation(error)
+            raise
+
+    async def _reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
         table = self._table("ai_state_sequences")
         if len(requests) == 1:
             key, count = next(iter(requests.items()))
@@ -2099,9 +2137,11 @@ class _SqlTransaction:
                 self._context.dialect.upsert_increment(
                     self._session,
                     table=table,
-                    values={"store_key": self._store_key, "stream_key": validate_stream_key(key)},
+                    values={"store_key": self._store_key, "stream_key": validate_stream_key(key),
+                            "stream_locator": _key_locator(key)},
                     column="value",
-                    index_elements=("store_key", "stream_key"),
+                    index_elements=("store_key", "stream_locator"),
+                    identity_columns=("stream_key",),
                     step=count,
                 )
             )
@@ -2112,6 +2152,7 @@ class _SqlTransaction:
             {
                     "store_key": self._store_key,
                 "stream_key": validate_stream_key(key),
+                "stream_locator": _key_locator(key),
                 "value": requests[key],
             }
             for key in sorted(requests)
@@ -2121,7 +2162,8 @@ class _SqlTransaction:
             table=table,
             rows=rows,
             column="value",
-            index_elements=("store_key", "stream_key"),
+            index_elements=("store_key", "stream_locator"),
+            identity_columns=("stream_key",),
             returning_key="stream_key",
         ))
         result = {
@@ -2141,7 +2183,7 @@ class _SqlTransaction:
             update(table)
             .where(
                 table.c.store_key == self._store_key,
-                table.c.stream_key == validate_stream_key(key),
+                _key_matches(table.c.stream_key, validate_stream_key(key)),
                 table.c.value == expected,
             )
             .values(value=expected + 1, updated_at=func.current_timestamp())
@@ -2160,15 +2202,14 @@ class _SqlTransaction:
             return
         from sqlalchemy import delete
 
-        await self._execute(
-            delete(self._table("ai_state_sequences")).where(
-                self._table("ai_state_sequences").c.store_key == self._store_key,
-                self._table("ai_state_sequences").c.stream_key.in_(
-                    tuple(validate_stream_key(key) for key in values)
-                ),
-            )
-        )
-        self._log_batch("delete_sequences", len(values), 1)
+        table = self._table("ai_state_sequences")
+        for offset in range(0, len(values), _RAW_KEY_BATCH_SIZE):
+            batch = values[offset:offset + _RAW_KEY_BATCH_SIZE]
+            await self._execute(delete(table).where(
+                table.c.store_key == self._store_key,
+                _keys_match(table.c.stream_key, tuple(validate_stream_key(key) for key in batch)),
+            ))
+        self._log_batch("delete_sequences", len(values), (len(values) + _RAW_KEY_BATCH_SIZE - 1) // _RAW_KEY_BATCH_SIZE)
         for key in values:
             self._sequence_cache[key] = 0
 
@@ -2210,7 +2251,7 @@ class _SqlTransaction:
             rows = (await self._execute(
                 select(table).where(
                     table.c.store_key == self._store_key,
-                    table.c.stream_key == validate_stream_key(stream_key),
+                    _key_matches(table.c.stream_key, validate_stream_key(stream_key)),
                     table.c.sequence.in_(ordered[offset:offset + _FACT_READ_BATCH_SIZE]),
                 ).order_by(table.c.sequence)
             )).mappings().all()
@@ -2223,7 +2264,7 @@ class _SqlTransaction:
         table = self._table("ai_state_facts")
         conditions = [
             table.c.store_key == self._store_key,
-            table.c.stream_key == validate_stream_key(query.stream_key),
+            _key_matches(table.c.stream_key, validate_stream_key(query.stream_key)),
         ]
         if query.after_sequence is not None:
             conditions.append(table.c.sequence > query.after_sequence)
@@ -2239,7 +2280,7 @@ class _SqlTransaction:
                 select(table)
                 .where(
                     table.c.store_key == self._store_key,
-                    table.c.stream_key == validate_stream_key(query.stream_key),
+                    _key_matches(table.c.stream_key, validate_stream_key(query.stream_key)),
                     table.c.sequence.in_(latest_sequences),
                 )
                 .order_by(table.c.sequence)
@@ -2287,7 +2328,7 @@ class _SqlTransaction:
                 or_(
                     table.c.stream_key > validate_stream_key(after.stream_key),
                     and_(
-                        table.c.stream_key == validate_stream_key(after.stream_key),
+                        _key_matches(table.c.stream_key, validate_stream_key(after.stream_key)),
                         table.c.sequence > after.sequence,
                     ),
                 )
@@ -2315,7 +2356,7 @@ class _SqlTransaction:
         await self._execute(
             delete(self._table("ai_state_facts")).where(
                 self._table("ai_state_facts").c.store_key == self._store_key,
-                self._table("ai_state_facts").c.owner_key == validate_record_key(owner_key),
+                _key_matches(self._table("ai_state_facts").c.owner_key, validate_record_key(owner_key)),
             )
         )
 
@@ -2338,13 +2379,15 @@ class _SqlTransaction:
                 await self._execute(
                     select(table).where(
                         table.c.store_key == self._store_key,
-                        table.c.operation_key == key,
+                        _locator_column(table.c.operation_key) == _key_locator(key),
                     )
                 )
             )
             .mappings()
             .one_or_none()
         )
+        if row is not None and row["operation_key"] != key:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return None if row is None else _operation_from_row(row)
 
     async def replace_operation(
@@ -2361,7 +2404,7 @@ class _SqlTransaction:
             update(table)
             .where(
                 table.c.store_key == self._store_key,
-                table.c.operation_key == value.key,
+                _key_matches(table.c.operation_key, value.key),
                 table.c.state == expected_state,
             )
             .values(_operation_values(value, updating=True))
@@ -2378,7 +2421,7 @@ class _SqlTransaction:
         table = self._table("ai_state_operations")
         conditions = [table.c.store_key == self._store_key]
         if query.stream_key is not None:
-            conditions.append(table.c.stream_key == validate_stream_key(query.stream_key))
+            conditions.append(_key_matches(table.c.stream_key, validate_stream_key(query.stream_key)))
         if query.states is not None:
             conditions.append(table.c.state.in_(tuple(query.states)))
         if query.after_sequence is not None:
@@ -2436,23 +2479,20 @@ class _SqlTransaction:
             table = self._table("ai_state_operations")
             for value in values:
                 guarded = await self._execute(update(table).where(
-                    table.c.store_key == self._store_key, table.c.operation_key == value.key,
+                    table.c.store_key == self._store_key, _key_matches(table.c.operation_key, value.key),
                     table.c.state == value.state,
                 ).values(state=value.state))
                 if guarded.rowcount != 1:
                     error = AIError(ErrorCode.STORAGE_CONFLICT)
                     self._abort_mutation(error)
                     raise error
-            await self._retire_native_rows("operation", table,
-                table.c.store_key == self._store_key, table.c.operation_key.in_(tuple(value.key for value in values)))
-            await self._execute(
-                delete(self._table("ai_state_operations")).where(
-                    self._table("ai_state_operations").c.store_key == self._store_key,
-                    self._table("ai_state_operations").c.operation_key.in_(
-                        tuple(value.key for value in values)
-                    ),
-                )
-            )
+            for offset in range(0, len(values), _RAW_KEY_BATCH_SIZE):
+                keys = tuple(value.key for value in values[offset:offset + _RAW_KEY_BATCH_SIZE])
+                await self._retire_native_rows("operation", table,
+                    table.c.store_key == self._store_key, _keys_match(table.c.operation_key, keys))
+                await self._execute(delete(table).where(
+                    table.c.store_key == self._store_key, _keys_match(table.c.operation_key, keys),
+                ))
         for value in values:
             self._stage_native_owner("operation", (value.key,), None)
         return values
@@ -2495,6 +2535,10 @@ def _record_values(
 ) -> dict[str, object]:
     values: dict[str, object] = {
         "key": validate_record_key(record.key),
+        "key_locator": _key_locator(record.key),
+        "scope_locator": _key_locator(record.scope_key),
+        "parent_locator": _key_locator(record.parent_key),
+        "sort_prefix": record.sort_key[:128],
         "scope_key": record.scope_key,
         "parent_key": record.parent_key,
         "subject_id": None
@@ -2520,6 +2564,9 @@ def _record_values(
 def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
     try:
         _row_store_key(row["store_key"])
+        _validate_locators(row, "key", "scope_key", "parent_key")
+        if row["sort_prefix"] != row["sort_key"][:128]:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         record = StoredRecord(
             _row_record_key(row["key"]),
             row["scope_key"],
@@ -2545,6 +2592,8 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
 def _fact_values(fact: StoredFact) -> dict[str, object]:
     return {
         "stream_key": validate_stream_key(fact.stream_key),
+        "stream_locator": _key_locator(fact.stream_key),
+        "owner_locator": _key_locator(fact.owner_key),
         "sequence": fact.sequence,
         "owner_key": validate_record_key(fact.owner_key),
         "kind": fact.kind,
@@ -2559,6 +2608,7 @@ def _fact_values(fact: StoredFact) -> dict[str, object]:
 def _fact_from_row(row: Mapping[str, object]) -> StoredFact:
     try:
         _row_store_key(row["store_key"])
+        _validate_locators(row, "stream_key", "owner_key")
         return StoredFact(
             _row_stream_key(row["stream_key"]),
             _row_nonnegative_int(row["sequence"]),
@@ -2579,6 +2629,8 @@ def _operation_values(
 ) -> dict[str, object]:
     values: dict[str, object] = {
         "operation_key": value.key,
+        "operation_locator": _key_locator(value.key),
+        "stream_locator": _key_locator(value.stream_key),
         "stream_key": validate_stream_key(value.stream_key),
         "sequence": value.sequence,
         "state": value.state,
@@ -2595,6 +2647,7 @@ def _operation_values(
 def _operation_from_row(row: Mapping[str, object]) -> StoredOperation:
     try:
         _row_store_key(row["store_key"])
+        _validate_locators(row, "operation_key", "stream_key")
         return StoredOperation(
             row["operation_key"],
             _row_stream_key(row["stream_key"]),
@@ -2607,6 +2660,38 @@ def _operation_from_row(row: Mapping[str, object]) -> StoredOperation:
         raise
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _key_locator(value: bytes | None) -> str | None:
+    return None if value is None else hashlib.sha256(value).hexdigest()
+
+
+def _locator_column(column: "ColumnElement") -> "ColumnElement":
+    name = "key_locator" if column.name == "key" else column.name.removesuffix("_key") + "_locator"
+    return column.table.c[name]
+
+
+def _key_matches(column: "ColumnElement", value: bytes | None) -> "ColumnElement[bool]":
+    from sqlalchemy import and_
+
+    return and_(_locator_column(column) == _key_locator(value), column == value)
+
+
+def _keys_match(column: "ColumnElement", values: Sequence[bytes]) -> "ColumnElement[bool]":
+    from sqlalchemy import and_
+
+    values = tuple(values)
+    return and_(_locator_column(column).in_(tuple(_key_locator(value) for value in values)), column.in_(values))
+
+
+def _validate_locators(row: Mapping[str, object], *names: str) -> None:
+    for name in names:
+        locator = "key_locator" if name == "key" else name.removesuffix("_key") + "_locator"
+        raw = row[name]
+        if raw is not None and type(raw) is not bytes:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if row[locator] != _key_locator(raw):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _sort_key_prefix_upper_bound(prefix: bytes) -> bytes | None:

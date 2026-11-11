@@ -5,6 +5,8 @@
 from collections.abc import Mapping
 import base64
 import binascii
+import hashlib
+from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -14,8 +16,8 @@ from .core import validate_resource_id, validate_persistence_namespace, validate
 from .errors import AIError
 
 
-NATIVE_STORE_KEY_MAX_BYTES = 402
-NATIVE_REPLAY_KEY_MAX_BYTES = 512
+NATIVE_STORE_KEY_MAX_BYTES = 274
+NATIVE_REPLAY_KEY_MAX_BYTES = 128
 
 
 def native_store_key(namespace: str, tenant_id: str) -> bytes:
@@ -47,6 +49,11 @@ def validate_native_store_key(value: bytes) -> bytes:
     return value
 
 
+def native_store_locator(value: bytes) -> str:
+    """Derive the indexed projection without changing the exact partition identity."""
+    return hashlib.sha256(validate_native_store_key(value)).hexdigest()
+
+
 def encode_native_store_key(value: bytes) -> str:
     """Encode an exact native scope only at a JSON transport boundary."""
     return base64.b64encode(validate_native_store_key(value)).decode("ascii")
@@ -66,30 +73,32 @@ def decode_native_store_key(value: object) -> bytes:
 
 
 def validate_native_replay_key(value: str | None) -> str | None:
-    """Preserve NULL occurrences and exact keyed strings, including empty keys."""
+    """Preserve unkeyed occurrences and exact keyed strings, including empty keys."""
     if value is None:
         return None
     if not isinstance(value, str) or "\x00" in value:
         raise ValueError("native replay key must be a string without NUL or None")
     try:
         if len(value.encode("utf-8")) > NATIVE_REPLAY_KEY_MAX_BYTES:
-            raise ValueError("native replay key exceeds 512 UTF-8 bytes")
+            raise ValueError("native replay key exceeds 128 UTF-8 bytes")
     except UnicodeEncodeError as error:
         raise ValueError("native replay key is invalid") from error
     return value
 
 
-def encode_native_replay_key(value: str | None) -> bytes | None:
-    """Store original UTF-8 bytes so SQL cannot fold case or trailing spaces."""
-    return None if validate_native_replay_key(value) is None else value.encode("utf-8")
+def encode_native_replay_key(value: str | None) -> bytes:
+    """Prepare exact UTF-8 replay bytes or a distinct private occurrence identity."""
+    return b"\x00" + uuid4().bytes if validate_native_replay_key(value) is None else value.encode("utf-8")
 
 
-def decode_native_replay_key(value: bytes | None) -> str | None:
-    """Read exact nullable replay bytes without normalizing their contents."""
-    if value is None:
-        return None
+def decode_native_replay_key(value: bytes) -> str | None:
+    """Decode stored replay bytes, keeping private occurrence identities private."""
     if type(value) is not bytes:
-        raise ValueError("native replay row must contain bytes or NULL")
+        raise ValueError("native replay row must contain bytes")
+    if value.startswith(b"\x00"):
+        if len(value) != 17:
+            raise ValueError("native occurrence key is invalid")
+        return None
     try:
         result = value.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -180,7 +189,7 @@ class NativeLifecycleEvent(StepEvent):
 
 __all__ = [
     "NATIVE_STORE_KEY_MAX_BYTES", "NATIVE_REPLAY_KEY_MAX_BYTES", "native_store_key",
-    "validate_native_store_key", "encode_native_store_key", "decode_native_store_key",
+    "validate_native_store_key", "native_store_locator", "encode_native_store_key", "decode_native_store_key",
     "validate_native_replay_key", "encode_native_replay_key", "decode_native_replay_key",
     "validate_native_step_ids", "LifecycleOutcome", "NativeLifecycleEvent", "NativeStepSource",
     "rekey_native_step_sources",

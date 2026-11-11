@@ -453,11 +453,11 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
     metadata = build_step_sql_metadata()
     kind = "mysql" if dialect.name == "mysql" else "portable"
     expected = {
-        "runs": {("store_key", "run_id"): True,
-                 ("store_key", "conversation_id"): False, ("store_key", "parent_run_id"): False},
-        "events": {("store_key", "run_id", "idempotency_key"): True, ("store_key", "run_id"): False},
-        "snapshots": {("store_key", "run_id", "pruned"): False,
-                      ("store_key", "run_id", "idempotency_key"): True},
+        "runs": {("store_locator", "run_id"): True,
+                 ("store_locator", "conversation_id"): False, ("store_locator", "parent_run_id"): False},
+        "events": {("store_locator", "run_id", "idempotency_key"): True, ("store_locator", "run_id"): False},
+        "snapshots": {("store_locator", "run_id", "pruned"): False,
+                      ("store_locator", "run_id", "idempotency_key"): True},
     }
     for name, lookups in expected.items():
         table = metadata.tables["ai_step_" + name]
@@ -483,7 +483,7 @@ def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
                 key_bytes = sum(column.type.length * (1 if isinstance(column.type, LargeBinary) else 4)
                                 if getattr(column.type, "length", None) else 1
                                 for column in (table.c[name] for name in columns))
-                assert key_bytes == (1426 if "idempotency_key" in columns else 915 if "pruned" in columns else 914)
+                assert key_bytes == (896 if "idempotency_key" in columns else 769 if "pruned" in columns else 768)
                 assert key_bytes <= 3072
 
 
@@ -507,12 +507,7 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
             assert len(index.columns) <= 3
             if index.unique:
                 nullable = {column.name for column in index.columns if column.nullable}
-                if (table.name in {"ai_step_events", "ai_step_snapshots"}
-                        and "idempotency_key" in index.columns):
-                    # NULL replay keys append independent occurrences; non-NULL keys deduplicate.
-                    assert nullable == {"idempotency_key"}
-                else:
-                    assert not nullable
+                assert not nullable
             else:
                 assert not any(column.primary_key for column in index.columns)
             assert index.name == ("uk_" if index.unique else "ix_") + "_".join(column.name for column in index.columns)

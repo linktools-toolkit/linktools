@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ..core import JsonValue, validate_page_limit
+from ..steps import native_store_locator
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload
 from ..storage import (
@@ -442,6 +443,7 @@ async def _purge_unreferenced_objects(
                     for offset in range(0, len(scoped_ids), 128):
                         batch = scoped_ids[offset:offset + 128]
                         target_ids = select(table.c.id).where(
+                            table.c.store_locator == native_store_locator(store_key),
                             table.c.store_key == store_key, table.c.sha256.in_(batch),
                         )
                         if table is native_metadata.tables["ai_step_sequences"]:
@@ -455,6 +457,7 @@ async def _purge_unreferenced_objects(
                             edges.c.edge_kind.in_(edge_kinds), edges.c.target_id.in_(target_ids),
                         ))
                         removed = await session.execute(delete(table).where(
+                            table.c.store_locator == native_store_locator(store_key),
                             table.c.store_key == store_key, table.c.sha256.in_(batch),
                         ))
                         if removed.rowcount != len(batch):

@@ -67,8 +67,8 @@ async def test_record_subject_identity_cannot_change(
 
 
 async def test_sql_subject_reads_bound_parameters_and_globally_order_chunks(tmp_path: Path) -> None:
-    # Store, scope and kind use three binds, leaving 996 subjects per query.
-    subjects = tuple(f"subject-{index}" for index in range(997))
+    # Store, scope locator, raw scope and kind use four binds, leaving 995 subjects per query.
+    subjects = tuple(f"subject-{index}" for index in range(996))
     first = replace(_record(1), subject_id=subjects[0], sort_key=b"z")
     last = replace(_record(2), subject_id=subjects[-1], sort_key=b"a")
     unrequested = replace(_record(3), subject_id="unrequested-subject")
@@ -150,8 +150,8 @@ async def test_sql_subject_lookup_query_plan(tmp_path: Path) -> None:
             analyzed = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).all()
         for plan in (fresh, analyzed):
             details = " ".join(row[3] for row in plan)
-            assert "scope_key_subject_id" in details
-            assert "store_key_kind_sort_key" not in details
+            assert "scope_locator_subject_id" in details
+            assert "store_key_kind_sort_prefix" not in details
         print(f"subject lookup fresh EXPLAIN: {fresh!r}")
         print(f"subject lookup analyzed EXPLAIN: {analyzed!r}")
         assert fresh and analyzed

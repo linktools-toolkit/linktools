@@ -26,7 +26,7 @@ def _tuple(*parts: str) -> bytes:
 
 
 def test_stream_components_preserve_exact_unicode_scope_and_empty_owner() -> None:
-    namespace, tenant, owner = "界" * 85 + "a", "界" * 42 + "ab", "界" * 42 + "ab"
+    namespace, tenant, owner = "界" * 42 + "ab", "界" * 42 + "ab", "界" * 42 + "ab"
     address = stream_key(namespace, tenant, "trace", "event", (owner,))
     assert address == _tuple("stream", namespace, tenant, "trace", "event", owner)
     assert stream_key("ns", "tenant", "conversation", "session_list_tenant", ()) == _tuple(
@@ -41,9 +41,9 @@ def test_stream_components_preserve_exact_unicode_scope_and_empty_owner() -> Non
         with pytest.raises(TypeError):
             stream_key("ns", "tenant", "trace", "event", malformed)
     base = len(stream_key("ns", "tenant", "trace", "event", ("",)))
-    assert len(stream_key("ns", "tenant", "trace", "event", ("x" * (1280 - base),))) == 1280
+    assert len(stream_key("ns", "tenant", "trace", "event", ("x" * (STREAM_KEY_MAX_BYTES - base),))) == STREAM_KEY_MAX_BYTES
     with pytest.raises(ValueError):
-        stream_key("ns", "tenant", "trace", "event", ("x" * (1281 - base),))
+        stream_key("ns", "tenant", "trace", "event", ("x" * (STREAM_KEY_MAX_BYTES + 1 - base),))
 
 
 def test_stream_and_receipt_bounds_preserve_current_wire_and_private_repr() -> None:
@@ -66,11 +66,11 @@ def test_stream_and_receipt_bounds_preserve_current_wire_and_private_repr() -> N
     with pytest.raises(AIError) as snapshot:
         _decode_snapshot_sequences([{"stream_key": (key + b"x").hex(), "value": 1}])
     assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    namespace = capability = write = "界" * 85 + "a"
+    namespace = capability = write = "界" * 42 + "ab"
     tenant = run = "界" * 42 + "ab"
     receipt = capability_receipt_key(namespace, tenant, capability, (1 << 63) - 1, run, write)
     assert receipt == b"\x02" + _tuple("capability-write", namespace, tenant, capability, str((1 << 63) - 1), run, write)
-    assert len(receipt) == 1074 <= OPERATION_KEY_MAX_BYTES
+    assert len(receipt) == 690 <= OPERATION_KEY_MAX_BYTES
 
 
 @pytest.mark.asyncio
@@ -141,7 +141,7 @@ async def test_sql_current_stream_readers_fail_closed_on_oversized_storage(table
             await transaction.next_sequence(key)
         await store.mutate(seed)
         async with store.context.engine.begin() as connection:
-            await connection.execute(text(f"UPDATE {table} SET stream_key = :key"), {"key": b"x" * 1281})
+            await connection.execute(text(f"UPDATE {table} SET stream_key = :key"), {"key": b"x" * (STREAM_KEY_MAX_BYTES + 1)})
         readers = {"ai_state_facts": lambda tx: tx.scan_facts(),
                    "ai_state_operations": lambda tx: tx.scan_operations(),
                    "ai_state_sequences": lambda tx: tx.scan_sequences()}

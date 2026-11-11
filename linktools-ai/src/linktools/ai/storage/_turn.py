@@ -28,8 +28,8 @@ class TurnScopeIdentity:
     @classmethod
     def validate_scope(cls, value: str) -> str:
         """Validate a local scope without changing its exact spelling."""
-        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
-            raise ValueError("turn scope must contain 1..256 UTF-8 bytes")
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 128:
+            raise ValueError("turn scope must contain 1..128 UTF-8 bytes")
         return value
 
     def as_tuple(self) -> tuple[str, str, str]:

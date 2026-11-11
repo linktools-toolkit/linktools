@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary, WeakSet
 
 from ..core import canonical_json_bytes
-from ..steps import validate_native_store_key
+from ..steps import native_store_locator, validate_native_store_key
 from ..model.attachments import read_attachment_payload, validate_attachment_payload
 from ..errors import AIError
 from ..storage import ObjectRef, SqlStorageContext, StoredPayload
@@ -200,6 +200,7 @@ class NativeMessageContent:
     ) -> None:
         self._empty = NativeMessageSequence()
         self._store_key = validate_native_store_key(store_key)
+        self._store_locator = native_store_locator(self._store_key)
         self._group_id: str | None = None
         if group_id is not None:
             self.bind_group(group_id)
@@ -436,11 +437,11 @@ class NativeMessageContent:
         else:
             if confirmed_content is None or prepared.cold:
                 await self._insert_rows(session, self._messages, [
-                    {"store_key": self._store_key, "sha256": identity, **body.to_native_values()}
+                    {"store_key": self._store_key, "store_locator": self._store_locator, "sha256": identity, **body.to_native_values()}
                     for identity, body in prepared.messages if prepared.cold or identity not in self._known_messages
                 ])
                 await self._insert_rows(session, self._nodes, [
-                    {"store_key": self._store_key, "sha256": identity,
+                    {"store_key": self._store_key, "store_locator": self._store_locator, "sha256": identity,
                      "message_sha256": node.content_id, "tree_count": node.tree_count,
                      "left_sha256": node.left, "right_sha256": node.right, "next_sha256": node.next_forest}
                     for identity, node in prepared.nodes if prepared.cold or identity not in self._known_nodes
@@ -485,7 +486,7 @@ class NativeMessageContent:
             if batch and (len(batch) >= 64 or size + row_size > 256 * 1024):
                 await self._context.dialect.insert_immutable_many(
                     session, table=table, rows=batch,
-                    index_elements=("store_key", "sha256"), conflict_column="id",
+                    index_elements=("store_locator", "sha256"), conflict_column="id",
                 )
                 batch, size = [], 0
             batch.append(row)
@@ -493,7 +494,7 @@ class NativeMessageContent:
         if batch:
             await self._context.dialect.insert_immutable_many(
                 session, table=table, rows=batch,
-                index_elements=("store_key", "sha256"), conflict_column="id",
+                index_elements=("store_locator", "sha256"), conflict_column="id",
             )
 
     def confirm_current(self, receipt: NativeMessageReceipt) -> CommittedNativeMessages | None:
@@ -594,6 +595,7 @@ class NativeMessageContent:
         true = literal_column("1 = 1")
         nodes, messages = self._nodes, self._messages
         store = bindparam("native_store_key", self._store_key, type_=nodes.c.store_key.type)
+        locator = bindparam("native_store_locator", self._store_locator, type_=nodes.c.store_locator.type)
         seeds = []
         depth = path_units = 0
         inputs, _ = self._range_inputs(roots)
@@ -605,8 +607,8 @@ class NativeMessageContent:
                 nodes.c.sha256, nodes.c.message_sha256, nodes.c.tree_count,
                 nodes.c.left_sha256, nodes.c.right_sha256, nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ).select_from(nodes.outerjoin(messages, and_(
-                messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
-            ))).where(nodes.c.store_key == store, nodes.c.sha256.in_(
+                messages.c.store_locator == locator, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
+            ))).where(nodes.c.store_locator == locator, nodes.c.store_key == store, nodes.c.sha256.in_(
                 bindparam("native_singleton_ids", [item.first for _, _, item in inputs], expanding=True),
             ))
             return self._range_plan(statement, depth=0, path_units=len(inputs), budget=budget)
@@ -659,7 +661,7 @@ class NativeMessageContent:
                 case((edges.c.edge == integer(2), integer(1)),
                      (edges.c.edge == integer(3), frontier.c.forest), else_=integer(0)).label("forest"),
             ).select_from(frontier.join(nodes, and_(
-                nodes.c.store_key == store, nodes.c.sha256 == frontier.c.sha256,
+                nodes.c.store_locator == locator, nodes.c.store_key == store, nodes.c.sha256 == frontier.c.sha256,
             )).join(edges, true)).where(
                 child.is_not(None), frontier.c.depth < integer(depth),
                 nodes.c.tree_count > integer(0), nodes.c.tree_count <= frontier.c.remaining,
@@ -685,9 +687,9 @@ class NativeMessageContent:
             nodes.c.message_sha256, nodes.c.tree_count, nodes.c.left_sha256, nodes.c.right_sha256,
             nodes.c.next_sha256, messages.c.message, messages.c.compression, messages.c.raw_size, messages.c.payload_json,
         ).select_from(closure.join(nodes, and_(
-            nodes.c.store_key == store, nodes.c.sha256 == closure.c.sha256,
+            nodes.c.store_locator == locator, nodes.c.store_key == store, nodes.c.sha256 == closure.c.sha256,
         )).outerjoin(messages, and_(
-            selected, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
+            selected, messages.c.store_locator == locator, messages.c.store_key == store, messages.c.sha256 == nodes.c.message_sha256,
         )))
         return self._range_plan(statement, depth=depth, path_units=path_units, budget=budget)
 

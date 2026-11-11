@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
 
 from ..core import (
+    deterministic_id,
     JsonValue,
     ToolOperationStatus,
     canonical_json_bytes,
@@ -443,7 +444,7 @@ class RuntimeToolOperationBridge:
         kind = "tool_call_failed" if failed else "tool_call_completed"
         return replace(
             started, kind=kind, timestamp=datetime.now(UTC), error=error,
-            idempotency_key=f"tool:{decision.operation_id}:{started.step_index}:{decision.fence}:{kind}",
+            idempotency_key=deterministic_id("tool", decision.operation_id, started.step_index, decision.fence, kind),
         )
 
     def _unknown_event(self, operation_id: str, fence: int) -> StepEvent:
@@ -452,7 +453,7 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return replace(started, kind="tool_call_failed", timestamp=datetime.now(UTC),
             error=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
-            idempotency_key=f"tool:{operation_id}:{started.step_index}:{fence}:unknown")
+            idempotency_key=deterministic_id("tool", operation_id, started.step_index, fence, "unknown"))
 
     @property
     def cancellation_requested(self) -> bool:
@@ -562,7 +563,7 @@ class RuntimeToolOperationBridge:
                 parent_run_id=None if self._native_run is None else self._native_run.parent_run_id,
                 metadata={} if self._native_run is None else dict(self._native_run.metadata),
                 tool_call_id=call.tool_call_id, tool_name=tool_def.name,
-                idempotency_key=f"tool:{operation_id}:{ctx.run_step}:started",
+                idempotency_key=deterministic_id("tool", operation_id, ctx.run_step, "started"),
             )
             try:
                 confirmed = await self._admission_boundary(

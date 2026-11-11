@@ -14,7 +14,7 @@ from sqlalchemy import event, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.steps import encode_native_replay_key, native_store_key
+from linktools.ai.steps import native_store_locator, encode_native_replay_key, native_store_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_message_content import NativeMessageContent
@@ -42,9 +42,9 @@ class _ReadTraffic:
             for table in batches:
                 if columns == {f"{table}.sha256", f"{table}.id"}:
                     assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[0] == store_key
-                    assert 0 < len(parameters) - 1 <= 128
-                    batches[table].append(parameters[1:])
+                    assert parameters[:2] == (native_store_locator(store_key), store_key)
+                    assert 0 < len(parameters) - 2 <= 128
+                    batches[table].append(parameters[2:])
                     break
             else:
                 collector_reads += 1
@@ -193,8 +193,14 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
             )
             after = traffic.count
             await store.save_snapshot(snapshot)
-            assert traffic.count == after  # Rejected duplicate owners publish no dependencies.
-        assert traffic.count == 3 * len(cases)
+            # Duplicate owners verify raw scope once, without publishing dependencies.
+            assert traffic.count == after + 1
+            statement, parameters = traffic.reads[-1]
+            assert " ".join(statement.split("FROM", 1)[0].split()) == "SELECT ai_step_snapshots.store_key"
+            assert "ai_step_snapshots.store_locator =" in statement
+            assert parameters == (native_store_locator(store.store_key), snapshot.run_id,
+                                  encode_native_replay_key(snapshot.idempotency_key))
+        assert traffic.count == 4 * len(cases)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == len(cases)
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4

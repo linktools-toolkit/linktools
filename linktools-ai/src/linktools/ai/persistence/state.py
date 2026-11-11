@@ -27,11 +27,12 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 
-ALIAS_KEY_MAX_BYTES = 1024
-OPERATION_KEY_MAX_BYTES = 1152
-STREAM_KEY_MAX_BYTES = 1280
-STORE_KEY_MAX_BYTES = 768
-RELATION_KEY_MAX_BYTES = 1024
+ALIAS_KEY_MAX_BYTES = 768
+OPERATION_KEY_MAX_BYTES = 768
+STREAM_KEY_MAX_BYTES = 768
+STORE_KEY_MAX_BYTES = 128
+_STORE_SOURCE_MAX_BYTES = 768
+RELATION_KEY_MAX_BYTES = 768
 PARENT_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
 
 
@@ -1274,7 +1275,7 @@ def state_store_key(namespace: str, tenant_id: str, partition: str) -> bytes:
         raise ValueError("store partition must be a non-empty string")
     return hashlib.sha256(_encode_key_components(
         ("state_store", validate_persistence_namespace(namespace), validate_tenant_id(tenant_id), partition),
-        STORE_KEY_MAX_BYTES,
+        _STORE_SOURCE_MAX_BYTES,
     )).digest()
 
 
@@ -1283,7 +1284,7 @@ def capability_store_key(namespace: str, tenant_id: str, capability_id: str) -> 
     return hashlib.sha256(_encode_key_components(
         ("capability-store", validate_persistence_namespace(namespace),
          validate_tenant_id(tenant_id), validate_capability_id(capability_id)),
-        STORE_KEY_MAX_BYTES,
+        _STORE_SOURCE_MAX_BYTES,
     )).digest()
 
 
@@ -1291,7 +1292,7 @@ def standalone_store_key(partition: str) -> bytes:
     """Compact one standalone SQL store's complete declared partition once."""
     if not isinstance(partition, str) or not partition:
         raise ValueError("store partition must be a non-empty string")
-    return hashlib.sha256(_encode_key_components(("standalone", partition), STORE_KEY_MAX_BYTES)).digest()
+    return hashlib.sha256(_encode_key_components(("standalone", partition), _STORE_SOURCE_MAX_BYTES)).digest()
 
 
 def validate_store_key(value: bytes) -> bytes:
