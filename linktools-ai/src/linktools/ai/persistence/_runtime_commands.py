@@ -3105,6 +3105,8 @@ class StateCommands:
             )
 
         prepared_execution: PreparedAgentRunCheckpointBatch | tuple[()] = ()
+        if self._execution_run_store is not None and execution_run is not None:
+            await self._execution_run_store.prepare_run_registration(execution_run)
         if (
             not execution_projections
             and self._execution_run_store is not None

@@ -43,6 +43,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
         )
         await archive.state_store.mutate(lambda tx: repository.commit_observation(tx, prepared))
         records = await archive.state_store.read(lambda tx: tx.scan_records())
+        records = await archive._project_run_records(records)
         facts = tuple(sorted(await archive.state_store.read(lambda tx: tx.scan_facts()),
                              key=lambda fact: (fact.stream_key, fact.sequence)))
         aliases, sequences = canonical_snapshot_indexes(
@@ -98,6 +99,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
             )
             await archive.state_store.mutate(lambda tx: repository.commit_observation(tx, completed))
             records = await archive.state_store.read(lambda tx: tx.scan_records())
+            records = await archive._project_run_records(records)
             facts = tuple(sorted(await archive.state_store.read(lambda tx: tx.scan_facts()),
                                  key=lambda fact: (fact.stream_key, fact.sequence)))
             aliases, sequences = canonical_snapshot_indexes(
@@ -122,6 +124,7 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
             transcript_message_count_before=0,
         ), execution_id="execution")
         records = await archive.state_store.read(lambda tx: tx.scan_records())
+        records = await archive._project_run_records(records)
         facts = tuple(sorted(await archive.state_store.read(lambda tx: tx.scan_facts()),
                              key=lambda fact: (fact.stream_key, fact.sequence)))
         aliases, sequences = canonical_snapshot_indexes(
@@ -159,6 +162,7 @@ async def test_snapshot_model_interaction_records_validate_identity_and_sequence
     async with _archive(tmp_path) as (_state, archive, run):
         await archive.register_agent_run(run, execution_id="execution")
         records = await archive.state_store.read(lambda tx: tx.scan_records())
+        records = await archive._project_run_records(records)
         first = _interaction("run", 1)
         second = _interaction("run", 3 if corruption == "gap" else 2)
         record = archive._stored_interaction(first)
@@ -217,6 +221,7 @@ async def test_snapshot_trace_requires_complete_unique_authoritative_event_prefi
             budget=_SnapshotCaptureBudget(SnapshotLimits(1000, 2**20)), page_size=1,
         )
         records, facts = captured.records, captured.facts
+        records = await archive._project_run_records(records)
         assert not any(record.kind == "history_association" for record in records)
         assert len(facts) == 2
         aliases, sequences = canonical_snapshot_indexes(

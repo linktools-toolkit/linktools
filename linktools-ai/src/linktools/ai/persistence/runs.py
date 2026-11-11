@@ -294,7 +294,6 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if source is not None:
                     self.checkpoint_persistence.reader.confirm_run(source)
                     self._staging.adopt_native_run_local(OfficialStepReader.project_run(source))
-                    archive.confirm_native_run(source)
 
     def stage_run_source(self, record: RunRecord) -> None:
         """Retain admitted metadata without claiming a native boundary committed."""
@@ -318,7 +317,6 @@ class RuntimeAgentRunStore(AgentRunStore):
             self.checkpoint_persistence.reader.confirm_run(source)
             archive = self._archives.get(PersistenceDomain.TRACE)
             if self.execution_persistence(source.run_id)[1] and isinstance(archive, StateStepArchive):
-                archive.confirm_native_run(source)
                 if receipt is not None:
                     archive.confirm_native_event_source(receipt)
                     if isinstance(native, SqlStepStore) and native.started_from_receipt(receipt) is not None:
@@ -332,9 +330,6 @@ class RuntimeAgentRunStore(AgentRunStore):
     def invalidate_step_run(self, run_id: str) -> None:
         """Discard confirmed data when a source operation has an uncertain outcome."""
         self.checkpoint_persistence.reader.invalidate_run(run_id)
-        archive = self._archives.get(PersistenceDomain.TRACE)
-        if isinstance(archive, StateStepArchive):
-            archive.invalidate_native_run(run_id)
 
     def bind_pending_producer_guard(self, guard: Callable[[str, int, bool], bool]) -> None:
         """Bind the Runtime-owned authority for turns not yet persisted."""
@@ -528,20 +523,6 @@ class RuntimeAgentRunStore(AgentRunStore):
                 source = RunRecord(run_id=record.agent_run_id, conversation_id=record.agent_conversation_id,
                                    parent_run_id=record.parent_agent_run_id, agent_name=record.agent_id,
                                    metadata=dict(record.metadata), started_at=record.started_at)
-                await self.run_registrations.publish(source)
-            elif record.agent_run_id in self._run_sources:
-                native = self.run_registrations.native
-                # The built-in native boundary owns its transaction and receipt.
-                # Import only across owners; never replay an uncertain native write.
-                step = self.step_store
-                same_owner = (isinstance(step, SqlStepStore) and native is not None
-                              and step.storage_context.engine is native.storage_context.engine
-                              and step.store_key == native.store_key)
-                if not same_owner:
-                    # This admits metadata only. A custom or split native store
-                    # may still have a pending lifecycle boundary; its own receipt
-                    # remains the sole evidence that boundary committed.
-                    await self.run_registrations.publish(source)
             for archive in self._archives.values():
                 if isinstance(archive, StateStepArchive):
                     archive.remember_run_registration(source)

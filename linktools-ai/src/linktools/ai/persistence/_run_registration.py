@@ -11,12 +11,13 @@ from typing import TYPE_CHECKING
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 
+from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..steps import validate_native_step_ids
-from .codec import decode_envelope, encode_envelope
+from .codec import decode_envelope, encode_envelope, _encode_step_envelope
 from ._official_step_reader import OfficialStepReader
 from ._step_contracts import AgentRunRecord
-from .state import StateStore, StateStorageGroup, StateTransaction, StoredRecord, record_key
+from .state import StateStore, StateTransaction, StoredRecord, record_key, active_state_transaction
 
 if TYPE_CHECKING:
     from ._step_store import SqlStepStore
@@ -47,14 +48,6 @@ class RunRegistrationStore:
         return record_key(self._namespace, self._tenant_id, "execution", "step_run", (run_id,))
 
     @property
-    def state_store(self) -> StateStore:
-        return self._store
-
-    @property
-    def storage_group(self) -> StateStorageGroup:
-        return self._store.storage_group
-
-    @property
     def native(self) -> "SqlStepStore | None":
         return self._native
 
@@ -83,30 +76,49 @@ class RunRegistrationStore:
             result[run.run_id] = run
         return result
 
-    async def publish(self, run: RunRecord) -> None:
-        """Import immutable metadata without replaying native lifecycle effects."""
+    def joins(self, store: StateStore) -> bool:
+        if self._native is not None:
+            from ._sql import SqlStateStore
+            return (isinstance(store, SqlStateStore)
+                    and store.context.engine is self._native.storage_context.engine)
+        return store.storage_group is self._store.storage_group
+
+    def transaction_stores(self, store: StateStore) -> tuple[StateStore, ...]:
+        return (self._store,) if self._native is None and self.joins(store) else ()
+
+    async def _write(self, transaction: StateTransaction, run: RunRecord) -> None:
         key = self.key(run.run_id)
+        data = encode_envelope(json.loads(_RUN.dump_json(run)))
+        current = await transaction.get_record(key)
+        if current is not None:
+            if current.kind != "step_run" or current.data != data:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return
+        await transaction.insert_record(StoredRecord(
+            key=key, scope_key=None, parent_key=None, kind="step_run",
+            sort_key=run.started_at.isoformat().encode("utf-8"), state=None,
+            storage_revision=0, lease_owner=None, lease_fence=0,
+            lease_expires_at=None, data=data,
+        ))
+
+    async def publish_in_transaction(self, transaction: StateTransaction, run: RunRecord) -> None:
+        """Publish with the domain owner; never confirm provisional native data."""
+        if self._native is not None:
+            await self._native.import_run_in_transaction(transaction, run)
+        else:
+            owner = active_state_transaction(self._store, writable=True)
+            if owner is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            await self._write(owner, run)
+
+    async def publish(self, run: RunRecord) -> None:
+        """Import metadata for a consumer in an independent storage group."""
         validate_native_step_ids(run_id=run.run_id, conversation_id=run.conversation_id,
                                  parent_run_id=run.parent_run_id)
         if self._native is not None:
             await self._native.import_run(run)
-            return
-        data = encode_envelope(json.loads(_RUN.dump_json(run)))
-
-        async def write(transaction: StateTransaction) -> None:
-            current = await transaction.get_record(key)
-            if current is not None:
-                if current.kind != "step_run" or current.data != data:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                return
-            await transaction.insert_record(StoredRecord(
-                key=key, scope_key=None, parent_key=None, kind="step_run",
-                sort_key=run.started_at.isoformat().encode("utf-8"), state=None,
-                storage_revision=0, lease_owner=None, lease_fence=0,
-                lease_expires_at=None, data=data,
-            ))
-
-        await self._store.mutate(write)
+        else:
+            await self._store.mutate(lambda transaction: self._write(transaction, run))
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +130,7 @@ class RunRegistrationReference:
     fields: Mapping[str, str | None]
     metadata: Mapping[str, str]
     removed_metadata: tuple[str, ...]
+    projection_digest: str
 
     @classmethod
     def capture(cls, source: RunRecord, projection: AgentRunRecord) -> "RunRegistrationReference":
@@ -134,13 +147,15 @@ class RunRegistrationReference:
         return cls(source.run_id, source.registration_id, changes,
                    {key: value for key, value in projection.metadata.items()
                     if original.metadata.get(key) != value},
-                   tuple(sorted(original.metadata.keys() - projection.metadata.keys())))
+                   tuple(sorted(original.metadata.keys() - projection.metadata.keys())),
+                   canonical_sha256(_encode_step_envelope(projection)))
 
     def to_data(self) -> dict[str, object]:
         return encode_envelope({"type": "run_reference", "payload": {
             "run_id": self.run_id, "registration_id": self.registration_id,
             "fields": dict(self.fields), "metadata": dict(self.metadata),
             "removed_metadata": list(self.removed_metadata),
+            "projection_digest": self.projection_digest,
         }})
 
     @classmethod
@@ -149,7 +164,7 @@ class RunRegistrationReference:
         payload = value.get("payload")
         if (set(value) != {"type", "payload"} or value["type"] != "run_reference"
                 or not isinstance(payload, Mapping)
-                or set(payload) != {"run_id", "registration_id", "fields", "metadata", "removed_metadata"}):
+                or set(payload) != {"run_id", "registration_id", "fields", "metadata", "removed_metadata", "projection_digest"}):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         validate_native_step_ids(run_id=payload["run_id"])
         registration, fields, metadata, removed = (payload[name] for name in
@@ -164,7 +179,10 @@ class RunRegistrationReference:
                 or any(not isinstance(key, str) for key in removed)
                 or list(removed) != sorted(set(removed)) or set(removed).intersection(metadata)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return cls(payload["run_id"], registration, dict(fields), dict(metadata), tuple(removed))
+        digest = payload["projection_digest"]
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return cls(payload["run_id"], registration, dict(fields), dict(metadata), tuple(removed), digest)
 
     def project(self, source: RunRecord) -> AgentRunRecord:
         if (source.run_id != self.run_id or source.registration_id != self.registration_id):
@@ -183,7 +201,11 @@ class RunRegistrationReference:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         metadata = {key: value for key, value in original.metadata.items() if key not in self.removed_metadata}
         metadata.update(self.metadata)
-        return replace(original, metadata=metadata, **changes)
+        projection = replace(original, metadata=metadata, **changes)
+        # Commit to the consumed projection, not source-only or overridden data.
+        if canonical_sha256(_encode_step_envelope(projection)) != self.projection_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return projection
 
 
 __all__ = ["RunRegistrationStore", "RunRegistrationReference"]

@@ -244,6 +244,7 @@ async def test_canonical_interaction_pages_and_snapshot_sequences_include_runnin
         ) == list(values[8:11])
         assert await archive.model_interaction_count(agent_run_id="run") == 12
         records = await archive.state_store.read(lambda tx: tx.scan_records())
+        records = await archive._project_run_records(records)
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         operations = await archive.state_store.read(lambda tx: tx.scan_operations())
         aliases, sequences = canonical_snapshot_indexes(
@@ -346,6 +347,7 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
             budget=_SnapshotCaptureBudget(SnapshotLimits(1000, 2**20)), page_size=1,
         )
         records, facts, operations = captured.records, captured.facts, captured.operations
+        records = await archive._project_run_records(records)
         aliases, sequences = canonical_snapshot_indexes(
             namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=operations,

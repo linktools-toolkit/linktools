@@ -164,6 +164,7 @@ async def test_transcript_recovery_keeps_custom_archive_stream(
         custom = CustomArchive(
             archive.state_store, object_store=None, namespace="archive-boundaries",
             tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
+            run_registrations=state.run_store.run_registrations,
         )
         state.run_store._archives[PersistenceDomain.TRACE] = custom
         await state.run_store.register_agent_run(run, execution_id="execution")
@@ -187,6 +188,7 @@ async def test_combined_projection_publishes_messages_with_its_owner(tmp_path: P
         assert combined.native_messages == source.native_messages
         assert combined.native_publishers == source.native_publishers
         observation = replace(observation, archive=PreparedArchive())
+        await archive.prepare_run_registration(run)
 
         async def publish(transaction):
             await archive.sync_projection_in_transaction(

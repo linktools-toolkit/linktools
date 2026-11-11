@@ -1253,14 +1253,6 @@ class StateStepArchive(AgentRunStore):
             return await transaction.get_facts(query.stream_key, sequences)
         return await transaction.list_facts(query)
 
-    def confirm_native_run(self, record: RunRecord) -> None:
-        if self._native_runs is not None:
-            self._native_runs.confirm(record)
-
-    def invalidate_native_run(self, run_id: str) -> None:
-        if self._native_runs is not None:
-            self._native_runs.invalidate(run_id)
-
     def remember_run_registration(self, source: RunRecord) -> None:
         """Carry the prepared canonical source to its domain publication."""
         previous = self._registration_sources.get(source.run_id)
@@ -1269,26 +1261,23 @@ class StateStepArchive(AgentRunStore):
         self._registration_sources[source.run_id] = source
 
     async def prepare_run_registration(self, run: AgentRunRecord) -> None:
-        """Publish immutable registration metadata before a domain transaction."""
-        if self._run_registrations is None:
+        """Prepare admission; same-owner metadata joins the domain publication."""
+        owner = self._run_registrations
+        if owner is None:
             return
-        prepared = self._registration_sources.get(run.agent_run_id)
-        if prepared is not None:
-            native = self._run_registrations.native
-            if native is None or native.confirmed_run(run.agent_run_id) == prepared:
-                return
-            if self._native_events is not None and self._native_events.pending_source(run.agent_run_id) is not None:
-                return
-            if await self._run_registrations.get(run.agent_run_id) != prepared:
-                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            return
-        source = await self._run_registrations.get(run.agent_run_id)
+        source = self._registration_sources.get(run.agent_run_id)
         if source is None:
-            source = RunRecord(run_id=run.agent_run_id, conversation_id=run.agent_conversation_id,
-                               parent_run_id=run.parent_agent_run_id, agent_name=run.agent_id,
-                               metadata=dict(run.metadata), started_at=run.started_at)
-            await self._run_registrations.publish(source)
-        self.remember_run_registration(source)
+            source = await owner.get(run.agent_run_id)
+            if source is None:
+                source = RunRecord(run_id=run.agent_run_id, conversation_id=run.agent_conversation_id,
+                                   parent_run_id=run.parent_agent_run_id, agent_name=run.agent_id,
+                                   metadata=dict(run.metadata), started_at=run.started_at)
+            self.remember_run_registration(source)
+        if not owner.joins(self._store):
+            # An independent owner must be durable before this domain can refer
+            # to it. Existing immutable admissions need no extra commit.
+            if await owner.get(run.agent_run_id) != source:
+                await owner.publish(source)
 
     async def read_run_registrations(self, run_ids: Sequence[str]) -> Mapping[str, RunRecord] | None:
         """Capture immutable registrations before opening a domain scope."""
@@ -1348,9 +1337,12 @@ class StateStepArchive(AgentRunStore):
     def transaction_stores(self) -> tuple[StateStore, ...]:
         """Enlist evidence and its authoritative producer head atomically."""
         repository = self._execution_repository
+        stores = [self._store]
         if repository is not None:
-            return tuple(dict.fromkeys((self._store, repository.state_store)))
-        return (self._store,)
+            stores.append(repository.state_store)
+        if self._run_registrations is not None:
+            stores.extend(self._run_registrations.transaction_stores(self._store))
+        return tuple(dict.fromkeys(stores))
 
     async def _mutate(
         self, callback: Callable[[StateTransaction], Awaitable[_ValueT]],
@@ -2606,7 +2598,12 @@ class StateStepArchive(AgentRunStore):
         require_no_run_history_lock(
             "StateStepArchive.sync_prepared_projection"
         )
-        await self.prepare_run_registration(run)
+        # Direct callers may admit a fresh run. A surrounding publication must
+        # already have prepared its independent owner before opening its scope.
+        if active_state_scope() is None:
+            await self.prepare_run_registration(run)
+        elif run.agent_run_id not in self._registration_sources:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         values = tuple(checkpoints)
         if any(not isinstance(value, PreparedAgentRunCheckpoint) for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2944,6 +2941,12 @@ class StateStepArchive(AgentRunStore):
         owner_record = records.get(owner)
         head_record = records.get(head_key)
         if owner_record is None:
+            registrations = self._run_registrations
+            if registrations is not None and registrations.joins(self._store) and source_receipt is None:
+                source = self._registration_sources.get(run.agent_run_id)
+                if source is None:
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                await registrations.publish_in_transaction(transaction, source)
             stored_run = self._stored_agent_run(run, source_receipt=source_receipt)
             if self._native_runs is not None:
                 self._native_runs.remember_prepared(transaction, stored_run, run, source_receipt=source_receipt,
@@ -3496,7 +3499,6 @@ class StateStepArchive(AgentRunStore):
     def release_runtime_cache(self, agent_run_id: str) -> None:
         self._registration_sources.pop(agent_run_id, None)
         self._context_baselines.pop(agent_run_id, None)
-        self.invalidate_native_run(agent_run_id)
         if self._native_events is not None:
             self._native_events.clear(agent_run_id)
 

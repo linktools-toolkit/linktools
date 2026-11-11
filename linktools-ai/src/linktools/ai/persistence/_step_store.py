@@ -338,31 +338,35 @@ class SqlStepStore:
             query = query.select_from(joined)
         return query.where(*self._run_predicates(table, record.run_id))
 
-    async def import_run(self, record: RunRecord) -> None:
-        """Import immutable run metadata without replaying a native boundary.
-
-        A run header records lineage, not successful lifecycle-event publication.
-        Native event receipts continue to prove their own boundary separately.
-        """
+    async def _import_run(self, session: "AsyncSession", record: RunRecord) -> _RunFields:
         from sqlalchemy import select
 
-        await self.initialize()
         values = self._run_values(record.run_id) | self._record_values(record)
         table = self._table("runs")
+        result = await self._context.dialect.insert_ignore_conflict(
+            session, table=table, values=values, index_elements=("store_locator", "run_id"),
+        )
+        if result.inserted:
+            return _RunFields.from_row(values, engine=self._context.engine)
+        row = (await session.execute(select(table).where(*self._run_predicates(table, record.run_id)))).mappings().one()
+        if _RUN_ADAPTER.validate_python(self._record_data(row)) != record:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return _RunFields.from_row(row, engine=self._context.engine)
 
-        async def write(session: "AsyncSession") -> _RunFields:
-            result = await self._context.dialect.insert_ignore_conflict(
-                session, table=table, values=values, index_elements=("store_locator", "run_id"),
-            )
-            if result.inserted:
-                return _RunFields.from_row(values, engine=self._context.engine)
-            row = (await session.execute(select(table).where(*self._run_predicates(table, record.run_id)))).mappings().one()
-            if _RUN_ADAPTER.validate_python(self._record_data(row)) != record:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return _RunFields.from_row(row, engine=self._context.engine)
-
-        source = await self._context.run_mutation(write, domain="steps.run_metadata")
+    async def import_run(self, record: RunRecord) -> None:
+        """Import metadata independently of native lifecycle-event publication."""
+        await self.initialize()
+        source = await self._context.run_mutation(
+            lambda session: self._import_run(session, record), domain="steps.run_metadata",
+        )
         self._confirm_run(source)
+
+    async def import_run_in_transaction(self, transaction: StateTransaction, record: RunRecord) -> None:
+        """Admit metadata in the consumer's actual publication, not a new commit."""
+        if not isinstance(transaction, SqlStateTransaction):
+            raise TypeError("native SQL metadata requires a SQL state transaction")
+        await transaction.run_sql(self._context, lambda session: self._import_run(session, record))
+        # Provisional metadata is not a committed native receipt or cache entry.
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         from sqlalchemy import select

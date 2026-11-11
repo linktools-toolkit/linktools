@@ -133,6 +133,7 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
         ]
         records = tuple(record for record in await archive.state_store.read(lambda tx: tx.scan_records())
                         if record.kind != "history_association")
+        records = await archive._project_run_records(records)
         facts = tuple(sorted(
             await archive.state_store.read(lambda tx: tx.scan_facts()),
             key=lambda fact: (fact.stream_key, fact.sequence),

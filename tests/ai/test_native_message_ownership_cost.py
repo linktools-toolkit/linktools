@@ -250,8 +250,6 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     await service._open(create=True)
     registered = RunRecord(run_id='run', registration_id='registered')
     await native.register_run(registered)
-    for archive in traces:
-        archive.confirm_native_run(registered)
     traffic = _Traffic()
     traffic.observe(monkeypatch)
     event.listen(engine.sync_engine, 'before_cursor_execute', traffic.sql)
@@ -489,8 +487,6 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
     await service._open(create=True)
     registered = RunRecord(run_id='growing', registration_id='growing-registration')
     await native.register_run(registered)
-    for archive in archives:
-        archive.confirm_native_run(registered)
 
     cold = Persistence(PersistenceStorage.sqlite(path))
     await cold.initialize(namespace=namespace, tenant_id=tenant)

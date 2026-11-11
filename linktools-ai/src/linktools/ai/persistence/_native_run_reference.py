@@ -3,7 +3,6 @@
 """Trace run projections whose common fields belong to a native registration."""
 
 import json
-from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING
@@ -50,7 +49,6 @@ class NativeRunReferences:
         self._store_key = SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
         self._store_locator = native_store_locator(self._store_key)
         self._native: SqlStepStore | None = None
-        self._confirmed: OrderedDict[str, str] = OrderedDict()
         self._projections: WeakKeyDictionary[StateTransaction, dict[bytes, tuple[Mapping[str, object], Mapping[str, object]]]] = WeakKeyDictionary()
         metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE}))
         build_step_sql_metadata(metadata=metadata)
@@ -66,23 +64,7 @@ class NativeRunReferences:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._native = native
 
-    def confirm(self, record: RunRecord) -> None:
-        if (self._native is None or not record.registration_id
-                or self._native.confirmed_run(record.run_id) != record):
-            return
-        previous = self._confirmed.get(record.run_id)
-        if previous is not None and previous != record.registration_id:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self._confirmed[record.run_id] = record.registration_id
-        self._confirmed.move_to_end(record.run_id)
-        while len(self._confirmed) > 128:
-            self._confirmed.popitem(last=False)
-
-    def invalidate(self, run_id: str) -> None:
-        self._confirmed.pop(run_id, None)
-
     def clear(self) -> None:
-        self._confirmed.clear()
         self._projections.clear()
 
     def encode(self, run: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None) -> dict[str, object] | None:
