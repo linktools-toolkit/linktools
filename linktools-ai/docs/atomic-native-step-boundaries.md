@@ -154,7 +154,7 @@ Keeping all keys and all user-visible history cannot provide constant space.
 Configured snapshot pruning retires roots while preserving replay tombstones
 and the latest complete recovery point. It does not authorize dropping history
 owned by Conversation, Trace, a task handoff, or another retained snapshot.
-Active snapshots use the `(store_digest, run_digest, pruned)` index and equality
+Active snapshots use the `(store_digest, run_id, pruned)` index and equality
 on the non-null boolean, including on MySQL 5.7. Tombstones therefore do not
 expand the active scan. Pruning reads one row containing the retention cutoff
 and latest complete ID, then retires older roots in metadata batches of at most

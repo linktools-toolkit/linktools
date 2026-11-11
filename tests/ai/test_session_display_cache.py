@@ -779,10 +779,10 @@ async def test_display_cache_same_id_recreation_does_not_reuse_old_page():
         history = record.history_id
         keys = (key,) + tuple(record_key_digest(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, history)
                               for kind in ("conversation_history", "transcript_head"))
-        from linktools.ai.persistence.state import sequence_key
+        from linktools.ai.persistence.state import stream_digest
         async def remove(transaction):
             await transaction.delete_records(keys)
-            await transaction.delete_sequence(sequence_key(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, "session_turn", ["session"]))
+            await transaction.delete_sequence(stream_digest(sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, "session_turn", ["session"]))
         await sessions.state_store.mutate(remove)
         await sessions.create(replace(record, created_at=record.created_at + timedelta(seconds=1), metadata={"rebuilt": True}))
         rebuilt = await service.refresh("session", principal=_PRINCIPAL, max_age=3)

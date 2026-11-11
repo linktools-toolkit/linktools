@@ -24,7 +24,6 @@ from ._object import (
     ObjectStat,
     _CHUNK_SIZE,
     _finish_owned_task,
-    _key_digest,
     _settle_task,
     _spool_file,
     _track_object_task,
@@ -39,6 +38,11 @@ _OBJECT_FORMAT_VERSION = 1
 _DATA_NAME = "data"
 _METADATA_NAME = "metadata.json"
 _IGNORED_ROOT_NAMES = frozenset({".tmp", ".trash"})
+
+
+def _object_path_digest(store_id: str, key: str) -> str:
+    # Opaque keys are not filesystem paths and may exceed one filename component.
+    return hashlib.sha256(store_id.encode("utf-8") + b"\0" + key.encode("utf-8")).hexdigest()
 
 
 class FilesystemObjectStore:
@@ -65,7 +69,7 @@ class FilesystemObjectStore:
         return tuple(task for task in self._background_tasks if not task.done())
 
     def _path(self, key: str) -> Path:
-        digest = _key_digest(self.store_id, key).hex()
+        digest = _object_path_digest(self.store_id, key)
         return self._root / digest[:2] / digest
 
     async def put(
@@ -87,7 +91,7 @@ class FilesystemObjectStore:
                 expected_digest=expected_digest,
                 acquire_lock=not offline_owned,
             ),
-            name=f"filesystem-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
+            name="filesystem-object-put",
         )
         _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
@@ -207,7 +211,7 @@ class FilesystemObjectStore:
                 expected_digest=expected_digest,
                 acquire_lock=not offline_owned,
             ),
-            name=f"filesystem-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
+            name="filesystem-object-delete",
         )
         _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
@@ -338,7 +342,7 @@ def _publish_filesystem_object(
 def _validate_filesystem_objects(root: Path, store_id: str) -> None:
     for object_path in _filesystem_object_paths(root):
         stat = _read_filesystem_metadata(object_path)
-        digest = _key_digest(store_id, stat.key).hex()
+        digest = _object_path_digest(store_id, stat.key)
         if object_path.name != digest or object_path.parent.name != digest[:2]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         actual_size, actual_digest = _hash_file(object_path / _DATA_NAME)
@@ -350,7 +354,7 @@ def _list_filesystem_objects(root: Path, store_id: str) -> tuple[ObjectStat, ...
     values: list[ObjectStat] = []
     for object_path in _filesystem_object_paths(root):
         value = _read_filesystem_metadata(object_path)
-        digest = _key_digest(store_id, value.key).hex()
+        digest = _object_path_digest(store_id, value.key)
         if object_path.name != digest or object_path.parent.name != digest[:2]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values.append(value)

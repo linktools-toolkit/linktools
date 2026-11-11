@@ -285,3 +285,21 @@ async def test_asset_snapshot_preserves_known_field_types_and_open_metadata(corr
             assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_opaque_asset_keys_keep_independent_history_after_recreation(asset_store: AssetStore) -> None:
+    keys = (AssetKey("resource", "name"), AssetKey("resource", "name "),
+            AssetKey("other", "name"), AssetKey("resource", "🪷" * 128))
+    for index, key in enumerate(keys):
+        await asset_store.put(key, str(index).encode())
+    refs = await asset_store.resolve_versions(keys)
+    target = keys[0]
+    await asset_store.delete(target)
+    await asset_store.reset(target)
+    await asset_store.put(target, b"recreated")
+    assert await asset_store.read_versions(refs) == tuple(str(index).encode() for index in range(len(keys)))
+    assert await asset_store.get(target) == b"recreated"
+    assert await asset_store.get(keys[1]) == b"1"
+    assert len(await asset_store._storage.primary.list_versions(target)) == 4
+    await asset_store._storage.primary.validate_integrity()

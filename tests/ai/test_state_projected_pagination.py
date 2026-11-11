@@ -3,7 +3,7 @@
 """Current record projections retain complete pagination and snapshot validation."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -19,7 +19,7 @@ from linktools.ai.persistence._snapshot_validation import canonical_snapshot_ind
 from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.persistence.codec import decode_record, encode_record
 from linktools.ai.persistence.contracts import SessionRecord
-from linktools.ai.persistence.state import RecordQuery, StateStore, StoredRecord
+from linktools.ai.persistence.state import RecordQuery, StateStore, StoredRecord, sortable_timestamp
 
 
 def _record(identity: str) -> StoredRecord:
@@ -82,3 +82,12 @@ async def test_projected_records_page_completely_and_validate_after_roundtrip(
         await store.close()
         if engine is not None:
             await engine.dispose()
+
+
+def test_timestamp_sorting_preserves_chronology_and_stable_ties() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first, second = _record("first").key_digest, _record("second").key_digest
+    same_time = (sortable_timestamp(now, first), sortable_timestamp(now, second))
+    assert same_time[0] != same_time[1]
+    assert same_time[0] == sortable_timestamp(now, first)
+    assert max(same_time) < sortable_timestamp(now + timedelta(microseconds=1), first)

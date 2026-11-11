@@ -1290,16 +1290,6 @@ def stream_digest(
     return _digest(["stream", namespace, tenant_id, runtime_domain, relation, identity])
 
 
-def sequence_key(
-    namespace: str,
-    tenant_id: str,
-    runtime_domain: str,
-    relation: str,
-    identity: JsonValue,
-) -> bytes:
-    return _digest(["sequence", namespace, tenant_id, runtime_domain, relation, identity])
-
-
 def operation_key(
     namespace: str,
     tenant_id: str,
@@ -1313,15 +1303,13 @@ def subject_digest(identity: JsonValue) -> bytes:
     return _digest(["subject", identity])
 
 
-def sortable_timestamp(value: datetime, suffix: str) -> str:
+def sortable_timestamp(value: datetime, key: bytes) -> str:
     if value.tzinfo is None:
         raise ValueError("sortable timestamp must be timezone-aware")
     micros = int(value.astimezone(timezone.utc).timestamp() * 1_000_000)
     if micros < 0 or micros >= 1 << 63:
         raise ValueError("sortable timestamp is outside the supported range")
-    if not suffix:
-        raise ValueError("sortable timestamp suffix is required")
-    return "t:" + f"{micros:016x}" + ":" + hashlib.sha256(suffix.encode("utf-8")).hexdigest()
+    return "t:" + f"{micros:016x}" + ":" + _require_digest(key, "timestamp key").hex()
 
 
 def encode_sort_key(value: str) -> str:
@@ -1390,4 +1378,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sequence_key', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

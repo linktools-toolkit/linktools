@@ -8,6 +8,19 @@ directory without maintaining historical versions.
 `AssetStore`, `StorageOverlay` and `AssetVersionRef` retain the same logical
 keys, layer identities and version-read contracts with these backends.
 
+## Exact keys and SQL history
+
+Asset namespaces and kinds contain at most 128 UTF-8 bytes each; opaque Asset
+IDs contain at most 512 UTF-8 bytes. IDs are not paths and are never trimmed,
+normalized or hashed for SQL identity. SQL uses the unique
+`(namespace, kind, asset_id)` key; `asset_id` stores the exact UTF-8 bytes so
+MySQL does not conflate IDs that differ by trailing spaces.
+
+Each current entry's existing surrogate row ID also owns its history rows.
+Delete and reset append revisions and retain that entry row; recreating the
+same logical key retains its history. Version reads resolve the natural key
+and history in one SQL statement. No identifier map or extra lookup is stored.
+
 ## Local persistent assets
 
 Install the `sqlite` extra for local SQL storage. Provision the schema explicitly;
@@ -72,39 +85,28 @@ Use a versioned backend when edits and deletions must leave earlier content
 readable. Materializing a pinned version into a temporary directory does not
 change the Asset's logical identity or transfer ownership to Workspace.
 
-## Replacing a versioned filesystem backend
+## Object keys and byte integrity
 
-The `FilesystemAssetBackend` and `filesystem_root` APIs are removed. They are
-not aliases for SQLite or DirectoryAssetBackend. This source change does not
-convert or delete an existing metadata directory, create a substitute database,
-or rewrite a stored AssetVersionRef.
+ObjectStore keys contain at most 1024 UTF-8 bytes across the memory, filesystem
+and SQL backends. Keys stay opaque and exact, including separators, Unicode and
+trailing spaces. Oversized or invalid UTF-8 keys fail before consuming content;
+they are never truncated. SQL stores their original UTF-8 bytes and uniquely
+indexes `(store_id, object_key)`, without a second key digest.
 
-Before upgrading a consumer that used the removed backend:
+FilesystemObjectStore hashes the store ID and key only to derive a safe,
+fixed-width physical filename. Directly using opaque keys as paths would change
+separator semantics, permit path traversal and exceed filesystem filename
+limits. An escaped split-path encoding could avoid that digest, but would add
+path rules and directories without improving the logical identity contract.
 
-1. Inventory its actual backend, roots, object stores and any executions or
-   retained references that still need old versions. A directory path alone
-   does not identify the backend.
-2. Keep a quiescent copy of the original metadata and objects, with a reader
-   capable of opening that format. Do not run mixed old and new writers against
-   the same data.
-3. If historical state must remain live, complete and verify an explicit data
-   conversion before switching the consumer. Preserve logical keys, layer IDs,
-   entry revisions, store revision ordering, metadata, deletion/reset states,
-   version bytes and idempotency receipts. Reopen and read the references that
-   existing consumers actually retain.
-4. Switch to a separately provisioned target only after those checks. Retain
-   the source until its independent data-retention requirements are resolved.
+Content SHA-256 digests bind immutable bytes to version references and detect
+corruption or substitution. Batch request digests distinguish an exact replay
+from a different request using the same idempotency key without retaining all
+input file bytes in the receipt.
 
-There is no automatic historical converter in this change. Consumers with live
-filesystem history must retain their compatible reader until a conversion is
-available; an empty SQL store is not a successful migration.
+## Snapshots
 
 `AssetStore.snapshot()` captures selected effective assets at a point in time.
 It is not an export of every historical version, tombstone, reset or batch
 receipt. Copying only current files or replaying ordinary `put()` calls into a
 new store does not preserve arbitrary existing version references.
-
-Existing SQL metadata, ObjectStore implementations and Directory readers are
-not reinterpreted by this backend removal. Runtime's
-`PersistenceStorage.from_root()` is a separate composition: it already uses
-SQLite state and filesystem objects, not this Asset metadata format.

@@ -8,6 +8,18 @@ from typing import Literal
 
 from pydantic_ai_harness.step_persistence import StepEvent
 
+from .core import validate_resource_id
+
+
+def validate_native_step_ids(
+    *, run_id: str, conversation_id: str | None = None, parent_run_id: str | None = None,
+) -> None:
+    """Apply the resource ID contract to native run identity and lineage."""
+    validate_resource_id(run_id)
+    for value in (conversation_id, parent_run_id):
+        if value is not None:
+            validate_resource_id(value)
+
 
 @dataclass(frozen=True, slots=True)
 class NativeStepSource:
@@ -53,6 +65,8 @@ class NativeLifecycleEvent(StepEvent):
     outcome: LifecycleOutcome
 
     def __post_init__(self) -> None:
+        validate_native_step_ids(run_id=self.run_id, conversation_id=self.conversation_id,
+                                 parent_run_id=self.parent_run_id)
         kind = {"succeeded": "run_completed", "interrupted": "run_completed",
                 "failed": "run_failed", "cancelled": "run_failed"}.get(self.outcome)
         if (kind is None or self.kind != kind or self.idempotency_key is None
@@ -74,4 +88,4 @@ class NativeLifecycleEvent(StepEvent):
         return "AGENT_RUN_FAILED"
 
 
-__all__ = ["LifecycleOutcome", "NativeLifecycleEvent", "NativeStepSource", "rekey_native_step_sources"]
+__all__ = ["validate_native_step_ids", "LifecycleOutcome", "NativeLifecycleEvent", "NativeStepSource", "rekey_native_step_sources"]

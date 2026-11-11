@@ -51,6 +51,7 @@ from ._redaction import (
 )
 from ._usage import UsageMetrics
 from ._validation import (
+    RESOURCE_ID_MAX_BYTES,
     validate_agent_id,
     validate_asset_kind,
     validate_asset_namespace,
@@ -111,6 +112,7 @@ from ._domain import PersistenceDomain
 from ._token_seed import token_seed
 
 __all__ = [
+    "RESOURCE_ID_MAX_BYTES",
     "token_seed",
     "ExecutionContext",
     "PersistenceDomain",

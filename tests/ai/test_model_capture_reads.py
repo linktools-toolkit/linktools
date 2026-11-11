@@ -847,7 +847,7 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
         assert combined_selects < separate_selects
         print("run/page SELECT separate, batched:", separate_selects, combined_selects)
         # A row beyond the durable sequence boundary must not become visible.
-        await archive.state_store.mutate(lambda transaction: transaction.delete_sequence(archive._sequence(run.agent_run_id, "interaction")))
+        await archive.state_store.mutate(lambda transaction: transaction.delete_sequence(archive._stream(run.agent_run_id, "interaction")))
         with pytest.raises(AIError) as raised:
             await _metadata(_service(state))
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

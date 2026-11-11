@@ -90,7 +90,7 @@ async def test_cold_replay_uses_existing_registration_select(native) -> None:
         selects = [sql for sql in statements if sql.startswith("SELECT")]
         assert len(selects) == 1 and "JOIN ai_step_events" in selects[0]
         selected_columns = selects[0].split("FROM", 1)[0]
-        for excluded in ("created_at", "updated_at", "conversation_digest", "parent_digest"):
+        for excluded in ("created_at", "updated_at"):
             assert excluded not in selected_columns
         assert "ai_step_events.id AS" not in selected_columns
         assert "ai_step_runs.id," not in selected_columns
@@ -149,7 +149,7 @@ async def test_public_decoder_checks_inherited_fields_and_scope(native) -> None:
         registration = dict((await connection.execute(select(store._table("runs")))).mappings().one())
     assert source["run_fields"] == 15
     assert SqlStepStore.decode_started_row(source, expected_store_digest=store.store_digest, run=registration) == started
-    for corrupted in (source | {"key_digest": "wrong"}, source | {"run_digest": "wrong"},
+    for corrupted in (source | {"key_digest": "wrong"}, source | {"run_id": "wrong"},
                       source | {"run_fields": 16}, source | {"body_sha256": None},
                       source | {"step_index": "0"}, source | {"step_index": False}):
         with pytest.raises(ValueError):
@@ -324,7 +324,7 @@ async def test_narrow_start_fields_proof_does_not_claim_metadata_integrity(nativ
 
     projected = {field.name: getattr(full, field.name) for field in fields(full) if field.name != "metadata"}
     projected["timestamp"] = full.timestamp.isoformat()
-    projected.update({name: source[name] for name in ("outcome", "store_digest", "run_digest", "key_digest", "fields_sha256")})
+    projected.update({name: source[name] for name in ("outcome", "store_digest", "key_digest", "fields_sha256")})
     assert "metadata" not in projected and "body_sha256" not in projected
     assert SqlStepStore.decode_started_fields(projected, expected_store_digest=store.store_digest) == replace(started, metadata={})
     for damage in ({"error": "changed"}, {"fields_sha256": None}, {"fields_sha256": "wrong"}, {"step_index": "0"}):

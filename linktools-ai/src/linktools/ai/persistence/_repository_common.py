@@ -62,7 +62,6 @@ from .state import (
     parent_digest,
     record_key_digest,
     scope_digest,
-    sequence_key,
     stream_digest,
     subject_digest,
 )
@@ -515,29 +514,6 @@ def validate_recovery_operation(
 
 
 class OperationLedgerRepositoryImpl(_RepositoryBase):
-    def _stream(self, value: OperationLedgerInput | OperationLedgerRecord) -> bytes:
-        return stream_digest(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            "operation",
-            [value.resource_kind.value, value.resource_id],
-        )
-
-    def _stored_operation(
-        self, value: OperationLedgerInput, sequence: int
-    ) -> StoredOperation:
-        return StoredOperation(
-            operation_key(
-                self._namespace, self._tenant_id, self._domain.value, value.operation_id
-            ),
-            self._stream(value),
-            sequence,
-            value.status.value,
-            value.compactable,
-            _domain_data(value),
-        )
-
     async def append(self, value: OperationLedgerInput) -> OperationLedgerRecord:
         _require_tenant(value, self._tenant_id)
 
@@ -564,16 +540,14 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
             if _operation_matches(current, value):
                 return current
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        sequence = await transaction.next_sequence(
-            sequence_key(
-                self._namespace,
-                self._tenant_id,
-                self._domain.value,
-                "operation",
-                [value.resource_kind.value, value.resource_id],
-            )
+        stream = stream_digest(
+            self._namespace, self._tenant_id, self._domain.value,
+            "operation", [value.resource_kind.value, value.resource_id],
         )
-        await transaction.insert_operation(self._stored_operation(value, sequence))
+        sequence = await transaction.next_sequence(stream)
+        await transaction.insert_operation(StoredOperation(
+            key, stream, sequence, value.status.value, value.compactable, _domain_data(value),
+        ))
         return _operation_record(value, sequence)
 
     async def get(
@@ -1098,7 +1072,7 @@ async def _reserve_operation(
             return current, True
         raise AIError(ErrorCode.STORAGE_CONFLICT)
     sequence = await transaction.next_sequence(
-        sequence_key(
+        stream_digest(
             repository._namespace,
             repository._tenant_id,
             repository._domain.value,

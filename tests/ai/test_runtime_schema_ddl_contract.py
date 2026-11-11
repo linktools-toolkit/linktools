@@ -114,10 +114,10 @@ def test_snapshot_active_lookup_uses_full_partition_index() -> None:
         tuple(column.name for column in index.columns)
         for index in snapshots.indexes
     }
-    assert ("store_digest", "run_digest", "pruned") in index_columns
-    assert ("store_digest", "run_digest") not in index_columns
+    assert ("store_digest", "run_id", "pruned") in index_columns
+    assert ("store_digest", "run_id") not in index_columns
     # Other append-only tables do not need the snapshot retirement dimension.
-    assert ("store_digest", "run_digest") in {
+    assert ("store_digest", "run_id") in {
         tuple(column.name for column in index.columns)
         for index in metadata.tables["ai_step_events"].indexes
     }
@@ -127,19 +127,19 @@ def test_snapshot_active_lookup_uses_full_partition_index() -> None:
         snapshots.create(engine)
         with engine.begin() as connection:
             connection.execute(snapshots.insert(), [{
-                "store_digest": "s" * 64, "run_digest": "r" * 64,
+                "store_digest": "s" * 64,
                 "run_id": "run", "step_index": index, "timestamp": "timestamp",
                 "state": "interrupted", "messages": "{}",
                 "key_digest": f"{index:064x}", "pruned": index < 2000,
             } for index in range(2008)])
             query = select(snapshots.c.id).where(
                 snapshots.c.store_digest == "s" * 64,
-                snapshots.c.run_digest == "r" * 64,
+                snapshots.c.run_id == "run",
                 snapshots.c.pruned == false(),
             ).order_by(snapshots.c.id.desc()).limit(2)
             compiled = str(query.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
             plan = " ".join(row[-1] for row in connection.exec_driver_sql("EXPLAIN QUERY PLAN " + compiled))
-            assert "store_digest=? AND run_digest=? AND pruned=?" in plan
+            assert "store_digest=? AND run_id=? AND pruned=?" in plan
             assert "TEMP B-TREE" not in plan
             assert len(connection.execute(query).all()) == 2
     finally:

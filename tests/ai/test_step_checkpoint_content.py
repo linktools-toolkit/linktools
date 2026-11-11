@@ -138,7 +138,7 @@ async def test_checkpoint_digest_roundtrips_canonical_media(tmp_path: Path, meta
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("column", ("store_digest", "run_digest", "run_id", "key_digest"))
+@pytest.mark.parametrize("column", ("store_digest", "run_id", "key_digest"))
 async def test_snapshot_lookup_keeps_scope_and_replay_identity(atomic_store, column) -> None:
     store, engine = atomic_store
     snapshot = ContinuableSnapshot(run_id="run", step_index=1,

@@ -318,20 +318,20 @@ class NativeEventReferences:
             if not full_source:
                 columns[name] = case((referenced, runs.c[name]), else_=columns[name])
             invalid.append(and_(referenced, or_(events.c[name].is_not(None), runs.c[name].is_(None))))
-        columns.update((name, events.c[name]) for name in ("store_digest", "run_digest", "key_digest", "fields_sha256"))
+        columns.update((name, events.c[name]) for name in ("store_digest", "key_digest", "fields_sha256"))
         registration_columns = ()
         if full_source:
             columns["body_sha256"] = events.c.body_sha256
             columns["run_fields"] = events.c.run_fields
             registration_columns = tuple(runs.c[name].label("registration_" + name) for name in (
-                "store_digest", "run_digest", *(field.name for field in fields(RunRecord)),
+                "store_digest", *(field.name for field in fields(RunRecord)),
             ))
         statement = select(facts, *(column.label("native_" + name) for name, column in columns.items()),
                            *registration_columns, or_(*invalid).label("invalid_native_reference")).select_from(
             facts.outerjoin(events, and_(facts.c.kind == "step_event", events.c.store_digest == self._store_digest,
                                          events.c.key_digest == reference["key"].as_string())).outerjoin(runs, and_(
                 *(() if full_source else (inherited != 0,)), runs.c.store_digest == events.c.store_digest,
-                runs.c.run_digest == events.c.run_digest, runs.c.run_id == events.c.run_id,
+                runs.c.run_id == events.c.run_id,
             )))
         statement = visitors.replacement_traverse(statement, {}, lambda node: (
             bindparam(None, node.value, type_=node.type, literal_execute=True)

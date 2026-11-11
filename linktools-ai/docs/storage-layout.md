@@ -57,30 +57,42 @@ production DBA approval or a deployed migration.
 | `ai_native_content_edges` | Rebuildable dependency and collection queue metadata, not another durable semantic owner. |
 
 Identity, sequence, state, lease, CAS, revision, ordering and time columns are not
-compressed. Existing unbounded opaque string contracts are not silently narrowed
-to fixed-width IDs. Snapshot pruning uses the `(store_digest, run_digest, pruned)`
-index and an equality predicate compatible with MySQL 5.7 index selection.
+compressed. Snapshot pruning uses the `(store_digest, run_id, pruned)` index and
+an equality predicate compatible with MySQL 5.7 index selection.
 
-The SQL digest simplification removes nine redundant columns overall. Native
-lineage lookup digests are retained for the index-size contract below.
+## Native Step identities and digest ownership
 
-## Native Step digest ownership
+Native `run_id`, `conversation_id` and `parent_run_id` use the resource ID
+contract: nonempty UTF-8 strings of at most 128 bytes, with no leading/trailing
+whitespace or Unicode control characters (`Cc`). Optional lineage remains `None`
+when absent. IDs are preserved exactly, without trimming, Unicode normalization,
+truncation or digest substitution. The same limit applies to writes, lookups,
+Runtime projections and backup restore. Generated Runtime run/conversation IDs
+are 66 ASCII bytes; native SDK UUIDs also fit this contract.
 
-Run lineage keeps the original unbounded `conversation_id` and `parent_run_id`
-strings alongside fixed-width lookup digests. PostgreSQL B-tree entries cannot
-index arbitrarily large, incompressible text, so indexing these original columns
-directly would reject valid upstream IDs. Scoped digest indexes bound the entry
-size on every backend. Queries also compare the original strings; the digest
-predicate keeps trailing-space identities distinct under MySQL PAD SPACE
-comparisons. Backup validation checks that each lookup digest matches its source.
+The original IDs are indexed directly. Runs are unique by `(store_digest,
+run_id)`; lineage indexes use `(store_digest, conversation_id)` and `(store_digest,
+parent_run_id)`. Step tables and native Trace run references do not store another
+run-identity hash. Rejecting edge whitespace keeps these IDs exact under MySQL
+PAD SPACE comparisons too.
+
+SQL declares the IDs as `VARCHAR(128)`, whose width counts characters rather than
+UTF-8 bytes; application validation enforces the tighter byte bound on every
+backend, including SQLite. With `utf8mb4`, a scope `CHAR(64)` plus an ID declares
+768 key bytes, or 769 with the snapshot boolean. These fit InnoDB's 3072-byte
+large-prefix budget, not its legacy 767-byte configuration. Existing Runtime
+indexes already exceed 767 bytes, including `(store_digest, kind, sort_key(128))`.
+Provision MySQL 5.7 with the applicable large-prefix row format/settings; this
+contract adds no fallback for legacy index settings. The same bounded IDs stay
+well below PostgreSQL's ordinary B-tree entry limit. DDL compilation is distinct
+from validation on a deployed database server.
 
 | Table | Retained digest or content reference | Contract |
 | --- | --- | --- |
-| `ai_step_runs` | `store_digest`, `run_digest` | Namespace/tenant partition and fixed-width uniqueness for an unbounded upstream run ID. The original ID remains available unchanged. |
-| `ai_step_runs` | `conversation_digest`, `parent_digest` | Bounded lineage lookup indexes for opaque, unbounded source strings, including values too large for PostgreSQL B-tree entries. |
-| `ai_step_events` | `store_digest`, `run_digest`, `key_digest` | Scoped run lookup and a unique composite replay key, or a distinct unkeyed append occurrence. |
+| `ai_step_runs` | `store_digest` | Composite namespace/tenant partition. The original run and lineage IDs are direct lookup keys. |
+| `ai_step_events` | `store_digest`, `key_digest` | Partition and a unique composite of the original run ID with its replay key, or a distinct unkeyed append occurrence. |
 | `ai_step_events` | `body_sha256`, `fields_sha256` | Managed lifecycle source integrity. Full recovery authenticates metadata too; metadata-free Trace projections authenticate their fields without reading the large metadata body. |
-| `ai_step_snapshots` | `store_digest`, `run_digest`, `key_digest` | Scoped run lookup, retained replay identity and snapshot pruning. |
+| `ai_step_snapshots` | `store_digest`, `key_digest` | Partition and retained composite replay identity. Snapshot pruning uses the original run ID. |
 | `ai_step_snapshots` | `sequence_root` | The sole stored root of the immutable message sequence. The bounded descriptor stores its count and checkpoint control, not another root. |
 | `ai_step_messages` | `store_digest`, `sha256` | Scoped anonymous content addressing and integrity of original uncompressed canonical message bytes. |
 | `ai_step_sequences` | `store_digest`, `sha256`, `message_sha256`, `left_sha256`, `right_sha256`, `next_sha256` | Scoped immutable ordered sequence addressing and references to its content, subtrees and next forest. Repeated messages remain distinct occurrences. |

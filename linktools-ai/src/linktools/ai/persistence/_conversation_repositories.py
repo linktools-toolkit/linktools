@@ -42,7 +42,6 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
-    sequence_key,
     stream_digest,
     subject_digest,
 )
@@ -456,15 +455,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
 
-    def _timeline_sequence_key(self, session_id: str) -> bytes:
-        return sequence_key(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            "session_turn",
-            [session_id],
-        )
-
     def _timeline_stream(self, session_id: str) -> bytes:
         return stream_digest(
             self._namespace,
@@ -534,7 +524,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return value
 
     def _list_generation_key(self, owner_principal_id: str | None = None) -> bytes:
-        return sequence_key(
+        return stream_digest(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -783,7 +773,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     prefix_head = node.node_id
             inherited = committed_total
             turn_head = await transaction.get_sequence(
-                self._timeline_sequence_key(source_session_id)
+                self._timeline_stream(source_session_id)
             )
             if source.active_execution_id is not None:
                 if turn_head < 1:
@@ -928,7 +918,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         _require_repository_tenant(tenant_id, self._tenant_id)
         return await self._store.read(
             lambda transaction: transaction.get_sequence(
-                self._timeline_sequence_key(session_id)
+                self._timeline_stream(session_id)
             )
         )
 
@@ -1372,12 +1362,11 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if release and next_value.history_quality != value.history_quality:
                 await self._bump_list_generation(transaction, value.owner_principal_id)
             if not release:
-                sequence = await transaction.next_sequence(
-                    self._timeline_sequence_key(session_id)
-                )
+                stream = self._timeline_stream(session_id)
+                sequence = await transaction.next_sequence(stream)
                 await transaction.insert_fact(
                     StoredFact(
-                        self._timeline_stream(session_id),
+                        stream,
                         sequence,
                         self._key("session", session_id),
                         "session_turn",
@@ -1570,14 +1559,14 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         history_quality="complete" if successful else current.history_quality,
                         revision=current.revision + 1, updated_at=await transaction.now())
         await _replace_checked(transaction, _projected_record(self, record, final), record.storage_revision)
-        sequence_key = self._timeline_sequence_key(current.session_id)
+        stream = self._timeline_stream(current.session_id)
         sequences = await transaction.reserve_sequences({
-            sequence_key: 1, self._list_generation_key(current.owner_principal_id): 1,
+            stream: 1, self._list_generation_key(current.owner_principal_id): 1,
             self._list_generation_key(): 1,
         })
-        sequence = sequences[sequence_key]
+        sequence = sequences[stream]
         await transaction.insert_fact(StoredFact(
-            self._timeline_stream(current.session_id), sequence, record.key_digest, "session_turn",
+            stream, sequence, record.key_digest, "session_turn",
             self._timeline_subject(execution_id), None, {"version": 1, "execution_id": execution_id},
         ))
         await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommit(

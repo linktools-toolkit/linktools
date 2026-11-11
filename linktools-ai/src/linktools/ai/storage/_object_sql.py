@@ -26,9 +26,9 @@ from ._dialects import (
 from ._object import (
     ObjectStat,
     _CHUNK_SIZE,
+    _OBJECT_KEY_MAX_BYTES,
     _STORE_ID_MAX_LENGTH,
     _finish_owned_task,
-    _key_digest,
     _spool_file,
     _track_object_task,
     _validate_key,
@@ -97,7 +97,7 @@ class SqlObjectStore:
                 expected_size=expected_size,
                 expected_digest=expected_digest,
             ),
-            name=f"sql-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
+            name="sql-object-put",
         )
         _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
@@ -135,14 +135,12 @@ class SqlObjectStore:
 
         table = self._metadata.tables["ai_objects"]
         chunks = self._metadata.tables["ai_object_chunks"]
-        key_digest = _key_digest(self.store_id, key)
 
         async def execute(session) -> None:
             result = await self._context.run_statement(session.execute(
                 insert(table).values(
-                    key_digest=key_digest.hex(),
                     store_id=self.store_id,
-                    object_key=key,
+                    object_key=key.encode("utf-8"),
                     content_digest=digest,
                     size=size,
                 )
@@ -178,7 +176,8 @@ class SqlObjectStore:
                 (
                     await self._context.run_statement(session.execute(
                         select(table).where(
-                            table.c.key_digest == _key_digest(self.store_id, key).hex()
+                            table.c.store_id == self.store_id,
+                            table.c.object_key == key.encode("utf-8")
                         )
                     ))
                 )
@@ -189,8 +188,6 @@ class SqlObjectStore:
             await session.close()
         if row is None:
             return None
-        if row["store_id"] != self.store_id or row["object_key"] != key:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return ObjectStat(key, str(row["content_digest"]), int(row["size"]))
 
     async def validate_integrity(self) -> None:
@@ -226,8 +223,6 @@ class SqlObjectStore:
                         await self._context.run_statement(session.execute(
                             select(
                                 objects.c.id,
-                                objects.c.key_digest,
-                                objects.c.store_id,
                                 objects.c.object_key,
                             )
                             .where(
@@ -247,13 +242,11 @@ class SqlObjectStore:
                 return
 
             for header in headers:
-                key = str(header["key_digest"])
-                object_key = str(header["object_key"])
-                if (
-                    str(header["store_id"]) != self.store_id
-                    or _key_digest(self.store_id, object_key).hex() != key
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    object_key = bytes(header["object_key"]).decode("utf-8")
+                    _validate_key(object_key)
+                except (UnicodeDecodeError, TypeError, ValueError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 stream = self._stream_open(object_key)
                 try:
                     async for _chunk in stream:
@@ -282,7 +275,7 @@ class SqlObjectStore:
             await session.close()
         for row in rows:
             yield ObjectStat(
-                str(row["object_key"]),
+                bytes(row["object_key"]).decode("utf-8"),
                 str(row["content_digest"]),
                 int(row["size"]),
             )
@@ -294,7 +287,7 @@ class SqlObjectStore:
         _validate_key(key)
         task = asyncio.create_task(
             self._delete_owned(key, expected_digest=expected_digest),
-            name=f"sql-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
+            name="sql-object-delete",
         )
         _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
@@ -302,14 +295,12 @@ class SqlObjectStore:
     async def _delete_owned(self, key: str, *, expected_digest: str) -> bool:
         from sqlalchemy import delete, select
 
-        key_digest = _key_digest(self.store_id, key).hex()
-
         async def execute(session) -> bool:
             table = self._metadata.tables["ai_objects"]
             current = (
                 await self._context.run_statement(session.execute(
                     select(table.c.id, table.c.content_digest).where(
-                        table.c.key_digest == key_digest,
+                        table.c.object_key == key.encode("utf-8"),
                         table.c.store_id == self.store_id,
                     )
                 ))
@@ -327,7 +318,7 @@ class SqlObjectStore:
             result = await self._context.run_statement(session.execute(
                 delete(table).where(
                     table.c.id == current.id,
-                    table.c.key_digest == key_digest,
+                    table.c.object_key == key.encode("utf-8"),
                     table.c.store_id == self.store_id,
                 )
             ))
@@ -367,10 +358,10 @@ class SqlObjectStore:
         result = None
         try:
             first = or_(chunks.c.chunk_index == 0, chunks.c.chunk_index.is_(None))
-            # Opaque object keys are unbounded; transmit the header only once.
+            # Transmit header metadata once rather than with every content chunk.
             header_columns = tuple(
                 case((first, column)).label(column.name)
-                for column in (table.c.store_id, table.c.object_key, table.c.content_digest, table.c.size)
+                for column in (table.c.content_digest, table.c.size)
             )
 
             async def start_stream() -> None:
@@ -378,7 +369,10 @@ class SqlObjectStore:
                 result = await session.stream(
                     select(*header_columns, chunks.c.chunk_index, chunks.c.content)
                     .select_from(table.outerjoin(chunks, chunks.c.object_id == table.c.id))
-                    .where(table.c.key_digest == _key_digest(self.store_id, key).hex())
+                    .where(
+                        table.c.store_id == self.store_id,
+                        table.c.object_key == key.encode("utf-8"),
+                    )
                     .order_by(chunks.c.chunk_index)
                 )
 
@@ -393,14 +387,12 @@ class SqlObjectStore:
                     row = await self._context.run_statement(rows.__anext__())
                 except StopAsyncIteration:
                     break
+                if row["chunk_index"] is not None and int(row["chunk_index"]) != expected_index:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if header is None:
-                    if row["store_id"] != self.store_id or row["object_key"] != key:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     header = ObjectStat(key, str(row["content_digest"]), int(row["size"]))
                 if row["chunk_index"] is None:
                     continue
-                if int(row["chunk_index"]) != expected_index:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value = bytes(row["content"])
                 expected_index += 1
                 digest.update(value)
@@ -433,7 +425,8 @@ class SqlObjectStore:
 
 
 def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
-    from sqlalchemy import BigInteger, Column, MetaData, Table, Text
+    from sqlalchemy import BigInteger, Column, LargeBinary, MetaData, Table
+    from sqlalchemy.dialects.mysql import VARBINARY
 
     if metadata is None:
         metadata = MetaData()
@@ -445,12 +438,6 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         metadata,
         sql_id_column(),
         Column(
-            "key_digest",
-            digest,
-            nullable=False,
-            comment="Canonical SHA-256 identity of the ObjectStore store identifier and object key.",
-        ),
-        Column(
             "store_id",
             sql_text_key(_STORE_ID_MAX_LENGTH),
             nullable=False,
@@ -458,9 +445,9 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         ),
         Column(
             "object_key",
-            Text,
+            LargeBinary(_OBJECT_KEY_MAX_BYTES).with_variant(VARBINARY(_OBJECT_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Original opaque object key exposed by the ObjectStore API.",
+            comment="Exact UTF-8 bytes of the opaque ObjectStore key.",
         ),
         Column(
             "content_digest",
@@ -478,7 +465,7 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         comment="Immutable ObjectStore headers containing canonical object identity, content digest, and size.",
         **sql_table_options(),
     )
-    sql_unique(objects, "key_digest")
+    sql_unique(objects, "store_id", "object_key")
     sql_audit_indexes(objects)
     chunks = Table(
         "ai_object_chunks",

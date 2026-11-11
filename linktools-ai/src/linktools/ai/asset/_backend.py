@@ -133,7 +133,7 @@ class InMemoryAssetBackend:
             if (
                 previous is not None
                 and previous[0].status is StorageEntryStatus.NORMAL
-                and previous[0].digest == _digest(value)
+                and previous[1] == value
             ):
                 return StoragePutResult(previous[0], previous[0].revision, self._store_revision(), False)
             self._revision += 1
@@ -398,7 +398,7 @@ def _change_mutates(
     if change.operation is StorageOperation.RESET:
         return previous is not None and previous[0].status is not StorageEntryStatus.RESET
     value = bytes(change.value or b"")
-    return previous is None or previous[0].status is not StorageEntryStatus.NORMAL or previous[0].digest != _digest(value)
+    return previous is None or previous[0].status is not StorageEntryStatus.NORMAL or previous[1] != value
 
 
 def _encode_entry(info: AssetInfo, value: bytes) -> "dict[str, object]":

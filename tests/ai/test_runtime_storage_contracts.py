@@ -620,8 +620,12 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         await engine.dispose()
 
 
-async def test_operation_compaction_keeps_one_stream_anchor() -> None:
-    state = Persistence(PersistenceStorage.in_memory())
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_operation_compaction_keeps_one_stream_anchor(tmp_path: Path, backend: str) -> None:
+    state = Persistence(
+        PersistenceStorage.in_memory() if backend == "memory"
+        else PersistenceStorage.sqlite(tmp_path / "operations.db")
+    )
     await state.initialize(namespace="operation-anchor", tenant_id="tenant")
     now = datetime.now(timezone.utc)
 
@@ -651,6 +655,16 @@ async def test_operation_compaction_keeps_one_stream_anchor() -> None:
             ]
         )
         assert tuple(value.sequence for value in values) == (1, 2, 3)
+
+        async def counter_matches_stream(transaction: StateTransaction) -> None:
+            stored = await transaction.scan_operations()
+            assert len({value.stream_digest for value in stored}) == 1
+            stream = stored[0].stream_digest
+            assert await transaction.get_sequence(stream) == 3
+
+        await state.conversation.operations.state_store.read(counter_matches_stream)
+        assert await state.conversation.operations.append(operation(3)) == values[2]
+        await state.conversation.operations.state_store.read(counter_matches_stream)
 
         assert await state.conversation.operations.compact_terminal(
             ResourceKind.SESSION,

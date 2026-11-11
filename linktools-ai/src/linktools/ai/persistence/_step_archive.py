@@ -104,7 +104,6 @@ from .state import (
     record_key_digest,
     require_no_run_history_lock,
     scope_digest,
-    sequence_key,
     sortable_timestamp,
     stream_digest,
 )
@@ -1343,9 +1342,9 @@ class StateStepArchive(AgentRunStore):
             key
             for agent_run_id in unique_agent_run_ids
             for key in (
-                self._sequence(agent_run_id, "event"),
-                self._sequence(agent_run_id, "checkpoint"),
-                self._sequence(agent_run_id, "interaction"),
+                self._stream(agent_run_id, "event"),
+                self._stream(agent_run_id, "checkpoint"),
+                self._stream(agent_run_id, "interaction"),
             )
         )
         run_keys = tuple(self._agent_run_key(agent_run_id) for agent_run_id in unique_agent_run_ids)
@@ -1368,10 +1367,10 @@ class StateStepArchive(AgentRunStore):
             agent_run_record = records.get(self._agent_run_key(agent_run_id))
             head_record = records.get(self._history.head_key(agent_run_id))
             projection_record = records.get(self._history.projection_key(agent_run_id))
-            event_count = sequences.get(self._sequence(agent_run_id, "event"), 0)
-            checkpoint_count = sequences.get(self._sequence(agent_run_id, "checkpoint"), 0)
+            event_count = sequences.get(self._stream(agent_run_id, "event"), 0)
+            checkpoint_count = sequences.get(self._stream(agent_run_id, "checkpoint"), 0)
             interaction_count = sequences.get(
-                self._sequence(agent_run_id, "interaction"), 0
+                self._stream(agent_run_id, "interaction"), 0
             )
             if head_record is None:
                 if (
@@ -1773,7 +1772,7 @@ class StateStepArchive(AgentRunStore):
 
     async def checkpoint_count(self, *, agent_run_id: str) -> int:
         require_no_run_history_lock("StateStepArchive.checkpoint_count")
-        key = self._sequence(agent_run_id, "checkpoint")
+        key = self._stream(agent_run_id, "checkpoint")
         return (await self._store.read(lambda transaction: transaction.get_sequences((key,)))).get(key, 0)
 
     async def verify_checkpoint_range(
@@ -2062,9 +2061,6 @@ class StateStepArchive(AgentRunStore):
     def _stream(self, agent_run_id: str, family: str) -> bytes:
         return stream_digest(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
 
-    def _sequence(self, agent_run_id: str, family: str) -> bytes:
-        return sequence_key(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
-
     async def register_agent_run(
         self,
         record: AgentRunRecord,
@@ -2088,8 +2084,9 @@ class StateStepArchive(AgentRunStore):
         await self._mutate(mutate)
 
     def _stored_agent_run(self, record: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None) -> StoredRecord:
+        key = self._agent_run_key(record.agent_run_id)
         return StoredRecord(
-            self._agent_run_key(record.agent_run_id),
+            key,
             None
             if record.agent_conversation_id is None
             else scope_digest(
@@ -2111,7 +2108,7 @@ class StateStepArchive(AgentRunStore):
                 record.parent_agent_run_id,
             ),
             "agent_run",
-            sortable_timestamp(record.started_at, record.agent_run_id),
+            sortable_timestamp(record.started_at, key),
             None,
             0,
             None,
@@ -2596,24 +2593,24 @@ class StateStepArchive(AgentRunStore):
             grouped[family].append(value)
             kinds[family].append(kind)
         stored_facts: list[StoredFact] = []
-        reservation_requests = {
-            self._sequence(run.agent_run_id, family): len(grouped[family])
-            for family in ("event", "checkpoint")
-            if grouped[family]
+        streams = {
+            family: self._stream(run.agent_run_id, family)
+            for family in ("event", "checkpoint") if grouped[family]
         }
-        high_waters = await transaction.reserve_sequences(reservation_requests)
+        high_waters = await transaction.reserve_sequences({
+            stream: len(grouped[family]) for family, stream in streams.items()
+        })
         for family in ("event", "checkpoint"):
             values = grouped[family]
             if not values:
                 continue
-            sequence_key_value = self._sequence(run.agent_run_id, family)
-            final = high_waters[sequence_key_value]
+            stream = streams[family]
+            final = high_waters[stream]
             sequences = tuple(range(final - len(values) + 1, final + 1))
             if family == "event":
                 await self.index_history_events_in_transaction(
                     transaction, run, tuple(zip(sequences, events)),
                 )
-            stream = self._stream(run.agent_run_id, family)
             fact_kind = {
                 "event": "step_event",
                 "checkpoint": "step_checkpoint",
@@ -2739,7 +2736,7 @@ class StateStepArchive(AgentRunStore):
             await self._history.append_checkpoint(
                 transaction, checkpoint.owner_id, checkpoint.chunks,
                 checkpoint.projection, checkpoint.history_quality,
-                checkpoint_fact=(self._sequence(run.agent_run_id, "checkpoint"), checkpoint_fact),
+                checkpoint_fact=checkpoint_fact,
             )
         else:
             await self._history.append_checkpoint(
@@ -2753,7 +2750,7 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if not batch_new_owner:
             sequence = (await _reserve_sequences(
-                transaction, self._sequence(run.agent_run_id, "checkpoint"), 1,
+                transaction, stream, 1,
             ))[0]
             await _insert_facts(transaction, (replace(checkpoint_fact, sequence=sequence),))
         else:
@@ -2913,7 +2910,7 @@ class StateStepArchive(AgentRunStore):
 
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         require_no_run_history_lock("StateStepArchive.model_interaction_count")
-        key = self._sequence(agent_run_id, "interaction")
+        key = self._stream(agent_run_id, "interaction")
         return (await self._store.read(lambda transaction: transaction.get_sequences((key,)))).get(key, 0)
 
     async def iter_messages(self, *, agent_run_id: str) -> AsyncIterator[object]:
@@ -3360,7 +3357,7 @@ class StateStepArchive(AgentRunStore):
             ))
             await transaction.delete_sequences(
                 tuple(
-                    self._sequence(agent_run_id, family)
+                    self._stream(agent_run_id, family)
                     for family in ("event", "checkpoint", "interaction")
                 )
             )
@@ -3406,7 +3403,7 @@ class StateStepArchive(AgentRunStore):
                 expected_storage_revision=owner_record.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            sequence = await transaction.next_sequence(self._sequence(agent_run_id, family))
+            sequence = await transaction.next_sequence(stream)
             await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, None, kind, data))
             if isinstance(value, StepEvent):
                 run = _decode_step(owner_record.data)
@@ -3750,7 +3747,7 @@ class StateStepArchive(AgentRunStore):
             self._agent_run_key(run_id), self._history.head_key(run_id),
         ))
         sequence_keys = tuple(key for run_id in run_ids for key in (
-            self._sequence(run_id, "event"), self._sequence(run_id, "interaction"),
+            self._stream(run_id, "event"), self._stream(run_id, "interaction"),
         ))
 
         pending_loaders = {}
@@ -3762,8 +3759,8 @@ class StateStepArchive(AgentRunStore):
             for run_id in run_ids:
                 owner = records.get(self._agent_run_key(run_id))
                 head_record = records.get(self._history.head_key(run_id))
-                event_count = sequences.get(self._sequence(run_id, "event"), 0)
-                interaction_count = sequences.get(self._sequence(run_id, "interaction"), 0)
+                event_count = sequences.get(self._stream(run_id, "event"), 0)
+                interaction_count = sequences.get(self._stream(run_id, "interaction"), 0)
                 if owner is None:
                     if head_record is not None or event_count or interaction_count:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

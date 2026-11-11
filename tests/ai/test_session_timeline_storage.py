@@ -151,7 +151,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
             )
             assert guarded is not None
             sequence = await transaction.next_sequence(
-                repository._timeline_sequence_key("session")
+                repository._timeline_stream("session")
             )
             await transaction.insert_fact(
                 StoredFact(

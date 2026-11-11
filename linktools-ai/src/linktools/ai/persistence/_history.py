@@ -62,7 +62,6 @@ from .state import (
     active_state_scope,
     record_key_digest,
     require_no_run_history_lock,
-    sequence_key,
     stream_digest,
 )
 
@@ -801,7 +800,7 @@ class TranscriptRepository:
         projection: ContextProjection,
         quality: HistoryQuality | None = None,
         *,
-        checkpoint_fact: tuple[bytes, StoredFact] | None = None,
+        checkpoint_fact: StoredFact | None = None,
     ) -> None:
         """Write one transcript checkpoint using its known metadata write set."""
         if checkpoint_fact is not None and (type(self) is not TranscriptRepository or not chunks):
@@ -834,7 +833,7 @@ class TranscriptRepository:
         quality: HistoryQuality | None,
         *,
         projection: ContextProjection | None = None,
-        checkpoint_fact: tuple[bytes, StoredFact] | None = None,
+        checkpoint_fact: StoredFact | None = None,
     ) -> None:
         if not chunks:
             return
@@ -899,14 +898,13 @@ class TranscriptRepository:
                     current.storage_revision,
                 ))
             await transaction.replace_records(tuple(replacements))
-        sequence_key = self._transcript_sequence(owner_id)
-        requests = {sequence_key: len(chunks)}
+        requests = {stream: len(chunks)}
         if checkpoint_fact is not None:
-            if checkpoint_fact[0] == sequence_key:
+            if checkpoint_fact.stream_digest == stream:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            requests[checkpoint_fact[0]] = 1
+            requests[checkpoint_fact.stream_digest] = 1
         high_waters = await transaction.reserve_sequences(requests)
-        final = high_waters[sequence_key]
+        final = high_waters[stream]
         sequences = tuple(range(final - len(chunks) + 1, final + 1))
         await transaction.insert_facts(
             tuple(
@@ -926,7 +924,7 @@ class TranscriptRepository:
                 )
                 for sequence, chunk in zip(sequences, chunks, strict=True)
             ) + (() if checkpoint_fact is None else (
-                replace(checkpoint_fact[1], sequence=high_waters[checkpoint_fact[0]]),
+                replace(checkpoint_fact, sequence=high_waters[checkpoint_fact.stream_digest]),
             ))
         )
         await self._insert_message_seek_boundaries(
@@ -2318,17 +2316,6 @@ class TranscriptRepository:
             self.history_stream(owner_id)
             if self._runtime_domain is PersistenceDomain.CONVERSATION
             else self.agent_run_stream(owner_id)
-        )
-
-    def _transcript_sequence(self, owner_id: str) -> bytes:
-        return sequence_key(
-            self._namespace,
-            self._tenant_id,
-            self._runtime_domain.value,
-            "history_transcript"
-            if self._runtime_domain is PersistenceDomain.CONVERSATION
-            else "run_transcript",
-            owner_id,
         )
 
     def _pending_stream(self, owner_id: str, message_index: int) -> bytes:

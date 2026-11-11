@@ -1068,7 +1068,7 @@ def test_terminal_source_join_keeps_explicit_locator_bind_budget(dialect_name: s
     source = NativeEvent(run_id="run", kind="run_started", step_index=0, idempotency_key="0:0:run_started:")
     compiled = references.statement(keys=(b"b" * 32,), expected_start=source).compile(
         dialect=dialect, compile_kwargs={"render_postcompile": True})
-    locators = {"source_run_digest", "source_run_id", "source_event_key"}
+    locators = {"source_run_id", "source_event_key"}
     assert locators <= compiled.params.keys()
     assert compiled.params["source_run_id"] == "run"
     assert compiled.params["source_event_key"] == native.event_key_digest(source)

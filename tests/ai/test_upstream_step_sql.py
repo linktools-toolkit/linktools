@@ -3,7 +3,6 @@
 """Public upstream StepStore behavior over the project SQL adapter."""
 
 import asyncio
-import random
 import re
 import sqlite3
 from collections.abc import AsyncIterator
@@ -23,11 +22,13 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot, InMemoryStepStore, RunRecord, SqliteStepStore,
     StepEvent, StepPersistence, StepStore, ToolEffectRecord, continue_run,
 )
-from sqlalchemy import Text, event, text
+from sqlalchemy import Text, UniqueConstraint, event, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 
+from linktools.ai.core import RESOURCE_ID_MAX_BYTES, validate_resource_id
+from linktools.ai.errors import AIError
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_store import SqlStepStore
 
@@ -68,39 +69,40 @@ async def test_run_lineage_filters_sort_by_instant_and_keep_original_records(sto
 
 
 @pytest.mark.asyncio
-async def test_sql_lineage_filters_preserve_wide_exact_identifiers_under_padded_comparisons(tmp_path: Path) -> None:
+async def test_sql_lineage_filters_preserve_bounded_exact_identifiers_under_padded_comparisons(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lineage.db'}")
     metadata = build_step_sql_metadata()
     runs = metadata.tables["ai_step_runs"]
-    # SQLite RTRIM models MySQL PAD SPACE comparisons without limiting ID size.
-    for name in ("conversation_id", "parent_run_id"):
+    # SQLite RTRIM models MySQL PAD SPACE comparisons for the accepted IDs.
+    for name in ("run_id", "conversation_id", "parent_run_id"):
         runs.c[name].type = Text(collation="RTRIM")
     async with engine.begin() as connection:
         await connection.run_sync(metadata.create_all)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
     other = SqlStepStore(engine, namespace="steps", tenant_id="two")
-    # High-entropy IDs exceed index-page capacity without relying on compression.
-    prefix = "共同前缀" + random.Random(304).randbytes(12 * 1024).hex()
+    prefix = "共同前缀" + "x" * (RESOURCE_ID_MAX_BYTES - len("共同前缀".encode()) - 1)
     records = [
-        RunRecord(run_id="exact", conversation_id=prefix, parent_run_id=prefix),
-        RunRecord(run_id="padded-conversation", conversation_id=prefix + " ", parent_run_id=prefix),
-        RunRecord(run_id="padded-parent", conversation_id=prefix, parent_run_id=prefix + " "),
-        RunRecord(run_id="other-suffix", conversation_id=prefix + "x", parent_run_id=prefix + "x"),
-        RunRecord(run_id="empty", conversation_id="", parent_run_id=""),
+        RunRecord(run_id="exact", conversation_id=prefix + "a", parent_run_id=prefix + "a"),
+        RunRecord(run_id="other-parent", conversation_id=prefix + "a", parent_run_id=prefix + "b"),
+        RunRecord(run_id="other-conversation", conversation_id=prefix + "b", parent_run_id=prefix + "a"),
         RunRecord(run_id="missing"),
     ]
     try:
         for record in records:
             await store.register_run(record)
         await other.register_run(records[0])
-        assert await store.list_runs(conversation_id=prefix, parent_run_id=prefix) == records[:1]
-        assert {record.run_id for record in await store.list_runs(conversation_id=prefix)} == {"exact", "padded-parent"}
-        assert {record.run_id for record in await store.list_runs(parent_run_id=prefix)} == {"exact", "padded-conversation"}
-        assert await store.list_runs(conversation_id=prefix + " ") == records[1:2]
-        assert await store.list_runs(parent_run_id=prefix + " ") == records[2:3]
-        assert await store.list_runs(conversation_id=prefix + "x", parent_run_id=prefix + "x") == records[3:4]
-        assert await store.list_runs(conversation_id="", parent_run_id="") == records[4:5]
+        assert await store.list_runs(conversation_id=prefix + "a", parent_run_id=prefix + "a") == records[:1]
+        assert {record.run_id for record in await store.list_runs(conversation_id=prefix + "a")} == {"exact", "other-parent"}
+        assert {record.run_id for record in await store.list_runs(parent_run_id=prefix + "a")} == {"exact", "other-conversation"}
+        assert await other.list_runs() == records[:1]
         assert len(await store.list_runs()) == len(records)
+        for field in ("run_id", "conversation_id", "parent_run_id"):
+            with pytest.raises(AIError):
+                await store.register_run(replace(records[0], **{field: "padded "}))
+        with pytest.raises(AIError):
+            await store.list_runs(conversation_id="padded ")
+        with pytest.raises(AIError):
+            await store.list_runs(parent_run_id="padded ")
     finally:
         await store.close()
         await other.close()
@@ -388,8 +390,10 @@ async def test_sql_cold_store_continues_official_capability_after_settled_tool(t
 
     try:
         with pytest.raises(RuntimeError, match="model failed after tool"):
-            await agent.run("question", conversation_id="conversation")
+            await agent.run("question")
         original = (await store.list_runs())[0]
+        for generated in (original.run_id, original.conversation_id):
+            assert validate_resource_id(generated) == generated
         await store.close()
         cold = SqlStepStore(engine, namespace="steps", tenant_id="one", tool_effect_store=effects)
         history = await continue_run(cold, run_id=original.run_id)
@@ -434,18 +438,38 @@ async def test_sql_effect_binding_borrows_partition_without_owning_its_lifetime(
 
 
 @pytest.mark.parametrize("dialect", (mysql.dialect(), postgresql.dialect(), sqlite.dialect()))
-def test_run_lineage_indexes_keep_unbounded_ids_out_of_btree_entries(dialect) -> None:
-    runs = build_step_sql_metadata().tables["ai_step_runs"]
+def test_native_indexes_use_bounded_original_identifiers(dialect) -> None:
+    metadata = build_step_sql_metadata()
     kind = "mysql" if dialect.name == "mysql" else "portable"
-    indexes = tuple(index for index in runs.indexes if index.info.get("ddl_dialect") == kind)
-    for name in ("conversation_digest", "parent_digest"):
-        index = next(index for index in indexes
-                     if tuple(column.name for column in index.columns) == ("store_digest", name))
-        assert not index.unique
-        assert all(column.type.length == 64 for column in index.columns)
-        assert name in str(CreateIndex(index).compile(dialect=dialect))
-    assert not any(column.name in {"conversation_id", "parent_run_id"}
-                   for index in indexes for column in index.columns)
+    expected = {
+        "runs": {("store_digest", "run_id"): True,
+                 ("store_digest", "conversation_id"): False, ("store_digest", "parent_run_id"): False},
+        "events": {("store_digest", "run_id"): False},
+        "snapshots": {("store_digest", "run_id", "pruned"): False},
+    }
+    for name, lookups in expected.items():
+        table = metadata.tables["ai_step_" + name]
+        for column in ("run_id", "conversation_id", "parent_run_id"):
+            assert table.c[column].type.length == RESOURCE_ID_MAX_BYTES
+            assert "VARCHAR(128)" in str(table.c[column].type.compile(dialect=dialect))
+        indexes = {tuple(column.name for column in index.columns): index for index in table.indexes
+                   if index.info.get("ddl_dialect") == kind}
+        for columns, unique in lookups.items():
+            if unique and dialect.name != "mysql":
+                assert columns in {tuple(column.name for column in constraint.columns)
+                                   for constraint in table.constraints if isinstance(constraint, UniqueConstraint)}
+                ddl = str(CreateTable(table).compile(dialect=dialect))
+            else:
+                index = indexes[columns]
+                assert index.unique is unique
+                ddl = str(CreateIndex(index).compile(dialect=dialect))
+            assert "(" + ", ".join(columns) + ")" in ddl
+            if dialect.name == "mysql":
+                # MySQL budgets declared characters, not the application's byte limit.
+                key_bytes = sum(column.type.length * 4 if getattr(column.type, "length", None) else 1
+                                for column in (table.c[name] for name in columns))
+                assert key_bytes == (769 if name == "snapshots" else 768)
+                assert key_bytes <= 3072
 
 
 def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy() -> None:

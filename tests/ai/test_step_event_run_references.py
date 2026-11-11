@@ -407,7 +407,7 @@ class _InlineStepStore(SqlStepStore):
         for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
             rows = [self._run_values(item.run_id) | self._event_values(item) for item in group]
             for row in rows:
-                row["key_digest"] = module._replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
+                row["key_digest"] = module._replay_digest(self._store_digest, row["run_id"], row["idempotency_key"])
             batch_size = module._BATCH_SIZE if keyed else 1
             for offset in range(0, len(rows), batch_size):
                 if not keyed:

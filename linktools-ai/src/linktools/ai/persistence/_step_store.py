@@ -27,6 +27,7 @@ from pydantic_ai_harness.step_persistence import (
 
 from linktools.core import environ
 
+from ..core import validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
 from ._archive import ContentArchive, ContentRecord, PreparedArchive
@@ -45,7 +46,7 @@ from ._step_backup import NativeStepBackup
 from ._step_maintenance import StepContentCleanupResult, purge_step_content
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction, SqlStateRowReader
-from ..steps import NativeLifecycleEvent, NativeStepSource
+from ..steps import NativeLifecycleEvent, NativeStepSource, validate_native_step_ids
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
@@ -68,7 +69,7 @@ _RUN_CACHE_SIZE = 128
 _RUN_CACHE_BYTES = 1024 * 1024
 _EVENT_RUN_FIELDS = ("conversation_id", "parent_run_id", "agent_name", "metadata")
 _EVENT_SOURCE_COLUMNS = tuple(field.name for field in fields(StepEvent)) + (
-    "outcome", "store_digest", "run_digest", "key_digest", "run_fields", "body_sha256", "fields_sha256",
+    "outcome", "store_digest", "key_digest", "run_fields", "body_sha256", "fields_sha256",
 )
 
 
@@ -283,11 +284,9 @@ class SqlStepStore:
         started: StepEvent | None = None,
     ) -> _RunFields:
         values = self._run_values(record.run_id) | self._record_values(record)
-        values["conversation_digest"] = _optional_digest(record.conversation_id)
-        values["parent_digest"] = _optional_digest(record.parent_run_id)
         result = await self._context.dialect.insert_ignore_conflict(
             session, table=self._table("runs"), values=values,
-            index_elements=("store_digest", "run_digest"),
+            index_elements=("store_digest", "run_id"),
         )
         if not result.inserted:
             if replay and record.registration_id is not None:
@@ -322,18 +321,17 @@ class SqlStepStore:
         query = select(table.c.store_digest, table.c.run_id, table.c.registration_id, table.c.started_at,
                        *(table.c[name] for name in _EVENT_RUN_FIELDS))
         if started is not None:
-            query = query.add_columns(table.c.run_digest,
-                *(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS))
+            query = query.add_columns(*(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS))
             joined = table.outerjoin(events, and_(
                 events.c.key_digest == self.event_key_digest(started),
-                events.c.store_digest == table.c.store_digest, events.c.run_digest == table.c.run_digest,
+                events.c.store_digest == table.c.store_digest,
                 events.c.run_id == table.c.run_id,
             ))
             terminal = events.alias("terminal")
-            key = _replay_digest(self._store_digest, _digest(record.run_id), NativeLifecycleEvent.source_key())
+            key = _replay_digest(self._store_digest, record.run_id, NativeLifecycleEvent.source_key())
             joined = joined.outerjoin(terminal, and_(terminal.c.key_digest == key,
                 terminal.c.store_digest == table.c.store_digest,
-                terminal.c.run_digest == table.c.run_digest, terminal.c.run_id == table.c.run_id))
+                terminal.c.run_id == table.c.run_id))
             query = query.add_columns(*(terminal.c[name].label("terminal_" + name) for name in _EVENT_SOURCE_COLUMNS))
             query = query.select_from(joined)
         return query.where(*self._run_predicates(table, record.run_id))
@@ -362,9 +360,11 @@ class SqlStepStore:
         table = self._table("runs")
         query = select(table).where(table.c.store_digest == self._store_digest)
         if parent_run_id is not None:
-            query = query.where(table.c.parent_digest == _digest(parent_run_id), table.c.parent_run_id == parent_run_id)
+            validate_resource_id(parent_run_id)
+            query = query.where(table.c.parent_run_id == parent_run_id)
         if conversation_id is not None:
-            query = query.where(table.c.conversation_digest == _digest(conversation_id), table.c.conversation_id == conversation_id)
+            validate_resource_id(conversation_id)
+            query = query.where(table.c.conversation_id == conversation_id)
         async with self._context.sessions() as session:
             rows = (await self._context.run_statement(session.execute(query.order_by(table.c.id)))).mappings().all()
         records = [_RUN_ADAPTER.validate_python(self._record_data(row)) for row in rows]
@@ -407,7 +407,7 @@ class SqlStepStore:
                         if candidate is not None and candidate == value:
                             row[name] = None
                             row["run_fields"] |= 1 << bit
-                row["key_digest"] = _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
+                row["key_digest"] = _replay_digest(self._store_digest, row["run_id"], row["idempotency_key"])
                 rows.append(row)
             # An unkeyed append must fail rather than silently suppress a
             # colliding physical occurrence identity.
@@ -464,7 +464,7 @@ class SqlStepStore:
             columns[name] = case((referenced, runs.c[name]), else_=columns[name]).label(name)
             invalid.append(and_(referenced, or_(table.c[name].is_not(None), runs.c[name].is_(None))))
         source_columns = () if not expected else (
-            table.c.store_digest, table.c.run_digest, table.c.key_digest,
+            table.c.store_digest, table.c.key_digest,
         )
         registration_columns = ()
         if expected:
@@ -477,7 +477,6 @@ class SqlStepStore:
         ).select_from(table.outerjoin(runs, and_(
             *(() if expected else (table.c.run_fields != 0,)),
             runs.c.store_digest == table.c.store_digest,
-            runs.c.run_digest == table.c.run_digest,
             runs.c.run_id == table.c.run_id,
         ))).where(*self._run_predicates(table, run_id)).order_by(table.c.id)
         async with self._context.sessions() as session:
@@ -509,6 +508,7 @@ class SqlStepStore:
 
     def confirmed_run(self, run_id: str) -> RunRecord | None:
         """Return detached committed run proof when retained, without reading SQL."""
+        validate_resource_id(run_id)
         source = self._confirmed_runs.get(run_id)
         if source is None or self._context.closed:
             return None
@@ -583,7 +583,8 @@ class SqlStepStore:
         """Exact native locator for a keyed event in this store's partition."""
         if event.idempotency_key is None:
             raise ValueError("an event locator requires an idempotency key")
-        return _replay_digest(self._store_digest, _digest(event.run_id), event.idempotency_key)
+        validate_resource_id(event.run_id)
+        return _replay_digest(self._store_digest, event.run_id, event.idempotency_key)
 
     def started_from_receipt(self, receipt: StepWriteReceipt) -> StepEvent | None:
         """Detach the immutable start source; outer-transaction receipts are provisional."""
@@ -591,11 +592,13 @@ class SqlStepStore:
         source = receipt.run_fields
         if source is None or source.started_body is None:
             return None
-        return _EVENT_ADAPTER.validate_python(json.loads(source.started_body))
+        return self.decode_event(json.loads(source.started_body))
 
     @classmethod
     def decode_event(cls, data: Mapping[str, object]) -> StepEvent:
         """Restore explicit lifecycle fields without changing ordinary upstream inputs."""
+        validate_native_step_ids(run_id=data["run_id"], conversation_id=data.get("conversation_id"),
+                                 parent_run_id=data.get("parent_run_id"))
         return (_LIFECYCLE_ADAPTER if data.get("outcome") is not None else _EVENT_ADAPTER).validate_python(data)
 
     def events_from_receipt(self, receipt: StepWriteReceipt) -> tuple[StepEvent, ...]:
@@ -613,6 +616,7 @@ class SqlStepStore:
 
     def confirmed_started(self, run_id: str) -> StepEvent | None:
         """Return a retained committed start source without a SQL read."""
+        validate_resource_id(run_id)
         source = self._confirmed_runs.get(run_id)
         if source is None or self._context.closed:
             return None
@@ -639,14 +643,11 @@ class SqlStepStore:
             raise ValueError("native lifecycle source outcome is missing")
         if data.get("store_digest") != expected_store_digest:
             raise ValueError("native start source is missing or belongs to another store")
-        run_id = data.get("run_id")
-        if not isinstance(run_id, str) or data.get("run_digest") != _digest(run_id):
-            raise ValueError("native start source run identity is corrupt")
         mask = data.get("run_fields")
         if type(mask) is not int or not 0 <= mask < (1 << len(_EVENT_RUN_FIELDS)):
             raise ValueError("native start source run fields are corrupt")
         if mask:
-            if run is None or any(run.get(name) != data.get(name) for name in ("store_digest", "run_digest", "run_id")):
+            if run is None or any(run.get(name) != data.get(name) for name in ("store_digest", "run_id")):
                 raise ValueError("native start source run reference is missing or corrupt")
         for bit, name in enumerate(_EVENT_RUN_FIELDS):
             if mask & (1 << bit):
@@ -664,7 +665,7 @@ class SqlStepStore:
         body = cls._started_body(result)
         if raw_body != body:
             raise ValueError("native start source body has noncanonical field types")
-        locator = _replay_digest(expected_store_digest, _digest(result.run_id), result.idempotency_key)
+        locator = _replay_digest(expected_store_digest, result.run_id, result.idempotency_key)
         if (data.get("key_digest") != locator or data.get("body_sha256") != _digest(body)
                 or data.get("fields_sha256") != _digest(cls._started_fields_body(result))):
             raise ValueError("native start source body or locator is corrupt")
@@ -677,7 +678,7 @@ class SqlStepStore:
         """Verify a metadata-free Trace projection, never a complete source proof.
 
         Supply SQL-resolved event fields except metadata, plus native scope,
-        run/key digests and fields_sha256. Metadata is intentionally not read or
+        replay key digest and fields_sha256. Metadata is intentionally not read or
         authenticated here; full source readback uses decode_started_row instead.
         """
         if "outcome" not in event:
@@ -693,9 +694,8 @@ class SqlStepStore:
         raw_body = json.dumps({name: event[name] for name in names}, ensure_ascii=False,
                               sort_keys=True, separators=(",", ":"))
         body = cls._started_fields_body(result)
-        locator = _replay_digest(expected_store_digest, _digest(result.run_id), result.idempotency_key)
+        locator = _replay_digest(expected_store_digest, result.run_id, result.idempotency_key)
         if (event.get("store_digest") != expected_store_digest
-                or event.get("run_digest") != _digest(result.run_id)
                 or event.get("key_digest") != locator
                 or event.get("fields_sha256") != _digest(body) or raw_body != body):
             raise ValueError("native start projected fields or locator are corrupt")
@@ -736,23 +736,21 @@ class SqlStepStore:
                 if set(row) != columns or row["store_digest"] != backup.store_digest:
                     raise ValueError("native backup row fields or scope are invalid")
                 run_id = row["run_id"]
-                if not isinstance(run_id, str) or row["run_digest"] != _digest(run_id):
-                    raise ValueError("native backup run identity is corrupt")
-                key = row["run_digest"] if name == "runs" else row["key_digest"]
-                NativeMessageRoot("validation", key)
+                validate_native_step_ids(run_id=run_id, conversation_id=row["conversation_id"],
+                                         parent_run_id=row["parent_run_id"])
+                key = row["run_id"] if name == "runs" else row["key_digest"]
+                if name != "runs":
+                    NativeMessageRoot("validation", key)
                 if key in seen:
                     raise ValueError("native backup contains duplicate owner identities")
                 seen.add(key)
                 if name == "runs":
-                    record = _RUN_ADAPTER.validate_python(cls._record_data(row))
-                    if (row["conversation_digest"] != _optional_digest(record.conversation_id)
-                            or row["parent_digest"] != _optional_digest(record.parent_run_id)):
-                        raise ValueError("native backup lineage identity is corrupt")
+                    _RUN_ADAPTER.validate_python(cls._record_data(row))
                     runs[run_id] = row
                     continue
                 replay = row["idempotency_key"]
                 if replay is not None and (not isinstance(replay, str) or key !=
-                        _replay_digest(backup.store_digest, row["run_digest"], replay)):
+                        _replay_digest(backup.store_digest, row["run_id"], replay)):
                     raise ValueError("native backup replay identity is corrupt")
                 if name == "snapshots":
                     if type(row["pruned"]) is not bool:
@@ -1214,6 +1212,9 @@ class SqlStepStore:
             if (run is None or len(starts) != 1 or starts[0].idempotency_key is None
                     or starts[0].run_id != run.run_id):
                 raise ValueError("managed start requires one keyed run_started and its registration")
+        for record in (() if run is None else (run,)) + tuple(events) + (() if snapshot is None else (snapshot,)):
+            validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                     parent_run_id=record.parent_run_id)
         await self.initialize()
         run, events = deepcopy((run, tuple(events)))
         if snapshot is not None:
@@ -1403,7 +1404,7 @@ class SqlStepStore:
         self, session: "AsyncSession", values: "dict[str, SqlValue]", prepared: PreparedNativeMessages,
     ) -> StepWriteReceipt:
         values = values | self._run_values(values["run_id"])
-        values["key_digest"] = _replay_digest(self._store_digest, values["run_digest"], values["idempotency_key"])
+        values["key_digest"] = _replay_digest(self._store_digest, values["run_id"], values["idempotency_key"])
         if values["idempotency_key"] is None:
             result = await session.execute(self._table("snapshots").insert().values(values))
             snapshot_id = result.inserted_primary_key[0]
@@ -1457,12 +1458,15 @@ class SqlStepStore:
         return bound
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
+        validate_resource_id(record.run_id)
         await self._require_tool_effect_store().record_tool_effect(record)
 
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
+        validate_resource_id(run_id)
         return await self._require_tool_effect_store().get_tool_effect(run_id=run_id, tool_call_id=tool_call_id)
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
+        validate_resource_id(run_id)
         return await self._require_tool_effect_store().list_unresolved_tool_effects(run_id=run_id)
 
     def _require_tool_effect_store(self) -> StepStore:
@@ -1589,11 +1593,10 @@ class SqlStepStore:
                     _logger.warning("Skipping corrupt snapshot for run %s", run_id)
                     continue
                 try:
-                    # SQL already matches the partition and run digest. Keep the
-                    # raw ID comparison because SQL text equality may ignore padding.
+                    # Verify the returned owner and replay key before restoring content.
                     if (row["run_id"] != run_id
                             or row["idempotency_key"] is not None and row["key_digest"] !=
-                               _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])):
+                               _replay_digest(self._store_digest, row["run_id"], row["idempotency_key"])):
                         raise ValueError("snapshot owner identity is invalid")
                     data = self._record_data(row)
                     snapshot, raw = self._decode_snapshot(data, readback.payloads)
@@ -1636,7 +1639,7 @@ class SqlStepStore:
             raise ValueError("snapshot terminal message is invalid")
         header = dict(data, messages=[])
         header.pop("sequence_root")
-        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(header), messages=list(messages))
+        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(cls._record_data(header)), messages=list(messages))
         NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"])
 
     @classmethod
@@ -1665,20 +1668,24 @@ class SqlStepStore:
         # Validate native control fields without sending canonical host/model
         # values back through the SDK's narrower message union.
         data["messages"] = []
-        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(data), messages=list(messages))
+        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(cls._record_data(data)), messages=list(messages))
         return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"]), raw
 
     def _table(self, name: str) -> "Table":
         return self._metadata.tables[f"ai_step_{name}"]
 
     def _run_values(self, run_id: str) -> "dict[str, SqlValue]":
-        return {"store_digest": self._store_digest, "run_digest": _digest(run_id), "run_id": run_id}
+        validate_resource_id(run_id)
+        return {"store_digest": self._store_digest, "run_id": run_id}
 
     def _run_predicates(self, table: "Table", run_id: str) -> "tuple[ColumnElement[bool], ...]":
-        return (table.c.store_digest == self._store_digest, table.c.run_digest == _digest(run_id), table.c.run_id == run_id)
+        validate_resource_id(run_id)
+        return (table.c.store_digest == self._store_digest, table.c.run_id == run_id)
 
     @classmethod
     def _event_values(cls, event: StepEvent) -> dict[str, object]:
+        validate_native_step_ids(run_id=event.run_id, conversation_id=event.conversation_id,
+                                 parent_run_id=event.parent_run_id)
         values = {field.name: getattr(event, field.name) for field in fields(event)}
         values["timestamp"] = event.timestamp.isoformat()
         values["metadata"] = dict(event.metadata)
@@ -1686,6 +1693,8 @@ class SqlStepStore:
 
     @classmethod
     def _record_values(cls, record: RunRecord | StepEvent | ContinuableSnapshot) -> "dict[str, SqlValue]":
+        validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                 parent_run_id=record.parent_run_id)
         values = {field.name: getattr(record, field.name) for field in fields(record) if field.name != "messages"}
         for name in ("timestamp", "started_at"):
             if name in values:
@@ -1696,6 +1705,8 @@ class SqlStepStore:
 
     @classmethod
     def _record_data(cls, row: "Mapping[str, object] | RowMapping") -> dict[str, object]:
+        validate_native_step_ids(run_id=row["run_id"], conversation_id=row.get("conversation_id"),
+                                 parent_run_id=row.get("parent_run_id"))
         data = dict(row)
         if "metadata" in data:
             data["metadata"] = json.loads(data["metadata"])
@@ -1718,12 +1729,8 @@ def _snapshot_descriptor_json(value: Mapping[str, object]) -> str:
     return encoded
 
 
-def _optional_digest(value: str | None) -> str | None:
-    return None if value is None else _digest(value)
-
-
-def _replay_digest(store_digest: str, run_digest: str, value: str | None) -> str:
-    identity = [store_digest, run_digest, "occurrence", uuid4().hex] if value is None else [store_digest, run_digest, "key", value]
+def _replay_digest(store_digest: str, run_id: str, value: str | None) -> str:
+    identity = [store_digest, run_id, "occurrence", uuid4().hex] if value is None else [store_digest, run_id, "key", value]
     return _digest(json.dumps(identity))
 
 

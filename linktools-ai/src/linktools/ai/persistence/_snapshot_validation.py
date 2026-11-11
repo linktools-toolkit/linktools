@@ -77,7 +77,6 @@ from .state import (
     parent_digest,
     record_key_digest,
     scope_digest,
-    sequence_key,
     sortable_timestamp,
     stream_digest,
     subject_digest,
@@ -834,7 +833,7 @@ def _expected_record(
                 "parent",
                 value.parent_agent_run_id,
             )
-        sort_key = sortable_timestamp(value.started_at, value.agent_run_id)
+        sort_key = sortable_timestamp(value.started_at, record.key_digest)
     elif isinstance(value, MemoryRecord):
         path = value.metadata.get("path")
         if not isinstance(path, str) or not path or not path.isascii():
@@ -1196,7 +1195,7 @@ def _canonical_sequences(
     for agent_run_id, admitted in interactions.items():
         if set(admitted) != set(range(1, len(admitted) + 1)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        key = sequence_key(
+        key = stream_digest(
             namespace, tenant_id, domain.value, "interaction", agent_run_id
         )
         sequences[key] = len(admitted)
@@ -1207,7 +1206,7 @@ def _canonical_sequences(
         if isinstance(owner, ExecutionRecord) or fact.kind == "transcript_pending_part":
             continue
         relation, value = _fact_storage_identity(domain, fact, owner)
-        key = sequence_key(
+        key = stream_digest(
             namespace,
             tenant_id,
             domain.value,
@@ -1220,7 +1219,7 @@ def _canonical_sequences(
         value = _decode_enveloped_domain(operation.data, OperationLedgerInput)
         if value.tenant_id != tenant_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        key = sequence_key(
+        key = stream_digest(
             namespace,
             tenant_id,
             domain.value,

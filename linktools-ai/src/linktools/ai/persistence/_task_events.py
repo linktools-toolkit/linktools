@@ -12,7 +12,6 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
-    sequence_key,
     stream_digest,
 )
 
@@ -52,15 +51,6 @@ def _task_event_stream(
     graph_id: str,
 ) -> bytes:
     return stream_digest(namespace, tenant_id, domain, "task_event", graph_id)
-
-
-def _task_event_seq(
-    namespace: str,
-    tenant_id: str,
-    domain: str,
-    graph_id: str,
-) -> bytes:
-    return sequence_key(namespace, tenant_id, domain, "task_event", graph_id)
 
 
 def _task_node_changed(left: TaskNodeView, right: TaskNodeView) -> bool:
@@ -230,13 +220,13 @@ async def _append_task_events(
         return
     if not owner_guarded:
         await _guard_task_event_owner(transaction, graph_key)
+    stream = _task_event_stream(namespace, tenant_id, domain, graph_id)
     final_sequence = await transaction.reserve_sequence(
-        _task_event_seq(namespace, tenant_id, domain, graph_id),
+        stream,
         len(drafts),
     )
     first_sequence = final_sequence - len(drafts) + 1
     occurred_at = await transaction.now()
-    stream = _task_event_stream(namespace, tenant_id, domain, graph_id)
     events = tuple(
         TaskEvent(
             1,

@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.storage import SqlObjectStore
-from linktools.ai.storage._object import _key_digest
 from linktools.ai.storage._object_sql import build_object_sql_metadata
 
 
@@ -41,7 +40,7 @@ async def _assert_reads(engine: AsyncEngine) -> None:
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
         for size in (0, 16384, 3 * 1024 * 1024):
-            key = f"{size}:" + "k" * 16384
+            key = f"{size}:" + "k" * (1024 - len(f"{size}:"))
             payload = b"x" * size
             await store.put(key, _chunks(payload), expected_size=size,
                             expected_digest=hashlib.sha256(payload).hexdigest())
@@ -53,6 +52,13 @@ async def _assert_reads(engine: AsyncEngine) -> None:
             assert info is not None and info.size == size
             assert len(statements) <= 1
             assert all("ai_object_chunks" not in sql for sql in statements)
+
+        for opaque_key, value in (("name", b"one"), ("name ", b"two"), ("../路径/", b"three"),
+                                  ("🪷" * 256, b"four")):
+            digest = hashlib.sha256(value).hexdigest()
+            await store.put(opaque_key, _chunks(value), expected_size=len(value), expected_digest=digest)
+            assert b"".join([part async for part in store.open(opaque_key)]) == value
+        assert b"".join([part async for part in store.open("name")]) == b"one"
 
         with pytest.raises(AIError) as missing:
             _ = [part async for part in store.open("missing")]
@@ -93,15 +99,13 @@ async def _assert_corruption(engine: AsyncEngine) -> None:
     for fault, indices in (
         ("missing_first", (1, 2)), ("nonzero_first", (7, 8, 9)),
         ("gap", (0, 2)), ("truncated", (0, 1)), ("no_chunks", ()),
-        ("identity", (0, 1, 2)), ("store", (0, 1, 2)), ("size", (0, 1, 2)),
+        ("size", (0, 1, 2)),
         ("digest", (0, 1, 2)), ("empty_digest", ()),
     ):
         key = f"corrupt:{fault}"
-        key_digest = _key_digest(store.store_id, key).hex()
         async with engine.begin() as connection:
             result = await connection.execute(insert(objects).values(
-                key_digest=key_digest, store_id="wrong" if fault == "store" else store.store_id,
-                object_key="wrong" if fault == "identity" else key,
+                store_id=store.store_id, object_key=key.encode("utf-8"),
                 content_digest=hashlib.sha256(b"wrong" if fault == "digest" else b"abc").hexdigest(),
                 size=4 if fault == "size" else 0 if fault == "empty_digest" else 3,
             ))
@@ -120,7 +124,7 @@ async def _assert_corruption(engine: AsyncEngine) -> None:
     with pytest.raises(IntegrityError):
         async with engine.begin() as connection:
             object_id = await connection.scalar(select(objects.c.id).where(
-                objects.c.key_digest == _key_digest(store.store_id, key).hex(),
+                objects.c.store_id == store.store_id, objects.c.object_key == key.encode("utf-8"),
             ))
             await connection.execute(insert(chunks).values(
                 object_id=object_id, chunk_index=0, content=b"duplicate",
@@ -212,7 +216,6 @@ async def test_object_delete_fences_the_header_identity_read(tmp_path: Path) -> 
     objects = metadata.tables["ai_objects"]
     chunks = metadata.tables["ai_object_chunks"]
     key = "replaceable"
-    identity = _key_digest(store.store_id, key).hex()
     old_digest = hashlib.sha256(b"old").hexdigest()
     new_digest = hashlib.sha256(b"new").hexdigest()
     await store.put(key, _chunks(b"old"), expected_size=3, expected_digest=old_digest)
@@ -227,9 +230,9 @@ async def test_object_delete_fences_the_header_identity_read(tmp_path: Path) -> 
             return
         replaced = True
         # Model a same-key replacement after the deletion's identity read.
-        connection.execute(delete(objects).where(objects.c.key_digest == identity))
+        connection.execute(delete(objects).where(objects.c.store_id == store.store_id, objects.c.object_key == key.encode("utf-8")))
         connection.execute(insert(objects).values(
-            id=999, key_digest=identity, store_id=store.store_id, object_key=key,
+            id=999, store_id=store.store_id, object_key=key.encode("utf-8"),
             content_digest=new_digest, size=3,
         ))
         connection.execute(insert(chunks).values(object_id=999, chunk_index=0, content=b"new"))

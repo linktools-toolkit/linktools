@@ -9,6 +9,9 @@ from ..errors import AIError, ErrorCode
 from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
+RESOURCE_ID_MAX_BYTES = 128
+
+
 def validate_tenant_id(value: str) -> str:
     return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
 
@@ -52,7 +55,8 @@ def validate_principal_id(value: str) -> str:
 
 
 def validate_resource_id(value: str) -> str:
-    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+    """Validate an exact resource identity of at most 128 UTF-8 bytes."""
+    return _text(value, RESOURCE_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_idempotency_key(value: str) -> str:
@@ -152,6 +156,7 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 
 __all__ = [
+    "RESOURCE_ID_MAX_BYTES",
     "validate_agent_id",
     "validate_logical_id",
     "validate_asset_kind",

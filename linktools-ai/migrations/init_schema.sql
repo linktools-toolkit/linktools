@@ -94,28 +94,29 @@ CREATE TABLE ai_asset_heads (
 
 CREATE TABLE ai_asset_entries (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the asset key including namespace identity.',
     namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original AssetStore namespace.',
+    kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Asset kind namespace.',
+    asset_id VARBINARY(512) NOT NULL COMMENT 'Exact UTF-8 bytes of the opaque Asset identifier.',
     entry_revision BIGINT NOT NULL COMMENT 'Latest committed per-asset revision.',
     store_revision BIGINT NOT NULL COMMENT 'Namespace-wide revision that produced this current projection.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical current AssetInfo payload including status, metadata, content reference, and semantic timestamps.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_namespace_store_revision (namespace, store_revision),
+    PRIMARY KEY (id), UNIQUE KEY uk_namespace_kind_asset_id (namespace, kind, asset_id), KEY ix_namespace_store_revision (namespace, store_revision),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current AssetStore projection for the latest committed revision of each asset key.';
 
 CREATE TABLE ai_asset_changes (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the asset key including namespace identity.',
+    entry_id BIGINT NOT NULL COMMENT 'Surrogate identifier of the Asset entry owning this immutable revision.',
     entry_revision BIGINT NOT NULL COMMENT 'Immutable per-asset revision number represented by this history row.',
     namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original AssetStore namespace.',
     store_revision BIGINT NOT NULL COMMENT 'Namespace-wide revision in which this asset change committed.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical immutable AssetInfo history payload.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_key_digest_entry_revision (key_digest, entry_revision),
-    UNIQUE KEY uk_namespace_store_revision_key_digest (namespace, store_revision, key_digest),
+    PRIMARY KEY (id), UNIQUE KEY uk_entry_id_entry_revision (entry_id, entry_revision),
+    UNIQUE KEY uk_namespace_store_revision_entry_id (namespace, store_revision, entry_id),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable AssetStore history containing every committed per-asset revision.';
 
@@ -132,14 +133,13 @@ CREATE TABLE ai_asset_batch_receipts (
 
 CREATE TABLE ai_objects (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the ObjectStore store identifier and object key.',
     store_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Logical ObjectStore identifier that namespaces object keys.',
-    object_key TEXT NOT NULL COMMENT 'Original opaque object key exposed by the ObjectStore API.',
+    object_key VARBINARY(1024) NOT NULL COMMENT 'Exact UTF-8 bytes of the opaque ObjectStore key.',
     content_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 digest of the immutable object bytes.',
     size BIGINT NOT NULL COMMENT 'Exact immutable object size in bytes.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+    PRIMARY KEY (id), UNIQUE KEY uk_store_id_object_key (store_id, object_key), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ObjectStore headers containing canonical object identity, content digest, and size.';
 
 CREATE TABLE ai_object_chunks (
@@ -190,14 +190,13 @@ CREATE TABLE ai_metric_observations (
 CREATE TABLE ai_step_events (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
-	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
-	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream boundary event kind.',
 	outcome VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Owned lifecycle outcome, absent for ordinary upstream events.',
 	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 event time.',
-	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
-	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
+	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
+	parent_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	tool_call_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream tool call identifier.',
 	tool_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream tool name.',
@@ -211,7 +210,7 @@ CREATE TABLE ai_step_events (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_run_digest (store_digest, run_digest),
+	KEY ix_store_digest_run_id (store_digest, run_id),
 	UNIQUE KEY uk_key_digest (key_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Append-only upstream agent execution boundary events.' COLLATE utf8mb4_bin;
@@ -235,12 +234,9 @@ CREATE TABLE ai_step_messages (
 CREATE TABLE ai_step_runs (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
-	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
-	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
-	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
-	conversation_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical conversation lookup digest.',
-	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
-	parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Physical parent run lookup digest.',
+	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
+	parent_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	metadata LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream string metadata encoded as JSON.',
 	started_at VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 run start time.',
@@ -248,9 +244,9 @@ CREATE TABLE ai_step_runs (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_conversation_digest (store_digest, conversation_digest),
-	KEY ix_store_digest_parent_digest (store_digest, parent_digest),
-	UNIQUE KEY uk_store_digest_run_digest (store_digest, run_digest),
+	KEY ix_store_digest_conversation_id (store_digest, conversation_id),
+	KEY ix_store_digest_parent_run_id (store_digest, parent_run_id),
+	UNIQUE KEY uk_store_digest_run_id (store_digest, run_id),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream agent run lineage and registration records.' COLLATE utf8mb4_bin;
 
@@ -274,11 +270,10 @@ CREATE TABLE ai_step_sequences (
 CREATE TABLE ai_step_snapshots (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical namespace and tenant partition.',
-	run_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical lookup digest of the original run identifier.',
-	run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
+	run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original upstream run identifier.',
 	step_index BIGINT NOT NULL COMMENT 'Upstream graph step index.',
-	conversation_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
-	parent_run_id LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
+	conversation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream conversation identifier.',
+	parent_run_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Original upstream parent run identifier.',
 	agent_name LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Upstream agent name.',
 	timestamp VARCHAR(64) NOT NULL COMMENT 'Original ISO 8601 snapshot time.',
 	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Upstream complete or interrupted state.',
@@ -290,7 +285,7 @@ CREATE TABLE ai_step_snapshots (
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (id),
-	KEY ix_store_digest_run_digest_pruned (store_digest, run_digest, pruned),
+	KEY ix_store_digest_run_id_pruned (store_digest, run_id, pruned),
 	UNIQUE KEY uk_key_digest (key_digest),
 	KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 )ENGINE=InnoDB CHARSET=utf8mb4 COMMENT='Upstream complete or interrupted message-history snapshots.' COLLATE utf8mb4_bin;

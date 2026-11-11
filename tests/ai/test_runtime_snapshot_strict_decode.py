@@ -53,7 +53,6 @@ from linktools.ai.persistence.state import (
     alias_digest,
     operation_key,
     scope_digest,
-    sequence_key,
     stream_digest,
 )
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
@@ -601,7 +600,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
 
     assert aliases == ()
     assert sequences == {
-        sequence_key(
+        stream_digest(
             "runtime",
             "tenant",
             PersistenceDomain.CONVERSATION.value,

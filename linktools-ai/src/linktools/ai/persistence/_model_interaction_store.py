@@ -108,7 +108,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.list_model_interactions")
         _validate_interaction_page(after_model_request_seq, limit)
-        sequence_key = self._sequence(agent_run_id, "interaction")
+        sequence_key = self._stream(agent_run_id, "interaction")
         start = 1 if after_model_request_seq is None else after_model_request_seq + 1
 
         async def read(transaction: StateTransaction) -> tuple[AgentRunRecord | None, list[object]]:
@@ -283,7 +283,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        sequence_key = self._sequence(run.agent_run_id, "interaction")
+        sequence_key = self._stream(run.agent_run_id, "interaction")
         durable_count = (await transaction.get_sequences((sequence_key,))).get(
             sequence_key,
             0,
