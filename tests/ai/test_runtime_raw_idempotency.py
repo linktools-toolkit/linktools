@@ -20,7 +20,10 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import IdempotencyRecord, IdempotencyTerminalUpdate, OperationTerminalUpdate
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._repository_common import domain_data
-from linktools.ai.persistence.codec import _decode_enveloped_domain, decode_envelope, encode_envelope
+from linktools.ai.persistence.codec import (
+    _CURRENT_CODEC, _decode_domain, _decode_enveloped_domain, _encode_persisted_domain,
+    decode_envelope, encode_envelope,
+)
 from linktools.ai.persistence.contracts import ApprovalRecord, ExternalCallRecord, ExecutionEventRecord
 from linktools.ai.persistence.state import record_key
 from linktools.ai.runtime._execution import DefaultExecutionService, ExecutionStartIdentity
@@ -65,8 +68,6 @@ async def test_raw_replay_keys_preserve_maximum_bytes_and_component_boundaries(
 
 @pytest.mark.parametrize("value", (
     _record(),
-    IdempotencyTerminalUpdate("scope", KEY, IdempotencyStatus.STARTED,
-        IdempotencyStatus.COMPLETED, "a" * 64, "b" * 64, None),
     ApprovalRecord("approval", "execution", ApprovalStatus.PENDING, KEY, None, None, None, NOW, None),
     ExternalCallRecord("call", "execution", ExternalCallStatus.PENDING, KEY, NOW, None),
 ))
@@ -75,7 +76,7 @@ def test_raw_replay_wire_roundtrips_and_invalid_stored_keys_fail_closed(value: o
     encoded = domain_data(value)
     assert _decode_enveloped_domain(encoded, type(value)) == value
     payload = deepcopy(decode_envelope(encoded).value)
-    fields = payload["payload"] if isinstance(value, IdempotencyTerminalUpdate) else payload["payload"]["fields"]
+    fields = payload["payload"]["fields"]
     assert fields["idempotency_key"] == KEY
     for key in (KEY + "x", "", "bad\x00key", " key", "\ud800"):
         with pytest.raises(ValueError):
@@ -86,6 +87,21 @@ def test_raw_replay_wire_roundtrips_and_invalid_stored_keys_fail_closed(value: o
             continue
         with pytest.raises(AIError) as corrupt:
             _decode_enveloped_domain(encode_envelope(payload), type(value))
+        assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_terminal_idempotency_plain_mapping_rejects_invalid_stored_keys() -> None:
+    value = IdempotencyTerminalUpdate("scope", KEY, IdempotencyStatus.STARTED,
+        IdempotencyStatus.COMPLETED, "a" * 64, "b" * 64, None)
+    assert KEY not in repr(value)
+    payload = _encode_persisted_domain(value)
+    assert payload["idempotency_key"] == KEY
+    assert _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True) == value
+    for key in (KEY + "x", "", "bad\x00key", " key", "\ud800"):
+        with pytest.raises(ValueError):
+            replace(value, idempotency_key=key)
+        with pytest.raises(AIError) as corrupt:
+            _decode_domain({**payload, "idempotency_key": key}, type(value), _CURRENT_CODEC, persisted=True)
         assert corrupt.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
