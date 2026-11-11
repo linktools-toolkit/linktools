@@ -153,7 +153,7 @@ async def _assert_record_cas(engine: AsyncEngine) -> None:
     store = SqlStateStore(engine)
     await store.initialize()
     records = tuple(StoredRecord(
-        index.to_bytes(32, "big"), None, None, "owner", str(index), None,
+        index.to_bytes(32, "big"), None, None, "owner", (str(index)).encode("ascii"), None,
         0, None, 0, None, {"index": index},
     ) for index in range(70))
     async def seed(transaction: StateTransaction) -> None:

@@ -219,6 +219,8 @@ from .state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
+    SORT_KEY_MAX_BYTES,
+    validate_sort_key,
 )
 
 CURRENT_DATA_VERSION = 1
@@ -1299,7 +1301,7 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
         "parent": None if record.parent_digest is None else record.parent_digest.hex(),
         "subject": record.subject_id,
         "kind": record.kind,
-        "sort": record.sort_key,
+        "sort": base64.b64encode(record.sort_key).decode("ascii"),
         "state": record.state,
         "storage_revision": record.storage_revision,
         "lease": {
@@ -1312,6 +1314,15 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
         "data": dict(record.data),
         "payload_bytes": None if record.payload_bytes is None else base64.b64encode(record.payload_bytes).decode("ascii"),
     }
+
+
+def _decode_record_sort(value: str) -> bytes:
+    if not 1 <= len(value) <= ((SORT_KEY_MAX_BYTES + 2) // 3) * 4:
+        raise ValueError("record sort encoding length is invalid")
+    raw = base64.b64decode(value, validate=True)
+    if base64.b64encode(raw).decode("ascii") != value:
+        raise ValueError("record sort encoding is not canonical")
+    return validate_sort_key(raw)
 
 
 def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
@@ -1345,7 +1356,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             _optional_digest(value["scope"]),
             _optional_digest(value["parent"]),
             _string(value, "kind"),
-            _string(value, "sort"),
+            _decode_record_sort(_string(value, "sort")),
             _optional_string(value["state"]),
             _integer(value, "storage_revision"),
             _optional_string(lease["owner"]),

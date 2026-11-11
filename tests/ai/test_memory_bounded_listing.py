@@ -12,7 +12,8 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.memory import PersistentMemoryStore
-from linktools.ai.memory._store import _MutationReceipt
+from linktools.ai.memory._store import _MutationReceipt, _normalize_path, _normalize_prefix
+from linktools.ai.persistence.state import SORT_KEY_MAX_BYTES
 from linktools.ai.persistence.contracts import MemoryRecord
 from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.persistence.repositories import MemoryRepositoryImpl
@@ -125,7 +126,7 @@ async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
 
     stored = repository._stored("memory", value.memory_id, value)
 
-    assert stored.sort_key == "memory/z.md"
+    assert stored.sort_key == b"memory/z.md"
 
 
 async def test_memory_repository_accepts_full_harness_path_length() -> None:
@@ -149,7 +150,7 @@ async def test_memory_repository_accepts_full_harness_path_length() -> None:
     stored = repository._stored("memory", value.memory_id, value)
 
     assert len(logical_path) > 128
-    assert stored.sort_key == logical_path
+    assert stored.sort_key == logical_path.encode("ascii")
 
 
 async def test_memory_repository_applies_prefix_before_limit() -> None:
@@ -283,3 +284,14 @@ async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
             cursor=page.next_cursor, limit=1,
         )
         assert [value.metadata["path"] for value in second.items] == ["memory/001.md"]
+
+
+async def test_memory_path_and_prefix_respect_complete_sort_byte_limit() -> None:
+    path = ("x" * 199 + "/") * 5 + "x" * (SORT_KEY_MAX_BYTES - 1000)
+    assert len(path) == SORT_KEY_MAX_BYTES
+    assert _normalize_path(path) == path
+    assert _normalize_prefix(path) == path
+    with pytest.raises(ValueError):
+        _normalize_path(path + "x")
+    with pytest.raises(ValueError):
+        _normalize_prefix(path + "/")

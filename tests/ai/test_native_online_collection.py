@@ -51,7 +51,7 @@ async def _shared(path: Path):
 
 
 def _record(data, *, key: bytes = b"r" * 32, state: str = "UNKNOWN") -> StoredRecord:
-    return StoredRecord(key, None, None, "owner", "owner", state, 0, None, 0, None, data)
+    return StoredRecord(key, None, None, "owner", b'owner', state, 0, None, 0, None, data)
 
 
 async def _count(engine, table: str) -> int:

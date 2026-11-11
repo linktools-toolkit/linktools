@@ -16,7 +16,7 @@ from linktools.ai.storage import InMemoryCacheBackend
 
 
 def _record(key: bytes, value: str) -> StoredRecord:
-    return StoredRecord(key, None, None, "record", value, None, 0, None, 0, None, {"value": value})
+    return StoredRecord(key, None, None, "record", (value).encode("ascii"), None, 0, None, 0, None, {"value": value})
 
 
 @pytest.mark.asyncio

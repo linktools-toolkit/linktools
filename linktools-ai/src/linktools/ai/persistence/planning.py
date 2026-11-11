@@ -142,7 +142,7 @@ class PlanStateStore:
             scope_digest=None,
             parent_digest=None,
             kind=_KIND,
-            sort_key="plan:" + self._key.hex(),
+            sort_key=self._key,
             state=None,
             storage_revision=1 if current is None else current.storage_revision + 1,
             lease_owner=None,

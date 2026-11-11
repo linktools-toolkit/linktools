@@ -313,7 +313,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             or source.parent_digest
             != self._key("transcript_head", source_history_id)
             or source.kind != "context_projection"
-            or source.sort_key != source_history_id
+            or source.sort_key != source_history_id.encode("ascii")
             or source.state is not None
             or source.lease_owner is not None
             or source.lease_fence != 0
@@ -325,7 +325,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             None,
             self._key("transcript_head", child_history_id),
             "context_projection",
-            child_history_id,
+            child_history_id.encode("ascii"),
             None,
             0,
             None,
@@ -475,7 +475,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             self._scope("session_turn_commit", "session", value.session_id),
             None,
             "session_turn_commit",
-            "i:" + key.hex(),
+            key,
             None,
             0,
             None,
@@ -509,7 +509,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             != self._scope("session_turn_commit", "session", session_id)
             or record.parent_digest is not None
             or record.kind != "session_turn_commit"
-            or record.sort_key != "i:" + record.key_digest.hex()
+            or record.sort_key != record.key_digest
             or record.state is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

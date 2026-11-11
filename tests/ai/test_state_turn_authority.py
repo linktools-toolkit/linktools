@@ -606,7 +606,7 @@ async def test_state_turn_sort_reuses_identity_across_pages_and_snapshot(tmp_pat
             assert claim is not None and claim.lease is not None
             assert await authority.read_turn_by_request(_SCOPE, f"r{index}") == replace(claim, lease=None)
         records = await store.read(lambda tx: tx.scan_records())
-        assert all(record.sort_key == record.key_digest.hex() for record in records)
+        assert all(record.sort_key == record.key_digest for record in records)
         for kind in ("turn_session", "turn_request", "turn_execution"):
             expected = tuple(sorted((record for record in records if record.kind == kind),
                                     key=lambda record: record.key_digest))
@@ -629,7 +629,7 @@ async def test_state_turn_sort_reuses_identity_across_pages_and_snapshot(tmp_pat
             namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
             records=restored, aliases=(), facts=(), operations=(), sequences={},
         )
-        invalid = (replace(restored[0], sort_key="not-its-identity"), *restored[1:])
+        invalid = (replace(restored[0], sort_key=b"not-its-identity"), *restored[1:])
         with pytest.raises(AIError) as caught:
             validate_snapshot_domain(
                 namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
@@ -705,7 +705,7 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
             key = record_key_digest(scope.namespace, scope.tenant_id, "execution", record.kind,
                                     [invalid_scope, identity])
             invalid_records.append(replace(
-                record, key_digest=key, sort_key=key.hex(),
+                record, key_digest=key, sort_key=key,
                 scope_digest=scope_digest(scope.namespace, scope.tenant_id, "execution", "turn", "scope", invalid_scope),
                 data={**record.data, "scope": invalid_scope},
             ))

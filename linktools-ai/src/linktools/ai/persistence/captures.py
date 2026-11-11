@@ -5,6 +5,7 @@
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
+from typing import cast
 import json
 
 from ..agent import AgentInputCaptureRef
@@ -41,19 +42,29 @@ def capture_record(namespace: str, tenant_id: str, key: str, value: JsonValue, *
     if source_digest is not None:
         payload["source_digest"] = source_digest
     return StoredRecord(record_key_digest(namespace, tenant_id, "task", kind, key),
-                        scope, None, kind, key, None, storage_revision, None, 0, None,
+                        scope, None, kind, key.encode("ascii"), None, storage_revision, None, 0, None,
                         encode_envelope({"type": kind, "payload": payload}))
 
 
-def capture_record_value(record: StoredRecord) -> JsonValue:
+def _capture_record_payload(record: StoredRecord) -> Mapping[str, JsonValue]:
     envelope = decode_envelope(record.data).value
     payload = envelope.get("payload")
     if (record.kind not in CAPTURE_RECORD_KINDS or envelope.get("type") != record.kind
             or not isinstance(payload, Mapping) or not {"namespace", "tenant_id", "key", "value"}.issubset(payload)
             or set(payload) - {"namespace", "tenant_id", "key", "value", "source_digest"}
-            or payload["key"] != record.sort_key):
+            or not isinstance(payload["key"], str) or not payload["key"].isascii()
+            or payload["key"].encode("ascii") != record.sort_key):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return payload["value"]
+    return payload
+
+
+def capture_record_key(record: StoredRecord) -> str:
+    """Return the validated logical capture path owned by this record."""
+    return cast(str, _capture_record_payload(record)["key"])
+
+
+def capture_record_value(record: StoredRecord) -> JsonValue:
+    return _capture_record_payload(record)["value"]
 
 
 async def read_capture_record(store: StateStore, *, namespace: str, tenant_id: str,
@@ -239,7 +250,8 @@ async def restore_capture_value(record: StoredRecord, *,
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         content = json.loads(await read_attachment_payload(payload, read_object=read_object))
         return encode_domain(content) if encoded else content
-    value = await _transform_capture_attachments(record.sort_key, capture_record_value(record), transform)
+    value = capture_record_value(record)
+    value = await _transform_capture_attachments(capture_record_key(record), value, transform)
     if canonical_sha256(value) != capture_record_digest(record):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
@@ -266,7 +278,7 @@ def map_capture_references(record: StoredRecord, transform: Callable[[JsonValue]
             return transform(content)
         return content
 
-    value = _map_capture_attachments(record.sort_key, value, attachment, transform)
+    value = _map_capture_attachments(capture_record_key(record), value, attachment, transform)
     if record.kind == "task_graph_binding_capture" and isinstance(value, Mapping) and "declarations" in value:
         value = {**value, "declarations": transform(value["declarations"])}
     envelope = decode_envelope(record.data).value
@@ -294,7 +306,7 @@ def capture_state_closure(records: Sequence[StoredRecord], *,
     Excluded public handles remain retained when another owner references them.
     Tombstones revoke a handle independently of any remaining references.
     """
-    captures = {record.sort_key: record for record in records if record.kind in CAPTURE_RECORD_KINDS}
+    captures = {capture_record_key(record): record for record in records if record.kind in CAPTURE_RECORD_KINDS}
     scopes = {capture_record_scope(record) for record in captures.values()}
     for record in captures.values():
         if record.kind == "input_capture":
@@ -426,7 +438,7 @@ def expand_snapshot_capture(record: StoredRecord, contents: Mapping[tuple[str, s
     encoded = content.body
     raw = decode_payload_bytes(encoded, codec=content.compression,
                                raw_digest=content.raw_digest, raw_size=content.raw_size)
-    return capture_record(namespace, tenant_id, record.sort_key, _expand_task_binding_value(value, raw),
+    return capture_record(namespace, tenant_id, capture_record_key(record), _expand_task_binding_value(value, raw),
                           storage_revision=record.storage_revision)
 
 
@@ -445,15 +457,15 @@ def snapshot_capture_size(record: StoredRecord, contents: Mapping[tuple[str, str
 
 def validate_capture_record(record: StoredRecord, *, namespace: str, tenant_id: str) -> None:
     value = capture_record_value(record)
-    expected = capture_record(namespace, tenant_id, record.sort_key, value, storage_revision=record.storage_revision,
+    expected = capture_record(namespace, tenant_id, capture_record_key(record), value, storage_revision=record.storage_revision,
                               source_digest=decode_envelope(record.data).value["payload"].get("source_digest"))
     capture_record_digest(record)
     if record != expected or capture_record_scope(record) != (namespace, tenant_id):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if record.kind == "input_capture":
-        validate_input_capture_payload(record.sort_key, value, namespace=namespace, tenant_id=tenant_id)
+        validate_input_capture_payload(capture_record_key(record), value, namespace=namespace, tenant_id=tenant_id)
     else:
-        validate_task_binding_payload(record.sort_key, value, namespace=namespace, tenant_id=tenant_id)
+        validate_task_binding_payload(capture_record_key(record), value, namespace=namespace, tenant_id=tenant_id)
 
 
 def validate_task_binding_payload(key: str, value: JsonValue, *, namespace: str, tenant_id: str) -> None:
@@ -563,4 +575,4 @@ from ._task_graph_binding_capture import (
     task_expander_declaration_identity,
 )
 
-__all__ = ['CAPTURE_RECORD_KINDS', 'TASK_BINDING_CODEC', 'capture_record', 'capture_record_value', 'capture_record_digest', 'prepare_capture_value', 'restore_capture_value', 'capture_record_scope', 'capture_retention_value', 'map_capture_references', 'capture_state_closure', 'read_capture_record', 'publish_capture_record', 'task_binding_content_reference', 'prepare_task_binding_value', 'read_task_binding_value', 'expand_snapshot_capture', 'snapshot_capture_size', 'validate_capture_record', 'validate_task_binding_payload', 'TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION', 'TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS', 'input_capture_expiry_key', 'input_capture_key', 'input_capture_state_dependency', 'iter_input_capture_dependencies', 'read_task_graph_binding_capture_declarations', 'task_declaration_identity', 'task_expander_declaration_identity', 'task_graph_binding_capture_key', 'validate_input_capture_payload']
+__all__ = ['CAPTURE_RECORD_KINDS', 'TASK_BINDING_CODEC', 'capture_record', 'capture_record_key', 'capture_record_value', 'capture_record_digest', 'prepare_capture_value', 'restore_capture_value', 'capture_record_scope', 'capture_retention_value', 'map_capture_references', 'capture_state_closure', 'read_capture_record', 'publish_capture_record', 'task_binding_content_reference', 'prepare_task_binding_value', 'read_task_binding_value', 'expand_snapshot_capture', 'snapshot_capture_size', 'validate_capture_record', 'validate_task_binding_payload', 'TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION', 'TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS', 'input_capture_expiry_key', 'input_capture_key', 'input_capture_state_dependency', 'iter_input_capture_dependencies', 'read_task_graph_binding_capture_declarations', 'task_declaration_identity', 'task_expander_declaration_identity', 'task_graph_binding_capture_key', 'validate_input_capture_payload']

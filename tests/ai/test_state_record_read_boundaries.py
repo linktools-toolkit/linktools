@@ -23,7 +23,7 @@ from .test_model_interaction_records import _prepared, _running, _terminal
 
 def _record(data: Mapping[str, JsonValue]) -> StoredRecord:
     return StoredRecord(
-        b"k" * 32, None, None, "record", "r:1", "ACTIVE", 0, None, 0, None, data,
+        b"k" * 32, None, None, "record", b'r:1', "ACTIVE", 0, None, 0, None, data,
     )
 
 
@@ -156,7 +156,7 @@ def test_interaction_read_does_not_encode_a_second_body(
     ("scope_digest", b"x" * 32),
     ("parent_digest", b"x" * 32),
     ("kind", "other"),
-    ("sort_key", "m:2"),
+    ("sort_key", b"m:2"),
     ("state", "FAILED"),
     ("lease_owner", "worker"),
     ("lease_fence", 1),

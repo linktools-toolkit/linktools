@@ -25,7 +25,7 @@ def _record(value: str) -> StoredRecord:
         None,
         None,
         "session",
-        value,
+        (value).encode("ascii"),
         "ACTIVE",
         0,
         None,

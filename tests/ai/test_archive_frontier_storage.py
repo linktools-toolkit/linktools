@@ -22,7 +22,7 @@ from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
 from linktools.ai.persistence.state import StateTransaction, StoredRecord, _ReadOnlyStateTransaction
-from linktools.ai.storage import create_sql_storage_context
+from linktools.ai.storage import create_sql_storage_context, dialect_for_name
 
 
 ALL = ArchiveNodeSlot.SELF | ArchiveNodeSlot.LEFT | ArchiveNodeSlot.RIGHT | ArchiveNodeSlot.NEXT
@@ -208,10 +208,16 @@ def test_fixed_frontier_compiles_for_supported_server_dialects_with_bounded_para
     requests = tuple(ArchiveNodeRead(_digest(f"node-{index}"), ALL, ALL) for index in range(500))
     content_keys = tuple(_digest(f"body-{index}") for index in range(500))
     for dialect in (sqlite.dialect(), mysql.dialect(server_version_info=(5, 7, 44)), postgresql.dialect()):
+        transaction._context.dialect = dialect_for_name(dialect.name)
         for nodes, contents in transaction._archive_read_batches(requests, content_keys):
             statement = transaction._archive_read_statement(_digest("scope").hex(), nodes, contents)
             compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
             parameters = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
             assert parameters <= 999
             assert "WITH RECURSIVE" not in str(compiled).upper()
-            assert "NOT IN" not in str(compiled).upper()
+            sql = str(compiled).upper()
+            assert "NOT IN" not in sql
+            if dialect.name == "postgresql":
+                assert "CONVERT_TO(" in sql
+            else:
+                assert " AS BINARY)" in sql if dialect.name == "mysql" else " AS BLOB)" in sql

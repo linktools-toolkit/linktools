@@ -32,7 +32,7 @@ DATA = {"numbers": [1.0, 1, True, -0.0, 0.0, 1.5, 1e20, 2**53 + 1,
                     float.fromhex("0x1.fffffffffffffp+1023")],
         "nested": {"$float": "ordinary user data", "values": [0, 0.0, -0.0]},
         "large_text": "数" * 25000}
-RECORD = StoredRecord(b"r" * 32, None, None, "numeric", "one", None, 0, None, 0, None, DATA)
+RECORD = StoredRecord(b"r" * 32, None, None, "numeric", b'one', None, 0, None, 0, None, DATA)
 FACT = StoredFact(b"s" * 32, 1, RECORD.key_digest, "numeric", "subject", None, DATA)
 OPERATION = StoredOperation(b"o" * 32, b"s" * 32, 1, "pending", False, DATA)
 

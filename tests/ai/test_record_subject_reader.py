@@ -20,7 +20,7 @@ async def test_record_subject_reads_preserve_scope_kind_and_transaction_view(
     tmp_path: Path, backend: str,
 ) -> None:
     subject, scope = "subject", _digest("scope")
-    records = tuple(replace(_record(index), subject_id=subject, sort_key="equal")
+    records = tuple(replace(_record(index), subject_id=subject, sort_key=b"equal")
                     for index in (1, 2))
     expected = tuple(sorted(records, key=lambda record: record.key_digest))
     excluded = (replace(_record(3), subject_id=subject, scope_digest=_digest("other")),
@@ -68,8 +68,8 @@ async def test_record_subject_identity_cannot_change(
 
 async def test_sql_subject_reads_bound_parameters_and_globally_order_chunks(tmp_path: Path) -> None:
     subjects = tuple(f"subject-{index}" for index in range(1100))
-    first = replace(_record(1), subject_id=subjects[0], sort_key="z")
-    last = replace(_record(2), subject_id=subjects[-1], sort_key="a")
+    first = replace(_record(1), subject_id=subjects[0], sort_key=b"z")
+    last = replace(_record(2), subject_id=subjects[-1], sort_key=b"a")
     async with _open_store("sql", tmp_path / "sql") as store:
         await store.mutate(lambda tx: tx.insert_records((first, last)))
         counts = []

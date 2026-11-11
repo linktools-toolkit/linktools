@@ -302,7 +302,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
     chunks = [chunk async for chunk in archive.open(snapshot.key)]
     manifest = json.loads(b"".join(chunks))
     records = manifest["domains"]["task"]["records"]
-    retained = [item for item in records if not decode_record(item).sort_key.startswith("v1/input-capture/result/")]
+    retained = [item for item in records if not decode_record(item).sort_key.startswith(b"v1/input-capture/result/")]
     assert len(retained) < len(records)
     manifest["domains"]["task"]["records"] = retained
     data = canonical_json_bytes(manifest)

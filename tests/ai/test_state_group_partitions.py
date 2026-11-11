@@ -19,7 +19,7 @@ def _key(value: str) -> bytes:
 
 
 def _record(value: str) -> StoredRecord:
-    return StoredRecord(_key("record"), None, None, "probe", "record", None, 0, None, 0, None, {"value": value})
+    return StoredRecord(_key("record"), None, None, "probe", b'record', None, 0, None, 0, None, {"value": value})
 
 
 def _storage(root: Path, backend: str) -> PersistenceStorage:

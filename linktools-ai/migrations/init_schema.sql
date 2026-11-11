@@ -9,7 +9,7 @@ CREATE TABLE ai_state_records (
     subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
     parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 identity of the logical parent used by hierarchical list queries.',
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
-    sort_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
+    sort_key VARBINARY(1152) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
     storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
     lease_owner TEXT NULL COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.',
@@ -20,10 +20,10 @@ CREATE TABLE ai_state_records (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest),
-    KEY ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128)),
-    KEY ix_scope_digest_sort_key (scope_digest, sort_key(128)),
+    KEY ix_store_digest_kind_sort_key (store_digest, kind, sort_key),
+    KEY ix_scope_digest_sort_key (scope_digest, sort_key),
     KEY ix_scope_digest_subject_id (scope_digest, subject_id),
-    KEY ix_parent_digest_sort_key (parent_digest, sort_key(128)),
+    KEY ix_parent_digest_sort_key (parent_digest, sort_key),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current durable state for runtime and step resources persisted as versioned records.';
 

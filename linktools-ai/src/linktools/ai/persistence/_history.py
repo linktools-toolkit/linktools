@@ -341,7 +341,7 @@ class TranscriptRepository:
             None,
             None,
             "transcript_head",
-            "i:" + key.hex(),
+            key,
             None,
             0,
             None,
@@ -977,7 +977,7 @@ class TranscriptRepository:
                     None,
                     self._head_key(owner_id),
                     "transcript_seek",
-                    f"b:{block_start:020d}",
+                    f"b:{block_start:020d}".encode("ascii"),
                     None,
                     0,
                     None,
@@ -1247,7 +1247,7 @@ class TranscriptRepository:
 
     async def validate_integrity(self) -> None:
         require_no_run_history_lock("TranscriptRepository.validate_integrity")
-        after_sort: str | None = None
+        after_sort: bytes | None = None
         after_key: bytes | None = None
         while True:
             page = await self._store.read(
@@ -1603,7 +1603,7 @@ class TranscriptRepository:
             None,
             self._owner_key(agent_run_id),
             "context_projection",
-            agent_run_id,
+            agent_run_id.encode("ascii"),
             None,
             0,
             None,

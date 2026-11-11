@@ -50,7 +50,7 @@ def test_stored_record_hides_operation_payload_without_changing_wire() -> None:
     data = _ReadableMapping({"operation_id": raw_key})
     assert raw_key in repr(data)
     record = StoredRecord(
-        b"r" * 32, None, None, "task_admission", "graph", None, 0, None, 0, None, data,
+        b"r" * 32, None, None, "task_admission", b'graph', None, 0, None, 0, None, data,
     )
 
     assert raw_key not in repr(record)

@@ -135,7 +135,7 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
             value = {"$dataclass": "execution_record", "fields": {"input_context": encode_domain(
                 RuntimePayloadRef(StoredPayload.inline_json(manifest), PersistenceDomain.EXECUTION))}}
         key = hashlib.sha256(b"retaining-owner").digest()
-        record = StoredRecord(key, None, None, "test_owner", "owner", None, 1, None, 0, None, value)
+        record = StoredRecord(key, None, None, "test_owner", b'owner', None, 1, None, 0, None, value)
         await state.mutate(lambda tx: tx.insert_record(record))
         await native.save_snapshot(_snapshot("run", 2, "current"))
         result = await native.purge_unreferenced_content(exclusive=_Offline())
@@ -271,7 +271,7 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
                 await connection.execute(metadata.tables["ai_step_sequences"].insert().values(_row(node, native.store_digest)))
         root = NativeMessageRoot(group_id, native.store_digest, (NativeMessageSlice(nodes[0].identity, 1, 0, 1),))
         key = hashlib.sha256(b"native-only-owner").digest()
-        record = StoredRecord(key, None, None, "test_owner", "owner", None, 1, None, 0, None,
+        record = StoredRecord(key, None, None, "test_owner", b'owner', None, 1, None, 0, None,
                               encode_domain(ArchivedContextBlock(root, "c" * 64, 2)))
         await state.mutate(lambda tx: tx.insert_record(record))
         candidates = ((domain, reference),)

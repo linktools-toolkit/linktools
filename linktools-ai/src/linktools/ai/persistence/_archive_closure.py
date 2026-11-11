@@ -338,8 +338,12 @@ class ArchiveClosure(_SequenceClosure):
             if record.scope_digest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             scope = record.scope_digest.hex()
-            identity = scope, record.kind, record.sort_key
-            if record.key_digest != record_key_digest("", "", "archive", record.kind, [scope, record.sort_key]):
+            try:
+                sort = record.sort_key.decode("ascii")
+            except UnicodeError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            identity = scope, record.kind, sort
+            if record.key_digest != record_key_digest("", "", "archive", record.kind, [scope, sort]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if identity in self._records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

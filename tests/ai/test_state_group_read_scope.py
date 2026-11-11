@@ -33,7 +33,7 @@ def _digest(value: str) -> bytes:
 
 
 def _record(value: int) -> StoredRecord:
-    return StoredRecord(_digest("record"), None, None, "probe", "record", None,
+    return StoredRecord(_digest("record"), None, None, "probe", b'record', None,
                         value - 1, None, 0, None, {"value": value})
 
 

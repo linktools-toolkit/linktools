@@ -28,6 +28,7 @@ ValueT = TypeVar("ValueT")
 
 ALIAS_KEY_MAX_BYTES = 1024
 OPERATION_KEY_MAX_BYTES = 1024
+SORT_KEY_MAX_BYTES = 1152
 
 
 class StateLockOrderError(RuntimeError):
@@ -332,7 +333,7 @@ class StoredRecord:
     scope_digest: bytes | None
     parent_digest: bytes | None
     kind: str
-    sort_key: str
+    sort_key: bytes = field(repr=False)
     state: str | None
     storage_revision: int
     lease_owner: str | None
@@ -356,12 +357,7 @@ class StoredRecord:
             raise ValueError("record kind must contain at most 32 characters")
         if self.kind in {".", ".."} or any(character in self.kind for character in "/\\"):
             raise ValueError("record kind contains a path separator")
-        if (
-            not isinstance(self.sort_key, str)
-            or not self.sort_key
-            or not self.sort_key.isascii()
-        ):
-            raise ValueError("record sort_key must contain non-empty ASCII characters")
+        validate_sort_key(self.sort_key)
         _require_state(self.state, "record state", optional=True)
         _require_nonnegative_int(self.storage_revision, "storage_revision")
         _require_optional_string(self.lease_owner, "lease_owner")
@@ -481,13 +477,15 @@ class RecordReplacement:
 
 @dataclass(frozen=True, slots=True)
 class RecordQuery:
+    """Ordered records; an after-sort without a key excludes that entire sort value."""
+
     scope_digest: bytes | None = None
     parent_digest: bytes | None = None
     kind: str | None = None
     states: frozenset[str] | None = None
-    sort_key_prefix: str | None = None
-    after_sort_key: str | None = None
-    after_key_digest: bytes | None = None
+    sort_key_prefix: bytes | None = field(default=None, repr=False)
+    after_sort_key: bytes | None = field(default=None, repr=False)
+    after_key_digest: bytes | None = field(default=None, repr=False)
     limit: int | None = None
 
     def __post_init__(self) -> None:
@@ -506,16 +504,12 @@ class RecordQuery:
             or any(character in self.kind for character in "/\\")
         ):
             raise ValueError("record kind contains a path separator")
-        if self.sort_key_prefix is not None and (
-            not isinstance(self.sort_key_prefix, str)
-            or not self.sort_key_prefix
-            or not self.sort_key_prefix.isascii()
-        ):
-            raise ValueError("record sort key prefix must contain non-empty ASCII characters")
-        if (self.after_sort_key is None) != (self.after_key_digest is None):
-            raise ValueError("record cursor requires both sort key and key digest")
+        if self.sort_key_prefix is not None:
+            validate_sort_key(self.sort_key_prefix)
+        if self.after_sort_key is None and self.after_key_digest is not None:
+            raise ValueError("record cursor key requires a sort key")
         if self.after_sort_key is not None:
-            encode_sort_key(self.after_sort_key)
+            validate_sort_key(self.after_sort_key)
         if self.after_key_digest is not None:
             _require_digest(self.after_key_digest, "after_key_digest")
         _validate_limit(self.limit)
@@ -1351,25 +1345,21 @@ def operation_key(
     )
 
 
-def sortable_timestamp(value: datetime, key: bytes) -> str:
+def sortable_timestamp(value: datetime, key: bytes) -> bytes:
     if value.tzinfo is None:
         raise ValueError("sortable timestamp must be timezone-aware")
-    micros = int(value.astimezone(timezone.utc).timestamp() * 1_000_000)
+    delta = value.astimezone(timezone.utc) - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    micros = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
     if micros < 0 or micros >= 1 << 63:
         raise ValueError("sortable timestamp is outside the supported range")
-    return "t:" + f"{micros:016x}" + ":" + _require_digest(key, "timestamp key").hex()
+    return validate_sort_key(micros.to_bytes(8, "big") + _require_digest(key, "timestamp key"))
 
 
-def encode_sort_key(value: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError("sort key is required")
-    if not value.isascii():
-        raise ValueError("sort key must contain ASCII characters")
+def validate_sort_key(value: bytes) -> bytes:
+    """Validate the complete physical ordering token, including any prefix."""
+    if type(value) is not bytes or not 1 <= len(value) <= SORT_KEY_MAX_BYTES:
+        raise ValueError(f"sort key must contain 1..{SORT_KEY_MAX_BYTES} bytes")
     return value
-
-
-def decode_sort_key(value: str) -> str:
-    return encode_sort_key(value)
 
 
 def validate_record_identity(record: StoredRecord) -> None:
@@ -1384,7 +1374,7 @@ def validate_record_identity(record: StoredRecord) -> None:
             raise ValueError(f"record {name} is invalid")
     if record.subject_id is not None:
         _require_subject_id(record.subject_id)
-    encode_sort_key(record.sort_key)
+    validate_sort_key(record.sort_key)
     if type(record.data) is ImmutableJsonMapping:
         return
     try:
@@ -1427,4 +1417,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'SORT_KEY_MAX_BYTES', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

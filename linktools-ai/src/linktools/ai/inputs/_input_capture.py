@@ -44,7 +44,7 @@ from ..core import PromptLimits
 from ..persistence import PersistenceDomain
 from ..persistence.contracts import ExecutionRepositories, TaskRepositories
 from ..persistence.captures import (
-    input_capture_key, input_capture_expiry_key, capture_record, capture_record_value, capture_retention_value,
+    input_capture_key, input_capture_expiry_key, capture_record, capture_record_key, capture_record_value, capture_retention_value,
     read_capture_record, publish_capture_record, prepare_capture_value, restore_capture_value,
 )
 from ..persistence.codec import decode_domain, encode_domain, iter_runtime_object_refs
@@ -352,7 +352,7 @@ class InputCaptures:
             cursor = None
             while len(candidates) < limit:
                 query = RecordQuery(kind="input_capture", scope_digest=owner_scope,
-                    sort_key_prefix=f"v1/input-capture/{kind}/", limit=1000,
+                    sort_key_prefix=f"v1/input-capture/{kind}/".encode("ascii"), limit=1000,
                     after_sort_key=None if cursor is None else cursor.sort_key,
                     after_key_digest=None if cursor is None else cursor.key_digest)
                 records = await self._state_store.read(lambda transaction: transaction.list_records(query))
@@ -381,7 +381,7 @@ class InputCaptures:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                     if expires_at > now:
                         continue
-                    key = record.sort_key
+                    key = capture_record_key(record)
                     await self._authorize(principal, ResourceKind.EVALUATION, key,
                                           AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
                     expiry_key = input_capture_expiry_key(key)

@@ -118,7 +118,7 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
         content_archive = await source.transcript_repository.content_archive()
         content_ids = await content_archive.content_ids(first.body.content, prepared=prepared)
         content = next(ContentRecord.from_record(item) for item in prepared.records.values()
-                       if item.kind == "archive_content" and item.sort_key == content_ids[0])
+                       if item.kind == "archive_content" and item.sort_key.decode("ascii") == content_ids[0])
         assert content.compression == ("zlib" if large else "raw")
         assert content.payload is None and isinstance(content.body, bytes)
         await source.sync_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution", archive=prepared)

@@ -25,7 +25,7 @@ pytestmark = pytest.mark.asyncio
 
 def _record(value: int, identity: str = "record") -> StoredRecord:
     return StoredRecord(hashlib.sha256(identity.encode()).digest(), None, None,
-                        "probe", identity, None, value - 1, None, 0, None,
+                        "probe", (identity).encode("ascii"), None, value - 1, None, 0, None,
                         {"value": value})
 
 

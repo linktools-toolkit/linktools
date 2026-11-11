@@ -332,7 +332,7 @@ class ContentArchive:
 
     def _record(self, kind: str, identity: str, data: Mapping[str, JsonValue],
                 *, payload_bytes: bytes | None = None) -> StoredRecord:
-        return StoredRecord(self._key(kind, identity), bytes.fromhex(self.content_scope), None, kind, identity,
+        return StoredRecord(self._key(kind, identity), bytes.fromhex(self.content_scope), None, kind, identity.encode("ascii"),
                             None, 0, None, 0, None, data, payload_bytes=payload_bytes)
 
     def content_record_keys(self, values: Sequence[tuple[str, bytes]]) -> tuple[bytes, ...]:
@@ -354,7 +354,7 @@ class ContentArchive:
                     or record.scope_digest != bytes.fromhex(self.content_scope)):
                 raise _integrity()
             content = ContentRecord.from_record(record)
-            if record.sort_key != content.identity or self._key("archive_content", content.identity) != key:
+            if record.sort_key != content.identity.encode("ascii") or self._key("archive_content", content.identity) != key:
                 raise _integrity()
         observed = {key: records.get(key) for key in keys}
         for key, record in observed.items():
@@ -499,7 +499,7 @@ class ContentArchive:
         if record.kind != "archive_sequence" or record.scope_digest != bytes.fromhex(self.content_scope):
             raise _integrity()
         node = ImmutableSequenceNode.from_json(record.data)
-        if record.sort_key != node.identity or record.key_digest != self._key(record.kind, node.identity):
+        if record.sort_key != node.identity.encode("ascii") or record.key_digest != self._key(record.kind, node.identity):
             raise _integrity()
         return node
 
@@ -700,7 +700,10 @@ class ContentArchive:
         for record in prepared.records.values():
             if record.kind != "archive_sequence":
                 continue
-            node = prepared.nodes[record.sort_key]
+            try:
+                node = prepared.nodes[record.sort_key.decode("ascii")]
+            except (UnicodeError, KeyError) as error:
+                raise _integrity() from error
             dependencies.add(self._key("archive_content", node.content_id))
             dependencies.update(self._key("archive_sequence", child) for child in
                                 (node.left, node.right, node.next_forest) if child is not None)
@@ -877,7 +880,7 @@ class ContentArchive:
                         nodes[node.identity] = node
                     elif record.kind == "archive_content":
                         content = ContentRecord.from_record(record)
-                        if (record.sort_key != content.identity
+                        if (record.sort_key != content.identity.encode("ascii")
                                 or key != self._key(record.kind, content.identity)):
                             raise _integrity()
                         contents[content.identity] = content
@@ -889,8 +892,8 @@ class ContentArchive:
                         if identity in nodes and nodes[identity].next_forest is not None
                     }
                     for record in rows.values():
-                        if record.kind == "archive_sequence" and record.sort_key in wanted:
-                            frontier_records[record.sort_key] = record
+                        if record.kind == "archive_sequence" and record.sort_key.decode("ascii") in wanted:
+                            frontier_records[record.sort_key.decode("ascii")] = record
                 for identity in body_pending:
                     content_id = nodes[identity].content_id
                     record = prepared.records.get(self._key("archive_content", content_id))

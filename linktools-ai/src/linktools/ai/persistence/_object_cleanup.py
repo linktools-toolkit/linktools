@@ -31,7 +31,7 @@ from ._capability_marker import has_capability_partition_marker
 from .codec import iter_runtime_object_dependencies, iter_runtime_object_refs
 from .captures import (
     CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
-    capture_record_scope, capture_record_value, expand_snapshot_capture, input_capture_expiry_key,
+    capture_record_key, capture_record_scope, capture_record_value, expand_snapshot_capture, input_capture_expiry_key,
 )
 from ._plan import PersistenceDomain
 from ._snapshot import SnapshotExclusiveGuard
@@ -101,17 +101,20 @@ async def _capture_owners(partitions: Mapping[StateStore, PersistenceDomain]) ->
 
 def _capture_closure(records: list[tuple[StateStore, StoredRecord]], values: list[JsonValue], *,
                      namespace: str, tenant_id: str, excluded_keys: tuple[str, ...] = ()) -> frozenset[str]:
-    locations = {(store, record.sort_key) for store, record in records if record.kind in CAPTURE_RECORD_KINDS}
-    live = {record.sort_key for store, record in records if record.kind in CAPTURE_RECORD_KINDS
-            and (store, input_capture_expiry_key(record.sort_key)) not in locations}
-    markers = {record.sort_key for _store, record in records
-               if record.kind == "input_capture" and record.sort_key.startswith("v1/input-capture/expired/")}
-    visible = tuple(record for _store, record in records if record.sort_key not in markers
+    locations = {(store, capture_record_key(record)) for store, record in records if record.kind in CAPTURE_RECORD_KINDS}
+    live = {capture_record_key(record) for store, record in records if record.kind in CAPTURE_RECORD_KINDS
+            and (store, input_capture_expiry_key(capture_record_key(record))) not in locations}
+    markers = {capture_record_key(record) for _store, record in records
+               if record.kind == "input_capture" and capture_record_key(record).startswith("v1/input-capture/expired/")}
+    visible = tuple(record for _store, record in records if record.kind not in CAPTURE_RECORD_KINDS
+                    or capture_record_key(record) not in markers
                     or capture_record_value(record)["capture_key"] not in live)
     # Identical logical keys may live in isolated physical sources. A marker in
     # one source cannot revoke the other source's independently retained body.
-    duplicates = {key for key in live if sum(record.sort_key == key for _store, record in records) > 1}
-    roots = (*values, *(capture_retention_value(record) for _store, record in records if record.sort_key in duplicates))
+    duplicates = {key for key in live if sum(capture_record_key(record) == key for _store, record in records
+                                               if record.kind in CAPTURE_RECORD_KINDS) > 1}
+    roots = (*values, *(capture_retention_value(record) for _store, record in records
+                       if record.kind in CAPTURE_RECORD_KINDS and capture_record_key(record) in duplicates))
     return capture_state_closure(visible, values=roots, excluded_keys=excluded_keys,
         namespace=namespace, tenant_id=tenant_id) | markers
 
@@ -133,7 +136,7 @@ async def purge_unreferenced_captures(
             return CaptureCleanupResult(blocked=selected)
         records, values = await _capture_owners(partitions)
         closure = _capture_closure(records, values, excluded_keys=selected, namespace=namespace, tenant_id=tenant_id)
-        captures = {record.sort_key: (store, record) for store, record in records
+        captures = {capture_record_key(record): (store, record) for store, record in records
                     if record.kind in CAPTURE_RECORD_KINDS and capture_record_scope(record) == (namespace, tenant_id)}
         deleted, missing, retained, blocked = [], [], [], []
         for key in selected:
@@ -323,7 +326,7 @@ async def _purge_unreferenced_objects(
                                         capture_retention_value(record) if record.kind in CAPTURE_RECORD_KINDS
                                         else record.data, state=record.state)
                 if record.kind in CAPTURE_RECORD_KINDS:
-                    if record.sort_key in retained_captures:
+                    if capture_record_key(record) in retained_captures:
                         scope_namespace, scope_tenant = capture_record_scope(record)
                         semantic = expand_snapshot_capture(record, binding_contents,
                             namespace=scope_namespace, tenant_id=scope_tenant)
@@ -403,7 +406,7 @@ async def _purge_unreferenced_objects(
                                  raw_digest=content.raw_digest, raw_size=content.raw_size)
 
     for store, record in capture_records:
-        if record.kind in CAPTURE_RECORD_KINDS and record.sort_key not in retained_captures:
+        if record.kind in CAPTURE_RECORD_KINDS and capture_record_key(record) not in retained_captures:
             await store.mutate(lambda tx: tx.delete_record(record.key_digest,
                 expected_storage_revision=record.storage_revision))
 

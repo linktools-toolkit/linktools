@@ -349,6 +349,8 @@ class _MemoryTransaction:
                 if (record.sort_key, record.key_digest)
                 > (query.after_sort_key, query.after_key_digest)
             ]
+        elif query.after_sort_key is not None:
+            values = [record for record in values if record.sort_key > query.after_sort_key]
         if query.limit is not None:
             values = values[: query.limit]
         return tuple(values)

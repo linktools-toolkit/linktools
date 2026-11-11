@@ -32,7 +32,7 @@ def _key(value: str) -> bytes:
 
 
 def _record(value: str, *, key: bytes | None = None) -> StoredRecord:
-    return StoredRecord(key or _key(value), None, None, "probe", value, None, 0,
+    return StoredRecord(key or _key(value), None, None, "probe", (value).encode("ascii"), None, 0,
                         None, 0, None, {"value": value})
 
 

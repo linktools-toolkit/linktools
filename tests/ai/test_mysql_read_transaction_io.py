@@ -230,7 +230,7 @@ async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_se
     writer_first = SqlStateStore(writer, store_digest=digests[0])
     writer_second = SqlStateStore(writer, store_digest=digests[1], group=writer_first.storage_group)
     stores = (first, second, writer_first, writer_second)
-    value = StoredRecord(digests[2], None, None, "probe", "record", None,
+    value = StoredRecord(digests[2], None, None, "probe", b'record', None,
                          0, None, 0, None, {"value": 1})
     checkouts = []
     event.listen(reader.sync_engine, "checkout", lambda *args: checkouts.append(True))

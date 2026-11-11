@@ -226,7 +226,7 @@ async def test_state_scope_owns_and_releases_exact_admission(tmp_path, kind: str
     from linktools.ai.persistence.turns import StateTurnCoordination
     from .test_state_batch_delete_backends import _open_store
     async with _open_store(kind, tmp_path / kind) as store:
-        backend = StateTurnCoordination(store, namespace="turn-scope", tenant_id="tenant")
+        backend = StateTurnCoordination(store, namespace=_SCOPE.namespace, tenant_id=_SCOPE.tenant_id)
         lifetime = backend.enter(_SCOPE, session_key="session", request_key="request", request_digest="digest",
                                  execution_id="execution", owner_id="owner")
         async with lifetime as owned:

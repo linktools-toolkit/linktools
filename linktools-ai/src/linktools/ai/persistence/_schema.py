@@ -12,13 +12,12 @@ from ..storage import (
     sql_id_column,
     sql_query_index,
     sql_sha256,
-    sql_sort_key,
     sql_state,
     sql_table_options,
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES
+from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -112,7 +111,7 @@ def build_runtime_sql_metadata(
         ),
         Column(
             "sort_key",
-            sql_sort_key(),
+            LargeBinary(SORT_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(SORT_KEY_MAX_BYTES), "mysql"),
             nullable=False,
             comment="Stable canonical ordering token used for deterministic keyset pagination.",
         ),
@@ -160,10 +159,10 @@ def build_runtime_sql_metadata(
         **sql_table_options(),
     )
     sql_unique(records, "store_digest", "key_digest")
-    sql_query_index(records, "store_digest", "kind", "sort_key", mysql_length=128)
-    sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
+    sql_query_index(records, "store_digest", "kind", "sort_key")
+    sql_query_index(records, "scope_digest", "sort_key")
     sql_query_index(records, "scope_digest", "subject_id")
-    sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
+    sql_query_index(records, "parent_digest", "sort_key")
     sql_audit_indexes(records)
 
     aliases = Table(

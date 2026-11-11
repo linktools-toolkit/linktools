@@ -22,7 +22,7 @@ from linktools.ai.persistence._archive_closure import (
 from linktools.ai.persistence.codec import _encode_persisted_domain, decode_domain, encode_domain
 from linktools.ai.persistence.contracts import ArchivedContextBlock, RuntimePayloadRef
 from linktools.ai.persistence._memory import InMemoryStateStore
-from linktools.ai.persistence._object_cleanup import purge_unreferenced_objects
+from linktools.ai.persistence._object_cleanup import _capture_closure, purge_unreferenced_objects
 from linktools.ai.persistence._plan import PersistenceDomain
 from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
@@ -56,7 +56,7 @@ async def test_archive_closure_preserves_partial_visible_content_and_shared_dag(
     closure.mark(partial)
     closure.mark(partial)
     retained = closure.retained_records
-    assert {record.sort_key for record in retained if record.kind == "archive_content"} == {identities[1]}
+    assert {record.sort_key.decode("ascii") for record in retained if record.kind == "archive_content"} == {identities[1]}
     for record in closure.unreachable_records:
         await store.mutate(lambda tx, record=record: tx.delete_record(record.key_digest))
     assert await archive.read_contents(await archive.content_ids(partial), codec="bytes") == (b"B",)
@@ -132,10 +132,10 @@ async def test_archive_gc_scans_unrouted_owner_and_collects_only_excluded_conten
         BinaryContent(value, media_type="application/octet-stream"),
     ])]),)) for value in values)
     root, identities = await _prepare(archive, values, codec="model-message")
-    record = StoredRecord(hashlib.sha256(b"hidden-owner").digest(), None, None, "probe", "hidden", None,
+    record = StoredRecord(hashlib.sha256(b"hidden-owner").digest(), None, None, "probe", b'hidden', None,
                           0, None, 0, None, {"root": encode_domain(root.slice(1, 2))})
     await hidden.mutate(lambda tx: tx.insert_record(record))
-    contents = {item.sort_key: ContentRecord.from_record(item) for item in await store.read(lambda tx: tx.scan_records()) if item.kind == "archive_content"}
+    contents = {item.sort_key.decode("ascii"): ContentRecord.from_record(item) for item in await store.read(lambda tx: tx.scan_records()) if item.kind == "archive_content"}
     candidates = tuple((PersistenceDomain.EXECUTION, contents[identity].object_refs()[0]) for identity in identities)
     result = await purge_unreferenced_objects(candidates, namespace="archive", tenant_id="tenant",
         stores={PersistenceDomain.EXECUTION: owner}, object_stores={domain: objects for domain in PersistenceDomain}, exclusive=Offline())
@@ -143,7 +143,7 @@ async def test_archive_gc_scans_unrouted_owner_and_collects_only_excluded_conten
     assert set(result.deleted) == {candidates[0], candidates[2]}
     assert await archive.read_contents(await archive.content_ids(root.slice(1, 2)), codec="model-message") == (values[1],)
     remaining = await store.read(lambda tx: tx.scan_records())
-    assert {item.sort_key for item in remaining if item.kind == "archive_content"} == {identities[1]}
+    assert {item.sort_key.decode("ascii") for item in remaining if item.kind == "archive_content"} == {identities[1]}
 
 
 async def test_archive_closure_full_prefix_work_scales_with_unique_nodes_and_roots(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,3 +188,18 @@ async def test_archive_scanner_accepts_persisted_portable_object_context() -> No
     assert not tuple(iter_archive_roots(wire))
     assert not tuple(iter_archive_content_refs(wire))
     assert rekey_archive_roots(wire, {}) == wire
+
+
+async def test_capture_cleanup_ignores_other_kinds_binary_sort_material() -> None:
+    record = StoredRecord(b"r" * 32, None, None, "probe", b"\xff\x00", None,
+                          0, None, 0, None, {})
+    assert _capture_closure([(InMemoryStateStore(), record)], [],
+                            namespace="archive", tenant_id="tenant") == frozenset()
+
+
+async def test_archive_closure_rejects_non_ascii_owned_sort_as_integrity_error() -> None:
+    record = StoredRecord(b"r" * 32, b"s" * 32, None, "archive_content", b"\xff", None,
+                          0, None, 0, None, {})
+    with pytest.raises(AIError) as error:
+        ArchiveClosure("scope", (record,))
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

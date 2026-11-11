@@ -283,7 +283,7 @@ class SqlStateStorageGroup:
                     return existing
                 value = StoredRecord(
                     key_digest=key, scope_digest=None, parent_digest=None,
-                    kind="archive_scope", sort_key="archive_scope", state=None,
+                    kind="archive_scope", sort_key=b"archive_scope", state=None,
                     storage_revision=0, lease_owner=None, lease_fence=0,
                     lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
                 )
@@ -340,7 +340,7 @@ class SqlStateStorageGroup:
             return
         record = StoredRecord(
             key_digest=key, scope_digest=None, parent_digest=None,
-            kind="archive_scope", sort_key="archive_scope", state=None,
+            kind="archive_scope", sort_key=b"archive_scope", state=None,
             storage_revision=0, lease_owner=None, lease_fence=0,
             lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
         )
@@ -1272,6 +1272,15 @@ class _SqlTransaction:
                    else type_coerce(encoded, JSON))
         return payload[field].as_string()
 
+    def _archive_link(self, column: "ColumnElement", field: str) -> "ColumnElement":
+        from sqlalchemy import LargeBinary, cast, func
+        from sqlalchemy.dialects.mysql import BINARY
+
+        text = self._payload_field(column, field)
+        if self._context.dialect.name == "postgresql":
+            return func.convert_to(text, "UTF8", type_=LargeBinary())
+        return cast(text, BINARY() if self._context.dialect.name == "mysql" else LargeBinary())
+
     def _archive_read_statement(
         self, scope_hex: str, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
     ) -> "Select":
@@ -1288,7 +1297,7 @@ class _SqlTransaction:
             body_keys = tuple(_hex(item.key_digest) for item in requests if item.content_slots & slot)
             if not metadata_keys and not body_keys:
                 continue
-            identity = current.c.sort_key if field is None else self._payload_field(current.c.payload_json, field)
+            identity = current.c.sort_key if field is None else self._archive_link(current.c.payload_json, field)
             if metadata_keys:
                 branches.append(select(literal("archive_sequence").label("kind"), identity.label("identity")).where(
                     current_scope, current.c.key_digest.in_(metadata_keys),
@@ -1303,7 +1312,7 @@ class _SqlTransaction:
                     node.c.kind == "archive_sequence", node.c.sort_key == identity,
                 ))
             branches.append(select(literal("archive_content").label("kind"),
-                                   self._payload_field(node.c.payload_json, "content").label("identity"))
+                                   self._archive_link(node.c.payload_json, "content").label("identity"))
                             .select_from(joined).where(current_scope, current.c.key_digest.in_(body_keys)))
         if content_keys:
             content = table.alias("archive_direct_content")
@@ -1790,6 +1799,8 @@ class _SqlTransaction:
                     ),
                 )
             )
+        elif query.after_sort_key is not None:
+            conditions.append(table.c.sort_key > query.after_sort_key)
         statement = (
             select(table)
             .where(*conditions)
@@ -2453,7 +2464,7 @@ class _SqlTransaction:
             column = table.c[name]
             # MySQL text equality may ignore case or trailing spaces even when
             # the in-memory identity contract distinguishes those values.
-            if self._context.dialect.name == "mysql" and name in ("kind", "sort_key"):
+            if self._context.dialect.name == "mysql" and name == "kind":
                 # SQL compares bytes; Python parameters remain text, not BLOBs.
                 column = type_coerce(cast(column, BINARY), column.type)
             conditions.append(column.is_not_distinct_from(values[name]))
@@ -2513,7 +2524,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             _row_digest_or_none(row["scope_digest"]),
             _row_digest_or_none(row["parent_digest"]),
             _row_string(row["kind"]),
-            _row_string(row["sort_key"]),
+            row["sort_key"],
             _row_optional_string(row["state"]),
             _row_nonnegative_int(row["storage_revision"]),
             _row_optional_string(row["lease_owner"]),
@@ -2595,11 +2606,11 @@ def _operation_from_row(row: Mapping[str, object]) -> StoredOperation:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _sort_key_prefix_upper_bound(prefix: str) -> str | None:
+def _sort_key_prefix_upper_bound(prefix: bytes) -> bytes | None:
     for index in range(len(prefix) - 1, -1, -1):
-        value = ord(prefix[index])
-        if value < 127:
-            return prefix[:index] + chr(value + 1)
+        value = prefix[index]
+        if value < 255:
+            return prefix[:index] + bytes((value + 1,))
     return None
 
 

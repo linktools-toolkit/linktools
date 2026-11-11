@@ -188,7 +188,7 @@ async def test_evaluation_read_reuse_rejects_changed_or_failed_storage(tmp_path,
     ("state", "changed"), ("storage_revision", 19),
     ("lease_owner", "other"), ("lease_fence", 7),
     ("lease_expires_at", NOW + timedelta(hours=1)),
-    ("key_digest", b"k" * 32), ("kind", "other"), ("sort_key", "different"),
+    ("key_digest", b"k" * 32), ("kind", "other"), ("sort_key", b"different"),
 ))
 async def test_evaluation_read_reuse_matches_every_storage_header_field(tmp_path, monkeypatch, field, value):
     state, repository = await _repository(tmp_path)

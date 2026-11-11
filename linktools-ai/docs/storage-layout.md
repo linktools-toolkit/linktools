@@ -128,6 +128,35 @@ Scope is repeated to preserve public shared-store isolation. A generated
 in-memory digest bytes. No universal storage or measured runtime speedup is
 implied.
 
+## State record ordering
+
+`StoredRecord.sort_key`, query prefixes and pagination boundaries are nonempty
+binary values of at most 1152 bytes, including every prefix. Writers and readers
+validate the same bound. Ordinary record order reuses the existing 32-byte
+record key directly. Chronological order uses eight big-endian epoch-microsecond
+bytes followed by that key, totaling 40 bytes. Explicit path, sequence and trace
+orders retain their ASCII semantics as ASCII bytes. No hex or Base64 encoding
+participates in SQL ordering.
+
+State uses `VARBINARY(1152)` on MySQL, `BYTEA` on PostgreSQL and `BLOB` on SQLite.
+Its indexes cover the full sort value, never a text or binary prefix. The widest
+sort index has three columns: `(store_digest, kind, sort_key)`. MySQL's declared
+field budget is 256 + 128 + 1152 = 1536 bytes, below 3072 even allowing 32 bytes
+for variable-length and record overhead. PostgreSQL's maximum actual field
+payload is 64 + 128 + 1152 = 1344 bytes; a conservative 40-byte allowance for
+field headers, alignment and the index tuple remains below its approximately
+2704-byte B-tree entry limit. Scope/parent plus sort indexes are smaller. These
+are size calculations, not measurements on a deployed server.
+
+Binary prefixes use a lexicographic lower bound and their least upper bound;
+an all-`ff` prefix has no finite upper bound. Pagination uses `(sort, record
+key)`, or strictly greater sort when the query omits an after-key. There is no
+fabricated maximum record key. Record cursor transport contains a two-byte
+sort length, raw sort, two-byte key length and raw key, then canonical unpadded
+URL-safe Base64. Current 32-byte keys give at most 1188 framed bytes and 1584
+encoded characters. Portable record JSON transports sort bytes as Base64 and
+returns raw bytes before comparison. The current format version is unchanged.
+
 ## Native Step identities and digest ownership
 
 Native `run_id`, `conversation_id` and `parent_run_id` use the resource ID
@@ -149,7 +178,7 @@ UTF-8 bytes; application validation enforces the tighter byte bound on every
 backend, including SQLite. With `utf8mb4`, a scope `CHAR(64)` plus an ID declares
 768 key bytes, or 769 with the snapshot boolean. These fit InnoDB's 3072-byte
 large-prefix budget, not its legacy 767-byte configuration. Existing Runtime
-indexes already exceed 767 bytes, including `(store_digest, kind, sort_key(128))`.
+indexes already exceed 767 bytes, including `(store_digest, kind, sort_key)`.
 Provision MySQL 5.7 with the applicable large-prefix row format/settings; this
 contract adds no fallback for legacy index settings. The same bounded IDs stay
 well below PostgreSQL's ordinary B-tree entry limit. DDL compilation is distinct

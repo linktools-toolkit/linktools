@@ -264,7 +264,7 @@ def validate_snapshot_domain(
     if domain is PersistenceDomain.TRACE:
         covered_owners = {
             record.parent_digest for record in records
-            if record.kind == "history_association" and record.sort_key == "coverage:event"
+            if record.kind == "history_association" and record.sort_key == b"coverage:event"
         }
         if set(event_counts) != covered_owners:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -272,7 +272,7 @@ def validate_snapshot_domain(
         if record.kind in _TURN_RECORD_KINDS:
             continue
         if record.kind == "history_association":
-            if record.sort_key == "coverage:event":
+            if record.sort_key == b"coverage:event":
                 _validate_history_association_coverage(
                     namespace, tenant_id, domain, record, records_by_key,
                     event_counts.get(record.parent_digest, 0), values,
@@ -513,7 +513,7 @@ def _history_association_records(
             sort_key = (
                 f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{fact.sequence:020d}"
                 if family == "trace" else f"{fact.sequence:020d}"
-            )
+            ).encode("ascii")
             candidate = StoredRecord(
                 key, None, fact.owner_key_digest, "history_association", sort_key,
                 None, 1, None, 0, None, {"sequence": fact.sequence},
@@ -542,7 +542,7 @@ def _validate_history_association_coverage(
     expected = StoredRecord(
         record_key_digest(namespace, tenant_id, domain.value, "history_association",
                           [run.agent_run_id, "coverage", "event"]),
-        None, record.parent_digest, "history_association", "coverage:event",
+        None, record.parent_digest, "history_association", b"coverage:event",
         None, record.storage_revision, None, 0, None, {"sequence": covered},
     )
     if covered != event_count or record.storage_revision < 1 or not _same_physical_identity(record, expected):
@@ -608,7 +608,7 @@ def _expected_record(
     scope: bytes | None = None
     parent: bytes | None = None
     state = record_state(value)
-    sort_key: str | None = None
+    sort_key: bytes | None = None
 
     if isinstance(value, BudgetModelReservation):
         _require_anchor(namespace, tenant_id, domain, records, "budget_scope", value.scope_id)
@@ -772,9 +772,9 @@ def _expected_record(
         )
         if parent not in records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        sort_key = f"b:{value.block_start:020d}"
+        sort_key = f"b:{value.block_start:020d}".encode("ascii")
     elif isinstance(value, ContextProjection):
-        agent_run_id = record.sort_key
+        agent_run_id = cast(str, identity)
         if not agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         identity = agent_run_id
@@ -789,7 +789,7 @@ def _expected_record(
         _require_anchor(namespace, tenant_id, domain, records, anchor_kind, agent_run_id)
         if parent not in records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        sort_key = agent_run_id
+        sort_key = agent_run_id.encode("ascii")
     elif isinstance(value, ModelInteractionRecord):
         value.validate_storage_domain(domain)
         _require_anchor(
@@ -798,7 +798,7 @@ def _expected_record(
         parent = record_key_digest(
             namespace, tenant_id, domain.value, "agent_run", value.agent_run_id
         )
-        sort_key = f"m:{value.model_request_seq:020d}"
+        sort_key = f"m:{value.model_request_seq:020d}".encode("ascii")
         state = value.status
     elif isinstance(value, AgentRunRecord):
         if value.agent_conversation_id is not None:
@@ -824,7 +824,7 @@ def _expected_record(
         path = value.metadata.get("path")
         if not isinstance(path, str) or not path or not path.isascii():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        sort_key = path
+        sort_key = path.encode("ascii")
 
     return project_record(
         namespace=namespace,
@@ -884,7 +884,10 @@ def _record_identity(
     if isinstance(value, AgentRunRecord):
         return value.agent_run_id
     if isinstance(value, ContextProjection):
-        return record.sort_key
+        try:
+            return record.sort_key.decode("ascii")
+        except UnicodeError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     try:
         return canonical_record_identity(kind, value)
     except TypeError as error:
@@ -942,7 +945,7 @@ def _expected_session_turn_commit(
         ),
         None,
         "session_turn_commit",
-        "i:" + key.hex(),
+        key,
         None,
         record.storage_revision,
         None,

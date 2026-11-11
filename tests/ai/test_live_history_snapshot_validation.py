@@ -161,7 +161,7 @@ async def test_snapshot_model_interaction_records_validate_identity_and_sequence
         if corruption == "owner":
             record = replace(record, parent_digest=b"x" * 32)
         elif corruption == "sequence":
-            record = replace(record, sort_key="m:00000000000000000002")
+            record = replace(record, sort_key=b"m:00000000000000000002")
         elif corruption == "state":
             record = replace(record, state="SUCCEEDED")
         elif corruption == "identity":
@@ -204,7 +204,7 @@ async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
         )
         records = list(await archive.state_store.read(lambda tx: tx.scan_records()))
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
-        marker = next(record for record in records if record.sort_key == "coverage:event")
+        marker = next(record for record in records if record.sort_key == b"coverage:event")
         if corruption == "missing-index":
             missing = next(record for record in records
                            if record.kind == "history_association" and record is not marker)

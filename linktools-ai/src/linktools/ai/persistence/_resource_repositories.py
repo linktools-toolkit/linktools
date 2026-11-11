@@ -69,7 +69,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 parent=parent,
                 state=state,
             ),
-            sort_key=path,
+            sort_key=path.encode("ascii"),
         )
 
     async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]:
@@ -167,7 +167,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         records = await self._records(
             "memory",
             scope=self._scope("memory", "memory_scope", memory_scope_digest),
-            sort_key_prefix=prefix or None,
+            sort_key_prefix=prefix.encode("ascii") if prefix else None,
             cursor=cursor,
             limit=limit + 1,
         )

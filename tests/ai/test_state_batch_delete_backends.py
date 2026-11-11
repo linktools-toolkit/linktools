@@ -32,13 +32,13 @@ def _digest(value: str) -> bytes:
 
 def _record(index: int) -> StoredRecord:
     return StoredRecord(
-        _digest(f"record-{index}"), _digest("scope"), None, "probe", f"{index:04d}",
+        _digest(f"record-{index}"), _digest("scope"), None, "probe", (f"{index:04d}").encode("ascii"),
         None, 0, None, 0, None, {"index": index},
     )
 
 
 def _alias(record: StoredRecord) -> StoredAlias:
-    return StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("run", record.sort_key)), record.key_digest)
+    return StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("run", record.sort_key.decode("ascii"))), record.key_digest)
 
 
 def _fact(record: StoredRecord, sequence: int = 1) -> StoredFact:

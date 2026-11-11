@@ -54,6 +54,7 @@ async def test_projected_records_page_completely_and_validate_after_roundtrip(
             "session-z", "session-a", "session-中", "session-0", "session-b",
         ))
         await store.mutate(lambda transaction: transaction.insert_records(records))
+        assert all(record.sort_key == record.key_digest for record in records)
         expected = tuple(sorted(records, key=lambda value: (value.sort_key, value.key_digest)))
         found: list[StoredRecord] = []
         while True:
@@ -74,7 +75,7 @@ async def test_projected_records_page_completely_and_validate_after_roundtrip(
                                  facts=(), operations=())
         with pytest.raises(AIError) as error:
             validate_snapshot_domain(
-                **scope, records=(replace(expected[0], sort_key="wrong"), *expected[1:]),
+                **scope, records=(replace(expected[0], sort_key=b"wrong"), *expected[1:]),
                 aliases=aliases, sequences=sequences, facts=(), operations=(),
             )
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -88,6 +89,8 @@ def test_timestamp_sorting_preserves_chronology_and_stable_ties() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     first, second = _record("first").key_digest, _record("second").key_digest
     same_time = (sortable_timestamp(now, first), sortable_timestamp(now, second))
+    assert len(same_time[0]) == 40
+    assert same_time[0][8:] == first
     assert same_time[0] != same_time[1]
     assert same_time[0] == sortable_timestamp(now, first)
     assert max(same_time) < sortable_timestamp(now + timedelta(microseconds=1), first)

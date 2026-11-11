@@ -56,7 +56,7 @@ async def _assert_rejected_batch(store: StateStore, *, difference: str) -> None:
         winner = replace(winner, data={"number": True})
         candidate = replace(winner, data={"number": 1})
     elif difference == "trailing-space":
-        candidate = replace(winner, sort_key=winner.sort_key + " ")
+        candidate = replace(winner, sort_key=winner.sort_key + b" ")
     else:
         candidate = replace(winner, sort_key=winner.sort_key.upper())
     await store.mutate(lambda tx: tx.insert_immutable_records((winner,)))

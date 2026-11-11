@@ -44,7 +44,7 @@ def test_portable_run_projection_restores_reference_and_rejects_registration_sub
         "projection_sha256": canonical_sha256(data), "metadata": {}, "removed": [], "started_at": None,
     }})
     projected = StoredRecord(record_key_digest("portable", "tenant", "trace", "agent_run", run.run_id),
-        None, None, "agent_run", "run", None, 1, None, 0, None, data)
+        None, None, "agent_run", b'run', None, 1, None, 0, None, data)
     validator = NativeBackupProjections(backup, namespace="portable", tenant_id="tenant")
     physical = validator.validate(projected, reference)
     assert physical.data == reference

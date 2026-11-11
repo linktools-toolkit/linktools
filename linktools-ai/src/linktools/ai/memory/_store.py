@@ -34,6 +34,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, StoredPayload
 from ..persistence.objects import read_runtime_object
+from ..persistence.state import SORT_KEY_MAX_BYTES
 from ..persistence.contracts import MemoryRecord, MemoryRepositories
 
 _logger = environ.get_logger("ai.memory")
@@ -511,6 +512,7 @@ def _normalize_path(path: str) -> str:
     if (
         not isinstance(path, str)
         or not path
+        or len(path) > SORT_KEY_MAX_BYTES
         or path.startswith("/")
         or "\\" in path
         or "\x00" in path
@@ -525,6 +527,8 @@ def _normalize_path(path: str) -> str:
 def _normalize_prefix(prefix: str) -> str:
     if prefix == "":
         return ""
+    if not isinstance(prefix, str) or len(prefix) > SORT_KEY_MAX_BYTES:
+        raise ValueError("memory prefix is invalid")
     _normalize_path(prefix.removesuffix("/"))
     return prefix
 

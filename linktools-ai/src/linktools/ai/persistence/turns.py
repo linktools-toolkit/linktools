@@ -70,7 +70,7 @@ class _TurnRecords:
         return StoredRecord(
             key,
             scope_digest(self.namespace, self.tenant_id, "execution", "turn", "scope", scope),
-            None, kind, key.hex(), state, 0, None, 0, None, dict(data),
+            None, kind, key, state, 0, None, 0, None, dict(data),
         )
 
     def validate(self, record: StoredRecord) -> StoredRecord:

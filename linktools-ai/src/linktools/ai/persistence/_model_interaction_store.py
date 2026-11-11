@@ -345,8 +345,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         return len(fresh) + len(replacements)
 
 
-def _interaction_sort_key(model_request_seq: int) -> str:
-    return f"m:{model_request_seq:020d}"
+def _interaction_sort_key(model_request_seq: int) -> bytes:
+    return f"m:{model_request_seq:020d}".encode("ascii")
 
 
 __all__ = [

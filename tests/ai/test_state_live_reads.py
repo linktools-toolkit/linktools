@@ -23,7 +23,7 @@ def _key(value: str) -> bytes:
 
 def _record(value: str) -> StoredRecord:
     return StoredRecord(
-        _key(value), None, None, "probe", value, "pending", 0,
+        _key(value), None, None, "probe", (value).encode("ascii"), "pending", 0,
         None, 0, None, {"value": 0},
     )
 

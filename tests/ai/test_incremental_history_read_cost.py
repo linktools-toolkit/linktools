@@ -138,7 +138,7 @@ async def test_exact_memory_fact_lookup_does_not_enumerate_other_facts(
     owner, stream = b"o" * 32, b"s" * 32
 
     async def seed(transaction) -> None:
-        await transaction.insert_record(StoredRecord(owner, None, None, "owner", "owner", None, 0, None, 0, None, {}))
+        await transaction.insert_record(StoredRecord(owner, None, None, "owner", b'owner', None, 0, None, 0, None, {}))
         await transaction.insert_facts(tuple(
             StoredFact(stream, index, owner, "event", None, None, {"index": index})
             for index in (1, 2, 3, 5)

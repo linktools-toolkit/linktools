@@ -67,7 +67,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     assert "partition_digest" not in records.c
     assert (
         records.c.sort_key.type.compile(dialect=dialect)
-        == "LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+        == "VARBINARY(1152)"
     )
 
     mysql_indexes = {
@@ -81,7 +81,8 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         "ix_parent_digest_sort_key",
     ):
         ddl = str(CreateIndex(mysql_indexes[name]).compile(dialect=dialect))
-        assert "sort_key(128)" in ddl
+        assert "sort_key)" in ddl
+        assert "sort_key(" not in ddl
 
     assert not mysql_indexes["ix_scope_digest_subject_id"].unique
     migration = (
@@ -91,15 +92,15 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         / "init_schema.sql"
     ).read_text(encoding="utf-8")
     assert (
-        "sort_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL"
+        "sort_key VARBINARY(1152) NOT NULL"
         in migration
     )
     assert "sort_key VARCHAR(128)" not in migration
     assert "partition_digest" not in migration
     for fragment in (
-        "ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128))",
-        "ix_scope_digest_sort_key (scope_digest, sort_key(128))",
-        "ix_parent_digest_sort_key (parent_digest, sort_key(128))",
+        "ix_store_digest_kind_sort_key (store_digest, kind, sort_key)",
+        "ix_scope_digest_sort_key (scope_digest, sort_key)",
+        "ix_parent_digest_sort_key (parent_digest, sort_key)",
         "ix_scope_digest_subject_id (scope_digest, subject_id)",
     ):
         assert fragment in migration

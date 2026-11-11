@@ -3,7 +3,6 @@
 """Shared backend-neutral repository primitives."""
 
 import base64
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -17,7 +16,6 @@ from ..core import (
     OperationStatus,
     ResourceKind,
     ResourceRef,
-    canonical_json_bytes,
     operation_cas_immutable_matches,
     operation_replay_matches,
 )
@@ -53,6 +51,8 @@ from ._evaluation_records import (
 from ._plan import PersistenceDomain
 from .state import (
     OperationQuery,
+    SORT_KEY_MAX_BYTES,
+    validate_sort_key,
     RecordQuery,
     StateStore,
     StateTransaction,
@@ -202,7 +202,7 @@ class _RepositoryBase:
         scope: bytes | None = None,
         parent: bytes | None = None,
         states: frozenset[str] | None = None,
-        sort_key_prefix: str | None = None,
+        sort_key_prefix: bytes | None = None,
         cursor: str | None = None,
         limit: int | None = None,
     ) -> tuple[StoredRecord, ...]:
@@ -259,7 +259,7 @@ class _RepositoryBase:
         scope: bytes | None = None,
         parent: bytes | None = None,
         states: frozenset[str] | None = None,
-        sort_key_prefix: str | None = None,
+        sort_key_prefix: bytes | None = None,
         cursor: str | None = None,
     ) -> bool:
         after_sort_key, after_key_digest = _decode_record_cursor(cursor)
@@ -699,7 +699,7 @@ def project_record(
     scope: bytes | None = None,
     parent: bytes | None = None,
     state: str | None = None,
-    sort_key: str | None = None,
+    sort_key: bytes | None = None,
     storage_revision: int = 0,
     encoded: JsonValue | None = None,
 ) -> StoredRecord:
@@ -729,7 +729,7 @@ def project_record(
         scope,
         parent,
         kind,
-        "i:" + key.hex() if sort_key is None else sort_key,
+        key if sort_key is None else sort_key,
         state,
         storage_revision,
         lease_owner,
@@ -1182,31 +1182,27 @@ def _operation_matches(
 
 
 def _record_cursor(record: StoredRecord) -> str:
-    payload = {
-        "sort_key": record.sort_key,
-        "key_digest": record.key_digest.hex(),
-    }
-    return base64.urlsafe_b64encode(canonical_json_bytes(payload)).decode("ascii")
+    sort_key = validate_sort_key(record.sort_key)
+    payload = (len(sort_key).to_bytes(2, "big") + sort_key
+               + len(record.key_digest).to_bytes(2, "big") + record.key_digest)
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
 
 
-def _decode_record_cursor(cursor: str | None) -> tuple[str | None, bytes | None]:
+def _decode_record_cursor(cursor: str | None) -> tuple[bytes | None, bytes | None]:
     if cursor is None:
         return None, None
     try:
-        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
-        value = json.loads(raw.decode("utf-8"))
-        sort_key = str(value["sort_key"])
-        key_digest = bytes.fromhex(str(value["key_digest"]))
-        if not sort_key or len(key_digest) != 32:
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= ((4 + SORT_KEY_MAX_BYTES + 32 + 2) // 3) * 4:
+            raise ValueError("cursor length")
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        size = int.from_bytes(raw[:2], "big")
+        key_size = int.from_bytes(raw[2 + size:4 + size], "big")
+        if key_size != 32 or len(raw) != 4 + size + key_size:
             raise ValueError("cursor identity")
-        return sort_key, key_digest
-    except (
-        TypeError,
-        ValueError,
-        KeyError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as error:
+        if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != cursor:
+            raise ValueError("cursor encoding")
+        return validate_sort_key(raw[2:2 + size]), raw[4 + size:]
+    except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 

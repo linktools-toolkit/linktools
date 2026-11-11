@@ -115,7 +115,7 @@ def test_manifest_identity_includes_native_closure(component: str) -> None:
 def test_manifest_identity_includes_archive_records() -> None:
     original = _manifest("1" * 32)
     content = ContentRecord("bytes", hashlib.sha256(b"x").hexdigest(), 1, "raw", body=b"x")
-    record = StoredRecord(b"a" * 32, b"b" * 32, None, "archive_content", content.identity,
+    record = StoredRecord(b"a" * 32, b"b" * 32, None, "archive_content", (content.identity).encode("ascii"),
                           None, 0, None, 0, None, content.to_json(), payload_bytes=content.body)
     original["archives"] = [{"scope_id": "1" * 32, "domain": "trace", "records": [encode_record(record)]}]
     changed = deepcopy(original)
@@ -130,7 +130,7 @@ async def test_capture_stops_on_shared_entry_budget_before_caching_more_sources(
 
         async def scan_records_page(self, *, after, limit):
             start = 0 if after is None else int.from_bytes(after.key_digest, "big") + 1
-            result = tuple(StoredRecord(index.to_bytes(32, "big"), None, None, "fixture", str(index),
+            result = tuple(StoredRecord(index.to_bytes(32, "big"), None, None, "fixture", (str(index)).encode("ascii"),
                                         None, 0, None, 0, None, {}) for index in range(start, min(start + limit, 1000)))
             self.consumed += len(result)
             return result
@@ -222,7 +222,7 @@ def test_native_representation_normalization_keeps_shared_archive_object_depende
     source = _manifest("1" * 32)
     content = ContentRecord.from_native_row(decode_native_message_row(
         source["native_messages"][0]["messages"][0]))
-    record = StoredRecord(b"a" * 32, b"b" * 32, None, "archive_content", content.identity,
+    record = StoredRecord(b"a" * 32, b"b" * 32, None, "archive_content", (content.identity).encode("ascii"),
                           None, 0, None, 0, None, content.to_json(), payload_bytes=content.body)
     source["archives"] = [{"scope_id": "1" * 32, "domain": "trace", "records": [encode_record(record)]}]
     changed = deepcopy(source)

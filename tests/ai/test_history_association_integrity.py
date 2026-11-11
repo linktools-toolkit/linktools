@@ -25,7 +25,7 @@ async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> 
         ))
         await transaction.delete_records(tuple(
             record.key_digest for record in records
-            if record.sort_key == "coverage:event" or record.data["sequence"] != keep_sequence
+            if record.sort_key == b"coverage:event" or record.data["sequence"] != keep_sequence
         ))
     await archive.state_store.mutate(mutate)
 
@@ -272,7 +272,7 @@ async def test_trace_duplicate_sequence_locators_keep_individual_validation(
             assert record is not None
             await transaction.insert_record(replace(
                 record, key_digest=b"\xff" * 32,
-                sort_key=record.sort_key + "x",
+                sort_key=record.sort_key + b"x",
             ))
 
         await archive.state_store.mutate(duplicate)
@@ -341,7 +341,7 @@ async def test_association_source_batches_reject_corruption_only_inside_cutoff(
                 record = await transaction.get_record(key)
                 assert record is not None
                 await transaction.delete_record(key)
-                await transaction.insert_record(replace(record, data={"sequence": 33}, sort_key="bad"))
+                await transaction.insert_record(replace(record, data={"sequence": 33}, sort_key=b"bad"))
                 return
             facts = await transaction.list_facts(FactQuery(stream))
             owner = await transaction.get_record(archive._agent_run_key(run_id))

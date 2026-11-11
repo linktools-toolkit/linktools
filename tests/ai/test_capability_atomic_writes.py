@@ -200,7 +200,7 @@ class _Capability(AbstractCapability[AgentContext[None]]):
         owner = await tx.get_record(stream)
         if owner is None:
             await tx.insert_record(StoredRecord(
-                stream, stream, None, self.id, str(payload["run"]), None, 0, None, 0, None, {},
+                stream, stream, None, self.id, (str(payload["run"])).encode("ascii"), None, 0, None, 0, None, {},
             ))
         else:
             assert await tx.guard_record(stream, expected_storage_revision=owner.storage_revision) is not None

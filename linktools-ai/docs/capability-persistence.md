@@ -45,7 +45,7 @@ class RunNote(AbstractCapability[AgentContext[None]]):
         identity = sha256(canonical_json_bytes(dict(payload))).digest()
         await transaction.insert_record(StoredRecord(
             key_digest=identity, scope_digest=identity, parent_digest=None,
-            kind="run-note", sort_key=identity.hex(), state=None,
+            kind="run-note", sort_key=identity, state=None,
             storage_revision=0, lease_owner=None, lease_fence=0,
             lease_expires_at=None, data=payload,
         ))

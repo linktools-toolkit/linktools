@@ -3465,7 +3465,7 @@ class StateStepArchive(AgentRunStore):
                 record = StoredRecord(
                     key, None, self._agent_run_key(agent_run_id), "history_association",
                     (f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
-                     if family == "trace" else f"{sequence:020d}"),
+                     if family == "trace" else f"{sequence:020d}").encode("ascii"),
                     None, 1, None, 0, None, {"sequence": sequence},
                 )
                 previous = derived.get(key)
@@ -3479,7 +3479,7 @@ class StateStepArchive(AgentRunStore):
             return 0
         sequence = record.data.get("sequence")
         if (record.key_digest != self._history_association_key(agent_run_id, "coverage", "event")
-                or record.kind != "history_association" or record.sort_key != "coverage:event"
+                or record.kind != "history_association" or record.sort_key != b"coverage:event"
                 or record.parent_digest != self._agent_run_key(agent_run_id)
                 or set(record.data) != {"sequence"} or isinstance(sequence, bool)
                 or not isinstance(sequence, int) or sequence < 1):
@@ -3511,7 +3511,7 @@ class StateStepArchive(AgentRunStore):
         if coverage_record is None:
             inserts.append(StoredRecord(
                 coverage_key, None, self._agent_run_key(run.agent_run_id), "history_association",
-                "coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
+                b"coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
             ))
         elif not await transaction.replace_record(
             replace(coverage_record, storage_revision=coverage_record.storage_revision + 1,
@@ -3643,7 +3643,7 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.CURSOR_INVALID)
         after_sort_key = (
             None if after_timestamp is None else
-            f"trace:{after_timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{after_sequence:020d}"
+            f"trace:{after_timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{after_sequence:020d}".encode("ascii")
         )
 
         if event_high_water == 0:
@@ -3667,10 +3667,10 @@ class StateStepArchive(AgentRunStore):
             events = await self._captured_history_events(transaction, agent_run_id, event_high_water)
             expected = self._history_association_records(agent_run_id, events)
             records = await transaction.get_records(tuple(
-                key for key, record in expected.items() if record.sort_key.startswith("trace:")
+                key for key, record in expected.items() if record.sort_key.startswith(b"trace:")
             ))
             for key, record in expected.items():
-                if record.sort_key.startswith("trace:") and records.get(key) != record:
+                if record.sort_key.startswith(b"trace:") and records.get(key) != record:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result: list[tuple[int, StepEvent]] = []
             for sequence, event in events:
@@ -3690,8 +3690,7 @@ class StateStepArchive(AgentRunStore):
                 return await scan_captured(transaction)
             records = await transaction.list_records(RecordQuery(
                 parent_digest=self._agent_run_key(agent_run_id), kind="history_association",
-                sort_key_prefix="trace:", after_sort_key=after_sort_key,
-                after_key_digest=None if after_sort_key is None else bytes([255]) * 32,
+                sort_key_prefix=b"trace:", after_sort_key=after_sort_key,
                 limit=limit,
             ))
             sequences: list[int] = []
@@ -3722,7 +3721,7 @@ class StateStepArchive(AgentRunStore):
                     record, fact = records[index], selected[sequence]
                     event = _decode_step(fact.data)
                     if (not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id
-                            or record.sort_key != f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
+                            or record.sort_key != f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}".encode("ascii")
                             or not matches(sequence, event)):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     result.append((sequence, event))

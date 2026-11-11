@@ -53,7 +53,7 @@ async def test_revision_guard_reuses_current_revision_and_source_payload(
 @pytest.mark.parametrize("backend", ("memory", "sql"))
 @pytest.mark.parametrize("field,value", (("scope_digest", None), ("parent_digest", _digest("parent")),
                                         ("kind", "other"), ("kind", "PROBE"), ("kind", "probe "),
-                                        ("sort_key", "other"), ("sort_key", "0001 ")))
+                                        ("sort_key", b"other"), ("sort_key", b"0001 ")))
 async def test_conditional_mutation_preserves_every_immutable_identity(
     backend: str, field: str, value: object, tmp_path: Path,
 ) -> None:
@@ -166,7 +166,7 @@ async def test_mysql_identity_conditions_compare_bytes_and_bind_text(
 
     compiler_dialect = dialect(dbapi=dialect.import_dbapi())
     values = {"scope_digest": None, "parent_digest": None, "subject_id": None,
-              "kind": "probe 測🙂 ", "sort_key": "0001 測🙂 "}
+              "kind": "probe 測🙂 ", "sort_key": b"0001 \x00\xff "}
     async with _database(tmp_path / "compile.db") as (_, store, _):
         async def inspect(tx: StateTransaction) -> None:
             with monkeypatch.context() as patch:
@@ -177,7 +177,7 @@ async def test_mysql_identity_conditions_compare_bytes_and_bind_text(
                 compiled = [condition.compile(dialect=compiler_dialect) for condition in conditions]
                 sql = " AND ".join(str(condition) for condition in compiled)
                 assert "CAST(ai_state_records.kind AS BINARY) <=>" in sql
-                assert "CAST(ai_state_records.sort_key AS BINARY) <=>" in sql
+                assert "ai_state_records.sort_key <=>" in sql
                 processed = []
                 for condition in compiled:
                     parameters = condition.construct_params(values if bound else None)
