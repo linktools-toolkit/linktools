@@ -5,8 +5,8 @@
 from dataclasses import replace
 
 from linktools.ai.core import ImmutableJsonMapping
-from linktools.ai.persistence.codec import decode_operation, encode_operation
-from linktools.ai.persistence.state import OperationScanCursor, StoredOperation, operation_key
+from linktools.ai.persistence.codec import decode_operation, decode_record, encode_operation, encode_record
+from linktools.ai.persistence.state import OperationScanCursor, StoredOperation, StoredRecord, operation_key
 
 
 class _ReadableMapping(ImmutableJsonMapping):
@@ -43,3 +43,19 @@ def test_operation_scan_cursor_hides_identity_without_changing_comparison() -> N
     assert cursor.key == key
     assert cursor == OperationScanCursor(key)
     assert cursor != OperationScanCursor(operation_key("different"))
+
+
+def test_stored_record_hides_operation_payload_without_changing_wire() -> None:
+    raw_key = "sensitive-admission-key-MUST-NOT-APPEAR-IN-REPR"
+    data = _ReadableMapping({"operation_id": raw_key})
+    assert raw_key in repr(data)
+    record = StoredRecord(
+        b"r" * 32, None, None, "task_admission", "graph", None, 0, None, 0, None, data,
+    )
+
+    assert raw_key not in repr(record)
+    assert record.data["operation_id"] == raw_key
+    wire = encode_record(record)
+    assert wire["data"] == {"operation_id": raw_key}
+    assert decode_record(wire) == record
+    assert replace(record, data={"operation_id": "different"}) != record

@@ -84,6 +84,7 @@ from ._snapshot_validation import (
     validate_snapshot_references,
 )
 from .codec import (
+    decode_alias,
     _decode_enveloped_domain,
     iter_runtime_object_dependencies,
     decode_fact,
@@ -733,7 +734,7 @@ async def _export_snapshot(
             raw_domain["aliases"].append(
                 accept(
                     {
-                        "alias_digest": value.alias_digest.hex(),
+                        "alias_key": value.alias_key.hex(),
                         "record_key_digest": value.record_key_digest.hex(),
                     }
                 )
@@ -1778,19 +1779,19 @@ def _decode_snapshot_aliases(value: object) -> tuple[StoredAlias, ...]:
     seen: set[bytes] = set()
     for raw in value:
         if not isinstance(raw, Mapping) or set(raw) != {
-            "alias_digest",
+            "alias_key",
             "record_key_digest",
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        alias = StoredAlias(
-            _decode_snapshot_digest(raw["alias_digest"]),
-            _decode_snapshot_digest(raw["record_key_digest"]),
-        )
-        if alias.alias_digest in seen:
+        alias = decode_alias({
+            "alias": raw["alias_key"],
+            "record": raw["record_key_digest"],
+        })
+        if alias.alias_key in seen:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        seen.add(alias.alias_digest)
+        seen.add(alias.alias_key)
         aliases.append(alias)
-    return tuple(sorted(aliases, key=lambda item: item.alias_digest))
+    return tuple(sorted(aliases, key=lambda item: item.alias_key))
 
 
 def _decode_snapshot_sequences(value: object) -> Mapping[bytes, int]:

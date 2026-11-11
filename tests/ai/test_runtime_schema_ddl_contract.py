@@ -160,8 +160,8 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_created_at",
         },
         "ai_state_aliases": {
-            "uk_store_digest_alias_digest",
-            "ix_record_key_digest",
+            "uk_store_digest_alias_key",
+            "ix_store_digest_record_key_digest",
             "ix_updated_at",
             "ix_created_at",
         },
@@ -192,7 +192,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_scope_digest_state_sort_key",
             "ix_store_digest_kind_key_digest",
         },
-        "ai_state_aliases": {"uk_alias_digest", "ix_store_digest_alias_digest"},
+        "ai_state_aliases": {"uk_alias_key", "ix_store_digest_alias_key"},
         "ai_state_facts": {
             "uk_stream_digest_sequence",
             "ix_store_digest_stream_digest_sequence",
@@ -227,7 +227,7 @@ def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None
     ).read_text(encoding="utf-8")
 
     for fragment in (
-        "KEY ix_store_digest_alias_digest ",
+        "KEY ix_store_digest_alias_key ",
         "KEY ix_store_digest_stream_digest_sequence ",
         "KEY ix_store_digest_key_digest ",
     ):
@@ -327,3 +327,19 @@ def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(diale
     assert any(index.unique and tuple(column.name for column in index.columns) == ("store_digest", "operation_key")
                for index in table.indexes)
     assert all(len(index.columns) <= 3 for index in table.indexes)
+
+
+def test_runtime_alias_schema_uses_partitioned_binary_indexes() -> None:
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CHECKPOINT})).tables["ai_state_aliases"]
+    assert table.c.alias_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(512)"
+    assert table.c.alias_key.type.compile(dialect=postgresql.dialect()) == "BYTEA"
+    assert table.c.alias_key.type.compile(dialect=sqlite.dialect()) == "BLOB"
+    columns = {tuple(column.name for column in index.columns): index.unique for index in table.indexes}
+    assert columns[("store_digest", "alias_key")]
+    assert not columns[("store_digest", "record_key_digest")]
+    assert all(len(index.columns) <= 3 for index in table.indexes)
+    # CHAR(64) utf8mb4 contributes up to 256 index bytes; the alias is binary.
+    assert table.c.store_digest.type.length * 4 + table.c.alias_key.type.length == 768
+    assert table.c.store_digest.type.length + table.c.alias_key.type.length == 576

@@ -214,6 +214,7 @@ from ._step_contracts import (
     StepEvent,
 )
 from .state import (
+    ALIAS_KEY_MAX_BYTES,
     StoredAlias,
     StoredFact,
     StoredOperation,
@@ -1433,7 +1434,7 @@ def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
 
 def encode_alias(alias: StoredAlias) -> dict[str, JsonValue]:
     return {
-        "alias": alias.alias_digest.hex(),
+        "alias": alias.alias_key.hex(),
         "record": alias.record_key_digest.hex(),
     }
 
@@ -1444,7 +1445,7 @@ def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
     _require_required_keys(value, frozenset({"alias", "record"}))
     try:
         return StoredAlias(
-            _digest_wire(_string(value, "alias")),
+            _alias_key_wire(_string(value, "alias")),
             _digest_wire(_string(value, "record")),
         )
     except (TypeError, ValueError, KeyError) as error:
@@ -2714,6 +2715,15 @@ def _bool(value: Mapping[str, object], key: str) -> bool:
     result = value[key]
     if not isinstance(result, bool):
         raise ValueError(f"{key} must be a boolean")  # noqa: TRY004
+    return result
+
+
+def _alias_key_wire(value: str) -> bytes:
+    if not 0 < len(value) <= 2 * ALIAS_KEY_MAX_BYTES:
+        raise ValueError("alias key exceeds its byte limit")
+    result = bytes.fromhex(value)
+    if result.hex() != value:
+        raise ValueError("alias key must be canonical lowercase hex")
     return result
 
 

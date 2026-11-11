@@ -27,6 +27,7 @@ from linktools.ai.persistence.codec import (
     decode_fact,
     decode_operation,
     decode_record,
+    encode_alias,
     encode_domain,
     encode_operation,
     encode_record,
@@ -35,6 +36,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
+from linktools.ai.persistence.state import ALIAS_KEY_MAX_BYTES, StoredAlias, alias_key
 from linktools.ai.task import TaskBindingContract
 from linktools.ai.steps import NativeStepSource
 from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
@@ -455,3 +457,37 @@ def test_operation_primitives_reject_out_of_contract_addresses(key: object) -> N
         StoredOperation(key, b"s" * 32, 1, "pending", False, {})
     with pytest.raises(ValueError):
         OperationScanCursor(key)
+
+
+def test_alias_tuple_is_injective_and_bounds_encoded_bytes() -> None:
+    assert alias_key("tool_call", ("a:b", "c")) != alias_key("tool_call", ("a", "b:c"))
+    assert alias_key("a", ("b", "c")) != alias_key("a", ("bc",))
+    assert len(alias_key("tool_call", ("r" * 128, "界" * 42 + "ab"))) == 271
+    assert len(alias_key("r", ("界" * 169,))) == ALIAS_KEY_MAX_BYTES
+    with pytest.raises(ValueError):
+        alias_key("r", ("界" * 169 + "a",))
+    with pytest.raises(ValueError):
+        alias_key("r", ("x" * 65536,))
+
+
+@pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * ALIAS_KEY_MAX_BYTES,
+                                  alias_key("tool_call", ("é", "e\u0301"))))
+def test_alias_binary_address_roundtrips_without_repr_disclosure(key: bytes) -> None:
+    alias = StoredAlias(key, b"r" * 32)
+    wire = encode_alias(alias)
+    assert wire["alias"] == key.hex()
+    assert decode_alias(wire) == alias
+    assert "alias_key=" not in repr(alias)
+
+
+@pytest.mark.parametrize("wire", ("", "AB", "aa ", "a", "gg", "aa" * (ALIAS_KEY_MAX_BYTES + 1), 1))
+def test_alias_wire_rejects_noncanonical_or_oversized_addresses(wire: object) -> None:
+    with pytest.raises(AIError) as rejected:
+        decode_alias({"alias": wire, "record": "77" * 32})
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("key", (b"", b"x" * (ALIAS_KEY_MAX_BYTES + 1), bytearray(b"x"), "x"))
+def test_alias_physical_address_rejects_invalid_bounds_and_types(key: object) -> None:
+    with pytest.raises(ValueError):
+        StoredAlias(key, b"r" * 32)

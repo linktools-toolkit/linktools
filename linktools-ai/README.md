@@ -1848,6 +1848,19 @@ receipts, execution history, and the raw transcript. Memory content continues to
 persist through `MemoryRepositories` and `ObjectStore`. Compaction only rewrites the
 request context projection; it never rewrites the raw transcript.
 
+State aliases are store-local binary addresses. The `tool_call` alias contains
+its relation, agent-run ID and tool-call ID, each encoded as a two-byte big-endian
+UTF-8 byte length followed by the exact UTF-8 bytes. Namespace, tenant and domain
+belong to the store partition, not to a second alias identity. Tool run and call
+IDs each retain the 128-byte resource-ID limit; their compound alias can reach
+271 bytes. Generic State alias addresses allow 1–512 bytes. SQL stores the alias
+as binary data and indexes both uniqueness and target cleanup within its store.
+Snapshot and codec transport uses canonical lowercase hex without changing the
+binary address. An example with a 66-byte run ID and 29-byte call ID uses 110
+binary bytes, more than the previous 64-byte SQL hex digest. This representation
+removes alias JSON serialization and SHA-256 hashing, but does not imply a storage or speed
+improvement.
+
 ### Workspace relocation
 
 Workspace has no independent persistent identity. `Workspace.root`, Runtime storage paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Persistence.open()`.

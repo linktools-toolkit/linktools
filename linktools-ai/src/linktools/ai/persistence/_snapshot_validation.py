@@ -72,7 +72,7 @@ from .state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    alias_digest,
+    alias_key,
     operation_key,
     parent_digest,
     record_key_digest,
@@ -206,12 +206,7 @@ def canonical_snapshot_indexes(
     validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
     _records_by_key, values = _decode_snapshot_records(domain, records)
     _validate_budget_projections(values)
-    aliases = _canonical_aliases(
-        namespace,
-        tenant_id,
-        domain,
-        values,
-    )
+    aliases = _canonical_aliases(domain, values)
     sequences = _canonical_sequences(
         namespace,
         tenant_id,
@@ -300,12 +295,7 @@ def validate_snapshot_domain(
         if not _same_physical_identity(record, expected):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    expected_aliases = _canonical_aliases(
-        namespace,
-        tenant_id,
-        domain,
-        values,
-    )
+    expected_aliases = _canonical_aliases(domain, values)
     if aliases != expected_aliases:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -418,8 +408,6 @@ def _decode_snapshot_records(
 
 
 def _canonical_aliases(
-    namespace: str,
-    tenant_id: str,
     domain: PersistenceDomain,
     values: Mapping[bytes, object],
 ) -> tuple[StoredAlias, ...]:
@@ -429,17 +417,14 @@ def _canonical_aliases(
     for record_key, value in values.items():
         if not isinstance(value, ToolOperationRecord):
             continue
-        digest = alias_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            "tool_call",
-            [value.agent_run_id, value.tool_call_id],
-        )
-        current = aliases.get(digest)
+        try:
+            key = alias_key("tool_call", (value.agent_run_id, value.tool_call_id))
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        current = aliases.get(key)
         if current is not None and current != record_key:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        aliases[digest] = record_key
+        aliases[key] = record_key
     return tuple(
         StoredAlias(alias, aliases[alias])
         for alias in sorted(aliases)

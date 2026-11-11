@@ -4,6 +4,7 @@
 
 import hashlib
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -50,7 +51,7 @@ from linktools.ai.persistence.state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    alias_digest,
+    alias_key,
     operation_key,
     scope_digest,
     stream_digest,
@@ -517,15 +518,28 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         operations=(),
     )
 
-    expected_alias = alias_digest(
-        "runtime",
-        "tenant",
-        PersistenceDomain.CHECKPOINT.value,
+    expected_alias = alias_key(
         "tool_call",
         [operation.agent_run_id, operation.tool_call_id],
     )
     assert aliases == (StoredAlias(expected_alias, record.key_digest),)
     assert sequences == {}
+
+    for field in ("agent_run_id", "tool_call_id"):
+        data = dict(record.data)
+        envelope_value = dict(data["value"])
+        payload = dict(envelope_value["payload"])
+        fields = dict(payload["fields"])
+        fields[field] = "é" * 65
+        payload["fields"] = fields
+        envelope_value["payload"] = payload
+        data["value"] = envelope_value
+        with pytest.raises(AIError) as rejected:
+            canonical_snapshot_indexes(
+                namespace="runtime", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
+                records=(replace(record, data=data),), facts=(), operations=(),
+            )
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
     validate_snapshot_domain(
         namespace="runtime",
@@ -704,3 +718,22 @@ def test_snapshot_object_refs_reject_malformed_known_fields(codec, change) -> No
     with pytest.raises(AIError) as raised:
         codec._object_ref_from_payload(wire)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("raw", ({"alias_key": "AA", "record_key_digest": "77" * 32},
+                                {"alias_key": "aa" * 513, "record_key_digest": "77" * 32},
+                                {"alias_key": "aa", "record_key_digest": "77" * 31},
+                                {"alias_key": "aa"}))
+def test_snapshot_aliases_reject_malformed_binary_transport(raw: object) -> None:
+    with pytest.raises(AIError) as rejected:
+        runtime_storage_snapshot_module._decode_snapshot_aliases([raw])
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_snapshot_alias_binary_transport_roundtrips() -> None:
+    key = alias_key("tool_call", ("é", "e\u0301"))
+    raw = {"alias_key": key.hex(), "record_key_digest": "77" * 32}
+    assert runtime_storage_snapshot_module._decode_snapshot_aliases([raw]) == (StoredAlias(key, b"w" * 32),)
+    with pytest.raises(AIError) as rejected:
+        runtime_storage_snapshot_module._decode_snapshot_aliases([raw, raw])
+    assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

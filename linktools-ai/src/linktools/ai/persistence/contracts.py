@@ -1038,10 +1038,12 @@ class ToolOperationRecord:
             raise ValueError("tool operation status is invalid")
         try:
             validate_resource_id(self.execution_id)
+            validate_resource_id(self.agent_run_id)
+            validate_resource_id(self.tool_call_id)
             if self.owner is not None:
                 validate_lease_owner(self.owner)
         except AIError as error:
-            raise ValueError("tool operation lease identity is invalid") from error
+            raise ValueError("tool operation identity or lease owner is invalid") from error
 
     def matches_admission(self, request: ToolOperationAdmission) -> bool:
         """Match a call while preserving the facts and result already admitted."""
@@ -1713,8 +1715,12 @@ class ToolOperationAdmission:
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
         try:
             validate_resource_id(self.execution_id)
+            validate_resource_id(self.agent_run_id)
+            validate_resource_id(self.tool_call_id)
+            if self.recovery_agent_run_id is not None:
+                validate_resource_id(self.recovery_agent_run_id)
         except AIError as error:
-            raise ValueError("tool operation execution identifier is invalid") from error
+            raise ValueError("tool operation identity is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)

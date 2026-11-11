@@ -22,6 +22,7 @@ from .state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
+    validate_alias_key,
     validate_operation_replacement,
     validate_record_identity,
     validate_record_replacement,
@@ -381,7 +382,7 @@ class _MemoryTransaction:
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
         values = {
             alias: self.aliases[alias]
-            for alias in dict.fromkeys(aliases)
+            for alias in dict.fromkeys(validate_alias_key(alias) for alias in aliases)
             if alias in self.aliases
         }
         for value in values.values():
@@ -402,6 +403,8 @@ class _MemoryTransaction:
         limit: int,
     ) -> tuple[StoredAlias, ...]:
         _require_scan_limit(limit)
+        if after is not None:
+            validate_alias_key(after)
         values = [
             StoredAlias(alias, record_key)
             for alias, record_key in sorted(self.aliases.items())
@@ -413,13 +416,13 @@ class _MemoryTransaction:
         await self.insert_aliases((alias,))
 
     async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
-        for alias in sorted(aliases, key=lambda value: value.alias_digest):
-            current = self.aliases.get(alias.alias_digest)
+        for alias in sorted(aliases, key=lambda value: value.alias_key):
+            current = self.aliases.get(alias.alias_key)
             if current is not None and current != alias.record_key_digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if alias.record_key_digest not in self.guarded_record_keys:
                 raise RuntimeError("alias owner must be guarded in the current transaction")
-            self.aliases[alias.alias_digest] = alias.record_key_digest
+            self.aliases[alias.alias_key] = alias.record_key_digest
 
     async def get_sequence(self, key: bytes) -> int:
         return self.sequences.get(key, 0)

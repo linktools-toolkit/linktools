@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 
+ALIAS_KEY_MAX_BYTES = 512
 OPERATION_KEY_MAX_BYTES = 257
 
 
@@ -337,7 +338,7 @@ class StoredRecord:
     lease_owner: str | None
     lease_fence: int
     lease_expires_at: datetime | None
-    data: Mapping[str, JsonValue]
+    data: Mapping[str, JsonValue] = field(repr=False)
     subject_id: str | None = None
     payload_bytes: bytes | None = None
 
@@ -373,11 +374,11 @@ class StoredRecord:
 
 @dataclass(frozen=True, slots=True)
 class StoredAlias:
-    alias_digest: bytes
+    alias_key: bytes = field(repr=False)
     record_key_digest: bytes
 
     def __post_init__(self) -> None:
-        _require_digest(self.alias_digest, "alias_digest")
+        validate_alias_key(self.alias_key)
         _require_digest(self.record_key_digest, "record_key_digest")
 
 
@@ -1286,14 +1287,30 @@ def parent_digest(
     return _digest(["parent", namespace, tenant_id, runtime_domain, kind, relation, identity])
 
 
-def alias_digest(
-    namespace: str,
-    tenant_id: str,
-    runtime_domain: str,
-    relation: str,
-    identity: JsonValue,
-) -> bytes:
-    return _digest(["alias", namespace, tenant_id, runtime_domain, relation, identity])
+def alias_key(relation: str, identity: Sequence[str]) -> bytes:
+    """Encode a store-local relation tuple without normalizing its text."""
+    if not isinstance(relation, str) or not relation:
+        raise ValueError("alias relation must be a non-empty string")
+    if not isinstance(identity, Sequence) or isinstance(identity, (str, bytes)):
+        raise TypeError("alias identity must be a sequence of strings")
+    components: list[bytes] = []
+    size = 0
+    for value in (relation, *identity):
+        if not isinstance(value, str):
+            raise TypeError("alias components must be strings")
+        encoded = value.encode("utf-8")
+        size += 2 + len(encoded)
+        if size > ALIAS_KEY_MAX_BYTES:
+            raise ValueError("alias key exceeds its byte limit")
+        components.append(len(encoded).to_bytes(2, "big") + encoded)
+    return b"".join(components)
+
+
+def validate_alias_key(value: bytes) -> bytes:
+    """Validate the bounded physical alias address, including custom keys."""
+    if type(value) is not bytes or not 0 < len(value) <= ALIAS_KEY_MAX_BYTES:
+        raise ValueError("alias key must contain 1 to 512 bytes")
+    return value
 
 
 def stream_digest(
@@ -1387,4 +1404,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

@@ -30,12 +30,12 @@ CREATE TABLE ai_state_records (
 CREATE TABLE ai_state_aliases (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
-    alias_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of a secondary unique runtime lookup key.',
+    alias_key VARBINARY(512) NOT NULL COMMENT 'Store-local binary secondary lookup address with a maximum of 512 bytes.',
     record_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record resolved by this alias.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_alias_digest (store_digest, alias_digest),
-    KEY ix_record_key_digest (record_key_digest),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_alias_key (store_digest, alias_key),
+    KEY ix_store_digest_record_key_digest (store_digest, record_key_digest),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Secondary unique lookup identities that resolve to canonical runtime records.';
 

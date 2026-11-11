@@ -52,6 +52,7 @@ from .state import (
     active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
+    validate_alias_key,
     validate_operation_replacement,
     validate_record_identity,
     validate_record_replacement,
@@ -806,7 +807,7 @@ class SqlStateStore:
             alias_rows = (
                 (
                     await transaction._execute(
-                        select(aliases.c.alias_digest, aliases.c.record_key_digest).where(
+                        select(aliases.c.alias_key, aliases.c.record_key_digest).where(
                             aliases.c.store_digest == transaction._store_hex
                         )
                     )
@@ -815,7 +816,7 @@ class SqlStateStore:
                 .all()
             )
             for row in alias_rows:
-                _row_digest(row["alias_digest"])
+                _row_alias_key(row["alias_key"])
                 _row_digest(row["record_key_digest"])
             orphan_alias = (await transaction._execute(
                 select(aliases.c.id)
@@ -1841,7 +1842,7 @@ class _SqlTransaction:
         return (await self.resolve_aliases((alias,))).get(alias)
 
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        unique_aliases = tuple(dict.fromkeys(aliases))
+        unique_aliases = tuple(dict.fromkeys(validate_alias_key(alias) for alias in aliases))
         missing = tuple(
             alias for alias in unique_aliases if alias not in self._alias_cache
         )
@@ -1854,7 +1855,7 @@ class _SqlTransaction:
                 (
                     await self._execute(
                         select(
-                            table.c.alias_digest,
+                            table.c.alias_key,
                             table.c.record_key_digest,
                             records.c.id,
                         )
@@ -1869,9 +1870,7 @@ class _SqlTransaction:
                         )
                         .where(
                             table.c.store_digest == self._store_hex,
-                            table.c.alias_digest.in_(
-                                tuple(_hex(alias) for alias in missing)
-                            ),
+                            table.c.alias_key.in_(missing),
                         )
                     )
                 )
@@ -1881,7 +1880,7 @@ class _SqlTransaction:
             if any(row["id"] is None for row in rows):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values = {
-                _row_digest(row["alias_digest"]): _row_digest(row["record_key_digest"])
+                _row_alias_key(row["alias_key"]): _row_digest(row["record_key_digest"])
                 for row in rows
             }
             self._alias_cache.update(values)
@@ -1902,12 +1901,12 @@ class _SqlTransaction:
             await self._execute(
                 select(table)
                 .where(table.c.store_digest == self._store_hex)
-                .order_by(table.c.alias_digest)
+                .order_by(table.c.alias_key)
             )
         ).mappings().all()
         return tuple(
             StoredAlias(
-                _row_digest(row["alias_digest"]),
+                _row_alias_key(row["alias_key"]),
                 _row_digest(row["record_key_digest"]),
             )
             for row in rows
@@ -1925,15 +1924,15 @@ class _SqlTransaction:
         table = self._table("ai_state_aliases")
         statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
-            statement = statement.where(table.c.alias_digest > _hex(after))
+            statement = statement.where(table.c.alias_key > validate_alias_key(after))
         rows = (
             await self._execute(
-                statement.order_by(table.c.alias_digest).limit(limit)
+                statement.order_by(table.c.alias_key).limit(limit)
             )
         ).mappings().all()
         return tuple(
             StoredAlias(
-                _row_digest(row["alias_digest"]),
+                _row_alias_key(row["alias_key"]),
                 _row_digest(row["record_key_digest"]),
             )
             for row in rows
@@ -1947,24 +1946,24 @@ class _SqlTransaction:
             return
         by_alias: dict[bytes, StoredAlias] = {}
         for alias in aliases:
-            current = by_alias.get(alias.alias_digest)
+            current = by_alias.get(alias.alias_key)
             if (
                 current is not None
                 and current.record_key_digest != alias.record_key_digest
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            by_alias[alias.alias_digest] = alias
-        values = tuple(sorted(by_alias.values(), key=lambda value: value.alias_digest))
+            by_alias[alias.alias_key] = alias
+        values = tuple(sorted(by_alias.values(), key=lambda value: value.alias_key))
         if any(
             alias.record_key_digest not in self._guarded_record_revisions for alias in values
         ):
             raise RuntimeError("alias owner must be guarded in the current transaction")
         existing = await self.resolve_aliases(
-            tuple(alias.alias_digest for alias in values)
+            tuple(alias.alias_key for alias in values)
         )
         rows: list[dict[str, object]] = []
         for alias in values:
-            current = existing.get(alias.alias_digest)
+            current = existing.get(alias.alias_key)
             if current is not None:
                 if current != alias.record_key_digest:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1972,7 +1971,7 @@ class _SqlTransaction:
             rows.append(
                 {
                     "store_digest": self._store_hex,
-                    "alias_digest": _hex(alias.alias_digest),
+                    "alias_key": alias.alias_key,
                     "record_key_digest": _hex(alias.record_key_digest),
                 }
             )
@@ -1984,7 +1983,7 @@ class _SqlTransaction:
             )
         self._log_batch("insert_aliases", len(values), 1 if rows else 0)
         for alias in values:
-            self._alias_cache[alias.alias_digest] = alias.record_key_digest
+            self._alias_cache[alias.alias_key] = alias.record_key_digest
 
     async def get_sequence(self, key: bytes) -> int:
         if key in self._sequence_cache:
@@ -2608,6 +2607,15 @@ def _hex(value: bytes) -> str:
     if not isinstance(value, bytes) or len(value) != 32:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value.hex()
+
+
+def _row_alias_key(value: object) -> bytes:
+    if not isinstance(value, bytes):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return validate_alias_key(value)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _row_digest(value: object) -> bytes:

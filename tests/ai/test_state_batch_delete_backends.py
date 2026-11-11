@@ -19,7 +19,7 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
 from linktools.ai.persistence.state import (
     FactQuery, RecordQuery, StateStore, StateTransaction, StateTransactionNestingError,
-    StoredAlias, StoredFact, StoredOperation, StoredRecord,
+    StoredAlias, StoredFact, StoredOperation, StoredRecord, alias_key,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -38,7 +38,7 @@ def _record(index: int) -> StoredRecord:
 
 
 def _alias(record: StoredRecord) -> StoredAlias:
-    return StoredAlias(_digest(f"alias-{record.sort_key}"), record.key_digest)
+    return StoredAlias(alias_key("tool_call", ("run", record.sort_key)), record.key_digest)
 
 
 def _fact(record: StoredRecord, sequence: int = 1) -> StoredFact:
@@ -83,7 +83,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
     deleted = _record(1)
     retained = replace(_record(2), parent_digest=deleted.key_digest)
     staged = _record(3)
-    staged_alias = StoredAlias(_digest("staged-alias"), deleted.key_digest)
+    staged_alias = StoredAlias(alias_key("tool_call", ("recovery", "staged")), deleted.key_digest)
     counter = _digest("counter")
     operation = StoredOperation(_digest("operation"), counter, 1, "DONE", False, {})
     async with _open_store(backend, tmp_path / backend) as store:
@@ -91,7 +91,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
 
         async def remove(transaction: StateTransaction) -> None:
             assert await transaction.get_record(deleted.key_digest) == deleted
-            assert await transaction.resolve_alias(_alias(deleted).alias_digest) == deleted.key_digest
+            assert await transaction.resolve_alias(_alias(deleted).alias_key) == deleted.key_digest
             assert await transaction.list_facts(FactQuery(_fact(deleted).stream_digest)) == (_fact(deleted),)
             assert await transaction.guard_record(deleted.key_digest, expected_storage_revision=0)
             await transaction.insert_alias(staged_alias)
@@ -106,7 +106,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
             ))
             assert await transaction.get_records((deleted.key_digest, staged.key_digest)) == {}
             assert await transaction.resolve_aliases((
-                _alias(deleted).alias_digest, staged_alias.alias_digest, _alias(staged).alias_digest,
+                _alias(deleted).alias_key, staged_alias.alias_key, _alias(staged).alias_key,
             )) == {}
             assert await transaction.list_facts(FactQuery(_fact(deleted).stream_digest)) == ()
             assert await transaction.list_facts(FactQuery(_fact(staged).stream_digest)) == ()
@@ -170,7 +170,7 @@ async def test_batch_delete_allows_reusing_deleted_identity(
             await transaction.insert_alias(_alias(replacement))
             await transaction.insert_fact(replacement_fact)
             assert await transaction.get_record(record.key_digest) == replacement
-            assert await transaction.resolve_alias(_alias(record).alias_digest) == record.key_digest
+            assert await transaction.resolve_alias(_alias(record).alias_key) == record.key_digest
             assert await transaction.list_facts(FactQuery(replacement_fact.stream_digest)) == (replacement_fact,)
 
         await store.mutate(recreate)

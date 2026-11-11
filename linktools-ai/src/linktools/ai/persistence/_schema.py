@@ -18,7 +18,7 @@ from ..storage import (
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import OPERATION_KEY_MAX_BYTES
+from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -177,10 +177,10 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
         ),
         Column(
-            "alias_digest",
-            digest,
+            "alias_key",
+            LargeBinary(ALIAS_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(ALIAS_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of a secondary unique runtime lookup key.",
+            comment="Store-local binary secondary lookup address with a maximum of 512 bytes.",
         ),
         Column(
             "record_key_digest",
@@ -192,8 +192,8 @@ def build_runtime_sql_metadata(
         comment=_ALIAS_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(aliases, "store_digest", "alias_digest")
-    sql_query_index(aliases, "record_key_digest")
+    sql_unique(aliases, "store_digest", "alias_key")
+    sql_query_index(aliases, "store_digest", "record_key_digest")
     sql_audit_indexes(aliases)
 
     facts = Table(
