@@ -134,10 +134,11 @@ class AgentRunCapture(AbstractCapability[None]):
         self._live_messages = ctx.messages
         if (ctx.messages and isinstance(ctx.messages[-1], ModelRequest)
                 and self._captured_request is not ctx.messages[-1]):
+            initial_request = self._captured_request is None
             self._captured_request = ctx.messages[-1]
             # Deferred results can extend the initial request after before_run.
-            # Compare the actual request only once its model boundary is reached.
-            if not self.recorder.request_already_captured(ctx.messages):
+            # Compare only the first actual request at its model boundary.
+            if not initial_request or not self.recorder.request_already_captured(ctx.messages):
                 self.recorder.append_transcript_message(ctx.messages[-1])
         return request_context
 
