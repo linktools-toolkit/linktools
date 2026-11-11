@@ -27,7 +27,7 @@ from ._native_backup_projection import NativeBackupProjections
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
-from ._run_registration import RunRegistrationStore, RunRegistrationReference
+from ._run_registration import RunRegistrationStore, RunRegistrationReference, RunRegistrationCleanupResult
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 from ._native_event_reference import NativeEventReferences
@@ -370,6 +370,34 @@ class RuntimeSnapshotOperations:
     ) -> None:
         self._resources = resources
         self._require_ready = require_ready
+
+    async def purge_unreferenced_run_registrations(
+        self, candidates: tuple[str, ...], *,
+        exclusive: Callable[[tuple[StateStorageGroup, ...]], AbstractAsyncContextManager[None]],
+        complete_reference_stores: tuple[StateStore, ...] | None = None, limit: int = 100,
+    ) -> RunRegistrationCleanupResult:
+        """Explicit offline reclamation, never automatic domain-release GC.
+
+        Supply every live State source borrowing this canonical owner, including
+        external archives. The callback receives all distinct source groups and
+        must drain and exclude all source users before yielding, including
+        readers, snapshot exporters, and writers from preparation through
+        publication, and hold that exclusion through scan and deletion. Neither
+        this Runtime's routes nor an ordinary no-argument snapshot guard proves
+        that authority. Omitted/empty inventories and SQL owners remain blocked.
+        """
+        self._require_ready()
+        if self._resources.read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
+        owner = self._resources.run_registrations
+        known = (*self._resources.stores.values(), *(self._resources.capability_stores or {}).values())
+        supplied = {store.storage_group for store in complete_reference_stores or ()}
+        if (owner is None or self._resources.capability_stores
+                or any(store.storage_group not in supplied for store in known)):
+            return RunRegistrationCleanupResult(blocked=tuple(dict.fromkeys(candidates)))
+        return await owner.purge_unreferenced(
+            candidates, exclusive=exclusive, complete_reference_stores=complete_reference_stores, limit=limit,
+        )
 
     async def purge_unreferenced_captures(
         self, candidates: tuple[str, ...], *, exclusive: SnapshotExclusiveGuard, limit: int = 100,
@@ -2107,4 +2135,4 @@ async def _put_snapshot_object(
 from ._capability_marker import ensure_capability_partition_marker
 from ._snapshot import snapshot_object_ref_from_payload, snapshot_object_ref_payload
 
-__all__ = ['snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']
+__all__ = ['RunRegistrationCleanupResult', 'snapshot_manifest_usage', 'snapshot_manifest_identity', 'RuntimeSnapshotOperations', 'SnapshotExclusiveGuard', 'SnapshotLimits', 'SnapshotResources', 'ensure_capability_partition_marker', 'has_capability_partition_marker', 'restore_snapshot', 'snapshot_object_ref_from_payload', 'snapshot_object_ref_payload']

@@ -5,25 +5,34 @@
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 
-from ..core import canonical_sha256
+from ..core import canonical_sha256, validate_page_limit
 from ..errors import AIError, ErrorCode
 from ..steps import validate_native_step_ids
 from .codec import decode_envelope, encode_envelope, _encode_step_envelope
 from ._official_step_reader import OfficialStepReader
 from ._step_contracts import AgentRunRecord
-from .state import StateStore, StateTransaction, StoredRecord, record_key, active_state_transaction
+from .state import StateStore, StateTransaction, StoredRecord, record_key, active_state_transaction, StateStorageGroup, RecordScanCursor
 
 if TYPE_CHECKING:
     from ._step_store import SqlStepStore
 
 
 _RUN = TypeAdapter(RunRecord)
+
+
+@dataclass(frozen=True, slots=True)
+class RunRegistrationCleanupResult:
+    deleted: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    retained: tuple[str, ...] = ()
+    blocked: tuple[str, ...] = ()
 
 
 class RunRegistrationStore:
@@ -75,6 +84,79 @@ class RunRegistrationStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result[run.run_id] = run
         return result
+
+    async def purge_unreferenced(
+        self, candidates: tuple[str, ...], *, exclusive: Callable[[tuple[StateStorageGroup, ...]], AbstractAsyncContextManager[None]],
+        complete_reference_stores: tuple[StateStore, ...] | None = None, limit: int = 100,
+    ) -> RunRegistrationCleanupResult:
+        """Reclaim non-SQL metadata only under explicit complete-source authority.
+
+        The inventory declares every live archive source borrowing this owner.
+        Before yielding, the callback must drain and exclude all source users:
+        readers, snapshot exporters, and writers from preparation through
+        publication. It must hold that exclusion across all supplied groups
+        until context exit; stopping only new writes is insufficient.
+        A regular snapshot guard, omitted inventory, or SQL owner cannot authorize
+        this collection. Domain release alone never proves shared unreachability.
+        """
+        from ._capability_marker import has_capability_partition_marker
+
+        validate_page_limit(limit)
+        selected = tuple(dict.fromkeys(candidates))
+        if not selected:
+            return RunRegistrationCleanupResult()
+        keys = {identity: self.key(identity) for identity in selected}
+        if self._native is not None or not complete_reference_stores:
+            return RunRegistrationCleanupResult(blocked=selected)
+        groups = tuple(dict.fromkeys(store.storage_group for store in complete_reference_stores))
+        if (self._store.storage_group not in groups or not callable(exclusive)
+                or any(not isinstance(group, StateStorageGroup) for group in groups)):
+            return RunRegistrationCleanupResult(blocked=selected)
+        async with exclusive(groups):
+            discovered = [store for group in groups for store in await group.scan_stores()]
+            partitions = tuple(dict.fromkeys((*complete_reference_stores, *discovered)))
+            if any([await store.read(has_capability_partition_marker) for store in partitions]):
+                return RunRegistrationCleanupResult(blocked=selected)
+            live = set()
+            for store in partitions:
+                cursor = None
+                while True:
+                    page = await store.read(lambda tx: tx.scan_records_page(after=cursor, limit=1000))
+                    for record in page:
+                        if record.kind == "agent_run":
+                            reference = RunRegistrationReference.from_data(record.data)
+                            if reference.run_id in keys:
+                                live.add(reference.run_id)
+                    if len(page) < 1000:
+                        break
+                    cursor = RecordScanCursor(page[-1].kind, page[-1].key)
+
+            async def collect(transaction: StateTransaction) -> RunRegistrationCleanupResult:
+                rows = await transaction.get_records(tuple(keys.values()))
+                deleted, missing, retained, blocked = [], [], [], []
+                for identity, key in keys.items():
+                    if identity in live:
+                        retained.append(identity)
+                    elif len(deleted) + len(missing) >= limit:
+                        blocked.append(identity)
+                    elif key not in rows:
+                        missing.append(identity)
+                    else:
+                        record = rows[key]
+                        if record.kind != "step_run":
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        try:
+                            run = _RUN.validate_python(decode_envelope(record.data).value)
+                        except ValueError as error:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                        if run.run_id != identity:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if not await transaction.delete_record(key, expected_storage_revision=record.storage_revision):
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        deleted.append(identity)
+                return RunRegistrationCleanupResult(tuple(deleted), tuple(missing), tuple(retained), tuple(blocked))
+
+            return await self._store.mutate(collect)
 
     def joins(self, store: StateStore) -> bool:
         if self._native is not None:
@@ -229,4 +311,4 @@ class RunRegistrationReference:
         return projection
 
 
-__all__ = ["RunRegistrationStore", "RunRegistrationReference"]
+__all__ = ["RunRegistrationStore", "RunRegistrationReference", "RunRegistrationCleanupResult"]
