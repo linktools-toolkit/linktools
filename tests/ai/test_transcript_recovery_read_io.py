@@ -205,13 +205,16 @@ async def test_combined_projection_publishes_messages_with_its_owner(tmp_path: P
 async def test_foreign_projection_baseline_rebuilds_captured_messages(tmp_path: Path, foreign_scope: str) -> None:
     from dataclasses import replace
     from linktools.ai.persistence._archive import PreparedArchive
+    from linktools.ai.steps import native_store_key
 
     async with _archive(tmp_path, "sqlite") as (_state, archive, run):
         repository = archive.transcript_repository
         messages = (ModelResponse(parts=[TextPart("captured across stores")]),)
         source = await repository.prepare_model_projection(messages, PreparedArchive())
         block = source.items[0]
-        foreign = replace(block.root, **{foreign_scope: "f" * 64})
+        foreign = (replace(block.root, group_id="f" * 64) if foreign_scope == "group_id"
+                   else replace(block.root, store_key=native_store_key("foreign", "tenant")))
+        assert foreign != block.root
         baseline = replace(source, items=(replace(block, root=foreign),))
         prepared = PreparedArchive()
         projection = await repository.prepare_model_projection(messages, prepared, baseline=baseline)
