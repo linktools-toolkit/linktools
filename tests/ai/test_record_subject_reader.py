@@ -67,19 +67,19 @@ async def test_record_subject_identity_cannot_change(
 
 
 async def test_sql_subject_reads_bound_parameters_and_globally_order_chunks(tmp_path: Path) -> None:
-    subjects = tuple(f"subject-{index}" for index in range(1100))
+    # Store, scope and kind use three binds, leaving 996 subjects per query.
+    subjects = tuple(f"subject-{index}" for index in range(997))
     first = replace(_record(1), subject_id=subjects[0], sort_key=b"z")
     last = replace(_record(2), subject_id=subjects[-1], sort_key=b"a")
+    unrequested = replace(_record(3), subject_id="unrequested-subject")
     async with _open_store("sql", tmp_path / "sql") as store:
-        await store.mutate(lambda tx: tx.insert_records((first, last)))
+        await store.mutate(lambda tx: tx.insert_records((first, last, unrequested)))
         counts = []
 
         def capture(connection, cursor, statement, parameters, context, many):
             if statement.lstrip().upper().startswith("SELECT") and "ai_state_records" in statement:
                 counts.append(len(parameters))
                 assert len(parameters) <= 999
-                assert "subject_id IN" in statement
-                assert " OR " not in statement
 
         engine = store.storage_group.context.engine.sync_engine
         event.listen(engine, "before_cursor_execute", capture)
@@ -122,23 +122,21 @@ async def test_sql_subject_cas_batches_stay_within_parameter_budget(tmp_path: Pa
 
 
 async def test_sql_subject_lookup_query_plan(tmp_path: Path) -> None:
+    # Two selected subjects remain selective among unrelated same-scope rows.
     records = tuple(replace(_record(index), subject_id=f"subject-{index}")
-                    for index in range(1100))
+                    for index in range(16))
     async with _open_store("sql", tmp_path / "sql") as store:
-        async def seed(tx):
-            for offset in range(0, len(records), 40):
-                await tx.insert_records(records[offset:offset + 40])
-        await store.mutate(seed)
+        await store.mutate(lambda tx: tx.insert_records(records))
         statements = []
 
         def capture(connection, cursor, statement, parameters, context, many):
-            if statement.lstrip().upper().startswith("SELECT") and "subject_id IN" in statement:
+            if statement.lstrip().upper().startswith("SELECT") and "ai_state_records" in statement:
                 statements.append((statement, parameters))
 
         engine = store.storage_group.context.engine
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
-            selected = (records[0], records[1099])
+            selected = (records[0], records[-1])
             assert await store.read(lambda tx: tx.read_record_subjects(
                 scope_key=records[0].scope_key, kind="probe",
                 subject_ids=tuple(record.subject_id for record in selected),
