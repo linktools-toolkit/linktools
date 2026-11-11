@@ -12,6 +12,7 @@ from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from linktools.ai.persistence import SqlStepStore
+from linktools.ai.steps import encode_native_replay_key
 
 
 @pytest.mark.asyncio
@@ -97,9 +98,9 @@ async def test_pruning_preserves_complete_point_appearing_after_retention_read(
         table = limited._table("snapshots")
         async with engine.begin() as connection:
             delayed = dict((await connection.execute(select(table).where(
-                table.c.idempotency_key == "late",
+                table.c.idempotency_key == encode_native_replay_key(late.idempotency_key),
             ))).mappings().one())
-            await connection.execute(text("DELETE FROM ai_step_snapshots WHERE idempotency_key = 'late'"))
+            await connection.execute(table.delete().where(table.c.id == delayed["id"]))
         await limited.initialize()
 
         async def appear_after_read(self, statement, *args, **kwargs):

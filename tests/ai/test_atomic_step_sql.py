@@ -361,21 +361,37 @@ async def test_unkeyed_prepared_boundary_appends_on_each_publication(tmp_path: P
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("event", "snapshot"))
 async def test_unkeyed_physical_identity_collision_fails_without_losing_append(
-    atomic_store: tuple[SqlStepStore, AsyncEngine], monkeypatch: pytest.MonkeyPatch, kind: str,
+    atomic_store: tuple[SqlStepStore, AsyncEngine], kind: str,
 ) -> None:
-    from uuid import UUID
-    from linktools.ai.persistence import _step_store as step_module
+    from sqlalchemy import select
+    from sqlalchemy.sql.dml import Insert
+    from linktools.ai.persistence._step_schema import build_step_sql_metadata
 
-    store, _ = atomic_store
-    monkeypatch.setattr(step_module, "uuid4", lambda: UUID(int=1))
+    store, engine = atomic_store
+    table = build_step_sql_metadata().tables["ai_step_events" if kind == "event" else "ai_step_snapshots"]
     item = (StepEvent(run_id="run", kind="model_request_started", step_index=0) if kind == "event"
             else ContinuableSnapshot(run_id="run", step_index=0, messages=[]))
     write = store.append_event if kind == "event" else store.save_snapshot
     await write(item)
-    with pytest.raises(IntegrityError):
-        await write(item)
+    async with engine.connect() as connection:
+        identity = (await connection.execute(select(table.c.id).where(table.c.store_key == store.store_key))).scalar_one()
+
+    def collide(connection, statement, multiparams, params, execution_options):
+        if isinstance(statement, Insert) and statement.table.name == table.name:
+            statement = statement.values(id=identity)
+        return statement, multiparams, params
+
+    event.listen(engine.sync_engine, "before_execute", collide, retval=True)
+    try:
+        with pytest.raises(IntegrityError):
+            await write(item)
+    finally:
+        event.remove(engine.sync_engine, "before_execute", collide)
     items = await store.list_events(run_id="run") if kind == "event" else await store.list_snapshots(run_id="run")
     assert items == [item]
+    await write(item)
+    items = await store.list_events(run_id="run") if kind == "event" else await store.list_snapshots(run_id="run")
+    assert items == [item, item]
 
 
 @pytest.mark.asyncio

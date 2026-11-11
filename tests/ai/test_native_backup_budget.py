@@ -73,7 +73,7 @@ async def test_native_capture_retains_authenticated_payload_and_reads_only_file_
     monkeypatch.setattr(snapshots, "read_object", read)
     result = await _capture_native_payloads("group", [], [row],
         budget=_SnapshotCaptureBudget(SnapshotLimits(100, 10000)), objects=InMemoryObjectStore(), backup=None)
-    assert result == {("c" * 64, row["sha256"]): raw}
+    assert result == {(native_store_key("c", "tenant"), row["sha256"]): raw}
     assert reads == list(bodies)
 
 

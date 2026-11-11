@@ -496,7 +496,13 @@ def test_step_sql_metadata_compiles_for_mysql57_and_obeys_project_table_policy()
         for index in indexes:
             assert len(index.columns) <= 3
             if index.unique:
-                assert all(not column.nullable for column in index.columns)
+                nullable = {column.name for column in index.columns if column.nullable}
+                if (table.name in {"ai_step_events", "ai_step_snapshots"}
+                        and "idempotency_key" in index.columns):
+                    # NULL replay keys append independent occurrences; non-NULL keys deduplicate.
+                    assert nullable == {"idempotency_key"}
+                else:
+                    assert not nullable
             else:
                 assert not any(column.primary_key for column in index.columns)
             assert index.name == ("uk_" if index.unique else "ix_") + "_".join(column.name for column in index.columns)

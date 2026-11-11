@@ -14,7 +14,7 @@ from sqlalchemy import event, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.steps import native_store_key
+from linktools.ai.steps import encode_native_replay_key, native_store_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_message_content import NativeMessageContent
@@ -302,12 +302,18 @@ async def test_invalid_snapshot_descriptor_does_not_hide_other_valid_history(
     engine = create_async_engine(url)
     cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
     try:
+        table = build_step_sql_metadata().tables["ai_step_snapshots"]
+        damage = {"messages": descriptor}
+        if clear_root:
+            damage["sequence_root"] = None
         async with engine.begin() as connection:
-            await connection.execute(text(
-                "UPDATE ai_step_snapshots SET messages = :descriptor "
-                + (", sequence_root = NULL " if clear_root else "")
-                + "WHERE idempotency_key IN ('bad-middle', 'bad-terminal')"
-            ), {"descriptor": descriptor})
+            changed = await connection.execute(table.update().where(
+                table.c.store_key == cold.store_key,
+                table.c.idempotency_key.in_([
+                    encode_native_replay_key("bad-middle"), encode_native_replay_key("bad-terminal"),
+                ]),
+            ).values(**damage))
+            assert changed.rowcount == 2
         with pytest.raises(ValueError):
             await cold.latest_snapshot(run_id="run")
         assert await cold.list_snapshots(run_id="run") == [first, last]

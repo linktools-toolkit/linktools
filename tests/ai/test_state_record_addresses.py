@@ -63,7 +63,9 @@ def test_raw_record_references_round_trip_at_bounds_without_repr_exposure() -> N
     with pytest.raises(ValueError):
         _record(key + b"x")
     with pytest.raises(ValueError):
-        sortable_timestamp(datetime(2026, 1, 1, tzinfo=timezone.utc), key)
+        sortable_timestamp(datetime(2026, 1, 1, tzinfo=timezone.utc), key + b"x")
+    ordered = sortable_timestamp(datetime(2026, 1, 1, tzinfo=timezone.utc), key)
+    assert len(ordered) == RECORD_KEY_MAX_BYTES + 8 and ordered[8:] == key
     assert len(sortable_timestamp(datetime(2026, 1, 1, tzinfo=timezone.utc), key[:-8])) == RECORD_KEY_MAX_BYTES
 
 

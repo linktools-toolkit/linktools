@@ -404,7 +404,7 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
             normalized = " ".join(sql.split())
             assert re.fullmatch(
                 r"SELECT (AI_STEP_MESSAGES|AI_STEP_SEQUENCES)\.SHA256, \1\.ID "
-                r"FROM \1 WHERE \1\.STORE_DIGEST = \? AND \1\.SHA256 IN \([?, ]+\)",
+                r"FROM \1 WHERE \1\.STORE_KEY = \? AND \1\.SHA256 IN \([?, ]+\)",
                 normalized,
             ), normalized
             assert parameters[0] == native.store_key

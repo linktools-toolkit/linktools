@@ -45,8 +45,9 @@ async def test_public_native_scope_identity_matches_physical_store(store) -> Non
 
 @pytest.mark.parametrize("namespace, tenant_id", [("", "one"), ("steps", ""), (None, "one"), ("steps", 1)])
 def test_native_scope_identity_rejects_invalid_partition(namespace, tenant_id) -> None:
-    with pytest.raises(ValueError, match="must be a non-empty string"):
+    with pytest.raises(AIError) as rejected:
         SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
+    assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 def _records() -> tuple[RunRecord, StepEvent]:
@@ -425,7 +426,9 @@ class _InlineStepStore(SqlStepStore):
             rows = (await self._context.run_statement(session.execute(select(table).where(
                 *self._run_predicates(table, run_id),
             ).order_by(table.c.id)))).mappings().all()
-        return [module._EVENT_ADAPTER.validate_python(dict(row)) for row in rows]
+        return [module._EVENT_ADAPTER.validate_python(dict(row) | {
+            "idempotency_key": module.decode_native_replay_key(row["idempotency_key"]),
+        }) for row in rows]
 
 
 class _TextInlineStepStore(_InlineStepStore):
@@ -437,7 +440,9 @@ class _TextInlineStepStore(_InlineStepStore):
 
     @classmethod
     def _event_values(cls, event):
-        return cls._record_values(event)
+        values = super()._event_values(event)
+        values["metadata"] = json.dumps(values["metadata"])
+        return values
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         await self.initialize()

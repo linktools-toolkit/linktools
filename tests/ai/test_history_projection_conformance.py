@@ -87,7 +87,7 @@ async def _message_content_records(
             async with context.sessions() as session, session.begin():
                 rows = (await session.execute(query.statement)).mappings().all()
             records.extend(validate_native_message_content(
-                {**row, "sha256": row["message_sha256"]},
+                {**row, "store_key": root.store_key, "sha256": row["message_sha256"]},
                 group_id=root.group_id,
             ) for row in rows if row["raw_size"] is not None)
         else:
