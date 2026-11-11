@@ -158,10 +158,12 @@ application call, port method, persisted contract or lifecycle is required.
   paths still reach multiple parts of AgentExecutionPort. Address their actual
   operation and lifetime contracts together; adding three forwarding methods
   does not complete this boundary.
-- Memory still has domain-specific projection/restore logic in Runtime. Preserve
-  its admitted scope. Planning now owns its store and native projection; Runtime
-  still selects the run owner. Model plan tools, execution plan mode and Task
-  scheduling remain three different concepts.
+- `memory.PersistentMemoryStore` owns persistent Memory operations, mutation
+  receipts and capture/seed. Runtime selects the admitted scope and resources,
+  then delegates capture and restore to that adapter. Persistence retains
+  transaction authority, and the adapter borrows its resources. Planning owns
+  its store and native projection; Runtime selects the run owner. Model plan
+  tools, execution plan mode and Task scheduling remain three different concepts.
 - The capability program covers resource capture and admitted Memory reuse;
   crash recovery, custom persistent callbacks and the remaining extension
   paths still require their own evidence. The [complete current Task port
