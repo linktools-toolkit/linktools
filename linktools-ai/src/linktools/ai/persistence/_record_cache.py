@@ -57,9 +57,9 @@ class StateRecordCache:
             result: dict[bytes, StoredRecord] = {}
             for value in values:
                 record = decode_record(value)
-                if record.key_digest not in requested or record.key_digest in result:
+                if record.key not in requested or record.key in result:
                     raise ValueError("cached record identity does not match")
-                result[record.key_digest] = record
+                result[record.key] = record
             return result
         except (AIError, TypeError, ValueError):
             await self._cache.invalidate(cache_key)
@@ -88,8 +88,10 @@ class StateRecordCache:
         return records
 
     def _cache_key(self, ordered: Sequence[bytes]) -> str:
-        key_digest = hashlib.sha256(canonical_json_bytes([key.hex() for key in ordered])).hexdigest()
-        return f"runtime-record:{self._scope}:{key_digest}"
+        if len(ordered) == 1:
+            return f"runtime-record:{self._scope}:record:{ordered[0].hex()}"
+        key_digest = hashlib.sha256(b"".join(len(key).to_bytes(2, "big") + key for key in ordered)).hexdigest()
+        return f"runtime-record:{self._scope}:batch:{key_digest}"
 
     def publish_record(self, record: StoredRecord, *, captured_at: float) -> None:
         """Offer one complete committed record; busy publishers discard the offer."""
@@ -104,7 +106,7 @@ class StateRecordCache:
                 return
             content = canonical_json_bytes([encode_record(record)])
             await self._cache.put(
-                self._cache_key((record.key_digest,)), content, captured_at=captured_at,
+                self._cache_key((record.key,)), content, captured_at=captured_at,
             )
 
         self._publisher = asyncio.create_task(publish(), name="runtime-record-cache-publish")

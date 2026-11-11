@@ -31,12 +31,11 @@ from ..capability import ToolCallFailed, ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ..storage import (
     ObjectStore,
-    PayloadPolicy,
     StoredPayload,
-    payload_fits_inline,
 )
 from ..model.messages import decode_model_messages, encode_model_messages
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
+from ..model.attachments import read_attachment_payload, store_attachment_payload
 from ..persistence import PersistenceDomain
 from ..persistence.state import Observed
 from ..persistence.contracts import ToolOperationAdmission
@@ -293,7 +292,6 @@ class RuntimeToolOperationBridge:
         binding_digest: str,
         owner: str,
         background_tasks: "set[asyncio.Task[object]]",
-        payload_policy: PayloadPolicy,
         recovery_agent_run_id: "str | None" = None,
         terminal_commands: "_ToolTerminalCommands | None" = None,
         producer_generation: int | None = None,
@@ -313,7 +311,6 @@ class RuntimeToolOperationBridge:
         self._binding_digest = binding_digest
         self._owner = owner
         self._background_tasks = background_tasks
-        self._payload_policy = payload_policy
         self._recovery_agent_run_id = recovery_agent_run_id
         self._fresh_execution = fresh_execution
         self._terminal_commands = terminal_commands
@@ -534,15 +531,6 @@ class RuntimeToolOperationBridge:
             agent_run_id=self._run_id(ctx),
             recovery_agent_run_id=(replay_agent_run_id if replay_agent_run_id != self._run_id(ctx) else None),
             tool_call_id=call.tool_call_id,
-            idempotency_key_digest=canonical_sha256(
-                {
-                    "execution_id": self._execution_id,
-                    "agent_run_id": replay_agent_run_id,
-                    "tool_call_id": call.tool_call_id,
-                    "tool_name": tool_def.name,
-                    "arguments_digest": arguments_digest,
-                }
-            ),
             tool_name=tool_def.name,
             arguments_digest=arguments_digest,
             binding_digest=self._binding_digest,
@@ -1342,22 +1330,22 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
 
     async def _payload(self, data: bytes) -> StoredPayload:
-        inline = StoredPayload.inline_bytes(data)
-        if payload_fits_inline(inline, self._payload_policy):
-            return inline
-        reference = await put_runtime_object(
-            self._checkpoint_objects,
-            self._object_keys,
-            PersistenceDomain.CHECKPOINT,
-            self._tenant_id,
-            data,
+        payload = await store_attachment_payload(
+            data, format="model-messages", write_object=lambda body: put_runtime_object(
+                self._checkpoint_objects, self._object_keys, PersistenceDomain.CHECKPOINT,
+                self._tenant_id, body,
+            ),
         )
-        return StoredPayload.object(reference)
+        return payload if payload is not None else StoredPayload.inline_bytes(data)
 
     async def _arguments_payload(self, args: dict[str, Any]) -> StoredPayload:
-        return await self._payload(canonical_json_bytes(_portable_arguments(args)))
+        return StoredPayload.inline_bytes(canonical_json_bytes(_portable_arguments(args)))
 
     async def _payload_bytes(self, payload: StoredPayload) -> bytes:
+        if payload.encoding == "json-attachments":
+            return await read_attachment_payload(
+                payload, read_object=lambda ref: read_runtime_object(self._checkpoint_objects, ref),
+            )
         if payload.kind == "inline":
             value = payload.decode()
             if not isinstance(value, bytes):

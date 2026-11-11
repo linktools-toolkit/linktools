@@ -95,7 +95,7 @@ class _ExecutionReader:
             ExecutionLineageKind.RUN,
             None,
             "root",
-            None,
+            None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         self.child = ExecutionView(
             "child",
@@ -104,7 +104,7 @@ class _ExecutionReader:
             ExecutionLineageKind.SUBAGENT,
             "root",
             "root",
-            "delegate-call",
+            "delegate-call", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
     async def inspect(
@@ -588,7 +588,7 @@ class _RetryExecutionReader:
             ExecutionLineageKind.RETRY,
             None,
             "original-root",
-            None,
+            None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         self.child = ExecutionView(
             "retry-child",
@@ -597,7 +597,7 @@ class _RetryExecutionReader:
             ExecutionLineageKind.SUBAGENT,
             "retry",
             "original-root",
-            "retry-delegate",
+            "retry-delegate", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
     async def inspect(
@@ -859,14 +859,14 @@ class _RecursiveExecutionReader:
         self.views = {
             "root": ExecutionView(
                 "root", "root-agent", ExecutionStatus.SUCCEEDED,
-                ExecutionLineageKind.RUN, None, "root", None,
+                ExecutionLineageKind.RUN, None, "root", None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             ),
         }
         parent = "root"
         for key in ("child", "grandchild", "leaf"):
             self.views[key] = ExecutionView(
                 key, f"{key}-agent", ExecutionStatus.SUCCEEDED,
-                ExecutionLineageKind.SUBAGENT, parent, "root", f"{key}-invocation",
+                ExecutionLineageKind.SUBAGENT, parent, "root", f"{key}-invocation", agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
             parent = key
         self.visible = set(self.views)

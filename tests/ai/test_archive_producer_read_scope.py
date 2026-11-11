@@ -157,10 +157,9 @@ async def test_custom_repository_checks_execution_then_actual_history(tmp_path: 
     calls = []
 
     class Custom(ExecutionRepositoryImpl):
-        async def get(self, *args, **kwargs):
-            assert active_state_transaction(source) is not None
+        async def require_revoked_producer(self, *args, **kwargs):
             calls.append("execution")
-            return await super().get(*args, **kwargs)
+            return await super().require_revoked_producer(*args, **kwargs)
 
     repository = Custom(source, namespace="producer-read", tenant_id="tenant")
     execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False, producer_generation=1)
@@ -185,16 +184,18 @@ async def test_cancelled_control_observation_does_not_grant_proof(
     repository = state.execution.executions
     execution = replace(_execution(), status=ExecutionStatus.SUCCEEDED, durable_trace=False, producer_generation=1)
     await repository.create(execution)
-    original = repository.get
+    original = repository.state_store.read
     entered = asyncio.Event()
 
-    async def observe(*args, **kwargs):
-        assert active_state_transaction(repository.state_store) is not None
-        await original(*args, **kwargs)
-        entered.set()
-        await asyncio.Event().wait()
+    async def observe(callback):
+        async def capture(transaction):
+            assert active_state_transaction(repository.state_store) is not None
+            await callback(transaction)
+            entered.set()
+            await asyncio.Event().wait()
+        return await original(capture)
 
-    monkeypatch.setattr(repository, "get", observe)
+    monkeypatch.setattr(repository.state_store, "read", observe)
     archive = state.run_store.read_store(PersistenceDomain.TRACE)
     task = asyncio.create_task(archive.require_revoked_execution_producer(
         execution_id="execution", producer_generation=1, terminal_execution=execution,
@@ -205,7 +206,7 @@ async def test_cancelled_control_observation_does_not_grant_proof(
         with pytest.raises(asyncio.CancelledError):
             await task
         assert active_state_scope() is None
-        monkeypatch.setattr(repository, "get", original)
+        monkeypatch.setattr(repository.state_store, "read", original)
         await archive.require_revoked_execution_producer(
             execution_id="execution", producer_generation=1, terminal_execution=execution,
         )
@@ -225,7 +226,7 @@ async def test_terminal_hint_and_cached_pair_do_not_hide_missing_source(tmp_path
     await repository.create(execution)
     assert await repository.get("execution", tenant_id="tenant") == execution
     source = remote.execution.executions
-    await source.state_store.mutate(lambda tx: tx.delete_record(source._key("execution", "execution")))
+    await source.state_store.mutate(lambda tx: tx.delete_record(source._key("execution", ("execution",))))
     archive = state.run_store.read_store(PersistenceDomain.TRACE)
     try:
         with pytest.raises(AIError) as raised:

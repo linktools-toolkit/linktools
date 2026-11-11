@@ -98,17 +98,169 @@ lineage and metadata, with the real leaf step and conversation identity.
 
 ## Snapshot identity and retained content
 
-A snapshot header owns its replay identity. Its nullable key digest is unique
-within the store/run partition. Pruning leaves the header as a tombstone, marks
-it pruned, clears its message-count descriptor and deletes its ordered refs.
+A snapshot header owns its replay identity. A supplied idempotency key is scoped
+to the store/run partition; an unkeyed write receives its own occurrence digest.
+Pruning leaves the header as a tombstone, marks
+it pruned, clears its message-count descriptor and releases its sequence root.
 Readers exclude tombstones. Retrying an old key cannot restore its old content
 or replace it with different content after pruning or body collection.
 
-Retained snapshots still have a complete ordered reference list. Message bodies
-are deduplicated by exact stored-byte SHA-256. No prefix chain or ancestor pinning
-is assumed. Tombstones retain no body references, so they do not become permanent
+Retained snapshots hold an immutable sequence root, not a growing reference list.
+The shared sequence forest preserves occurrence order and repetition while
+reusing unchanged prefixes. Message bodies are deduplicated by their canonical
+singleton-byte SHA-256. Tombstones retain no body references, so they do not become permanent
 content-retention roots. The separate snapshot-key table is removed from the
 current development schema and its matching reader/tests.
+
+## Cost and reclamation boundaries
+
+Let N be the number of message occurrences, B their total canonical bytes, and
+D the new suffix. A confirmed immutable append prepares O(D) new message bodies
+and sequence nodes, plus the logarithmic sequence frontier. Frozen message
+concatenation reuses the predecessor SHA state and hashes only the appended
+bytes; repeated digest requests do not rehash the history. A frozen retry-state
+envelope changes only the terminal message and shares the immutable prefix.
+These are content operations, not claims about total SQL, model input, or turn
+latency.
+
+Runtime's accepted transcript has an explicit immutable-prefix/append contract.
+Its recorder freezes only the new message and carries that snapshot through
+pending observations and owned checkpoint staging. This avoids rescanning the
+accepted transcript at each append. It is separate from the mutable SDK model
+context: a transcript append is not evidence that a hook left that context
+unchanged. Public/custom storage boundaries still receive their declared lists.
+
+The SDK exposes mutable history and nested message content to application hooks.
+Capturing that arbitrary history still requires O(B) work per boundary to notice
+earlier edits. Runtime freezes the logical checkpoint before asynchronous
+publication, then converts it to the native representation once and shares the
+frozen result through SQL preparation and confirmation. The two representations
+can differ for host input descriptors and retry metadata. Object identity or
+message count alone is never proof that old content is unchanged. N successive
+growing mutable histories can therefore still require quadratic cumulative
+capture work; preventing that would require a different SDK mutation contract.
+
+Cold recovery must read and validate the retained history, O(B) in the result
+size. It decodes each selected snapshot once and reuses that decoded value for
+the returned result and its content proof. Listing every historical snapshot is
+proportional to the total requested result, which may itself be quadratic for
+successively longer snapshots. Rewrites and cold writers may reconstruct
+sequence metadata; they must not assume an in-process committed prefix proof.
+
+Logical retained storage is proportional to unique message bodies, occurrence
+nodes and replay headers. Repeated copies of a shared body are not charged as
+new content, but each distinct snapshot replay key remains a retained identity.
+Keeping all keys and all user-visible history cannot provide constant space.
+Configured snapshot pruning retires roots while preserving replay tombstones
+and the latest complete recovery point. It does not authorize dropping history
+owned by Conversation, Trace, a task handoff, or another retained snapshot.
+Active snapshots use the `(store_digest, run_id, pruned)` index and equality
+on the non-null boolean, including on MySQL 5.7. Tombstones therefore do not
+expand the active scan. Pruning reads one row containing the retention cutoff
+and latest complete ID, then retires older roots in metadata batches of at most
+128, without loading an unbounded client-side list. With a fixed retention limit K, active metadata work is O(K),
+independent of historical tombstones. Reducing an unlimited existing history
+can still require a larger one-time scan and update. The update also preserves
+complete points that become visible after the retention read.
+
+Native SQL message and sequence reclamation follows a derived dependency index.
+Actual State and snapshot owners publish or release their roots in the same SQL
+transaction as their conditional write. Sequence edges preserve shared content.
+The index is rebuildable data, not a second history or retention owner. It adds
+linear metadata space in exchange for incremental reclamation; it is not a
+claim that every workload occupies fewer rows.
+
+Relevant successful commits run a separate best-effort maintenance transaction
+with a budget of 32 candidates, limited to the native partitions bound to that
+storage group. Work beyond the budget remains queued for later boundaries;
+there is no additional background scheduler. Target revisions protect publication racing a
+delete, and candidate revisions prevent an old collector from swallowing newly
+queued work. They are optimistic concurrency counters, not signatures or new
+content identities. A failed collector leaves work for a later boundary and
+does not change an already committed execution result. Replay tombstones and
+all visible retained histories remain owned. Terminal state alone never
+authorizes deleting them. Partial-slice owners conservatively pin their full
+forest; a new publication canonicalizes its visible message sequence.
+
+Owner selection and native SQL row capture share one consistent read snapshot.
+Decoding and external object reads occur after releasing that transaction; a
+paused iterator does not retain a database transaction. A bare native root is a
+locator rather than a permanent retention claim. If a cached publication proof
+has lost its old dependencies, a confirmed transaction rollback permits one
+cold rebuild per prepared candidate from its immutable messages, with the same
+canonical root. A multi-root transaction may encounter more than one such
+candidate; the same candidate cannot repeatedly restart it. Unknown commit
+outcomes never enter that retry path.
+
+External object bytes and generic archive content still use the explicitly
+exclusive offline collector. It discovers orphan message candidates by hash,
+validates retained bodies in batches of at most 128 before deleting anything,
+and never loads orphan bodies merely to delete them. Its retained root and
+sequence metadata still scale with the namespace. A single large retained body
+may exceed the typical batch size: this is bounded by body count, not a fixed
+byte cap. Existing offline exclusion and unresolved-retention checks remain.
+
+## Why other storage owners remain
+
+StateStore is the shared CAS/transaction layer for records, aliases, sequences,
+facts and operations, not another execution history. Execution owns admission,
+principal, producer fences, cancellation, budgets and terminal handoff. Task
+owns graph dependencies, scheduling leases and node outcomes across attempts.
+Conversation owns cross-run continuation, branches and committed turn order.
+None can be recovered reliably from native message snapshots alone.
+
+Trace retains provider requests, partial/failed responses, usage and timing that
+are not transcript messages. Shared run/event/message content references its
+native owner where available; trace-only and independent storage routes remain
+supported. The memory route uses the same state-backed interaction archive as
+SQL, rather than maintaining a second private interaction implementation.
+Checkpoint control owns tool-effect admission, fencing and unknown outcomes;
+native snapshots remain the recovery history owner. History is an authorized
+read facade, not an additional durable database.
+
+AssetStore owns logical asset versions, ObjectStore owns immutable file and attachment bytes,
+Memory owns cross-execution mutable state, and Evaluation and Metrics own their
+independent evidence and observations. Those semantics are not removable copies
+of StepStore. Large execution bindings, complete stored inputs (including their
+model-visible views), results and prepared terminal outcomes use the existing
+content archive in the database. Only declared Execution slots contain references;
+ordinary JSON is opaque. Small values stay with their Execution row. Terminal
+publication still folds a matching recovery outcome into the canonical result.
+Their physical placement does not create a second mutable source of truth.
+
+Control writes reuse immutable value encodings and existing content addresses.
+A confirmed Execution observation permits retaining its references without a
+source readback or another body publication. Weak encoding entries expire with
+the immutable values; they never prove that a body exists. Complete reads still
+check the referenced scope and original body bytes, and batch reads decode each
+shared input or result body once. New bodies are prepared before entering the owning transaction
+and published atomically with the Execution record. Failure, cancellation and
+unknown commit handling keep the same source receipts and retry rules.
+
+Execution inspection and child listings decode only their management projection
+and binding, preserving tenant and actor authorization and management-field checks. Task wait polls this
+projection, then reads the complete terminal or recovery result when required.
+Metadata reads do not substitute for full-content integrity validation. Native
+history capture enlists the Execution archive in its read snapshot. A cold reader
+that first discovers a declared content reference opens the existing archive
+outside the callback and restarts that read-only capture once. It discards the
+first capture's observations and rechecks session ownership; inline-only reads
+perform no archive discovery. Missing content and unrelated scope failures still
+fail closed. Portable snapshots and offline collection follow the references and the typed
+binary attachments in the resolved content, with unchanged retention policy.
+
+Conversation turn receipts retain execution identity and message range, not a
+second input, result, error or timestamp payload. Execution is the sole terminal
+content owner. Its first completion time remains stable while later handoff and
+retention-control updates may advance the record's normal update time. The
+repository's existing conditional writes preserve terminal facts; no additional
+terminal signature or content digest is introduced. Timeline pages batch-read
+the required Execution fields without expanding frozen bindings. Durable
+Conversation already requires durable Execution. Missing or mismatched owners
+fail closed instead of serving an independent stale copy.
+
+See [storage layout](storage-layout.md) for the direct binary body format, typed
+attachments, capture cleanup and the complete SQL table decisions.
 
 ## Verification
 

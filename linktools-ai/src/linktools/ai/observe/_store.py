@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
-from ..core import Page
+from ..core import Page, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ._model import (
     MetricAggregation,
@@ -19,8 +19,8 @@ from ._model import (
     Observation,
 )
 
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 def _observation_pruned() -> AIError:
     return AIError(
@@ -29,25 +29,30 @@ def _observation_pruned() -> AIError:
     )
 
 
-def _scan_cursor(occurred_at: datetime, observation_digest: str) -> str:
-    if occurred_at.tzinfo is None or _SHA256.fullmatch(observation_digest) is None:
+def _scan_cursor(occurred_at: datetime, observation_id: str) -> str:
+    try:
+        validate_resource_id(observation_id)
+    except (AIError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if occurred_at.tzinfo is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return f"{occurred_at.astimezone(timezone.utc).isoformat()}|{observation_digest}"
+    return f"{occurred_at.astimezone(timezone.utc).isoformat()}|{observation_id}"
 
 
 def _parse_scan_cursor(cursor: str) -> tuple[datetime, str]:
     if not isinstance(cursor, str) or not cursor:
         raise AIError(ErrorCode.CURSOR_INVALID)
-    occurred_raw, separator, digest = cursor.partition("|")
-    if not separator or _SHA256.fullmatch(digest) is None:
+    occurred_raw, separator, observation_id = cursor.partition("|")
+    if not separator:
         raise AIError(ErrorCode.CURSOR_INVALID)
     try:
+        validate_resource_id(observation_id)
         occurred_at = datetime.fromisoformat(occurred_raw)
-    except ValueError as error:
+    except (AIError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     if occurred_at.tzinfo is None:
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return occurred_at.astimezone(timezone.utc), digest
+    return occurred_at.astimezone(timezone.utc), observation_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +125,8 @@ class MetricStore(Protocol):
 
     ``scan_observations`` returns only the requested namespace/kind and the
     half-open interval ``[start, end)`` in strict ascending
-    ``(occurred_at, observation_digest)`` order. ``cursor`` is an opaque
+    ``(occurred_at, observation_id)`` order, comparing IDs by Unicode code
+    point rather than locale. ``cursor`` is an opaque
     continuation token produced by the same store; ``next_cursor=None`` means
     the scan is exhausted. A page never contains more than ``limit`` items.
     """

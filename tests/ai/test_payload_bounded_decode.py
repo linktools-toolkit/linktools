@@ -13,7 +13,8 @@ from linktools.ai.persistence._payload import decode_payload_bytes, encode_paylo
 
 @pytest.mark.parametrize("raw", (b"", b"payload", b"repeat" * 10000))
 def test_payload_roundtrip_preserves_empty_raw_and_compressed_bytes(raw: bytes) -> None:
-    codec, digest, size, content = encode_payload_bytes(raw)
+    codec, content = encode_payload_bytes(raw)
+    digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
     assert decode_payload_bytes(content, codec=codec, raw_digest=digest, raw_size=size) == raw
     assert decode_payload_bytes(zlib.compress(raw), codec="zlib", raw_digest=digest, raw_size=size) == raw
 

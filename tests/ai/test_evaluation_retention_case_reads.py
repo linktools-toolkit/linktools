@@ -42,20 +42,20 @@ async def _retention_repository(tmp_path, backend, states, *, dataset_state="liv
             NOW if dataset_state == "expired" else None)
         rows = []
         if dataset_state not in {"missing", "tombstone"}:
-            rows.append(repository._stored("evaluation_dataset", [dataset.ref.id, dataset.ref.revision], dataset_record))
+            rows.append(repository._stored("evaluation_dataset", (dataset.ref.id, str(dataset.ref.revision)), dataset_record))
         if dataset_state == "tombstone":
-            identity = [dataset.ref.id, dataset.ref.revision]
-            rows.append(repository._stored("evaluation_content_tombstone", ["evaluation_dataset", identity],
-                EvaluationContentTombstone("evaluation_dataset", identity, "owner", dataset.digest, NOW)))
+            identity = (dataset.ref.id, str(dataset.ref.revision))
+            rows.append(repository._stored("evaluation_content_tombstone", ("evaluation_dataset", *identity),
+                EvaluationContentTombstone("evaluation_dataset", [dataset.ref.id, dataset.ref.revision], "owner", dataset.digest, NOW)))
         for case, state in zip(cases, states):
-            identity = [case.ref.dataset_id, case.ref.case_id, case.ref.revision]
+            identity = (case.ref.dataset_id, case.ref.case_id, str(case.ref.revision))
             if state not in {"missing", "tombstone"}:
                 value = (dataset_record if state == "malformed" else
                          EvaluationCaseRecord(case, "owner", NOW, NOW if state == "expired" else None))
                 rows.append(repository._stored("evaluation_case", identity, value))
             if state in {"tombstone", "live_with_tombstone"}:
-                rows.append(repository._stored("evaluation_content_tombstone", ["evaluation_case", identity],
-                    EvaluationContentTombstone("evaluation_case", identity, "owner", case.digest, NOW)))
+                rows.append(repository._stored("evaluation_content_tombstone", ("evaluation_case", *identity),
+                    EvaluationContentTombstone("evaluation_case", [case.ref.dataset_id, case.ref.case_id, case.ref.revision], "owner", case.digest, NOW)))
         await repository.state_store.mutate(lambda tx: tx.insert_records(tuple(rows)))
         yield repository, record, cases
 
@@ -104,7 +104,7 @@ async def test_retention_reads_fresh_case_expiry_on_each_discovery(tmp_path: Pat
     async with _retention_repository(tmp_path, backend, ("live",) * 65) as (repository, record, cases):
         assert await repository.list_expired(now=NOW, limit=10) == ()
         case = cases[-1]
-        identity = [case.ref.dataset_id, case.ref.case_id, case.ref.revision]
+        identity = (case.ref.dataset_id, case.ref.case_id, str(case.ref.revision))
         row = repository._stored("evaluation_case", identity, EvaluationCaseRecord(case, "owner", NOW, NOW))
         assert await repository.state_store.mutate(lambda tx: tx.replace_record(
             replace(row, storage_revision=1), expected_storage_revision=0,
@@ -159,13 +159,13 @@ async def test_retention_case_batch_failure_propagates_without_retry(
 ) -> None:
     async with _retention_repository(tmp_path, "sqlite", ("live",) * 65) as (repository, _record, cases):
         original = _sql._record_from_row
-        keys = {repository._key("evaluation_case", [case.ref.dataset_id, case.ref.case_id, case.ref.revision]) for case in cases}
+        keys = {repository._key("evaluation_case", (case.ref.dataset_id, case.ref.case_id, str(case.ref.revision))) for case in cases}
         calls = 0
 
         def read(row):
             nonlocal calls
             value = original(row)
-            if value.key_digest in keys:
+            if value.key in keys:
                 calls += 1
                 if failure == "cancel":
                     raise asyncio.CancelledError
@@ -189,13 +189,13 @@ async def test_retention_fails_closed_on_corrupt_row_in_selected_case_batch(
 ) -> None:
     async with _retention_repository(tmp_path, "sqlite", ("expired", "live_with_tombstone")) as (repository, record, cases):
         case = cases[-1]
-        identity = [case.ref.dataset_id, case.ref.case_id, case.ref.revision]
-        key = repository._key(kind, identity if kind == "evaluation_case" else ["evaluation_case", identity])
+        identity = (case.ref.dataset_id, case.ref.case_id, str(case.ref.revision))
+        key = repository._key(kind, identity if kind == "evaluation_case" else ("evaluation_case", *identity))
         original = _sql._record_from_row
 
         def read(row):
             value = original(row)
-            if value.key_digest == key:
+            if value.key == key:
                 return original(dict(row, payload_json=[]))
             return value
 

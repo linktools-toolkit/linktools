@@ -23,13 +23,13 @@ async def _protect(tx, record, source):
     if source == "insert":
         await tx.insert_record(record)
     elif source == "guard":
-        record = await tx.guard_record(record.key_digest, expected_storage_revision=record.storage_revision)
+        record = await tx.guard_record(record.key, expected_storage_revision=record.storage_revision)
     elif source == "replace":
         candidate = replace(record, storage_revision=record.storage_revision + 1, data={"protected": True})
         await tx.replace_records((RecordReplacement(candidate, record.storage_revision),))
         record = candidate
     else:
-        assert await tx.get_record(record.key_digest) == record
+        assert await tx.get_record(record.key) == record
     return record
 
 
@@ -56,7 +56,7 @@ async def test_sql_lease_decision_samples_once_after_existing_write_protection(
         async def callback(tx):
             current = await _protect(tx, record, source)
             result = await tx.transition_record_lease(
-                current.key_digest, expected_storage_revision=current.storage_revision,
+                current.key, expected_storage_revision=current.storage_revision,
                 transition=RecordLeaseTransition(operation, "owner", 7,
                                                  5 if operation in {"acquire", "renew"} else None),
             )
@@ -71,7 +71,7 @@ async def test_sql_lease_decision_samples_once_after_existing_write_protection(
 
         result = await store.mutate(callback)
         assert len(sampled) == (2 if source == "cached" else 1)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == result
+        assert await store.read(lambda tx: tx.get_record(record.key)) == result
 
 
 @pytest.mark.parametrize("source", _PROTECTED)
@@ -99,17 +99,17 @@ async def test_sql_preprotected_lease_rejects_fresh_invalid_conditions_without_i
             sampled = _STAMP if condition != "clock_backwards" else _STAMP - timedelta(microseconds=1)
             operation = "guard_available" if condition == "clock_backwards" else "guard"
             assert await tx.transition_record_lease(
-                current.key_digest,
+                current.key,
                 expected_storage_revision=current.storage_revision + (condition == "revision"),
                 transition=RecordLeaseTransition(operation, "other" if condition == "owner" else "owner",
                                                  8 if condition == "fence" else 7),
             ) is None
             assert await tx.now() == snapshot
-            assert await tx.get_record(current.key_digest) == current
+            assert await tx.get_record(current.key) == current
             return current
 
         result = await store.mutate(callback)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == result
+        assert await store.read(lambda tx: tx.get_record(record.key)) == result
 
 
 @pytest.mark.parametrize("source", _PROTECTED)
@@ -131,7 +131,7 @@ async def test_sql_preprotected_first_clock_error_keeps_existing_caught_error_co
             current = await _protect(tx, record, source)
             with pytest.raises(type(failure)) as caught:
                 await tx.transition_record_lease(
-                    current.key_digest, expected_storage_revision=current.storage_revision,
+                    current.key, expected_storage_revision=current.storage_revision,
                     transition=RecordLeaseTransition("renew", "owner", 7, 5),
                 )
             assert caught.value is failure
@@ -140,7 +140,7 @@ async def test_sql_preprotected_first_clock_error_keeps_existing_caught_error_co
 
         result = await store.mutate(callback)
         records = await store.read(lambda tx: tx.scan_records())
-        assert {item.key_digest: item for item in records} == {item.key_digest: item for item in (result, _record(2))}
+        assert {item.key: item for item in records} == {item.key: item for item in (result, _record(2))}
 
 
 @pytest.mark.parametrize("source", _PROTECTED)
@@ -167,7 +167,7 @@ async def test_sql_preprotected_lease_write_failure_aborts_even_when_caught(
             current = await _protect(tx, record, source)
             with pytest.raises(type(failure)):
                 await tx.transition_record_lease(
-                    current.key_digest, expected_storage_revision=current.storage_revision,
+                    current.key, expected_storage_revision=current.storage_revision,
                     transition=RecordLeaseTransition("renew", "owner", 7, 5),
                 )
             await tx.insert_record(_record(2))
@@ -189,10 +189,10 @@ async def test_sql_deleted_record_does_not_reuse_previous_lease_protection(tmp_p
         monkeypatch.setattr(store.context.dialect, "database_current_time", clock)
 
         async def callback(tx):
-            guarded = await tx.guard_record(record.key_digest, expected_storage_revision=record.storage_revision)
-            await tx.delete_records((record.key_digest,))
+            guarded = await tx.guard_record(record.key, expected_storage_revision=record.storage_revision)
+            await tx.delete_records((record.key,))
             assert await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=guarded.storage_revision,
+                record.key, expected_storage_revision=guarded.storage_revision,
                 transition=RecordLeaseTransition("guard", "old", 7),
             ) is None
             if not reinsert:
@@ -200,13 +200,13 @@ async def test_sql_deleted_record_does_not_reuse_previous_lease_protection(tmp_p
             successor = replace(record, lease_owner="new", lease_fence=8)
             await tx.insert_record(successor)
             assert await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=successor.storage_revision,
+                record.key, expected_storage_revision=successor.storage_revision,
                 transition=RecordLeaseTransition("guard", "old", 7),
             ) is None
             return await tx.transition_record_lease(
-                record.key_digest, expected_storage_revision=successor.storage_revision,
+                record.key, expected_storage_revision=successor.storage_revision,
                 transition=RecordLeaseTransition("guard", "new", 8),
             )
 
         result = await store.mutate(callback)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == result
+        assert await store.read(lambda tx: tx.get_record(record.key)) == result

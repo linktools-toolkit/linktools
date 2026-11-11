@@ -124,7 +124,7 @@ async def test_graph_budget_export_rejects_missing_or_changed_scope(
             records = await transaction.list_records(RecordQuery(kind="budget_scope"))
             assert len(records) == 1
             record = records[0]
-            assert await transaction.delete_record(record.key_digest)
+            assert await transaction.delete_record(record.key)
             if corruption == "limits":
                 await transaction.insert_record(_changed_limits(record))
 

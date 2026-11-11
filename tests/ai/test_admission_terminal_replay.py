@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import CommitPolicy, ExecutionStatus, IdempotencyStatus, ResourceKind, RunBudget
+from linktools.ai.core import canonical_sha256, CommitPolicy, ExecutionStatus, IdempotencyStatus, ResourceKind, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import Execution, ExecutionStartReservation, ExecutionStartReservationResult
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -98,7 +98,10 @@ async def _terminal_race(
                     if receipt_fault == "not_started":
                         return replace(result, execution=replace(result.execution, started_at=None))
                     if receipt_fault == "missing_result":
-                        return replace(result, execution=replace(result.execution, result=None))
+                        # Inject a corrupt repository receipt without weakening constructor validation.
+                        corrupt = replace(result.execution)
+                        object.__setattr__(corrupt, "result", None)
+                        return replace(result, execution=corrupt)
                     if receipt_fault == "digest":
                         return replace(result, idempotency=replace(result.idempotency, result_digest="f" * 64))
                     return replace(result, idempotency=replace(result.idempotency, status=IdempotencyStatus.START_UNKNOWN))
@@ -180,7 +183,7 @@ async def _terminal_race(
                     )
                     assert await observer.read_owner(winner.execution_id, tenant_id=state.tenant_id) is None
                     assert await observer.read_request_execution(
-                        f"{identity.scope}:{identity.idempotency_key_digest}", tenant_id=state.tenant_id,
+                        canonical_sha256([identity.scope, identity.idempotency_key]), tenant_id=state.tenant_id,
                     ) is None
                 if outcome == "succeeded" or session:
                     sequential = await start(delayed_runtime, prompt="same request", hold_id="late-hold")

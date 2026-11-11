@@ -12,17 +12,21 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.core import canonical_json_bytes
+from linktools.ai.persistence._archive import PreparedArchive
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import encode_model_messages
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.persistence import Persistence, PersistenceStorage, PersistenceDomain
+from linktools.ai.core import ExecutionStatus
 from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
 from linktools.ai.persistence.contracts import ContextProjection, InlineContextBlock, ModelInteractionRecord, RuntimePayloadRef
 from linktools.ai.persistence.runs import AgentRunCheckpoint, AgentRunRecord, InMemoryStepArchive, RuntimeAgentRunStore, StagedModelInteraction, StagingAgentRunStore
 from linktools.ai.persistence._model_interaction import StagedContextProjection, build_inline_context_projection
-from linktools.ai.persistence._model_interaction_store import ModelInteractionInMemoryStepArchive
 from linktools.ai.storage import StoredPayload
 
 from .test_step_archive_read_boundaries import _archive
+
+from .test_history_projection_conformance import _record as _execution_record
+
 
 
 def _record(sequence: int, *, direct: bool) -> ModelInteractionRecord:
@@ -139,10 +143,12 @@ async def test_mixed_direct_and_prepared_archive_reads_keep_response_positions(t
 @pytest.mark.asyncio
 async def test_staged_and_prepared_direct_response_round_trip() -> None:
     staging = StagingAgentRunStore()
-    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
+    persistence = Persistence(PersistenceStorage.in_memory())
+    await persistence.initialize(namespace="test", tenant_id="tenant")
+    await persistence.execution.executions.create_execution(_execution_record(ExecutionStatus.STARTED, 1))
+    archive = persistence.run_store.read_store(PersistenceDomain.TRACE)
     store = RuntimeAgentRunStore(staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION), execution_archive=None)
     await store.initialize()
-    await archive.initialize()
     try:
         run = AgentRunRecord("run")
         await store.register_agent_run(run)
@@ -166,14 +172,15 @@ async def test_staged_and_prepared_direct_response_round_trip() -> None:
             values.append(staged)
         staged_batch = await store.resolve_model_interactions(values)
         assert staged_batch == [await store.resolve_model_interaction(value) for value in values]
-        durable = await archive.prepare_interactions(run, values, lambda digest: staging.staged_payload("run", digest))
+        assert await archive.resolve_model_interaction(_record(1, direct=True)) == staged_batch[0]
+        prepared = PreparedArchive()
+        durable = await archive.prepare_interactions(run, values, lambda digest: staging.staged_payload("run", digest), prepared=prepared)
         assert [value.request_context is None for value in durable] == [True, False, True, False]
-        assert await archive.resolve_model_interaction(durable[0]) == staged_batch[0]
         with pytest.raises(AIError) as raised:
             await archive.resolve_model_interaction(durable[1])
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         await archive.sync_projection(
-            run, events=(), checkpoints=(AgentRunCheckpoint("run", 1, [response]),), interactions=durable,
+            run, events=(), checkpoints=(AgentRunCheckpoint("run", 1, [response], transcript_message_count_before=0),), interactions=durable, archive=prepared, execution_id="execution",
         )
         durable_batch = await archive.resolve_model_interactions(durable)
         assert durable_batch == [await archive.resolve_model_interaction(value) for value in durable]
@@ -185,13 +192,16 @@ async def test_staged_and_prepared_direct_response_round_trip() -> None:
     finally:
         await store.preflight_close()
         await store.close()
-        await archive.close()
+        await persistence.close()
 
 
 @pytest.mark.asyncio
 async def test_running_page_resolves_after_terminal_archive_releases_staging() -> None:
     staging = StagingAgentRunStore()
-    archive = ModelInteractionInMemoryStepArchive(PersistenceDomain.TRACE)
+    persistence = Persistence(PersistenceStorage.in_memory())
+    await persistence.initialize(namespace="test", tenant_id="tenant")
+    await persistence.execution.executions.create_execution(_execution_record(ExecutionStatus.STARTED, 1))
+    archive = persistence.run_store.read_store(PersistenceDomain.TRACE)
     store = RuntimeAgentRunStore(staging, conversation_archive=InMemoryStepArchive(PersistenceDomain.CONVERSATION),
                                  execution_archive=archive)
     await store.initialize()
@@ -212,8 +222,8 @@ async def test_running_page_resolves_after_terminal_archive_releases_staging() -
         before = await store.resolve_model_interactions(page)
         response = ModelResponse(parts=[TextPart("response-1")], timestamp=terminal.started_at)
         await archive.sync_projection(run, events=(),
-                                      checkpoints=(AgentRunCheckpoint("run", 1, [request, response]),),
-                                      interactions=(terminal,))
+                                      checkpoints=(AgentRunCheckpoint("run", 1, [request, response], transcript_message_count_before=0),),
+                                      interactions=(terminal,), execution_id="execution")
         await staging.release_agent_run("run")
         assert await store.resolve_model_interactions(page) == before
         assert before[0][1] is None
@@ -221,3 +231,4 @@ async def test_running_page_resolves_after_terminal_archive_releases_staging() -
     finally:
         await store.preflight_close()
         await store.close()
+        await persistence.close()

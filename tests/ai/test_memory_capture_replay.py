@@ -149,7 +149,7 @@ async def test_memory_capture_receipt_rejects_inconsistent_replay(
             payload["result"]["version"] = "m1:" + "0" * 64
         elif corruption == "path":
             payload["result"]["file"] = "memory/other.md"
-            record = replace(record, resource_id=_memory_id(canonical_sha256("target"), "memory/other.md"))
+            record = replace(record, resource_id=_memory_id("target", "memory/other.md"))
             expected_error = MemoryOperationConflictError
         elif corruption == "kind":
             payload["result"].update(version=None, status="deleted")

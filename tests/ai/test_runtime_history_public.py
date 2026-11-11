@@ -1027,7 +1027,7 @@ async def test_execution_history_and_trace_forward_filters(
         _Executions(), TenantAuthorizationPolicy("tenant"), reader,
     )
     principal = Principal("caller", "tenant", "service")
-    executions = RuntimeExecutions(service, None)
+    executions = RuntimeExecutions(service, None, bind_execution=None)
     execution = Execution(SimpleNamespace(service=executions), "execution", principal, None)
     target = {
         "service": service,

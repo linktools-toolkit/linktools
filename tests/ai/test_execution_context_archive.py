@@ -21,6 +21,20 @@ from .test_incremental_projection_boundaries import _storage
 pytestmark = pytest.mark.asyncio
 
 
+async def _publish_context(state, prepared, *, execution_id="accepted-context"):
+    from .test_runtime_persistence_evidence import _execution
+
+    repository = state.execution.executions
+    execution = replace(_execution(), execution_id=execution_id, root_execution_id=execution_id,
+                        input_context=prepared.reference)
+
+    async def commit(transaction):
+        await prepared.publish()
+        await repository.create_execution_in_transaction(transaction, execution)
+
+    await repository.state_store.mutate(commit)
+
+
 @pytest.mark.parametrize("invalid_skills", ({}, "", [None]))
 @pytest.mark.parametrize("reader", ("load", "closure", "rekey"))
 async def test_context_archive_rejects_malformed_preload_skills(tmp_path, invalid_skills, reader):
@@ -34,7 +48,7 @@ async def test_context_archive_rejects_malformed_preload_skills(tmp_path, invali
         )
         context = ExecutionInputContext.from_messages(())
         prepared = await service.prepare(context)
-        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        await _publish_context(state, prepared)
         manifest = prepared.reference.payload.decode()
         assert manifest["preload_skills"] == []
         assert await service.load(prepared.reference) == context
@@ -67,7 +81,7 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
             ModelRequest(parts=[UserPromptPart(f"message-{index}")]) for index in range(3)
         ))
         first = await service.prepare(context)
-        await first.archive.store.mutate(lambda tx: first.archive.publish(tx, first.records))
+        await _publish_context(state, first)
         root = NativeMessageRoot.from_json(first.reference.payload.decode()["history"])
         reads = []
         original = first.archive.store.read_records
@@ -133,7 +147,7 @@ async def test_context_archive_handle_is_bound_and_failed_open_is_retryable(tmp_
         assert service._archive is None
         context = ExecutionInputContext.from_messages((ModelRequest(parts=[UserPromptPart("message")]),))
         prepared = await service.prepare(context)
-        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        await _publish_context(state, prepared)
         assert await service._open() is prepared.archive
         assert await service.load(prepared.reference) == context
         assert calls == [False, True]
@@ -172,7 +186,7 @@ async def test_instruction_read_does_not_materialize_history_or_other_components
             memory={"large": {"content": "memory"}}, preload_skills=({"large": "skill"},),
         )
         prepared = await service.prepare(context)
-        await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
+        await _publish_context(state, prepared)
         cold = ExecutionContextArchive(
             state.execution.executions.state_store,
             state.archive_object_store(PersistenceDomain.EXECUTION),

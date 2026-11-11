@@ -409,7 +409,7 @@ async def test_pending_tool_terminal_rollback_leaves_no_partial_effect_fact(
             tool_operation_id="operation", execution_id=execution.execution_id,
             agent_run_id=agent_run_id(namespace="pending-turn", tenant_id="tenant",
                 execution_id=execution.execution_id, agent_run_seq=1),
-            tool_call_id="call", idempotency_key_digest=canonical_sha256({"call": "call"}),
+            tool_call_id="call",
             tool_name="work", arguments_digest=canonical_sha256({}),
             binding_digest=execution.binding_digest, replay_safe=True,
             status=ToolOperationStatus.COMPLETED, owner=execution.producer_claim_id, fence=1,

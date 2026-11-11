@@ -3,7 +3,6 @@
 """Shared persistence scope, repositories and owned resource lifecycle."""
 
 import asyncio
-import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -13,7 +12,7 @@ from typing import TYPE_CHECKING, TypedDict, TypeVar
 from linktools.core import environ
 from ..observe.stream import await_stream_cleanup
 
-from ..core import validate_persistence_namespace, validate_tenant_id, canonical_json_bytes
+from ..core import validate_capability_id, validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
@@ -28,7 +27,7 @@ from ._root import PersistenceStorage, _validate_storage_configuration
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
 from .contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
                          ExecutionRepositories, MemoryRepositories, CheckpointRepositories, TaskRepositories)
-from .state import StateStore
+from .state import StateStore, capability_store_key
 from ..steps import NativeStepSource
 from ._snapshot import SnapshotLimits, SnapshotExclusiveGuard
 from .snapshots import SnapshotResources, RuntimeSnapshotOperations, restore_snapshot
@@ -219,17 +218,14 @@ class Persistence:
 
     async def capability_store(self, identity: str) -> StateStore:
         """Borrow an isolated capability partition, using the execution route by default."""
-        if not isinstance(identity, str) or not identity:
-            raise ValueError("capability identity must be nonempty")
+        validate_capability_id(identity)
         async with self._lock:
             self._require_ready()
             if self._read_only:
                 raise AIError(ErrorCode.STORAGE_READ_ONLY)
             store = self.capability_stores.get(identity)
             if store is None:
-                key = hashlib.sha256(canonical_json_bytes([
-                    "capability-store", self.namespace, self.tenant_id, identity,
-                ])).digest()
+                key = capability_store_key(self.namespace, self.tenant_id, identity)
                 store = await self.execution.executions.state_store.storage_group.open_partition(key, create=True)
                 if store is None:
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -593,7 +589,7 @@ class Persistence:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         opened = await state.storage_group.open_archive()
         if (opened is None or opened[0] != source.group_id
-                or source.store_digest != SqlStepStore.scope_digest(
+                or source.store_key != SqlStepStore.scope_key(
                     namespace=self.namespace, tenant_id=self.tenant_id)):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         from functools import partial

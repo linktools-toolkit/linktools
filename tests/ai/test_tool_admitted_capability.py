@@ -19,7 +19,7 @@ from linktools.ai.persistence.contracts import ToolOperationAdmission
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurn
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.spec import CapabilityRef
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from ._runtime_test_helpers import tool_run_context
 from .test_budget_tool_admission_boundary import admission_state, _commands, _execution
@@ -35,7 +35,7 @@ def _bridge(state: Persistence, *, recovery: bool = False) -> RuntimeToolOperati
         state.checkpoint.tools, InMemoryObjectStore(), namespace="admitted-capability",
         tenant_id="tenant", execution_id="execution", agent_run_id="resumed" if recovery else "run",
         binding_digest="b" * 64, owner="owner", background_tasks=set(),
-        payload_policy=PayloadPolicy(), recovery_agent_run_id="run" if recovery else None,
+         recovery_agent_run_id="run" if recovery else None,
     )
 
 
@@ -256,6 +256,6 @@ async def test_fresh_read_only_call_does_not_query_receipts() -> None:
     bridge = RuntimeToolOperationBridge(
         repository, InMemoryObjectStore(), namespace="fresh", tenant_id="tenant", execution_id="execution",
         agent_run_id="run", binding_digest="b" * 64, owner="owner", background_tasks=set(),
-        payload_policy=PayloadPolicy(), fresh_execution=True,
+         fresh_execution=True,
     )
     assert await bridge.existing_call_ids(("new-call",)) == frozenset()

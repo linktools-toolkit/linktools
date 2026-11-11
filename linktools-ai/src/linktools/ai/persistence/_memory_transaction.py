@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
-from ..core import canonical_json_bytes
+from ..core import canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
 from .state import (
     RecordLeaseTransition, FactQuery,
@@ -22,6 +22,9 @@ from .state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
+    validate_alias_key,
+    validate_stream_key,
+    validate_relation_key,
     validate_operation_replacement,
     validate_record_identity,
     validate_record_replacement,
@@ -115,34 +118,34 @@ class _MemoryTransaction:
 
     async def insert_records(self, records: Sequence[StoredRecord]) -> None:
         values = tuple(records)
-        keys = [record.key_digest for record in values]
+        keys = [record.key for record in values]
         if len(keys) != len(set(keys)):
             raise ValueError("insert_records contains duplicate keys")
-        ordered = tuple(sorted(values, key=lambda value: value.key_digest))
+        ordered = tuple(sorted(values, key=lambda value: value.key))
         for record in ordered:
             validate_record_identity(record)
-            if record.key_digest in self.records:
+            if record.key in self.records:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         for record in ordered:
-            self.records[record.key_digest] = record
-            self.guarded_record_keys.add(record.key_digest)
+            self.records[record.key] = record
+            self.guarded_record_keys.add(record.key)
 
     async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
         values = tuple(records)
         try:
-            if len({record.key_digest for record in values}) != len(values):
+            if len({record.key for record in values}) != len(values):
                 raise ValueError("insert_immutable_records contains duplicate keys")
             for record in values:
                 validate_record_identity(record)
-                current = self.records.get(record.key_digest)
+                current = self.records.get(record.key)
                 if current is not None and (
                     replace(current, data={}) != replace(record, data={})
                     or canonical_json_bytes(dict(current.data)) != canonical_json_bytes(dict(record.data))
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for record in values:
-                self.records[record.key_digest] = record
-                self.guarded_record_keys.add(record.key_digest)
+                self.records[record.key] = record
+                self.guarded_record_keys.add(record.key)
         except BaseException as error:
             if self.mutation_error is None:
                 self.mutation_error = error
@@ -191,18 +194,18 @@ class _MemoryTransaction:
 
     async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
         values = tuple(replacements)
-        keys = [replacement.record.key_digest for replacement in values]
+        keys = [replacement.record.key for replacement in values]
         if len(keys) != len(set(keys)):
             raise ValueError("replace_records contains duplicate keys")
         candidates: list[StoredRecord] = []
-        ordered = sorted(values, key=lambda value: value.record.key_digest)
+        ordered = sorted(values, key=lambda value: value.record.key)
         for replacement in ordered:
             validate_record_identity(replacement.record)
             if replacement.record.storage_revision != replacement.expected_storage_revision + 1:
                 raise ValueError("replacement must increment storage_revision exactly once")
         try:
             for replacement in ordered:
-                current = self.records.get(replacement.record.key_digest)
+                current = self.records.get(replacement.record.key)
                 if current is None or current.storage_revision != replacement.expected_storage_revision:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 validate_record_replacement(current, replacement.record)
@@ -212,8 +215,8 @@ class _MemoryTransaction:
                 self.mutation_error = error
             raise
         for record in candidates:
-            self.records[record.key_digest] = record
-            self.guarded_record_keys.add(record.key_digest)
+            self.records[record.key] = record
+            self.guarded_record_keys.add(record.key)
 
     async def transition_record_lease(
         self,
@@ -317,37 +320,40 @@ class _MemoryTransaction:
             if record_key in keys:
                 del self.aliases[alias]
         for fact_key, fact in tuple(self.facts.items()):
-            if fact.owner_key_digest in keys:
+            if fact.owner_key in keys:
                 del self.facts[fact_key]
         for key in keys:
             del self.records[key]
             self.guarded_record_keys.discard(key)
 
     async def read_record_subjects(
-        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+        self, *, scope_key: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...]:
-        subjects = frozenset(subject_digests)
+        validate_relation_key(scope_key)
+        subjects = frozenset(validate_resource_id(subject) for subject in subject_ids)
         if not subjects:
             return ()
         return tuple(sorted(
             (record for record in self.records.values()
-             if record.scope_digest == scope_digest and record.kind == kind
-             and record.subject_digest in subjects),
-            key=lambda record: (record.sort_key, record.key_digest),
+             if record.scope_key == scope_key and record.kind == kind
+             and record.subject_id in subjects),
+            key=lambda record: (record.sort_key, record.key),
         ))
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
         values = [
             record for record in self.records.values() if _matches_record(record, query)
         ]
-        values.sort(key=lambda record: (record.sort_key, record.key_digest))
-        if query.after_sort_key is not None and query.after_key_digest is not None:
+        values.sort(key=lambda record: (record.sort_key, record.key))
+        if query.after_sort_key is not None and query.after_key is not None:
             values = [
                 record
                 for record in values
-                if (record.sort_key, record.key_digest)
-                > (query.after_sort_key, query.after_key_digest)
+                if (record.sort_key, record.key)
+                > (query.after_sort_key, query.after_key)
             ]
+        elif query.after_sort_key is not None:
+            values = [record for record in values if record.sort_key > query.after_sort_key]
         if query.limit is not None:
             values = values[: query.limit]
         return tuple(values)
@@ -364,14 +370,14 @@ class _MemoryTransaction:
         _require_scan_limit(limit)
         values = sorted(
             self.records.values(),
-            key=lambda value: (value.kind, value.key_digest),
+            key=lambda value: (value.kind, value.key),
         )
         if after is not None:
             values = [
                 value
                 for value in values
-                if (value.kind, value.key_digest)
-                > (after.kind, after.key_digest)
+                if (value.kind, value.key)
+                > (after.kind, after.key)
             ]
         return tuple(values[:limit])
 
@@ -381,7 +387,7 @@ class _MemoryTransaction:
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
         values = {
             alias: self.aliases[alias]
-            for alias in dict.fromkeys(aliases)
+            for alias in dict.fromkeys(validate_alias_key(alias) for alias in aliases)
             if alias in self.aliases
         }
         for value in values.values():
@@ -402,6 +408,8 @@ class _MemoryTransaction:
         limit: int,
     ) -> tuple[StoredAlias, ...]:
         _require_scan_limit(limit)
+        if after is not None:
+            validate_alias_key(after)
         values = [
             StoredAlias(alias, record_key)
             for alias, record_key in sorted(self.aliases.items())
@@ -413,19 +421,20 @@ class _MemoryTransaction:
         await self.insert_aliases((alias,))
 
     async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
-        for alias in sorted(aliases, key=lambda value: value.alias_digest):
-            current = self.aliases.get(alias.alias_digest)
-            if current is not None and current != alias.record_key_digest:
+        for alias in sorted(aliases, key=lambda value: value.alias_key):
+            current = self.aliases.get(alias.alias_key)
+            if current is not None and current != alias.record_key:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if alias.record_key_digest not in self.guarded_record_keys:
+            if alias.record_key not in self.guarded_record_keys:
                 raise RuntimeError("alias owner must be guarded in the current transaction")
-            self.aliases[alias.alias_digest] = alias.record_key_digest
+            self.aliases[alias.alias_key] = alias.record_key
 
     async def get_sequence(self, key: bytes) -> int:
+        validate_stream_key(key)
         return self.sequences.get(key, 0)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
-        return {key: self.sequences.get(key, 0) for key in keys}
+        return {validate_stream_key(key): self.sequences.get(key, 0) for key in keys}
 
     async def scan_sequences(self) -> Mapping[bytes, int]:
         return dict(sorted(self.sequences.items()))
@@ -437,6 +446,8 @@ class _MemoryTransaction:
         limit: int,
     ) -> Mapping[bytes, int]:
         _require_scan_limit(limit)
+        if after is not None:
+            validate_stream_key(after)
         values = [
             (key, value)
             for key, value in sorted(self.sequences.items())
@@ -445,6 +456,7 @@ class _MemoryTransaction:
         return dict(values)
 
     async def next_sequence(self, key: bytes) -> int:
+        validate_stream_key(key)
         value = self.sequences.get(key, 0) + 1
         self.sequences[key] = value
         return value
@@ -458,6 +470,8 @@ class _MemoryTransaction:
             for count in requests.values()
         ):
             raise ValueError("sequence reservation count must be a positive integer")
+        for key in requests:
+            validate_stream_key(key)
         values = {
             key: self.sequences.get(key, 0) + requests[key]
             for key in sorted(requests)
@@ -466,6 +480,7 @@ class _MemoryTransaction:
         return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
+        validate_stream_key(key)
         if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
             raise ValueError("expected sequence must be a non-negative integer")
         current = self.sequences.get(key, 0)
@@ -477,14 +492,14 @@ class _MemoryTransaction:
         await self.delete_sequences((key,))
 
     async def delete_sequences(self, keys: Sequence[bytes]) -> None:
-        for key in sorted(set(keys)):
+        for key in sorted(set(validate_stream_key(key) for key in keys)):
             self.sequences.pop(key, None)
 
     async def insert_fact(self, fact: StoredFact) -> None:
-        key = (fact.stream_digest, fact.sequence)
+        key = (fact.stream_key, fact.sequence)
         if key in self.facts:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if fact.owner_key_digest not in self.guarded_record_keys:
+        if fact.owner_key not in self.guarded_record_keys:
             raise RuntimeError("fact owner must be guarded in the current transaction")
         self.facts[key] = fact
 
@@ -493,22 +508,23 @@ class _MemoryTransaction:
             await self.insert_fact(fact)
 
     async def get_facts(
-        self, stream_digest: bytes, sequences: Sequence[int],
+        self, stream_key: bytes, sequences: Sequence[int],
     ) -> tuple[StoredFact, ...]:
+        validate_stream_key(stream_key)
         return tuple(
             fact for sequence in sorted(set(sequences))
-            if (fact := self.facts.get((stream_digest, sequence))) is not None
+            if (fact := self.facts.get((stream_key, sequence))) is not None
         )
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         if (
-            query.limit is not None and query.subject_digest is None
+            query.limit is not None and query.subject_id is None
             and not query.latest and not query.latest_per_subject
         ):
             start = 1 if query.after_sequence is None else query.after_sequence + 1
             consecutive: list[StoredFact] = []
             for sequence in range(start, start + query.limit):
-                fact = self.facts.get((query.stream_digest, sequence))
+                fact = self.facts.get((query.stream_key, sequence))
                 if fact is None:
                     break
                 consecutive.append(fact)
@@ -517,19 +533,19 @@ class _MemoryTransaction:
         values = [
             fact
             for fact in self.facts.values()
-            if fact.stream_digest == query.stream_digest
+            if fact.stream_key == query.stream_key
         ]
         if query.after_sequence is not None:
             values = [fact for fact in values if fact.sequence > query.after_sequence]
-        if query.subject_digest is not None:
-            values = [fact for fact in values if fact.subject_digest == query.subject_digest]
+        if query.subject_id is not None:
+            values = [fact for fact in values if fact.subject_id == query.subject_id]
         values.sort(key=lambda fact: fact.sequence)
         if query.latest:
             return () if not values else (values[-1],)
         if query.latest_per_subject:
-            latest: dict[bytes | None, StoredFact] = {}
+            latest: dict[str | None, StoredFact] = {}
             for fact in values:
-                latest[fact.subject_digest] = fact
+                latest[fact.subject_id] = fact
             values = sorted(latest.values(), key=lambda fact: fact.sequence)
         if query.limit is not None:
             values = values[: query.limit]
@@ -547,29 +563,29 @@ class _MemoryTransaction:
         _require_scan_limit(limit)
         values = sorted(
             self.facts.values(),
-            key=lambda value: (value.stream_digest, value.sequence),
+            key=lambda value: (value.stream_key, value.sequence),
         )
         if after is not None:
             values = [
                 value
                 for value in values
-                if (value.stream_digest, value.sequence)
-                > (after.stream_digest, after.sequence)
+                if (value.stream_key, value.sequence)
+                > (after.stream_key, after.sequence)
             ]
         return tuple(values[:limit])
 
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         for key, fact in tuple(self.facts.items()):
-            if fact.owner_key_digest == owner_key:
+            if fact.owner_key == owner_key:
                 del self.facts[key]
 
     async def insert_operation(self, value: StoredOperation) -> None:
-        if value.key_digest in self.operations:
+        if value.key in self.operations:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if self._operation_key(value.stream_digest, value.sequence) is not None:
+        if self._operation_key(value.stream_key, value.sequence) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self.operations[value.key_digest] = value
-        self._set_operation_key(value.stream_digest, value.sequence, value.key_digest)
+        self.operations[value.key] = value
+        self._set_operation_key(value.stream_key, value.sequence, value.key)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return self.operations.get(key)
@@ -580,11 +596,11 @@ class _MemoryTransaction:
         *,
         expected_state: str,
     ) -> bool:
-        current = self.operations.get(value.key_digest)
+        current = self.operations.get(value.key)
         if current is None or current.state != expected_state:
             return False
         validate_operation_replacement(current, value)
-        self.operations[value.key_digest] = value
+        self.operations[value.key] = value
         return True
 
     async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
@@ -592,8 +608,8 @@ class _MemoryTransaction:
             operation
             for operation in self.operations.values()
             if (
-                query.stream_digest is None
-                or operation.stream_digest == query.stream_digest
+                query.stream_key is None
+                or operation.stream_key == query.stream_key
             )
             and (query.states is None or operation.state in query.states)
             and (query.after_sequence is None or operation.sequence > query.after_sequence)
@@ -606,7 +622,7 @@ class _MemoryTransaction:
                 or operation.compactable == query.compactable
             )
         ]
-        values.sort(key=lambda operation: (operation.sequence, operation.key_digest))
+        values.sort(key=lambda operation: (operation.sequence, operation.key))
         if query.limit is not None:
             values = values[: query.limit]
         return tuple(values)
@@ -623,11 +639,11 @@ class _MemoryTransaction:
         _require_scan_limit(limit)
         values = sorted(
             self.operations.values(),
-            key=lambda value: value.key_digest,
+            key=lambda value: value.key,
         )
         if after is not None:
             values = [
-                value for value in values if value.key_digest > after.key_digest
+                value for value in values if value.key > after.key
             ]
         return tuple(values[:limit])
 
@@ -637,8 +653,8 @@ class _MemoryTransaction:
     ) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)
         for value in values:
-            del self.operations[value.key_digest]
-            self._set_operation_key(value.stream_digest, value.sequence, None)
+            del self.operations[value.key]
+            self._set_operation_key(value.stream_key, value.sequence, None)
         return values
 
     def _operation_key(self, stream: bytes, sequence: int) -> bytes | None:
@@ -657,9 +673,9 @@ class _MemoryTransaction:
 
 
 def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
-    if query.scope_digest is not None and record.scope_digest != query.scope_digest:
+    if query.scope_key is not None and record.scope_key != query.scope_key:
         return False
-    if query.parent_digest is not None and record.parent_digest != query.parent_digest:
+    if query.parent_key is not None and record.parent_key != query.parent_key:
         return False
     if query.kind is not None and record.kind != query.kind:
         return False
@@ -679,21 +695,21 @@ async def _validate_transaction_integrity(
     transaction: StateTransaction,
 ) -> None:
     records = {
-        record.key_digest
+        record.key
         for record in await transaction.scan_records()
     }
     if any(
-        alias.record_key_digest not in records
+        alias.record_key not in records
         for alias in await transaction.scan_aliases()
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     facts = await transaction.scan_facts()
     for fact in facts:
-        if fact.owner_key_digest not in records:
+        if fact.owner_key not in records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     fact_sequences: dict[bytes, list[int]] = {}
     for fact in facts:
-        fact_sequences.setdefault(fact.stream_digest, []).append(fact.sequence)
+        fact_sequences.setdefault(fact.stream_key, []).append(fact.sequence)
     for sequences in fact_sequences.values():
         if sorted(sequences) != list(range(1, max(sequences) + 1)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

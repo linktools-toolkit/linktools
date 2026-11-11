@@ -245,7 +245,7 @@ async def test_read_only_graph_validates_selected_memory_tools(tmp_path: Path, t
             assert (await run.wait(timeout_seconds=20)).result.status is expected
             assert returned_tools == (["read_memory"] if tool_name == "read_memory" else [])
             assert await state.memory.records.capture_scope(
-                tenant_id=TENANT, memory_scope_digest=canonical_sha256("evaluation"),
+                tenant_id=TENANT, memory_scope="evaluation",
             ) == ()
 
 
@@ -306,7 +306,7 @@ async def test_imported_memory_obeys_effect_limit_without_current_memory_declara
             assert record is not None and record.context_imported and record.memory_scope is not None
             assert record.tool_effects == policy
             records = await state.memory.records.capture_scope(
-                tenant_id=TENANT, memory_scope_digest=canonical_sha256(record.memory_scope),
+                tenant_id=TENANT, memory_scope=record.memory_scope,
             )
             assert sorted(item.metadata["path"] for item in records) == (
                 ["memory/MEMORY.md", "memory/NEW.md"] if policy == "live" else ["memory/MEMORY.md"]

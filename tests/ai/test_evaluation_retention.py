@@ -19,7 +19,11 @@ import pytest
 from linktools.ai.core import AuthorizationAction, JsonValue, Principal, ResourceRef, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.persistence.captures import input_capture_key
+from linktools.ai.inputs import encode_user_content
+from linktools.ai.model import StoredUserInput
+from linktools.ai.model.attachments import read_attachment_payload, store_attachment_payload
+from pydantic_ai.messages import BinaryContent
+from linktools.ai.persistence.captures import input_capture_key, publish_capture_record
 from linktools.ai.persistence.contracts import ArtifactRecord
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
@@ -94,16 +98,31 @@ async def test_object_cleanup_scans_all_domains_and_independent_capture_closures
     try:
         shared = await put(objects, "shared-body", {"private": "referenced by another owner"})
         captured = await put(objects, "captured-body", {"private": "referenced only by capture"})
+        captured_bytes = canonical_json_bytes({"private": "referenced only by capture"})
+        raw_prompt = canonical_json_bytes(encode_user_content([
+            BinaryContent(captured_bytes, media_type="application/octet-stream"),
+        ]))
+
+        async def write_capture_attachment(data: bytes) -> ObjectRef:
+            assert data == captured_bytes
+            return captured
+
+        payload = await store_attachment_payload(raw_prompt, format="user-content",
+            write_object=write_capture_attachment)
+        assert payload is not None
         orphan = await put(objects, "orphan", {"private": "evaluation-owned expired body"})
         await storage.artifact.records.put_metadata(ArtifactRecord(
             "artifact", "execution", "producer", "application/json", shared, NOW))
-        foreign = await put(objects, input_capture_key("another-namespace", "another-tenant", "agent", "independent"), {
-            "kind": "agent", "version": 1, "namespace": "another-namespace", "tenant_id": "another-tenant",
-            "payload": encode_domain(captured),
-        })
-        await put(objects, "v1/input-capture/declaration/foreign", {
-            "capture": encode_domain(AgentInputCaptureRef("another-namespace", "another-tenant", "independent", foreign.digest, None)),
-        })
+        await publish_capture_record(storage.task.tasks.state_store,
+            namespace="another-namespace", tenant_id="another-tenant",
+            key=input_capture_key("another-namespace", "another-tenant", "agent", "independent"), value={
+                "kind": "agent", "version": 1, "namespace": "another-namespace", "tenant_id": "another-tenant",
+                "payload": {
+                    "prompt": {"kind": "stored-user-content-v1",
+                               "value": encode_domain(StoredUserInput("user-content-v1", payload))},
+                    "original_input": {},
+                },
+            })
         candidates = tuple((PersistenceDomain.EVALUATION, ref) for ref in (shared, captured, orphan))
         result = await purge_unreferenced_objects(candidates,
             namespace="evaluation-retention", tenant_id="tenant", stores=storage._stores,
@@ -113,6 +132,12 @@ async def test_object_cleanup_scans_all_domains_and_independent_capture_closures
         assert await objects.stat(orphan.key) is None
         assert await objects.stat(shared.key) is not None
         assert await objects.stat(captured.key) is not None
+
+        async def read_capture_attachment(ref: ObjectRef) -> bytes:
+            assert ref == captured
+            return b"".join([chunk async for chunk in objects.open(ref.key)])
+
+        assert await read_attachment_payload(payload, read_object=read_capture_attachment) == raw_prompt
         repeated = await purge_unreferenced_objects((candidates[-1],),
             namespace="evaluation-retention", tenant_id="tenant", stores=storage._stores,
             object_stores={domain: objects for domain in PersistenceDomain}, exclusive=guard)
@@ -345,7 +370,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
     from linktools.ai.core import service_principal
     from linktools.ai.evaluation import CaseRef, CaseSpec, DatasetRef, DatasetSpec
     from linktools.ai.inputs import _input_capture as captures_module
-    from linktools.ai.persistence.captures import input_capture_object_dependency
+    from linktools.ai.persistence.captures import input_capture_state_dependency, read_capture_record
 
     principal = service_principal("tenant", "owner")
     deadline = datetime.now(timezone.utc) + timedelta(seconds=60)
@@ -366,11 +391,16 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
         dataset = await evaluations.publish_dataset(spec, principal=principal,
             idempotency_key="expired", content_expires_at=deadline)
         owned = (await evaluations.list_cases(dataset, principal=principal)).items[0].input
-        objects = persistence_341.object_store(PersistenceDomain.TASK)
-        owned_key, _ = input_capture_object_dependency(owned)
-        borrowed_key, _ = input_capture_object_dependency(borrowed)
-        assert await objects.stat(owned_key) is not None
-        assert await objects.stat(borrowed_key) is not None
+        state = persistence_341.task.tasks.state_store
+        owned_key, _ = input_capture_state_dependency(owned)
+        borrowed_key, _ = input_capture_state_dependency(borrowed)
+
+        async def read_capture(key: str):
+            return await read_capture_record(state, namespace=persistence_341.namespace,
+                tenant_id=persistence_341.tenant_id, key=key)
+
+        assert await read_capture(owned_key) is not None
+        assert await read_capture(borrowed_key) is not None
 
         class ExpiredDateTime(datetime):
             @classmethod
@@ -388,12 +418,12 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
                 await evaluations.purge_expired(principal=unauthorized,
                     now=deadline + timedelta(seconds=1), exclusive=Offline())
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-            assert await objects.stat(owned_key) is not None
+            assert await read_capture(owned_key) is not None
         result = await evaluations.purge_expired(principal=principal,
             now=deadline + timedelta(seconds=1), exclusive=Offline())
         assert dataset in result.datasets
-        assert await objects.stat(owned_key) is None
-        assert await objects.stat(borrowed_key) is not None
+        assert await read_capture(owned_key) is None
+        assert await read_capture(borrowed_key) is not None
         assert (await evaluations._captures.read_agent(borrowed, principal=principal)).prompt == "independently retained source"
         with pytest.raises(AIError) as unavailable:
             await evaluations.publish_dataset(spec, principal=principal, idempotency_key="changed-publication",
@@ -454,7 +484,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
             return None
 
     class Captures:
-        async def expire_inputs(self, *, principal: Principal, now: datetime, limit: int) -> tuple[ObjectRef, ...]:
+        async def expire_inputs(self, *, principal: Principal, now: datetime, limit: int) -> tuple[str, ...]:
             return ()
 
     async def cancel_submission(record, intent, principal, idempotency_key):
@@ -478,7 +508,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
         await storage.evaluation.records.publish_evidence(bundle)
         retention = EvaluationRetention(Authorization(), cancel_submission, Captures(),
             tenant_id=storage.tenant_id, repository=storage.evaluation.records,
-            task_objects=storage.object_store(PersistenceDomain.TASK), maintenance=storage.snapshot_operations())
+            maintenance=storage.snapshot_operations())
         original_delete = objects.delete_object
 
         async def fail_delete(key: str, *, expected_digest: str) -> bool:
@@ -502,7 +532,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
     try:
         result = await EvaluationRetention(Authorization(), cancel_submission, Captures(),
             tenant_id=reopened.tenant_id, repository=reopened.evaluation.records,
-            task_objects=reopened.object_store(PersistenceDomain.TASK), maintenance=reopened.snapshot_operations()).purge_expired(
+            maintenance=reopened.snapshot_operations()).purge_expired(
             principal=service_principal("tenant", "owner"), now=now + timedelta(seconds=120), exclusive=guard)
         assert result.objects_deleted == 1
         assert await objects.stat(reference.key) is None

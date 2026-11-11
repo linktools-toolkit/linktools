@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 
@@ -33,20 +34,20 @@ from linktools.ai.core import (
     JsonValue,
     Page,
     Principal,
-    canonical_json_bytes,
-    canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.persistence import Persistence
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.core import ExecutionContext
-from linktools.ai.persistence._runtime_identity import task_graph_binding_capture_key
+from linktools.ai.persistence.captures import capture_record, task_graph_binding_capture_key
+from linktools.ai.persistence._memory import InMemoryStateStore
+from linktools.ai.persistence.state import StateCallback
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.task.engine import TaskEngine
 from linktools.ai.inputs import TaskGraphBindingCaptureStore
 from linktools.ai.execution import ExecutionHandle, ExecutionRequest
-from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
+from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import (
@@ -58,7 +59,6 @@ from linktools.ai.spec import (
 )
 from linktools.ai.storage import (
     InMemoryObjectStore,
-    ObjectStat,
     StorageOverlay,
     StoredPayload,
 )
@@ -230,6 +230,8 @@ async def test_binding_resolution_resolves_child_resources_without_durable_catal
 @pytest.mark.asyncio
 async def test_task_binding_capture_keeps_agent_binding_in_task_declaration() -> None:
     fixture = await _fixture()
+    state = InMemoryStateStore()
+    await state.initialize()
     try:
         class CaptureRunner:
             pass
@@ -267,7 +269,7 @@ async def test_task_binding_capture_keeps_agent_binding_in_task_declaration() ->
         )
         captures = TaskGraphBindingCaptureStore(
             "namespace",
-            InMemoryObjectStore("task"),
+            state,
         )
 
         capture = await captures.capture(admission, graph, tasks=(task,))
@@ -279,19 +281,22 @@ async def test_task_binding_capture_keeps_agent_binding_in_task_declaration() ->
         assert config["binding_contract"] == fixture.binding.binding_contract.to_payload()
         assert not capture.expanders
     finally:
+        await state.close()
         await fixture.assets.close()
 
 
-class _ConcurrentCaptureObjectStore(InMemoryObjectStore):
-    def __init__(self, capture_key: str) -> None:
-        super().__init__("task-capture-race")
-        self._capture_key = capture_key
+ValueT = TypeVar("ValueT")
+
+
+class _ConcurrentCaptureStateStore(InMemoryStateStore):
+    def __init__(self) -> None:
+        super().__init__()
         self._initial_reads = 0
         self._both_read = asyncio.Event()
 
-    async def stat(self, key: str) -> ObjectStat | None:
-        value = await super().stat(key)
-        if key == self._capture_key and self._initial_reads < 2:
+    async def read(self, fn: StateCallback[ValueT]) -> ValueT:
+        value = await super().read(fn)
+        if value is None and self._initial_reads < 2:
             self._initial_reads += 1
             if self._initial_reads == 2:
                 self._both_read.set()
@@ -302,6 +307,8 @@ class _ConcurrentCaptureObjectStore(InMemoryObjectStore):
 @pytest.mark.asyncio
 async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
     fixture = await _fixture()
+    state = _ConcurrentCaptureStateStore()
+    await state.initialize()
     try:
         async def run_task(_context: TaskNodeContext[None]) -> JsonValue:
             return {"captured": True}
@@ -338,14 +345,7 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
                 TaskGraphLimits(),
             )
         )
-        key = task_graph_binding_capture_key(
-            "namespace",
-            "tenant",
-            admission.graph_id,
-            admission.initial_request_digest,
-        )
-        objects = _ConcurrentCaptureObjectStore(key)
-        captures = TaskGraphBindingCaptureStore("namespace", objects)
+        captures = TaskGraphBindingCaptureStore("namespace", state)
 
         first, second = await asyncio.gather(
             captures.capture(
@@ -372,6 +372,7 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
         }
         assert len(captured_optional) == 1
     finally:
+        await state.close()
         await fixture.assets.close()
 
 
@@ -734,7 +735,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
     try:
         captures = TaskGraphBindingCaptureStore(
             "namespace",
-            state.object_store(PersistenceDomain.TASK),
+            state.task.tasks.state_store,
         )
         await captures.capture(admission, graph, tasks=(task,))
         await state.task.admissions.admit(admission, graph)
@@ -776,7 +777,7 @@ async def test_runtime_storage_snapshot_restores_task_binding_capture(
     try:
         restored_captures = TaskGraphBindingCaptureStore(
             "namespace",
-            restored.object_store(PersistenceDomain.TASK),
+            restored.task.tasks.state_store,
         )
         loaded = await restored_captures.load(admission)
         assert set(loaded.tasks) == {("test.capture-agent", 1)}
@@ -930,7 +931,8 @@ async def test_task_binding_capture_reader_rejects_invalid_declaration_manifests
     corruption: str,
     expected_code: ErrorCode,
 ) -> None:
-    objects = InMemoryObjectStore("task-capture-reader")
+    state = InMemoryStateStore()
+    await state.initialize()
     graph = TaskGraph(
         "capture-reader",
         (
@@ -998,22 +1000,15 @@ async def test_task_binding_capture_reader_rejects_invalid_declaration_manifests
         manifest["roots"] = {}
     if corruption == "missing_array":
         del manifest["expanders"]
-    payload = canonical_json_bytes(manifest)
-    async def chunks():
-        yield payload
-
-    await objects.put(
-        task_graph_binding_capture_key(
-            "namespace",
-            "tenant",
-            admission.graph_id,
-            admission.initial_request_digest,
-        ),
-        chunks(),
-        expected_size=len(payload),
-        expected_digest=canonical_sha256(manifest),
+    key = task_graph_binding_capture_key(
+        "namespace", "tenant", admission.graph_id, admission.initial_request_digest,
     )
-    reader = TaskGraphBindingCaptureStore("namespace", objects)
-    with pytest.raises(AIError) as error:
-        await reader.load(admission)
-    assert error.value.code is expected_code
+    try:
+        await state.mutate(lambda transaction: transaction.insert_record(
+            capture_record("namespace", "tenant", key, manifest)))
+        reader = TaskGraphBindingCaptureStore("namespace", state)
+        with pytest.raises(AIError) as error:
+            await reader.load(admission)
+        assert error.value.code is expected_code
+    finally:
+        await state.close()

@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
+from linktools.ai.model.messages import encode_model_messages
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
@@ -39,17 +41,19 @@ async def test_archive_object_reader_preserves_bytes_and_source_error(
         owner = await _archive(state)
         archive = ContentArchive(owner.store, owner.scope_id, namespace="archive", tenant_id="tenant",
                                  object_store=objects, object_reader=custom if reader == "custom" else None)
-        raw = b"content" * 4000
+        raw = encode_model_messages([ModelRequest(parts=[UserPromptPart([
+            BinaryContent(b"content" * 4000, media_type="application/octet-stream"),
+        ])])])
         prepared = PreparedArchive()
-        identities = await archive.prepare_content((("bytes", raw),), prepared)
+        identities = await archive.prepare_content((("model-message", raw),), prepared)
         await _publish(archive, prepared)
         if failure:
             monkeypatch.setattr(objects, "open", unavailable)
             with pytest.raises(OSError) as caught:
-                await archive.read_contents(identities, codec="bytes")
+                await archive.read_contents(identities, codec="model-message")
             assert caught.value is source_error
         else:
-            assert await archive.read_contents(identities, codec="bytes") == (raw,)
+            assert await archive.read_contents(identities, codec="model-message") == (raw,)
     finally:
         await state.close()
 
@@ -59,12 +63,16 @@ async def test_custom_archive_reader_cannot_replace_stored_compression(tmp_path:
     state = Persistence(_storage("memory", tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     objects = InMemoryObjectStore()
-    raw = b"content" * 4000
+    source = b"content" * 4000
+    compressed = zlib.compress(source)
+    raw = encode_model_messages([ModelRequest(parts=[UserPromptPart([
+        BinaryContent(compressed, media_type="application/octet-stream"),
+    ])])])
 
     async def custom(reference: ObjectRef) -> bytes:
         original = await read_object(objects, reference.key, expected_digest=reference.digest, expected_size=reference.size)
-        alternative = zlib.compress(raw, level=9)
-        assert alternative != original and zlib.decompress(alternative) == raw
+        alternative = zlib.compress(source, level=9)
+        assert alternative != original and zlib.decompress(alternative) == source
         return alternative
 
     try:
@@ -72,10 +80,10 @@ async def test_custom_archive_reader_cannot_replace_stored_compression(tmp_path:
         archive = ContentArchive(owner.store, owner.scope_id, namespace="archive", tenant_id="tenant",
                                  object_store=objects, object_reader=custom)
         prepared = PreparedArchive()
-        identities = await archive.prepare_content((("bytes", raw),), prepared)
+        identities = await archive.prepare_content((("model-message", raw),), prepared)
         await _publish(archive, prepared)
         with pytest.raises(AIError) as caught:
-            await archive.read_contents(identities, codec="bytes")
+            await archive.read_contents(identities, codec="model-message")
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()

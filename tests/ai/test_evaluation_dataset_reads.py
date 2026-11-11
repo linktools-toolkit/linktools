@@ -39,14 +39,14 @@ async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
         dataset = DatasetContract(DatasetRef("dataset", 1), tuple(case.ref for case in cases), "task_input")
         earliest = NOW + timedelta(hours=1)
         dataset_record = EvaluationDatasetRecord(dataset, "owner", NOW, NOW + timedelta(hours=3))
-        records = [repository._stored("evaluation_dataset", [dataset.ref.id, dataset.ref.revision], dataset_record)]
+        records = [repository._stored("evaluation_dataset", (dataset.ref.id, str(dataset.ref.revision)), dataset_record)]
         for index, case in enumerate(cases):
             if index == len(cases) - 1 and fault == "missing":
                 continue
             value = (dataset_record if index == len(cases) - 1 and fault == "wrong_type" else
                      EvaluationCaseRecord(case, "owner", NOW,
                         earliest if index == len(cases) - 1 else None))
-            records.append(repository._stored("evaluation_case", [case.ref.dataset_id, case.ref.case_id, case.ref.revision], value))
+            records.append(repository._stored("evaluation_case", (case.ref.dataset_id, case.ref.case_id, str(case.ref.revision)), value))
         await repository.state_store.mutate(lambda tx: tx.insert_records(tuple(records)))
         statements = []
         def capture(_connection, _cursor, sql, _parameters, _context, _many):
@@ -72,8 +72,7 @@ async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
             # A later operation reads a changed retained deadline rather than reusing a cache.
             row = records[-1]
             case = EvaluationCaseRecord(cases[-1], "owner", NOW, None)
-            changed = replace(repository._stored("evaluation_case", [cases[-1].ref.dataset_id,
-                              cases[-1].ref.case_id, cases[-1].ref.revision], case), storage_revision=1)
+            changed = replace(repository._stored("evaluation_case", (cases[-1].ref.dataset_id, cases[-1].ref.case_id, str(cases[-1].ref.revision)), case), storage_revision=1)
             assert await repository.state_store.mutate(lambda tx: tx.replace_record(
                 changed, expected_storage_revision=row.storage_revision))
             assert await repository.dataset_expiry(dataset.ref) == dataset_record.content_expires_at
@@ -152,16 +151,16 @@ async def test_required_case_batch_preserves_first_unavailable_position(
         first, second = (CaseContract(CaseRef("dataset", name, 1), TaskCaseInput(input={}))
                          for name in ("first", "second"))
         records = []
-        identity = [first.ref.dataset_id, first.ref.case_id, first.ref.revision]
+        identity = (first.ref.dataset_id, first.ref.case_id, str(first.ref.revision))
         if fault == "tombstone":
-            value = EvaluationContentTombstone("evaluation_case", identity, "owner", "0" * 64, NOW)
-            records.append(repository._stored("evaluation_content_tombstone", ["evaluation_case", identity], value))
+            value = EvaluationContentTombstone("evaluation_case", [first.ref.dataset_id, first.ref.case_id, first.ref.revision], "owner", "0" * 64, NOW)
+            records.append(repository._stored("evaluation_content_tombstone", ("evaluation_case", *identity), value))
         elif fault != "missing":
             value = (EvaluationCaseRecord(first, "owner", NOW, NOW) if fault == "expired" else
                      EvaluationDatasetRecord(DatasetContract(DatasetRef("dataset", 1), (first.ref,), "task_input"), "owner"))
             records.append(repository._stored("evaluation_case", identity, value))
         # This later expiry must not mask an earlier missing case.
-        records.append(repository._stored("evaluation_case", [second.ref.dataset_id, second.ref.case_id, second.ref.revision],
+        records.append(repository._stored("evaluation_case", (second.ref.dataset_id, second.ref.case_id, str(second.ref.revision)),
                                           EvaluationCaseRecord(second, "owner", NOW, NOW)))
         await repository.state_store.mutate(lambda tx: tx.insert_records(tuple(records)))
         with pytest.raises(AIError) as raised:
@@ -200,8 +199,7 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
         ) for name in ("third", "first", "second")))
         dataset = await owner.publish_dataset(spec, principal=PRINCIPAL, idempotency_key="dataset")
         repository = persistence_188.evaluation.records
-        keys = {repository._key("evaluation_case", [case.ref.dataset_id, case.ref.case_id,
-                                                   case.ref.revision]).hex() for case in spec.cases}
+        keys = {repository._key("evaluation_case", (case.ref.dataset_id, case.ref.case_id, str(case.ref.revision))) for case in spec.cases}
         statements = []
 
         def capture(_connection, _cursor, sql, parameters, _context, _many):
@@ -238,7 +236,7 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
             assert len(statements) <= 1, "one tick reads its distinct cases in a bounded batch"
             first = spec.cases[0].ref
             await repository.state_store.mutate(lambda tx: tx.delete_records((repository._key(
-                "evaluation_case", [first.dataset_id, first.case_id, first.revision]),)))
+                "evaluation_case", (first.dataset_id, first.case_id, str(first.revision))),)))
             for read in (run.preview_report,
                          lambda: owner.create_comparison_report(comparison_spec, principal=PRINCIPAL),
                          lambda: owner._tick(record.experiment_id, bound, PRINCIPAL)):

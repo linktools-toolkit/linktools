@@ -15,8 +15,9 @@ from ..agent import AgentInputCaptureRef
 from ..asset import AssetVersionRef
 from ..core import (
     ImmutableJsonMapping, JsonValue, Principal, WorkspaceFileInput,
-    canonical_sha256, principal_identity_payload, validate_idempotency_key,
+    canonical_sha256, principal_identity_payload, validate_idempotency_key, validate_resource_id,
 )
+from ..errors import AIError
 from ..task import (
     TaskGraphCaptureRef, TaskGraphLimits, TaskGraphTemplate,
     TaskGraphTemplateRef, TaskInvocationInputRef, TaskRef, TaskResultRef,
@@ -28,9 +29,16 @@ def _name(value: str) -> None:
         raise ValueError("name must be non-empty")
 
 
+def _resource_id(value: str) -> None:
+    try:
+        validate_resource_id(value)
+    except AIError as error:
+        raise ValueError("evaluation resource identity is invalid") from error
+
+
 def _revision(value: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("revision must be a positive integer")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= (1 << 63) - 1:
+        raise ValueError("revision must be a positive signed 64-bit integer")
 
 
 def _positive(value: float) -> None:
@@ -45,8 +53,8 @@ class CaseRef:
     revision: int
 
     def __post_init__(self) -> None:
-        _name(self.dataset_id)
-        _name(self.case_id)
+        _resource_id(self.dataset_id)
+        _resource_id(self.case_id)
         _revision(self.revision)
 
     def to_mapping(self) -> dict[str, JsonValue]:
@@ -59,7 +67,7 @@ class DatasetRef:
     revision: int
 
     def __post_init__(self) -> None:
-        _name(self.id)
+        _resource_id(self.id)
         _revision(self.revision)
 
     def to_mapping(self) -> dict[str, JsonValue]:
@@ -474,7 +482,7 @@ class EvaluationSpec:
 class StartEvaluationRequest:
     spec: EvaluationSpec
     principal: Principal
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.idempotency_key)
@@ -483,7 +491,7 @@ class StartEvaluationRequest:
 @dataclass(frozen=True, slots=True)
 class RescoreRequest:
     scorers: tuple[ScorerSpec, ...]
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     trial_ids: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:

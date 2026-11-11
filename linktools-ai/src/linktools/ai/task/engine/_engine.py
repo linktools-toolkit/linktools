@@ -17,7 +17,7 @@ from ...core import (AuthorizationPolicy, CorrelationData, ExecutionContext, Pri
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
 from ...persistence import Persistence, PersistenceDomain
 from ...observe import MetricRecorderProvider, MetricsControl, MetricFlushResult, MetricRecorderStatus
-from ...storage import PayloadPolicy, StorageRetentionMode
+from ...storage import StorageRetentionMode
 from ...task import (
     DefaultTaskGraphService,
     LocalTaskGraphLauncher,
@@ -131,7 +131,6 @@ class TaskEngine(Generic[AppT]):
             self._metrics.configure_runtime_dimensions(self._context.metric_dimensions)
         self._metrics_control = MetricsControl(self._metric_status, self._flush_metrics)
         key_factory = ObjectKeyFactory(self.namespace)
-        payload_policy = PayloadPolicy()
         self._execution_service = TaskExecutionService(
             persistence.execution, self._authorization,
             port=StoredExecutionManagementAdapter(
@@ -140,14 +139,13 @@ class TaskEngine(Generic[AppT]):
             ),
             sessions=persistence.conversation.sessions, task_admissions=persistence.task.admissions,
             release_terminal=persistence.retention.release_execution_handoff,
-            payload_policy=payload_policy,
         )
         self._execution_reads = TaskExecutionReads(self._execution_service, self._agent_execution_ports)
         self._history = (TaskHistory(self._execution_service, self._agent_execution_ports)
                          if any(task.agent_execution is not None for task in self._declarations.values()) else None)
         self._input_materializer = ExecutionInputMaterializer(
             None, PromptLimits(), object_store=persistence.object_store(PersistenceDomain.TASK),
-            object_key_factory=key_factory, payload_policy=PayloadPolicy(inline_limit_bytes=0),
+            object_key_factory=key_factory,
             object_domain=PersistenceDomain.TASK,
         )
         self._input_captures = InputCaptures.from_persistence(
@@ -163,7 +161,7 @@ class TaskEngine(Generic[AppT]):
             budgets=persistence.execution.budgets, task_objects=persistence.object_store(PersistenceDomain.TASK),
             artifact_state=persistence.artifact, artifact_objects=persistence.object_store(PersistenceDomain.ARTIFACT),
             object_key_factory=key_factory,
-            binding_captures=TaskGraphBindingCaptureStore(self.namespace, persistence.object_store(PersistenceDomain.TASK)),
+            binding_captures=TaskGraphBindingCaptureStore(self.namespace, persistence.task.tasks.state_store),
             tasks=tuple(self._tasks.values()), expanders=tuple(self._expanders.values()),
             input_captures=self._input_captures, input_materializer=self._input_materializer,
             task_durable=persistence.plan.route(PersistenceDomain.TASK).retention is StorageRetentionMode.DURABLE,
@@ -706,21 +704,16 @@ class TaskEngine(Generic[AppT]):
     ) -> Execution[AppT]:
         self._ensure_open()
         port = await self._agent_port_for_node(graph_id, node_id, principal)
-        binding = self._execution_binding if port is None else port.operations
-        watch = self._watch_execution_tree if port is None else port.watch_tree
-        return Execution(binding,
-            execution_id,
-            principal,
-            watch,
-            None,
-            lambda idempotency_key, force: self._cancel_task_execution(
-                graph_id,
-                node_id,
-                execution_id,
-                principal,
-                idempotency_key,
-                force,
-            ),
+        async def cancel(idempotency_key: str | None, force: bool) -> CancelExecutionResult:
+            return await self._cancel_task_execution(
+                graph_id, node_id, execution_id, principal, idempotency_key, force,
+            )
+
+        if port is not None:
+            return await port.get(execution_id, principal, cancel=cancel)
+        return Execution(
+            self._execution_binding, execution_id, principal, self._watch_execution_tree,
+            None, cancel,
         )
 
 
@@ -778,7 +771,7 @@ class TaskEngine(Generic[AppT]):
                 port = await self._agent_port_for_node(graph_id, node_id, principal)
                 if port is None:
                     raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
-                cancelled = await port.service.cancel(
+                cancelled = await port.cancel(
                     execution_id,
                     CancelExecutionRequest(
                         principal,

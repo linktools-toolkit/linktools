@@ -18,6 +18,23 @@ from linktools.ai.task import TaskGraph, TaskNode
 from ._task_test_helpers import admit_graph
 
 
+def _sql_command(statement: str | bytes) -> str:
+    command = statement.lstrip().split(None, 1)[0]
+    return (command.decode("ascii") if isinstance(command, bytes) else command).upper()
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    (
+        (b"\tupdate ai_state_record SET payload = _binary'\xff\x80\x00'", "UPDATE"),
+        (b"\nCOMMIT", "COMMIT"),
+        (" select 1", "SELECT"),
+    ),
+)
+def test_sql_command_ignores_binary_parameters(statement: str | bytes, expected: str) -> None:
+    assert _sql_command(statement) == expected
+
+
 async def _publish(engine, width, outcome, wire):
     namespace = f"terminal-{width}-{outcome}"
     counts = Counter()
@@ -105,8 +122,7 @@ async def test_mysql_terminal_wire_io_survives_reopen(_server, monkeypatch, widt
     async def execute_command(connection, command, sql):
         result = await original(connection, command, sql)
         if connection in owned and command == COM_QUERY:
-            statement = sql.decode("utf-8") if isinstance(sql, bytes) else sql
-            wire.append(statement.lstrip().split()[0].upper())
+            wire.append(_sql_command(sql))
         return result
     monkeypatch.setattr(Connection, "_execute_command", execute_command)
     try:

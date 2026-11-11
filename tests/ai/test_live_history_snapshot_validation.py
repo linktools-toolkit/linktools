@@ -9,6 +9,7 @@ import pytest
 
 from pydantic_ai.messages import ModelResponse, TextPart
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.codec import (
@@ -22,7 +23,7 @@ from linktools.ai.persistence._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
 )
-from linktools.ai.persistence.state import stream_digest
+from linktools.ai.persistence.state import stream_key
 
 from .test_step_archive_read_boundaries import _archive
 
@@ -55,12 +56,12 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
                 chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
                 if corruption == "future-index":
                     chunk = replace(chunk, first_message_index=1)
-                    fact = replace(fact, stream_digest=stream_digest(
+                    fact = replace(fact, stream_key=stream_key(
                         "archive-boundaries", "tenant", PersistenceDomain.TRACE.value,
-                        "transcript_pending_parts", ["run", 1],
+                        "transcript_pending_parts", ("run", "1"),
                     ))
                 elif corruption == "content-scope":
-                    chunk = replace(chunk, content=replace(chunk.content, store_digest="0" * 64))
+                    chunk = replace(chunk, content=replace(chunk.content, store_key=native_store_key("0", "tenant")))
                 elif corruption == "content-count":
                     chunk = replace(chunk, content=replace(chunk.content, slices=()))
                 else:
@@ -159,13 +160,13 @@ async def test_snapshot_model_interaction_records_validate_identity_and_sequence
         second = _interaction("run", 3 if corruption == "gap" else 2)
         record = archive._stored_interaction(first)
         if corruption == "owner":
-            record = replace(record, parent_digest=b"x" * 32)
+            record = replace(record, parent_key=b"x" * 32)
         elif corruption == "sequence":
-            record = replace(record, sort_key="m:00000000000000000002")
+            record = replace(record, sort_key=b"m:00000000000000000002")
         elif corruption == "state":
             record = replace(record, state="SUCCEEDED")
         elif corruption == "identity":
-            record = replace(record, key_digest=b"x" * 32)
+            record = replace(record, key=b"x" * 32)
         elif corruption == "conflict":
             second = replace(first, duration_ns=first.duration_ns + 1)
         records = (*records, record, archive._stored_interaction(second))
@@ -204,7 +205,7 @@ async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
         )
         records = list(await archive.state_store.read(lambda tx: tx.scan_records()))
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
-        marker = next(record for record in records if record.sort_key == "coverage:event")
+        marker = next(record for record in records if record.sort_key == b"coverage:event")
         if corruption == "missing-index":
             missing = next(record for record in records
                            if record.kind == "history_association" and record is not marker)
@@ -214,7 +215,7 @@ async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
         elif corruption == "ahead":
             records[records.index(marker)] = replace(marker, data={"sequence": 2})
         elif corruption == "wrong-owner":
-            records[records.index(marker)] = replace(marker, parent_digest=b"x" * 32)
+            records[records.index(marker)] = replace(marker, parent_key=b"x" * 32)
         aliases, sequences = canonical_snapshot_indexes(
             namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=tuple(records), facts=facts, operations=(),

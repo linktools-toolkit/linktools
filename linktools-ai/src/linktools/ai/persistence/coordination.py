@@ -16,7 +16,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader
+from ..storage import CacheBackend, StreamBackend, TurnAdmissionReader, TurnCoordination, TurnCoordinationBackend, TurnSessionReader, TurnScopeIdentity
 from .codec import decode_domain, encode_domain
 from ..execution import ExecutionRecord
 
@@ -41,9 +41,8 @@ class PendingTurnCoordination:
         self._backend = backend
         self._namespace = validate_persistence_namespace(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
-        self._scope = canonical_json_bytes([
-            "runtime-pending-turn", self._namespace, self._tenant_id,
-        ]).decode("utf-8")
+        self._scope = TurnScopeIdentity(self._namespace, self._tenant_id, "runtime-pending-turn")
+        self._scope_payload = list(self._scope.as_tuple())
 
     @classmethod
     def select(
@@ -97,7 +96,7 @@ class PendingTurnCoordination:
                 safe_details={"reason": "pending_views_not_supported"},
             )
         envelope = {
-            "scope": self._scope,
+            "scope": self._scope_payload,
             "execution_id": coordination.execution_id,
             "owner_id": coordination.owner_id,
             "principal_id": record.principal_id,
@@ -113,7 +112,7 @@ class PendingTurnCoordination:
             await self._cache.put(
                 self._session_key(record.session_id),
                 canonical_json_bytes({
-                    "scope": self._scope,
+                    "scope": self._scope_payload,
                     "session_id": record.session_id,
                     "execution_id": coordination.execution_id,
                     "owner_id": coordination.owner_id,
@@ -221,7 +220,7 @@ class PendingTurnCoordination:
             pointer = json.loads(content)
             if (
                 not isinstance(pointer, dict)
-                or pointer.get("scope") != self._scope
+                or pointer.get("scope") != self._scope_payload
                 or pointer.get("session_id") != session_id
                 or not isinstance(pointer.get("execution_id"), str)
                 or not pointer["execution_id"]
@@ -253,7 +252,7 @@ class PendingTurnCoordination:
             envelope = json.loads(content)
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("scope") != self._scope
+                or envelope.get("scope") != self._scope_payload
                 or envelope.get("execution_id") != current.execution_id
                 or envelope.get("owner_id") != current.owner_id
             ):
@@ -322,18 +321,18 @@ class PendingTurnCoordination:
 
     def _promotion_key(self, coordination: TurnCoordination) -> str:
         digest = hashlib.sha256(canonical_json_bytes([
-            self._scope, coordination.execution_id, coordination.owner_id,
+            self._scope_payload, coordination.execution_id, coordination.owner_id,
         ])).hexdigest()
         return f"runtime-pending-promotion:{digest}"
 
     def _record_key(self, coordination: TurnCoordination) -> str:
         digest = hashlib.sha256(canonical_json_bytes([
-            self._scope, coordination.execution_id, coordination.owner_id,
+            self._scope_payload, coordination.execution_id, coordination.owner_id,
         ])).hexdigest()
         return f"runtime-pending-execution:{digest}"
 
     def _session_key(self, session_id: str) -> str:
-        digest = hashlib.sha256(canonical_json_bytes([self._scope, session_id])).hexdigest()
+        digest = hashlib.sha256(canonical_json_bytes([self._scope_payload, session_id])).hexdigest()
         return f"runtime-pending-session:{digest}"
 
     @classmethod

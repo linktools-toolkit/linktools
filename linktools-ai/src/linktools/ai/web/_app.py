@@ -214,10 +214,11 @@ class _Console:
             runtime = self.require_runtime()
             payload = await _body(request)
             request.state.operation_id = _text(payload, "request_id")
-            return _json(await runtime.sessions.create(_text(payload, "agent_id", "default"), CreateSessionRequest(
+            view = await runtime.sessions.create_view(_text(payload, "agent_id", "default"), CreateSessionRequest(
                 self.principal, _text(payload, "session_id"), request.state.operation_id,
                 cwd=payload.get("cwd"), metadata={"title": _text(payload, "title", "New conversation")},
-            )), 201)
+            ))
+            return _json(view, 201)
         if self.runtime is not None:
             return _json(await self.runtime.sessions.list(ListSessionRequest(self.principal, **_paging(request))))
         # History currently offers recent sessions, not a read-only paged session index.

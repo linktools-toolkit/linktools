@@ -48,18 +48,20 @@ async def test_session_context_reuses_one_metadata_query(
             *state.conversation.histories.history_record_keys(history_id),
             repository.projection_key(history_id),
         }
-        hex_keys = {key.hex() for key in keys}
         metadata_queries = []
         statements = []
 
         def capture(_connection, _cursor, statement, parameters, _context, _many):
             statements.append(statement.split()[0].upper())
-            if statement.startswith("SELECT") and hex_keys.intersection(parameters):
-                metadata_queries.append(set(parameters).intersection(hex_keys))
+            if statement.startswith("SELECT") and keys.intersection(parameters):
+                metadata_queries.append(set(parameters).intersection(keys))
 
         async def uncaptured(_history_id, *, tenant_id):
             return None
 
+        # Compare query batching with the same opened physical archive owner.
+        # Cold scope discovery is covered by test_context_metadata_read_io.
+        assert await archive.state_store.storage_group.open_archive() is not None
         results, metadata_counts, select_counts = [], [], []
         engine = archive.state_store.storage_group.context.engine.sync_engine
         for use_capture in (False, True):
@@ -78,7 +80,7 @@ async def test_session_context_reuses_one_metadata_query(
             metadata_counts.append(len(metadata_queries))
             select_counts.append(statements.count("SELECT"))
             if use_capture:
-                assert metadata_queries == [hex_keys]
+                assert metadata_queries == [keys]
         assert results[0] == results[1]
         expected = (summary,) if shape == "projected" else ()
         assert results[1].model_messages() == expected

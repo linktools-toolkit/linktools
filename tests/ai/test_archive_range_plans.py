@@ -61,7 +61,7 @@ async def test_prepared_frontier_reuse_does_not_bypass_publication_integrity(tmp
         prepared = PreparedArchive()
         await archive.prepare_append(root, (("bytes", b"new"),), prepared)
         captured = next(record for record in prepared.records.values()
-                        if record.kind == "archive_sequence" and record.sort_key == root.slices[0].first)
+                        if record.kind == "archive_sequence" and record.sort_key.decode("ascii") == root.slices[0].first)
         corrupt = replace(captured, storage_revision=captured.storage_revision + 1,
                           data={**dict(captured.data), "count": 3})
         assert await archive.store.mutate(lambda transaction: transaction.replace_record(

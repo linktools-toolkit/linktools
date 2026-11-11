@@ -10,7 +10,7 @@ from ..errors import AIError, ErrorCode
 PAYLOAD_COMPRESS_MINIMUM = 16 * 1024
 
 
-def encode_payload_bytes(raw: bytes) -> tuple[str, str, int, bytes]:
+def encode_payload_bytes(raw: bytes) -> tuple[str, bytes]:
     content = raw
     codec = "raw"
     if len(raw) >= PAYLOAD_COMPRESS_MINIMUM:
@@ -18,7 +18,7 @@ def encode_payload_bytes(raw: bytes) -> tuple[str, str, int, bytes]:
         if len(compressed) <= len(raw) * 0.9:
             content = compressed
             codec = "zlib"
-    return codec, hashlib.sha256(raw).hexdigest(), len(raw), content
+    return codec, content
 
 
 def decode_payload_bytes(

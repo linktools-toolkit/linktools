@@ -121,7 +121,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             _execution("execution", status=ExecutionStatus.SUCCEEDED, prompt="prompt"),
             conversation=True,
         )
-        observed = replace(terminal, status=ExecutionStatus.FINALIZING, result=None)
+        observed = replace(terminal, status=ExecutionStatus.FINALIZING, result=None, completed_at=None)
 
         async def load_execution(execution_id: str, *, tenant_id: str):
             assert execution_id == "execution" and tenant_id == "tenant"

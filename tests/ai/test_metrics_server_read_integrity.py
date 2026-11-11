@@ -72,7 +72,7 @@ async def test_corrupt_record_fails_before_any_filter_or_aggregation(
     table = build_metrics_sql_metadata().tables["ai_metric_observations"]
     if damage in {"identity", "timestamp", "digest"}:
         values = {
-            "identity": {"observation_digest": "0" * 64},
+            "identity": {"observation_id": "0" * 64},
             "timestamp": {"occurred_at": _START + timedelta(microseconds=1)},
             "digest": {"payload_digest": "0" * 64},
         }[damage]

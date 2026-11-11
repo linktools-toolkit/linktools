@@ -135,14 +135,14 @@ async def test_comparison_rechecks_required_case_content_before_publishing(
         count = await _comparison_count(persistence)
         assert count == before + 1
         ref = right.cases[-1].ref
-        key = repository._key("evaluation_case", [ref.dataset_id, ref.case_id, ref.revision])
+        key = repository._key("evaluation_case", (ref.dataset_id, ref.case_id, str(ref.revision)))
         if failure == "missing":
             await repository.state_store.mutate(lambda tx: tx.delete_records((key,)))
         elif failure == "expired":
             case = await repository.get_case(ref)
             now = datetime.now(timezone.utc)
             value = EvaluationCaseRecord(case, PRINCIPAL.principal_id, now, now)
-            row = replace(repository._stored("evaluation_case", [ref.dataset_id, ref.case_id, ref.revision], value),
+            row = replace(repository._stored("evaluation_case", (ref.dataset_id, ref.case_id, str(ref.revision)), value),
                           storage_revision=1)
             assert await repository.state_store.mutate(lambda tx: tx.replace_record(row, expected_storage_revision=0))
         else:
@@ -185,7 +185,7 @@ async def test_comparison_case_io_measurements(
         engine = repository.state_store.context.engine.sync_engine
         counts = Counter()
         get_cases = repository.get_cases
-        keys = {repository._key("evaluation_case", [case.ref.dataset_id, case.ref.case_id, case.ref.revision]).hex()
+        keys = {repository._key("evaluation_case", (case.ref.dataset_id, case.ref.case_id, str(case.ref.revision)))
                 for case in dataset.cases}
 
         async def read(refs):

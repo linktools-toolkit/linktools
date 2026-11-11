@@ -62,6 +62,8 @@ async def _chunks(payload: bytes) -> AsyncIterator[bytes]:
         pytest.param("payload", 1.0, _DIGEST, id="float-size"),
         pytest.param("", 1, _DIGEST, id="empty-key"),
         pytest.param("nul\x00key", 1, _DIGEST, id="nul-key"),
+        pytest.param("🪷" * 256 + "a", 1, _DIGEST, id="oversize-key"),
+        pytest.param("\ud800", 1, _DIGEST, id="invalid-utf8-key"),
         pytest.param(1, 1, _DIGEST, id="non-string-key"),
         pytest.param("payload", 1, "", id="empty-digest"),
         pytest.param("payload", 1, "g" * 64, id="non-hex-digest"),
@@ -160,3 +162,21 @@ def test_object_ref_reader_rejects_boolean_size(size: bool) -> None:
     with pytest.raises(AIError) as raised:
         decode_domain(encoded, ObjectRef)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_object_keys_keep_exact_opaque_identity_within_byte_limit(object_store: ObjectStore) -> None:
+    keys = ("name", "name ", "../路径/", "🪷" * 256)
+    for index, key in enumerate(keys):
+        value = str(index).encode()
+        await object_store.put(key, _chunks(value), expected_size=len(value),
+                               expected_digest=hashlib.sha256(value).hexdigest())
+    for index, key in enumerate(keys):
+        assert b"".join([chunk async for chunk in object_store.open(key)]) == str(index).encode()
+    await object_store.validate_integrity()
+
+
+@pytest.mark.parametrize("key", ("🪷" * 256 + "a", "\ud800"))
+def test_object_ref_rejects_keys_outside_utf8_byte_contract(key: str) -> None:
+    with pytest.raises(ValueError):
+        ObjectRef("objects", key, "a" * 64, 0)

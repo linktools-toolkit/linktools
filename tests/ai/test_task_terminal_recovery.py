@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.core import (
-    OperationStatus, Principal, TaskStatus, TenantAuthorizationPolicy, canonical_sha256, idempotency_key_digest,
+    OperationStatus, Principal, TaskStatus, TenantAuthorizationPolicy, canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
 
@@ -111,7 +111,7 @@ async def test_recovery_settles_terminal_graph_without_rearming(
             assert result.node_results[0].execution_id == "execution"
             assert launcher.started == []
             operation = await engine.persistence.task.operations.get(
-                idempotency_key_digest(request.idempotency_key), tenant_id=principal.tenant_id,
+                request.idempotency_key, tenant_id=principal.tenant_id,
             )
             assert operation.status is OperationStatus.SUCCEEDED
             assert operation.result_ref == "graph"
@@ -155,7 +155,7 @@ async def test_missing_binding_does_not_settle_nonterminal_recovery(effect_unkno
         assert state.node_states[0].status is expected
         assert launcher.started == []
         operation = await engine.persistence.task.operations.get(
-            idempotency_key_digest("missing-binding"), tenant_id=principal.tenant_id,
+            "missing-binding", tenant_id=principal.tenant_id,
         )
         assert operation.status is OperationStatus.RUNNING
 
@@ -182,6 +182,6 @@ async def test_terminal_graph_does_not_hide_recovery_integrity_or_effect_error(
         assert raised.value.code is code
         assert launcher.started == []
         operation = await engine.persistence.task.operations.get(
-            idempotency_key_digest("failed-recovery"), tenant_id=principal.tenant_id,
+            "failed-recovery", tenant_id=principal.tenant_id,
         )
         assert operation.status is OperationStatus.RUNNING

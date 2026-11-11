@@ -9,7 +9,7 @@ import random
 
 import pytest
 import pytest_asyncio
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolReturnPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, ToolReturnPart
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
@@ -211,7 +211,8 @@ async def test_pending_object_bytes_scale_with_new_content(
         keys = []
         for index in range(count):
             before_part = submitted_bytes
-            parts.append(ToolReturnPart("tool", generator.randbytes(12_000).hex(), tool_call_id=str(index)))
+            attachment = BinaryContent(generator.randbytes(64), media_type="application/octet-stream")
+            parts.append(ToolReturnPart("tool", attachment, tool_call_id=str(index)))
             keys.append(f"tool_result:{index}")
             pending = ModelRequest(parts=list(parts))
             prepared = await repository.prepare_observation(
@@ -219,7 +220,7 @@ async def test_pending_object_bytes_scale_with_new_content(
             )
             assert len(prepared.new_pending_parts) == 1
             await store.mutate(lambda tx: repository.commit_observation(tx, prepared))
-            assert submitted_bytes > before_part, "each random body must use external object storage"
+            assert submitted_bytes - before_part == len(attachment.data), "only the new attachment must be submitted"
             warmed = submitted_bytes
             unchanged = await repository.prepare_observation(
                 "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
@@ -230,6 +231,9 @@ async def test_pending_object_bytes_scale_with_new_content(
                 "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
             )
             assert submitted_bytes == warmed, "confirmed bodies must not be resubmitted"
+        assert len(submitted_keys) == count and set(submitted_keys.values()) == {1}
+        pending_object_keys = set(submitted_keys)
+        pending_bytes = submitted_bytes - before
         message = ModelRequest(parts=list(reversed(parts)))
         final = await repository.prepare_observation(
             "run", (message,),
@@ -237,9 +241,12 @@ async def test_pending_object_bytes_scale_with_new_content(
         )
         await store.mutate(lambda tx: repository.commit_observation(tx, final))
         totals.append(submitted_bytes - before)
-        retained.append(sum(len(raw) for raw in objects._objects.values()))
-        assert submitted_keys and max(submitted_keys.values()) == 1
-        assert totals[-1] == retained[-1], "object writes must contain only distinct retained content"
+        retained.append(sum([item.size async for item in objects.list_objects()]))
+        assert set(submitted_keys) == pending_object_keys
+        # The final combined message may publish each attachment once more.
+        assert max(submitted_keys.values()) <= 2
+        assert retained[-1] == pending_bytes
+        assert retained[-1] <= totals[-1] <= 2 * retained[-1]
         assert await repository.load_messages("run") == (message,)
         await repository.validate_integrity()
         await store.close()

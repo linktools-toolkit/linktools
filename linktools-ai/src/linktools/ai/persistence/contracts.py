@@ -40,6 +40,7 @@ from ..execution import (
 import binascii
 import json
 from ..session import SessionRepository as SessionRepositoryContract
+from ..execution import ExecutionTimelineRecord, ExecutionView
 from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -90,7 +91,9 @@ from ..core import (
     normalize_thinking,
     validate_agent_id,
     validate_lease_owner,
+    validate_memory_scope,
     validate_resource_id,
+    validate_idempotency_key,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -120,6 +123,15 @@ from ._plan import PersistenceDomain
 if TYPE_CHECKING:
     from ._archive import ContentArchive, PreparedArchive
     from .state import Observed, StateStore, StateTransaction, StoredRecord
+
+
+def _validate_transcript_index(value: int, *, positive: bool = False) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not (1 if positive else 0) <= value <= (1 << 63) - 1
+    ):
+        raise ValueError("transcript index is outside the signed 64-bit range")
 
 
 def _is_sha256(value: object) -> bool:
@@ -315,6 +327,11 @@ class TaskPreparedInputRecord:
     published_fence: int
 
     def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.graph_id)
+            validate_resource_id(self.node_id)
+        except AIError as error:
+            raise ValueError("prepared task identity is invalid") from error
         validate_tenant_id(self.tenant_id)
         digests = (
             self.admission_digest,
@@ -363,6 +380,10 @@ class TranscriptChunk:
     raw_size: int
     content: ArchiveRoot | NativeMessageRoot
 
+    def __post_init__(self) -> None:
+        _validate_transcript_index(self.first_message_index)
+        _validate_transcript_index(self.message_count)
+
 
 class TranscriptSeekDimension(str, Enum):
     __str__ = str.__str__
@@ -387,6 +408,9 @@ class TranscriptHeadRecord:
     pending_part_count: int = 0
 
     def __post_init__(self) -> None:
+        _validate_transcript_index(self.message_count)
+        _validate_transcript_index(self.chunk_count)
+        _validate_transcript_index(self.pending_part_count)
         if self.message_count < 0 or self.chunk_count < 0:
             raise ValueError("transcript head counts cannot be negative")
         if not self.owner_id:
@@ -411,6 +435,9 @@ class TranscriptSeekRecord:
     chunk_first_message_index: int
 
     def __post_init__(self) -> None:
+        _validate_transcript_index(self.block_start)
+        _validate_transcript_index(self.fact_sequence, positive=True)
+        _validate_transcript_index(self.chunk_first_message_index)
         if self.block_start < 0 or self.fact_sequence < 1:
             raise ValueError("transcript seek boundary values are invalid")
         if self.chunk_first_message_index < 0:
@@ -434,6 +461,7 @@ class TranscriptMessageRef:
     message_index: int
 
     def __post_init__(self) -> None:
+        _validate_transcript_index(self.message_index)
         if self.message_index < 0:
             raise ValueError("transcript message index cannot be negative")
 
@@ -523,7 +551,7 @@ class ModelClientBodyRef:
     codec: str
     raw_digest: str
     raw_size: int
-    content: RuntimePayloadRef
+    content: RuntimePayloadRef | ArchiveRoot
 
     def __post_init__(self) -> None:
         if (
@@ -534,7 +562,8 @@ class ModelClientBodyRef:
             or isinstance(self.raw_size, bool)
             or not isinstance(self.raw_size, int)
             or self.raw_size < 0
-            or not isinstance(self.content, RuntimePayloadRef)
+            or not isinstance(self.content, (RuntimePayloadRef, ArchiveRoot))
+            or isinstance(self.content, ArchiveRoot) and (self.content.count != 1 or self.codec != "raw")
         ):
             raise ValueError("model client body reference is invalid")
 
@@ -676,6 +705,14 @@ class ModelInteractionRecord:
     stream_attempts: tuple[StreamAttemptRecord, ...] | None = None
 
     def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.agent_run_id)
+        except AIError as error:
+            raise ValueError("model interaction owner identity is invalid") from error
+        _validate_transcript_index(self.step_index)
+        _validate_transcript_index(self.model_request_seq, positive=True)
+        if self.output_retry_index is not None:
+            _validate_transcript_index(self.output_retry_index)
         if (
             not self.agent_run_id
             or self.step_index < 0
@@ -942,12 +979,30 @@ class AgentAttemptClaim:
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
     memory_id: str
-    memory_scope_digest: str
+    memory_scope: str = field(repr=False)
     content: StoredPayload
     metadata: Mapping[str, JsonValue]
     revision: int
     created_at: datetime
     updated_at: datetime
+    transient_execution_id: str | None = field(default=None, kw_only=True, repr=False)
+
+    def __post_init__(self) -> None:
+        self.scope_components(self.memory_scope, self.transient_execution_id)
+
+    @classmethod
+    def scope_components(
+        cls, memory_scope: str, transient_execution_id: str | None = None,
+    ) -> tuple[str, ...]:
+        try:
+            validate_memory_scope(memory_scope)
+            if transient_execution_id is not None:
+                validate_resource_id(transient_execution_id)
+        except AIError as error:
+            raise ValueError("memory scope identity is invalid") from error
+        if transient_execution_id is None:
+            return ("persistent", memory_scope)
+        return ("transient", memory_scope, transient_execution_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -958,7 +1013,6 @@ class ToolOperationRecord:
     execution_id: str
     agent_run_id: str
     tool_call_id: str
-    idempotency_key_digest: str
     tool_name: str
     arguments_digest: str
     binding_digest: str
@@ -990,7 +1044,6 @@ class ToolOperationRecord:
             raise ValueError("tool producer generation is invalid")
         if (not isinstance(self.status, ToolOperationStatus)
                 or not isinstance(self.arguments_digest, str)
-                or not isinstance(self.idempotency_key_digest, str)
                 or not isinstance(self.replay_safe, bool)):
             raise ValueError("admitted tool operation is incomplete")
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
@@ -1036,10 +1089,12 @@ class ToolOperationRecord:
             raise ValueError("tool operation status is invalid")
         try:
             validate_resource_id(self.execution_id)
+            validate_resource_id(self.agent_run_id)
+            validate_resource_id(self.tool_call_id)
             if self.owner is not None:
                 validate_lease_owner(self.owner)
         except AIError as error:
-            raise ValueError("tool operation lease identity is invalid") from error
+            raise ValueError("tool operation identity or lease owner is invalid") from error
 
     def matches_admission(self, request: ToolOperationAdmission) -> bool:
         """Match a call while preserving the facts and result already admitted."""
@@ -1053,7 +1108,6 @@ class ToolOperationRecord:
             self.execution_id == request.execution_id
             and self.tool_operation_id == request.tool_operation_id
             and self.tool_call_id == request.tool_call_id
-            and self.idempotency_key_digest == request.idempotency_key_digest
             and self.tool_name == request.tool_name
             and self.arguments_digest == request.arguments_digest
             and arguments_match
@@ -1101,7 +1155,7 @@ class ApprovalRecord:
     approval_id: str
     execution_id: str
     status: ApprovalStatus
-    idempotency_key_digest: str | None
+    idempotency_key: str | None = field(repr=False)
     decision: ApprovalDecision | None
     decided_by: str | None
     decision_digest: str | None
@@ -1111,6 +1165,11 @@ class ApprovalRecord:
     resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.idempotency_key is not None:
+            try:
+                validate_idempotency_key(self.idempotency_key)
+            except AIError as error:
+                raise ValueError("idempotency key is invalid") from error
         if self.decision_message is not None and not isinstance(
             self.decision_message, str
         ):
@@ -1130,7 +1189,7 @@ class ExternalCallRecord:
     call_id: str
     execution_id: str
     status: ExternalCallStatus
-    idempotency_key_digest: str | None
+    idempotency_key: str | None = field(repr=False)
     created_at: datetime
     supplied_at: datetime | None
     resolution_kind: str | None = None
@@ -1138,6 +1197,11 @@ class ExternalCallRecord:
     resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.idempotency_key is not None:
+            try:
+                validate_idempotency_key(self.idempotency_key)
+            except AIError as error:
+                raise ValueError("idempotency key is invalid") from error
         if self.resolution_kind not in {None, "succeeded", "retry", "failed"}:
             raise ValueError("external resolution kind is invalid")
         if self.status is ExternalCallStatus.SUPPLIED:
@@ -1246,13 +1310,6 @@ class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
         execution_id: str,
         start_message_index: int,
         end_message_index: int,
-        stored_user_input: StoredUserInput,
-        output: StoredPayload | None,
-        status: ExecutionStatus,
-        created_at: datetime,
-        updated_at: datetime,
-        error_code: str | None,
-        safe_error_details: Mapping[str, JsonValue],
         allow_unadmitted: bool = False,
         admitted_turn: SessionTurnRef | None = None,
     ) -> SessionTurnCommit | None: ...
@@ -1333,6 +1390,18 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):
+    async def get_view(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> tuple[ResourceRef, ExecutionView] | None: ...
+
+    async def list_child_views(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> tuple[ExecutionView, ...]: ...
+
+    async def get_timeline_many(
+        self, execution_ids: Sequence[str], *, tenant_id: str,
+    ) -> Mapping[str, ExecutionTimelineRecord]: ...
+
     async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
     async def create_execution(
         self, record: ExecutionRecord
@@ -1539,6 +1608,17 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def get_result(
         self, execution_id: str, *, tenant_id: str
     ) -> ResultRecord | None: ...
+    async def require_active_producer(
+        self, execution_id: str, *, tenant_id: str, expected_producer_generation: int,
+        allow_cancelling: bool = True, fresh: bool = False,
+    ) -> None:
+        """Check current producer control; fresh observations also refresh ordinary reads."""
+        raise NotImplementedError
+    async def require_revoked_producer(
+        self, execution_id: str, *, tenant_id: str, producer_generation: int,
+    ) -> None:
+        """Prove revocation from authoritative control and any required seal in one snapshot."""
+        raise NotImplementedError
     async def get_history_seal(
         self,
         execution_id: str,
@@ -1604,7 +1684,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
 class IdempotencyRepository(RuntimeRepository, Protocol):
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord: ...
     async def get(
-        self, scope: str, idempotency_key_digest: str, *, tenant_id: str
+        self, scope: str, idempotency_key: str, *, tenant_id: str
     ) -> IdempotencyRecord | None: ...
     async def list_by_resource(
         self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str
@@ -1612,7 +1692,7 @@ class IdempotencyRepository(RuntimeRepository, Protocol):
     async def compare_and_swap(
         self,
         scope: str,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         *,
         tenant_id: str,
         expected_status: IdempotencyStatus,
@@ -1657,7 +1737,7 @@ class EventRepository(RuntimeRepository, Protocol):
 @dataclass(frozen=True, slots=True)
 class ExecutionEventAppend:
     event_type: str
-    payload: Mapping[str, JsonValue]
+    payload: Mapping[str, JsonValue] = field(repr=False)
 
     def __post_init__(self) -> None:
         event_type = str(self.event_type)
@@ -1673,7 +1753,6 @@ class ToolOperationAdmission:
     agent_run_id: str
     recovery_agent_run_id: str | None
     tool_call_id: str
-    idempotency_key_digest: str
     tool_name: str
     arguments_digest: str
     binding_digest: str
@@ -1695,8 +1774,12 @@ class ToolOperationAdmission:
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
         try:
             validate_resource_id(self.execution_id)
+            validate_resource_id(self.agent_run_id)
+            validate_resource_id(self.tool_call_id)
+            if self.recovery_agent_run_id is not None:
+                validate_resource_id(self.recovery_agent_run_id)
         except AIError as error:
-            raise ValueError("tool operation execution identifier is invalid") from error
+            raise ValueError("tool operation identity is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1704,7 +1787,7 @@ class ExecutionEventRecord:
     execution_id: str
     event_seq: int
     event_type: str
-    payload: JsonValue
+    payload: JsonValue = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_type, str) or not self.event_type:
@@ -1744,7 +1827,7 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_status: ApprovalStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         decision: ApprovalDecision,
         principal_id: str,
         decision_digest: str,
@@ -1792,7 +1875,7 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_status: ExternalCallStatus,
-        idempotency_key_digest: str,
+        idempotency_key: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
         resolution_metadata: Mapping[str, JsonValue],
@@ -1856,7 +1939,7 @@ class OperationLedgerRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         through_sequence: int,
-    ) -> str: ...
+    ) -> None: ...
 
 
 class TaskRepository(RuntimeRepository, Protocol):
@@ -2025,15 +2108,20 @@ class EvaluationRepository(RuntimeRepository, Protocol):
     async def publish_report(self, report: EvaluationReport | ComparisonReport) -> EvaluationReport | ComparisonReport: ...
     async def purge_expired_datasets(self, *, now: datetime, owner_principal_id: str, limit: int) -> tuple[DatasetRef, ...]: ...
     async def list_expired(self, *, now: datetime, limit: int, owner_principal_id: str | None = None) -> tuple[EvaluationRecord, ...]: ...
-    async def purge(self, experiment_id: str, *, now: datetime, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = ()) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]: ...
+    async def purge(self, experiment_id: str, *, now: datetime, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = (),
+                    capture_keys: tuple[str, ...] = ()) -> tuple[tuple[PersistenceDomain, ObjectRef], ...]: ...
     async def pending_cleanup(self, *, owner_principal_id: str, limit: int | None) -> tuple[EvaluationCleanupRecord, ...]: ...
-    async def acknowledge_cleanup(self, experiment_id: str, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...]) -> None: ...
+    async def acknowledge_cleanup(self, experiment_id: str, objects: tuple[tuple[PersistenceDomain, ObjectRef], ...] = (),
+                                  *, capture_keys: tuple[str, ...] = ()) -> None: ...
     async def get_report_at(self, cutoff: EvaluationReadCutoff) -> EvaluationReport | None: ...
     async def get_report(self, report_id: str) -> EvaluationReport | ComparisonReport | None: ...
 
 
 class MemoryRepository(RuntimeRepository, Protocol):
-    async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]: ...
+    async def capture_scope(
+        self, *, tenant_id: str, memory_scope: str,
+        transient_execution_id: str | None = None,
+    ) -> tuple[MemoryRecord, ...]: ...
     async def get_header(
         self, memory_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...
@@ -2049,7 +2137,8 @@ class MemoryRepository(RuntimeRepository, Protocol):
         self,
         *,
         tenant_id: str,
-        memory_scope_digest: str,
+        memory_scope: str,
+        transient_execution_id: str | None = None,
         prefix: str,
         cursor: str | None,
         limit: int,

@@ -7,6 +7,7 @@ import sqlite3
 
 from collections import Counter
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import replace
 from pathlib import Path
 
@@ -38,8 +39,8 @@ pytestmark = pytest.mark.asyncio
 async def _snapshot(store, *, scope_mapping=None):
     async def read(transaction):
         return (
-            tuple(sorted(await transaction.scan_records(), key=lambda item: item.key_digest)),
-            tuple(sorted(await transaction.scan_facts(), key=lambda item: (item.stream_digest, item.sequence))),
+            tuple(sorted(await transaction.scan_records(), key=lambda item: item.key)),
+            tuple(sorted(await transaction.scan_facts(), key=lambda item: (item.stream_key, item.sequence))),
             await transaction.scan_sequences(),
         )
     snapshot = await store.read(read)
@@ -162,8 +163,8 @@ async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
                 member = next(value for value in replacements if value.record.kind == target)
                 table = transaction._table("ai_state_records")
                 await transaction._execute(update(table).where(
-                    table.c.store_digest == transaction._store_hex,
-                    table.c.key_digest == member.record.key_digest.hex(),
+                    table.c.store_key == transaction._store_key,
+                    table.c.key == member.record.key,
                 ).values(storage_revision=member.expected_storage_revision + 1))
                 lost.append(target)
             return await original(transaction, replacements)
@@ -267,11 +268,10 @@ async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_p
         prepared, = await archive.prepare_checkpoints(run, (checkpoint,))
         chunk, = prepared.chunks
         expected = repository.checkpoint_record_keys("run", ())
-        for changed in (
-            replace(chunk, owner_id="foreign"),
-            replace(chunk, message_count=10**100),
-            replace(chunk, first_message_index=-1),
-        ):
+        for field, invalid in (("owner_id", "foreign"), ("message_count", 10**100), ("first_message_index", -1)):
+            # Corrupt durable values bypass authoring-time index bounds.
+            changed = copy(chunk)
+            object.__setattr__(changed, field, invalid)
             assert repository.checkpoint_record_keys("run", (changed,)) == expected
         before = await _snapshot(archive.state_store)
         with pytest.raises(AIError) as raised:
@@ -320,8 +320,8 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
             member = next(value for value in replacements if value.record.kind == target)
             table = transaction._table("ai_state_records")
             await transaction._execute(update(table).where(
-                table.c.store_digest == transaction._store_hex,
-                table.c.key_digest == member.record.key_digest.hex(),
+                table.c.store_key == transaction._store_key,
+                table.c.key == member.record.key,
             ).values(storage_revision=member.expected_storage_revision + 1))
             lost.append(target)
         return await original(transaction, replacements)

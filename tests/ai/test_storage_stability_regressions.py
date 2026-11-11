@@ -135,7 +135,7 @@ async def test_sql_object_integrity_still_rejects_orphan_chunks(
         async with engine.begin() as connection:
             await connection.execute(
                 insert(chunks).values(
-                    key_digest="a" * 64,
+                    object_id=999999,
                     chunk_index=0,
                     content=b"orphan",
                 )

@@ -87,7 +87,7 @@ async def make_owner(namespace, execution_service, close_callback=None):
 async def make_run(graph, close_callback=None):
     async def inspect_execution(execution_id, *, principal):
         return ExecutionView(execution_id, "task", ExecutionStatus.SUCCEEDED,
-            ExecutionLineageKind.RUN, None, execution_id, None, binding_kind="task")
+            ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), binding_kind="task")
     stub = SimpleNamespace(inspect=inspect_execution)
     engine = await make_owner("observed-test", stub, close_callback)
     async def tree(*args, **kwargs):
@@ -112,7 +112,7 @@ async def _bound_graph_state(graph_id, *, principal):
 class _BoundExecutionService:
     async def inspect(self, execution_id, *, principal):
         return ExecutionView(execution_id, "agent", ExecutionStatus.STARTED,
-            ExecutionLineageKind.RUN, None, execution_id, None)
+            ExecutionLineageKind.RUN, None, execution_id, None, agent_run_seq=0, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
 
     async def capture(self, execution_id, *, principal, after_event_seqs=None):
         return ((await self.inspect(execution_id, principal=principal), 0, 0),)

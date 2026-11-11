@@ -377,7 +377,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion(late_producer: b
                 ExecutionLineageKind.RUN,
                 None,
                 "execution",
-                None,
+                None, agent_run_seq=executions.execution.agent_run_seq, created_at=executions.execution.created_at,
                 event_seq=executions.execution.event_seq,
             )
 

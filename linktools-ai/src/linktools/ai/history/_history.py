@@ -1200,9 +1200,7 @@ class History:
         executions, _ = self._require_direct_reader()
         if (type(sessions) is SessionRepositoryImpl and type(executions) is ExecutionRepositoryImpl
                 and sessions.state_store.storage_group is executions.state_store.storage_group):
-            return await sessions.state_store.storage_group.read_many(
-                (sessions.state_store, executions.state_store), lambda _group: read(),
-            )
+            return await executions.read_content(lambda _group: read(), stores=(sessions.state_store,))
         return await read()
 
     async def _pending_session(self, header: ResourceRef) -> ExecutionRecord | None:
@@ -1210,7 +1208,6 @@ class History:
             return None
         pending = await self._pending_session_execution(header.id, tenant_id=header.tenant_id)
         if (pending is None or pending.session_id != header.id
-                or pending.principal_id != header.owner_principal_id
                 or pending.parent_execution_id is not None or pending.result is not None
                 or pending.status not in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED,
                                           ExecutionStatus.CANCELLING}):

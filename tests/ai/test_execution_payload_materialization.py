@@ -10,17 +10,17 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.capability import ExecutionCapability
-from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, PromptLimits, canonical_json_bytes
+from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionInputContext, RuntimePayloadRef
 from linktools.ai.inputs import ExecutionInputMaterializer
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.codec import decode_domain, encode_domain
-from linktools.ai.persistence.objects import ObjectKeyFactory, read_runtime_object
+from linktools.ai.persistence.objects import ObjectKeyFactory
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.runtime._execution_payload import _materialize_execution_payloads
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
-from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, StoredPayload
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 from .test_history_projection_conformance import _record
@@ -42,7 +42,7 @@ async def test_captured_input_is_self_contained_before_object_materialization() 
     objects = _Objects()
     materializer = ExecutionInputMaterializer(
         None, PromptLimits(), object_store=objects,
-        object_key_factory=ObjectKeyFactory("capture"), payload_policy=PayloadPolicy(inline_limit_bytes=128),
+        object_key_factory=ObjectKeyFactory("capture"),
     )
     prompt = ("Inspect", BinaryContent(b"body" * 100, media_type="text/plain"))
     captured = materializer.capture(prompt)
@@ -51,7 +51,8 @@ async def test_captured_input_is_self_contained_before_object_materialization() 
     assert objects.writes == []
     assert tuple(await materializer.restore(restored)) == prompt
     placed = await materializer.materialize_payload(restored, tenant_id="tenant")
-    assert placed.payload.kind == "object"
+    assert placed.payload.kind == "inline"
+    assert placed.payload.encoding == "json-attachments"
     assert placed.payload.digest == captured.payload.digest
     assert tuple(await materializer.restore(placed)) == prompt
     assert await materializer.materialize_payload(placed, tenant_id="tenant") is placed
@@ -60,22 +61,21 @@ async def test_captured_input_is_self_contained_before_object_materialization() 
 
 
 @pytest.mark.asyncio
-async def test_instruction_placement_uses_frozen_bytes_without_mutating_capture() -> None:
+async def test_large_instructions_stay_with_the_execution_owner() -> None:
     objects = _Objects()
     instructions = RepositoryInstructions((
-        RepositoryInstructionDocument("agents:AGENTS.md", ".", "rule" * 100),
+        RepositoryInstructionDocument("agents:AGENTS.md", ".", "rule" * 30000),
     ))
     payload = StoredPayload.inline_json(instructions.to_payload())
     captured = replace(_record(ExecutionStatus.PENDING_START, 0),
                        repository_instructions=RuntimePayloadRef(payload, PersistenceDomain.EXECUTION))
     placed = await _materialize_execution_payloads(
-        captured, input_materializer=None, objects=objects, keys=ObjectKeyFactory("capture"),
-        policy=PayloadPolicy(inline_limit_bytes=128), tenant_id="tenant",
+        captured, input_materializer=None, tenant_id="tenant",
     )
     reference = placed.repository_instructions.payload
-    assert reference.kind == "object"
-    assert reference.digest == payload.digest
-    assert await read_runtime_object(objects, reference.ref) == canonical_json_bytes(instructions.to_payload())
+    assert reference is payload
+    assert reference.decode() == instructions.to_payload()
+    assert objects.writes == []
     assert captured.repository_instructions.payload is payload
     assert captured.repository_instructions.payload.kind == "inline"
 
@@ -84,15 +84,14 @@ async def test_instruction_placement_uses_frozen_bytes_without_mutating_capture(
 async def test_captured_context_owns_instruction_bytes_without_separate_object_write() -> None:
     objects = _Objects()
     instructions = RepositoryInstructions((
-        RepositoryInstructionDocument("agents:AGENTS.md", ".", "rule" * 100),
+        RepositoryInstructionDocument("agents:AGENTS.md", ".", "rule" * 30000),
     ))
     context = ExecutionInputContext.from_messages((), repository_instructions=instructions.to_payload())
     captured = replace(_record(ExecutionStatus.PENDING_START, 0),
         repository_instructions=RuntimePayloadRef(StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.EXECUTION),
         input_context=RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION))
     placed = await _materialize_execution_payloads(
-        captured, input_materializer=None, objects=objects, keys=ObjectKeyFactory("capture"),
-        policy=PayloadPolicy(inline_limit_bytes=128), tenant_id="tenant",
+        captured, input_materializer=None, tenant_id="tenant",
     )
     assert objects.writes == []
     assert placed.input_context == captured.input_context
@@ -132,8 +131,8 @@ async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_p
             source = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             if mode == "sync":
                 assert source is not None
-                assert source.stored_user_input.payload.kind == "object"
-                assert objects.writes
+                assert source.stored_user_input.payload.kind == "inline"
+                assert objects.writes == []
             else:
                 assert source is None
                 assert objects.writes == []
@@ -141,7 +140,7 @@ async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_p
                 await runtime._execution_service.runtime_backend().promote_pending_execution(execution.execution_id)
                 source = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
                 assert source is not None
-                assert source.stored_user_input.payload.kind == "object"
+                assert source.stored_user_input.payload.kind == "inline"
                 assert tuple(await runtime._execution_service.runtime_backend().restore_user_input(source)) == prompt
         finally:
             release.set()
@@ -150,7 +149,7 @@ async def test_large_pending_input_is_materialized_only_at_source_boundary(tmp_p
         assert result.output == {"text": answer}
         source = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert source is not None
-        assert source.stored_user_input.payload.kind == "object"
+        assert source.stored_user_input.payload.kind == "inline"
         assert tuple(await runtime._execution_service.runtime_backend().restore_user_input(source)) == prompt
         replay = await session.start(prompt, idempotency_key="first")
         assert replay.execution_id == execution.execution_id
@@ -217,7 +216,7 @@ async def test_imported_context_is_archived_at_source_and_can_reopen(tmp_path: P
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         reference = record.input_context
         assert reference.payload.decode()["kind"] == "execution-context"
-        assert objects.writes
+        assert objects.writes == []
     async with Persistence.open("imported-payload", storage=storage()) as persistence, Runtime.attach(
         persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
     ) as runtime:

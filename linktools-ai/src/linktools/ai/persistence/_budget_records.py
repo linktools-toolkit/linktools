@@ -5,6 +5,9 @@
 from dataclasses import dataclass
 from typing import Literal
 
+from ..core import validate_budget_scope, validate_resource_id
+from ..errors import AIError
+
 
 @dataclass(frozen=True, slots=True)
 class BudgetModelReservation:
@@ -16,7 +19,12 @@ class BudgetModelReservation:
     total_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        for value in (self.scope_id, self.request_id, self.owner_id, self.admission_id):
+        validate_budget_scope(self.scope_id)
+        try:
+            validate_resource_id(self.request_id)
+        except AIError as error:
+            raise ValueError("model budget request identity is invalid") from error
+        for value in (self.owner_id, self.admission_id):
             if not isinstance(value, str) or not value:
                 raise ValueError("model budget reservation identities are required")
         if self.status not in {"in_flight", "settled", "unknown"}:
@@ -35,7 +43,8 @@ class BudgetToolReservation:
     admission_id: str
 
     def __post_init__(self) -> None:
-        for value in (self.scope_id, self.call_id, self.admission_id):
+        validate_budget_scope(self.scope_id)
+        for value in (self.call_id, self.admission_id):
             if not isinstance(value, str) or not value:
                 raise ValueError("tool budget reservation identities are required")
 

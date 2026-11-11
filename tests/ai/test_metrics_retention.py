@@ -104,6 +104,58 @@ async def test_retention_preserves_identity_and_atomic_batch_contract(retention_
     assert page.next_cursor is None
 
 
+async def _assert_namespace_partitions(store: MetricStore) -> None:
+    namespaces = ("A", "a", "é", "e\u0301", "测" * 85 + "a", "😀" * 64,
+                  "n" * 255 + "a", "n" * 255 + "b")
+    definition = MetricDefinition(
+        name="partition", revision=1, observation_kind="app.retention",
+        source=MetricSource.observation_count(), metric_type=MetricType.COUNTER,
+        unit="1", default_aggregation=MetricAggregation.COUNT,
+    )
+    observation = _observation("😀" * 32)
+    for index, namespace in enumerate(namespaces):
+        metrics = Metrics.from_store(store, namespace=namespace)
+        await metrics.define(replace(definition, unit=str(index)))
+        await metrics.record_observations((replace(observation, status=str(index)),))
+    for index, namespace in enumerate(namespaces):
+        metrics = Metrics.from_store(store, namespace=namespace)
+        expected = replace(definition, unit=str(index))
+        assert await store.get_definition(namespace, definition.name, 1) == expected
+        assert await store.latest_definition(namespace, definition.name) == expected
+        assert await metrics.define(expected) == expected
+        assert await metrics.get_observation(observation.observation_id) == replace(
+            observation, status=str(index),
+        )
+        result = await metrics.query(MetricQuery(
+            definition.name, MetricWindow.between(_START, _END),
+        ))
+        assert result.points[0].value == 1
+        page = await store.scan_observations(
+            namespace, observation.kind, _START, _END, cursor=None, limit=1,
+        )
+        assert page.items == (replace(observation, status=str(index)),)
+    assert await store.prune_observations(namespaces[-1], before=_BEFORE) == 1
+    assert await store.get_observation(namespaces[-1], observation.observation_id) is None
+    assert await store.get_observation(namespaces[-2], observation.observation_id) == replace(
+        observation, status=str(len(namespaces) - 2),
+    )
+
+
+@pytest.mark.asyncio
+async def test_namespace_partitions_preserve_exact_unicode_and_full_length(
+    retention_store: MetricStore,
+) -> None:
+    await _assert_namespace_partitions(retention_store)
+
+
+@pytest.mark.asyncio
+async def test_server_namespace_partitions_preserve_exact_unicode_and_full_length(
+    server_metrics: tuple[Metrics, AsyncEngine, AsyncEngine],
+) -> None:
+    _, engine, _ = server_metrics
+    await _assert_namespace_partitions(SqlMetricStore(engine))
+
+
 @pytest.mark.asyncio
 async def test_server_retention_contract(
     server_metrics: tuple[Metrics, AsyncEngine, AsyncEngine], monkeypatch: pytest.MonkeyPatch,
@@ -199,7 +251,7 @@ async def test_sql_retains_minimal_original_receipt_and_first_pruned_time(tmp_pa
             ))
         assert pruned["pruned_at"] is not None
         assert pruned["active_occurred_at"] is None
-        for field in ("namespace", "observation_id", "namespace_digest", "observation_digest",
+        for field in ("namespace", "observation_id",
                       "payload_digest", "kind", "occurred_at"):
             assert pruned[field] == before[field]
         assert await metrics.prune(before=_END) == 0
@@ -235,6 +287,9 @@ async def test_prune_cannot_turn_corruption_into_a_deletion_proof(tmp_path: Path
                                          {"value": raw[:-1] + ', "version":1}'})
             else:
                 await connection.execute(update(table).values(**values[damage]))
+        if damage == "namespace":
+            assert await metrics.prune(before=_BEFORE) == 0
+            metrics = Metrics.sql(engine, namespace="other")
         with pytest.raises(AIError) as caught:
             await metrics.prune(before=_BEFORE)
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -276,7 +331,7 @@ async def test_paged_prune_is_one_atomic_mutation(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ("namespace", "identity", "kind", "time", "projection", "payload"))
+@pytest.mark.parametrize("damage", ("kind", "time", "projection", "payload"))
 async def test_invalid_tombstone_is_not_exact_pruned_proof(tmp_path: Path, damage: str) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'invalid-receipt.db'}")
     table = build_metrics_sql_metadata().tables["ai_metric_observations"]
@@ -287,7 +342,6 @@ async def test_invalid_tombstone_is_not_exact_pruned_proof(tmp_path: Path, damag
         await metrics.record_observations((observation,))
         assert await metrics.prune(before=_BEFORE) == 1
         values = {
-            "namespace": {"namespace": "other"}, "identity": {"observation_id": "other"},
             "kind": {"kind": "app.other"}, "time": {"occurred_at": _BEFORE},
             "projection": {"active_occurred_at": _START}, "payload": {"payload_json": {}},
         }
@@ -296,6 +350,38 @@ async def test_invalid_tombstone_is_not_exact_pruned_proof(tmp_path: Path, damag
         with pytest.raises(AIError) as caught:
             await metrics.record_observations((observation,))
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert caught.value.safe_details.get("reason") != _REASON
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", ("namespace", "observation_id"))
+async def test_renamed_tombstone_does_not_own_original_identity(tmp_path: Path, column: str) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'renamed-receipt.db'}")
+    table = build_metrics_sql_metadata().tables["ai_metric_observations"]
+    metrics = Metrics.sql(engine, namespace="retention")
+    observation = _observation("old")
+    try:
+        await provision_metrics_database(engine)
+        await metrics.record_observations((observation,))
+        assert await metrics.prune(before=_BEFORE) == 1
+        async with engine.begin() as connection:
+            await connection.execute(update(table).values({column: "other"}))
+            renamed = (await connection.execute(select(table))).mappings().one()
+        assert await metrics.get_observation("old") is None
+        await metrics.record_observations((observation,))
+        assert await metrics.get_observation("old") == observation
+        async with engine.connect() as connection:
+            assert (await connection.execute(
+                select(table).where(table.c.id == renamed["id"])
+            )).mappings().one() == renamed
+        moved_metrics = Metrics.sql(engine, namespace=renamed["namespace"])
+        with pytest.raises(AIError) as caught:
+            await moved_metrics.record_observations((replace(
+                observation, observation_id=renamed["observation_id"],
+            ),))
+        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
         assert caught.value.safe_details.get("reason") != _REASON
     finally:
         await engine.dispose()
@@ -348,3 +434,35 @@ async def test_unconfirmed_rollback_does_not_expose_pruned_proof(
         assert caught.value.safe_details.get("reason") != _REASON
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_observation_ids_order_ties_and_remain_namespace_scoped(
+    retention_store: MetricStore,
+) -> None:
+    identities = ("é", "a|b", "Z", "中", "a", "A")
+    observations = tuple(_observation(identity) for identity in identities)
+    await retention_store.put_observations("first", observations)
+    await retention_store.put_observations("second", (
+        replace(observations[0], status="FAILED"),
+    ))
+    await retention_store.put_observations("first", observations)
+    assert await retention_store.get_observation("first", "é") == observations[0]
+    assert (await retention_store.get_observation("second", "é")).status == "FAILED"
+    with pytest.raises(AIError, match="STORAGE_CONFLICT"):
+        await retention_store.put_observations("first", (
+            replace(observations[0], status="FAILED"),
+        ))
+    cursor = None
+    scanned = []
+    while True:
+        page = await retention_store.scan_observations(
+            "first", "app.retention", _START, _END, cursor=cursor, limit=1,
+        )
+        scanned.extend(item.observation_id for item in page.items)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert scanned == sorted(identities)
+    assert await retention_store.prune_observations("first", before=_BEFORE) == len(identities)
+    assert (await retention_store.get_observation("second", "é")).status == "FAILED"

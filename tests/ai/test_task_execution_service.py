@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Callable execution settlement does not need an Agent host or model configuration."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,13 @@ async def test_callable_settlement_round_trips_without_agent_host(tmp_path: Path
             await service.cancel_task(started.execution_id, principal=principal)
             status = ExecutionStatus.CANCELLED
         assert (await service.inspect(started.execution_id, principal=principal)).status is status
+        terminal = await state.execution.executions.get(started.execution_id, tenant_id="tenant")
+        assert terminal.completed_at is not None
+        claimed = await service.claim_task_attempt(started.execution_id, principal=principal)
+        assert claimed.status is status
+        assert await state.execution.executions.get(started.execution_id, tenant_id="tenant") == terminal
+        with pytest.raises(ValueError, match="agent-only"):
+            replace(terminal, session_id="session")
     finally:
         await state.close()
 

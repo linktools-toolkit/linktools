@@ -72,7 +72,7 @@ async def test_conversation_preparation_reuses_new_run_metadata(
                 event.remove(engine, "before_cursor_execute", capture)
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
             counts.append(statements.count("SELECT"))
-            domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
+            domain_counts.append(select_stores.count(archive.state_store.store_key))
         assert batches[0][0] == batches[1][0]
         await _assert_prepared_values_equal(archive, batches[0][1], batches[1][1])
         # Native message preparation adds no content existence query. Composing

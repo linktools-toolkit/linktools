@@ -23,7 +23,6 @@ from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
     FilesystemObjectStore,
     InMemoryCacheBackend,
-    PayloadPolicy,
     StorageChange,
     StorageEntryStatus,
     StorageEntryRevision,
@@ -161,7 +160,7 @@ def test_sql_asset_store_recovers_pinned_history_with_file_objects(tmp_path: Pat
         try:
             await provision_asset_database(engine)
             backend = SqlAssetBackend(
-                engine, namespace="restart", object_store=objects, payload_policy=PayloadPolicy(0),
+                engine, namespace="restart", object_store=objects,
             )
             store, _ = make_store(backend)
             await store.initialize()
@@ -177,7 +176,7 @@ def test_sql_asset_store_recovers_pinned_history_with_file_objects(tmp_path: Pat
         restarted_engine = create_async_engine(url)
         restarted = SqlAssetBackend(
             restarted_engine, namespace="restart",
-            object_store=FilesystemObjectStore(tmp_path / "objects"), payload_policy=PayloadPolicy(0),
+            object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
         restarted_store, _ = make_store(restarted)
         try:

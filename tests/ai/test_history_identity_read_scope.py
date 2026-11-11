@@ -82,7 +82,7 @@ async def test_history_small_page_does_not_read_a_later_corrupt_tool() -> None:
             record = await transaction.get_record(key)
             assert record is not None
             await transaction.delete_record(key)
-            await transaction.insert_record(replace(record, sort_key="invalid"))
+            await transaction.insert_record(replace(record, sort_key=b"invalid"))
 
         await archive.state_store.mutate(corrupt)
         page = await history.reader.history("execution", tenant_id="tenant", cursor=None, limit=1)
@@ -157,7 +157,7 @@ async def test_history_explicit_identity_excludes_unrelated_message_corruption(s
             record = await transaction.get_record(key)
             assert record is not None
             await transaction.delete_record(key)
-            await transaction.insert_record(replace(record, sort_key="invalid"))
+            await transaction.insert_record(replace(record, sort_key=b"invalid"))
 
         await archive.state_store.mutate(corrupt)
         selected = await history.reader.history(

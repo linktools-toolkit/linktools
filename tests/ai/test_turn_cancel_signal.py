@@ -13,7 +13,7 @@ from linktools.ai.core import CommitPolicy, ExecutionStatus, ToolOperationStatus
 from linktools.ai.execution import CancelExecutionRequest
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.storage import InMemoryCacheBackend, Lease, RenewingTurnScope, TurnCoordination, TurnScope
+from linktools.ai.storage import TurnScopeIdentity, InMemoryCacheBackend, Lease, RenewingTurnScope, TurnCoordination, TurnScope
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, model_features, native_checkpoint
 
@@ -28,7 +28,7 @@ class _DelayedRenewal(InMemoryCacheBackend):
         self.cancelled_executions: list[str] = []
 
     def enter(
-        self, scope: str, *, session_key: str, request_key: str, request_digest: str,
+        self, scope: TurnScopeIdentity, *, session_key: str, request_key: str, request_digest: str,
         execution_id: str, owner_id: str,
     ) -> TurnScope:
         return RenewingTurnScope(
@@ -47,7 +47,7 @@ class _DelayedRenewal(InMemoryCacheBackend):
         self.released.set()
         return result
 
-    async def cancel_turn(self, scope: str, execution_id: str) -> bool:
+    async def cancel_turn(self, scope: TurnScopeIdentity, execution_id: str) -> bool:
         self.cancelled_executions.append(execution_id)
         return await super().cancel_turn(scope, execution_id)
 
@@ -84,7 +84,7 @@ async def test_source_cancel_reaches_owner_after_remote_terminal_settlement(
         statuses = []
         cancel = coordination.cancel_turn
 
-        async def observed_cancel(scope: str, execution_id: str) -> bool:
+        async def observed_cancel(scope: TurnScopeIdentity, execution_id: str) -> bool:
             repository = remote_state.execution.executions
             record = await repository.state_store.read(lambda _tx: repository.get(
                 execution_id, tenant_id=remote.tenant_id,

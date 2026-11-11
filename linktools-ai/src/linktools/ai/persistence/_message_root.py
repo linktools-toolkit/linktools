@@ -3,9 +3,10 @@
 """Immutable references to canonical native message occurrence ranges."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..core import JsonValue
+from ..steps import validate_native_store_key, encode_native_store_key, decode_native_store_key
 
 
 _MAX_COUNT = (1 << 63) - 1
@@ -116,13 +117,13 @@ class NativeMessageSequence:
 @dataclass(frozen=True, slots=True)
 class NativeMessageRoot:
     group_id: str
-    store_digest: str
+    store_key: bytes = field(repr=False)
     slices: tuple[NativeMessageSlice, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id:
             raise ValueError("native message group is required")
-        _digest(self.store_digest)
+        validate_native_store_key(self.store_key)
         _validate_slices(self.slices)
 
     @property
@@ -138,21 +139,21 @@ class NativeMessageRoot:
         """Encode a root only in the owning record's declared reference slot."""
         return {
             "type": "native_message_root", "group_id": self.group_id,
-            "store_digest": self.store_digest, "slices": _encode_slices(self.slices),
+            "store_key": encode_native_store_key(self.store_key), "slices": _encode_slices(self.slices),
         }
 
     @classmethod
     def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeMessageRoot":
         """Decode a trusted root slot, never discover roots in business JSON."""
         if (not isinstance(value, Mapping)
-                or set(value) != {"type", "group_id", "store_digest", "slices"}
+                or set(value) != {"type", "group_id", "store_key", "slices"}
                 or value["type"] != "native_message_root"):
             raise ValueError("native message root wire is invalid")
-        return cls(value["group_id"], value["store_digest"], _decode_slices(value["slices"]))
+        return cls(value["group_id"], decode_native_store_key(value["store_key"]), _decode_slices(value["slices"]))
 
     def slice(self, start: int, end: int) -> "NativeMessageRoot":
         """Retain descriptors in O(r); repeated snapshots still cost O(s*r)."""
-        return NativeMessageRoot(self.group_id, self.store_digest, _slice_ranges(self.slices, start, end))
+        return NativeMessageRoot(self.group_id, self.store_key, _slice_ranges(self.slices, start, end))
 
 
 __all__ = ["NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]

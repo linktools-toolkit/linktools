@@ -35,7 +35,7 @@ async def test_independent_engines_publish_prune_and_replay_consistently(tmp_pat
         await asyncio.gather(*(stores[i % 2].save_snapshot(snapshot) for i, snapshot in enumerate(snapshots)))
         assert await stores[0].latest_snapshot(run_id="same") == terminal
         async with engines[0].connect() as connection:
-            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 13
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 2
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 0 AND sequence_root IS NOT NULL")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == 13
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 1 AND messages = '{}' AND sequence_root IS NULL")) == 12

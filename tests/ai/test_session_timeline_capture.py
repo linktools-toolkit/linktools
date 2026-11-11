@@ -21,7 +21,7 @@ from linktools.ai.persistence._history import TranscriptRepository
 from linktools.ai.persistence.state import active_state_scope
 
 from .test_session_refresh import _PRINCIPAL, _admit, _service
-from .test_session_timeline import _commit_fields, _materialize_conversation, _session
+from .test_session_timeline import _materialize_conversation, _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -40,7 +40,7 @@ async def committed_state(tmp_path: Path) -> AsyncIterator[tuple[Persistence, st
         async def commit(transaction):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
-                start_message_index=0, end_message_index=count, **_commit_fields(execution),
+                start_message_index=0, end_message_index=count,
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success", expected=None,

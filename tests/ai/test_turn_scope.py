@@ -7,14 +7,17 @@ from dataclasses import replace
 
 import pytest
 
+from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend, RenewingTurnScope, TurnCoordination, TurnScope
 
+_SCOPE = TurnScopeIdentity("runtime", "tenant", "scope")
+
 
 def scope(backend, **kwargs) -> RenewingTurnScope:
     return RenewingTurnScope(
-        backend, "scope", session_key="session", request_key="request", request_digest="digest",
+        backend, _SCOPE, session_key="session", request_key="request", request_digest="digest",
         execution_id="execution", owner_id="owner", lease_seconds=.15, renew_seconds=.01, **kwargs,
     )
 
@@ -22,13 +25,13 @@ def scope(backend, **kwargs) -> RenewingTurnScope:
 @pytest.mark.asyncio
 async def test_owned_scope_releases_and_rejects_reentry() -> None:
     backend = InMemoryCacheBackend(max_bytes=1)
-    lifetime = backend.enter("scope", session_key="session", request_key="request", request_digest="digest",
+    lifetime = backend.enter(_SCOPE, session_key="session", request_key="request", request_digest="digest",
                              execution_id="execution", owner_id="owner")
     assert isinstance(lifetime, TurnScope)
     async with lifetime as owned:
         assert owned.lease is not None
         lifetime.require_active()
-    assert await backend.read_turn("scope", "execution") is None
+    assert await backend.read_turn(_SCOPE, "execution") is None
     with pytest.raises(RuntimeError):
         lifetime.require_active()
     with pytest.raises(RuntimeError):
@@ -41,7 +44,7 @@ async def test_observation_and_busy_scopes_do_not_release_owner() -> None:
     async with scope(backend) as owned:
         async with scope(backend) as replay:
             assert replay.lease is None
-        busy = backend.enter("scope", session_key="session", request_key="other", request_digest="digest",
+        busy = backend.enter(_SCOPE, session_key="session", request_key="other", request_digest="digest",
                              execution_id="other", owner_id="other")
         async with busy as result:
             assert result is None
@@ -49,7 +52,7 @@ async def test_observation_and_busy_scopes_do_not_release_owner() -> None:
                 busy.require_active()
             with pytest.raises(RuntimeError):
                 await busy.wait_signal()
-        assert (await backend.read_turn("scope", owned.execution_id)).owner_id == owned.owner_id
+        assert (await backend.read_turn(_SCOPE, owned.execution_id)).owner_id == owned.owner_id
 
 
 @pytest.mark.asyncio
@@ -57,7 +60,7 @@ async def test_cancel_signal_is_once_and_renewal_continues_until_owner_lost() ->
     backend = InMemoryCacheBackend(max_bytes=1)
     lifetime = scope(backend)
     async with lifetime as owned:
-        await backend.cancel_turn("scope", "execution")
+        await backend.cancel_turn(_SCOPE, "execution")
         assert await asyncio.wait_for(lifetime.wait_signal(), 1) == "cancel_requested"
         await asyncio.sleep(.18)
         lifetime.require_active()
@@ -103,7 +106,7 @@ async def test_late_renewal_cannot_restore_expired_authority(monkeypatch: pytest
             returned.set()
             return result
     lifetime = RenewingTurnScope(
-        Backend(max_bytes=1), "scope", session_key="session", request_key="request", request_digest="digest",
+        Backend(max_bytes=1), _SCOPE, session_key="session", request_key="request", request_digest="digest",
         execution_id="execution", owner_id="owner", lease_seconds=60, renew_seconds=.01,
     )
     async with lifetime:
@@ -182,7 +185,7 @@ async def test_exit_settles_release_even_when_caller_is_cancelled_again() -> Non
     finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await backend.read_turn("scope", "execution") is None
+    assert await backend.read_turn(_SCOPE, "execution") is None
 
 
 def test_missing_enter_is_configuration_error_even_with_cache_capability() -> None:
@@ -214,7 +217,7 @@ async def test_cancelled_entry_waits_for_claim_and_releases_known_owner() -> Non
     finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await backend.read_turn("scope", "execution") is None
+    assert await backend.read_turn(_SCOPE, "execution") is None
 
 
 @pytest.mark.asyncio
@@ -223,16 +226,16 @@ async def test_state_scope_owns_and_releases_exact_admission(tmp_path, kind: str
     from linktools.ai.persistence.turns import StateTurnCoordination
     from .test_state_batch_delete_backends import _open_store
     async with _open_store(kind, tmp_path / kind) as store:
-        backend = StateTurnCoordination(store, namespace="turn-scope", tenant_id="tenant")
-        lifetime = backend.enter("scope", session_key="session", request_key="request", request_digest="digest",
+        backend = StateTurnCoordination(store, namespace=_SCOPE.namespace, tenant_id=_SCOPE.tenant_id)
+        lifetime = backend.enter(_SCOPE, session_key="session", request_key="request", request_digest="digest",
                                  execution_id="execution", owner_id="owner")
         async with lifetime as owned:
             lifetime.require_active()
             assert owned.lease is not None
-            async with backend.enter("scope", session_key="session", request_key="request", request_digest="digest",
+            async with backend.enter(_SCOPE, session_key="session", request_key="request", request_digest="digest",
                                      execution_id="ignored", owner_id="ignored") as replay:
                 assert replay == replace(owned, lease=None)
-        assert await backend.read_turn("scope", "execution") is None
+        assert await backend.read_turn(_SCOPE, "execution") is None
 
 
 @pytest.mark.asyncio
@@ -281,7 +284,7 @@ async def test_renewal_latency_counts_against_the_new_local_deadline() -> None:
                 return result
             await asyncio.Event().wait()
     lifetime = RenewingTurnScope(
-        Backend(max_bytes=1), "scope", session_key="session", request_key="request", request_digest="digest",
+        Backend(max_bytes=1), _SCOPE, session_key="session", request_key="request", request_digest="digest",
         execution_id="execution", owner_id="owner", lease_seconds=.25, renew_seconds=.03,
     )
     async with lifetime:
@@ -298,11 +301,11 @@ async def test_old_scope_exit_cannot_release_replacement_owner() -> None:
     async with lifetime as owned:
         await backend.release_turn(owned.lease)
         successor = await backend.claim_turn(
-            "scope", session_key="session", request_key="request", request_digest="digest",
+            _SCOPE, session_key="session", request_key="request", request_digest="digest",
             execution_id="execution", owner_id="successor", lease_seconds=30,
         )
         assert await asyncio.wait_for(lifetime.wait_signal(), 1) == "owner_lost"
-    assert await backend.read_turn("scope", "execution") == replace(successor, lease=None)
+    assert await backend.read_turn(_SCOPE, "execution") == replace(successor, lease=None)
     await backend.release_turn(successor.lease)
 
 

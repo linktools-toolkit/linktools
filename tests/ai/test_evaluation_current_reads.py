@@ -497,7 +497,7 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
             ref = CaseRef(ref.dataset_id, "missing", ref.revision)
         else:
             case = await repository.get_case(ref)
-            identity = [ref.dataset_id, ref.case_id, ref.revision]
+            identity = (ref.dataset_id, ref.case_id, str(ref.revision))
             key = repository._key("evaluation_case", identity)
             row = await repository.state_store.read(lambda tx: tx.get_record(key))
             value = EvaluationCaseRecord(case, PRINCIPAL.principal_id,

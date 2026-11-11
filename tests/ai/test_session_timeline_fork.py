@@ -16,12 +16,13 @@ from linktools.ai.core import (
     Principal,
     SessionStatus,
     TenantAuthorizationPolicy,
+    StopReason, UsageMetrics,
 )
 from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.execution import ForkSessionRequest
 from linktools.ai.persistence import PersistenceStorage
 from linktools.ai.persistence.contracts import (
-    ExecutionRecord,
+    ExecutionRecord, ResultRecord,
     SessionRecord,
     StoredUserInput,
 )
@@ -65,7 +66,7 @@ def _execution(
     prompt: str,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
-    return ExecutionRecord(
+    execution = ExecutionRecord(
         execution_id=execution_id,
         session_id="source",
         parent_execution_id=None,
@@ -97,6 +98,13 @@ def _execution(
             },
         ),
     )
+    if status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        result = ResultRecord(StoredPayload.inline_json("ok") if status is ExecutionStatus.SUCCEEDED else None,
+                              StopReason.END_TURN if status is ExecutionStatus.SUCCEEDED else StopReason.ERROR,
+                              UsageMetrics(), now)
+        return execution.finalize_terminal(result)
+    return execution
+
 
 
 class _Executions:
@@ -111,6 +119,9 @@ class _Executions:
     async def get_many(self, execution_ids, *, tenant_id: str):
         assert tenant_id == "tenant"
         return {execution_id: self.values[execution_id] for execution_id in execution_ids}
+
+    async def get_timeline_many(self, execution_ids, *, tenant_id: str):
+        return await self.get_many(execution_ids, tenant_id=tenant_id)
 
 
 class _ExecutionService:

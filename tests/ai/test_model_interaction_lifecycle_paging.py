@@ -14,6 +14,8 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
+    ResourceRef,
+    ResourceKind,
     agent_conversation_id,
     agent_run_id,
 )
@@ -23,7 +25,7 @@ from linktools.ai.persistence._model_interaction import (
     StagedContextProjection,
     StagedModelInteraction,
 )
-from linktools.ai.execution import UsageReadCutoff
+from linktools.ai.execution import ExecutionView, UsageReadCutoff
 from linktools.ai.persistence.contracts import (
     ContextProjection,
     ModelInteractionRecord,
@@ -51,6 +53,32 @@ class _Executions:
             ),
             None,
         )
+
+    @classmethod
+    def project_view(cls, record: object) -> ExecutionView:
+        return ExecutionView(
+            execution_id=record.execution_id,
+            agent_id=record.agent_id,
+            status=record.status,
+            lineage_kind=record.lineage_kind,
+            parent_execution_id=record.parent_execution_id,
+            root_execution_id=record.root_execution_id,
+            parent_invocation_id=record.parent_invocation_id,
+            agent_run_seq=record.agent_run_seq,
+            created_at=record.created_at,
+            durable_trace=record.durable_trace,
+            binding_kind=record.binding_kind,
+        )
+
+    async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+        record = await self.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            return None
+        return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id), self.project_view(record)
+
+    async def list_child_views(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
+        return tuple(self.project_view(record) for record in
+                     await self.list_children(execution_id, tenant_id=tenant_id))
 
     async def list_children(
         self,
@@ -131,6 +159,8 @@ def _record(execution_id: str, *, child: bool = False) -> object:
         (),
         {
             "execution_id": execution_id,
+            "agent_id": "default",
+            "binding_kind": "agent",
             "durable_trace": True,
             "parent_execution_id": "root" if child else None,
             "root_execution_id": "root",

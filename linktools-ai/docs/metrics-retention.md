@@ -48,57 +48,29 @@ only through an authorized maintenance process after every allowed producer
 retry, broker replay and manual redrive window has ended. Zero lag alone does
 not establish that condition. There is no automatic receipt GC.
 
-## Existing-database maintenance switch
+## SQL schema
 
-New installations use `build_metrics_sql_metadata()` or the matching
-`migrations/init_schema.sql`. Runtime does not alter existing schemas. The
-provisioning functions create missing tables; they are **not an upgrade** for an
-existing observation table.
+Provision the current schema explicitly with `build_metrics_sql_metadata()` or
+`migrations/init_schema.sql`. Runtime does not create or migrate these tables.
+There is no committed older Metrics schema or data format to migrate.
 
-This change requires a coordinated **non-mixed-version maintenance window**:
+Definition identity is the full `(namespace, metric_name, revision)` tuple.
+Observation identity is the full `(namespace, observation_id)` tuple. Namespace
+and observation ID retain their existing limits of 256 and 128 UTF-8 bytes.
+MySQL uses `utf8mb4_bin`; PostgreSQL uses `C` for the namespace and observation
+ID; SQLite uses its binary text comparison. No namespace or observation ID hash
+is stored, calculated or used as a second identity.
 
-1. Inventory and stop every old reader, writer and scheduled pruner. Prevent old
-   processes, jobs and deployment revisions from restarting throughout the new
-   protocol's lifetime. Extra columns and nullable payloads do not fence old
-   binaries: the generic schema validator does not reject all extra columns or
-   nullability differences, and old prune code physically deletes receipts.
-2. Back up the database and record the schema, row count, allowed replay windows
-   and exact writer/reader versions. While writes are stopped, fully decode all
-   still-present raw envelopes, rejecting duplicate JSON members and malformed
-   or unsupported records. Verify original namespace/ID, namespace/observation/
-   payload digests, kind and UTC occurrence time against the existing columns.
-   Resolve any corrupt rows before continuing; never turn them into receipts.
-3. With authorized, dialect-specific DDL, add `namespace VARCHAR(256)` and
-   `observation_id VARCHAR(128)` using the same binary text collation as canonical
-   metadata, initially nullable for backfill; add nullable `pruned_at` and
-   `active_occurred_at` using the canonical timestamp type. Permit SQL NULL in
-   `payload_json`. No data-envelope version bump or schema manifest is required.
-4. Backfill namespace/ID from each **validated** envelope, set `pruned_at` to
-   NULL and `active_occurred_at = occurred_at`. Do not derive original identities
-   from their hashes. Validate every backfilled row, count and invariant, then
-   make namespace/ID NOT NULL. Preserve the observation-digest unique constraint
-   and all audit columns/indexes.
-5. Replace the two occurrence-time query indexes with
-   `(namespace_digest, kind, active_occurred_at)` and
-   `(namespace_digest, active_occurred_at)` using DDL compiled from canonical
-   metadata for the target dialect. Generated portable index names use
-   SQLAlchemy's deterministic shortening when they exceed that dialect's limit;
-   MySQL index names remain table-local. SQLite requires an appropriate table rebuild to change nullability;
-   preserve IDs, uniqueness and audit values when copying validated rows.
-6. Run schema validation and a full backfill integrity check before starting only
-   the matching new reader/writer/pruner versions. Verify active reads and query
-   plans against the real dataset, then validate pruning and replay on controlled
-   records. Record the exact deployed code/schema pair. Local unit tests do not
-   establish a deployment's migration or query-plan performance.
+Both unique keys index complete values. MySQL's ordinary observation indexes
+use `(namespace(128), kind, active_occurred_at)` and
+`(namespace(128), active_occurred_at)`. Queries still compare the complete
+namespace, so a shared 128-character prefix does not combine partitions.
+PostgreSQL and SQLite index the complete values.
 
-No historical ID can be recovered from a payload already physically deleted by
-an old pruner. The no-reactivation guarantee covers only retained valid receipts.
-Earlier replay needs actual historical evidence or an explicit host acceptance/
-rejection policy, not an invented backfill.
-
-After any tombstone or NULL payload exists, do not restart an old binary as a
-rollback. Stop all access again, reconcile the data and either restore compatible
-backed-up data with an explicitly assessed replay window, or keep the new
-protocol code. One initial process shutdown is not a permanent mixed-version
-safety guarantee. No production migration, retention period or GC window is
-chosen by this implementation.
+`payload_digest` covers the complete canonical ObservationEnvelope before
+model decoding, including namespace and observation ID. Active reads and prune
+verify it against the stored payload. After pruning, it remains the content
+comparison evidence for replay: the same identity and digest produce the
+specific pruned conflict, while a different payload remains a normal conflict.
+Changing a row's namespace or observation ID changes its storage identity; a
+receipt at another key does not prove that the original key was pruned.

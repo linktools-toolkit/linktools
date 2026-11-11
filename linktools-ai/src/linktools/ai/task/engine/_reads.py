@@ -17,23 +17,23 @@ class TaskExecutionReads:
         self._tasks = tasks
         self._ports = ports
 
-    async def _service(self, execution_id: str, tenant_id: str) -> ExecutionService:
+    async def _service(self, execution_id: str, tenant_id: str) -> ExecutionService | AgentExecutionPort[object]:
         if not self._ports:
             return self._tasks
         direct = self._ports.get(execution_id)
         if direct is not None:
-            return direct.service
+            return direct
         record = await self._tasks.load_execution(execution_id, tenant_id=tenant_id)
         if record is None or record.binding_kind == "task":
             return self._tasks
         port = self._ports.get(execution_id) or self._ports.get(record.root_execution_id)
         if port is None:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
-        return port.service
+        return port
 
     async def _authorized(
         self, execution_id: str, principal: Principal,
-    ) -> tuple[ExecutionService, ExecutionView | None]:
+    ) -> tuple[ExecutionService | AgentExecutionPort[object], ExecutionView | None]:
         if not self._ports:
             return self._tasks, None
         view = await self._tasks.inspect(execution_id, principal=principal)
@@ -42,7 +42,7 @@ class TaskExecutionReads:
         port = self._ports.get(execution_id) or self._ports.get(view.root_execution_id)
         if port is None:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
-        return port.service, None
+        return port, None
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         service, view = await self._authorized(execution_id, principal)

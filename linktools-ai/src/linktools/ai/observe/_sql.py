@@ -12,7 +12,6 @@ from ..core import Page, canonical_sha256, validate_persistence_namespace, valid
 from ..errors import AIError, ErrorCode
 from ..storage import (
     create_sql_storage_context,
-    namespace_digest,
     sql_audit_columns,
     sql_audit_indexes,
     sql_id_column,
@@ -27,7 +26,6 @@ from ._codec import (
     decode_observation_envelope,
     same_definition_contract,
     definition_envelope,
-    observation_digest,
     observation_envelope,
     observation_payload_digest,
 )
@@ -53,7 +51,7 @@ if TYPE_CHECKING:
 
 
 def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
-    from sqlalchemy import BigInteger, Column, DateTime, JSON, MetaData, Table
+    from sqlalchemy import BigInteger, Column, DateTime, JSON, MetaData, String, Table
     from sqlalchemy.dialects import mysql
 
     target = metadata if metadata is not None else MetaData()
@@ -65,10 +63,8 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         target,
         sql_id_column(),
         Column(
-            "namespace_digest",
-            sql_sha256(),
-            nullable=False,
-            comment="SHA-256 partition identity of the Metrics namespace.",
+            "namespace", sql_text_key(256).with_variant(String(256, collation="C"), "postgresql"),
+            nullable=False, comment="Metrics namespace owning the definition.",
         ),
         Column(
             "metric_name",
@@ -98,7 +94,7 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         comment="Custom metric definitions.",
         **sql_table_options(),
     )
-    sql_unique(definitions, "namespace_digest", "metric_name", "revision")
+    sql_unique(definitions, "namespace", "metric_name", "revision")
     sql_audit_indexes(definitions)
 
     observations = Table(
@@ -106,24 +102,15 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         target,
         sql_id_column(),
         Column(
-            "namespace", sql_text_key(256), nullable=False,
+            "namespace", sql_text_key(256).with_variant(String(256, collation="C"), "postgresql"),
+            nullable=False,
             comment="Original Metrics namespace retained after pruning.",
         ),
         Column(
-            "observation_id", sql_text_key(128), nullable=False,
+            "observation_id",
+            sql_text_key(128).with_variant(String(128, collation="C"), "postgresql"),
+            nullable=False,
             comment="Original observation identity retained after pruning.",
-        ),
-        Column(
-            "namespace_digest",
-            sql_sha256(),
-            nullable=False,
-            comment="SHA-256 partition identity of the Metrics namespace.",
-        ),
-        Column(
-            "observation_digest",
-            sql_sha256(),
-            nullable=False,
-            comment="SHA-256 identity of namespace plus observation_id.",
         ),
         Column(
             "payload_digest",
@@ -161,9 +148,9 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         comment="Immutable metric observations and retained pruning receipts.",
         **sql_table_options(),
     )
-    sql_unique(observations, "observation_digest")
-    sql_query_index(observations, "namespace_digest", "kind", "active_occurred_at")
-    sql_query_index(observations, "namespace_digest", "active_occurred_at")
+    sql_unique(observations, "namespace", "observation_id")
+    sql_query_index(observations, "namespace", "kind", "active_occurred_at")
+    sql_query_index(observations, "namespace", "active_occurred_at")
     sql_audit_indexes(observations)
     return target
 
@@ -216,7 +203,6 @@ class SqlMetricStore:
 
         await self._initialize()
         dialect_name = self._context.dialect.name
-        namespace_key = namespace_digest(namespace)
         async with self._context.sessions() as session:
             if dialect_name in {"mysql", "postgresql"}:
                 if not sql_query_pushdown_supported(plan):
@@ -227,7 +213,7 @@ class SqlMetricStore:
                 if not await _sql_features_available(session, dialect_name, plan):
                     return None
                 scanned_count = await self._verify_query_records(
-                    session, namespace, namespace_key, plan
+                    session, namespace, plan
                 )
                 if (
                     plan.source_kind is MetricSourceKind.OBSERVATION_COUNT
@@ -245,10 +231,9 @@ class SqlMetricStore:
                     ))
             return await self._context.run_statement(execute_sql_metric_query(
                 session,
-                namespace_key=namespace_key,
+                namespace=namespace,
                 dialect_name=dialect_name,
                 plan=plan,
-                namespace=namespace,
                 verify=dialect_name == "sqlite",
             ))
 
@@ -256,7 +241,6 @@ class SqlMetricStore:
         self,
         session: "AsyncSession",
         namespace: str,
-        namespace_key: str,
         plan: _MetricQueryPushdownPlan,
     ) -> int:
         from sqlalchemy import func, select
@@ -270,7 +254,7 @@ class SqlMetricStore:
         bounded = (
             self._select_observations()
             .where(
-                columns.namespace_digest == namespace_key,
+                columns.namespace == namespace,
                 columns.kind == plan.observation_kind,
                 columns.pruned_at.is_(None),
                 columns.active_occurred_at >= start,
@@ -288,7 +272,7 @@ class SqlMetricStore:
                 if scanned_count > plan.max_scanned_observations:
                     raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
                 try:
-                    _decode_observation_record(namespace, namespace_key, row)
+                    _decode_observation_record(namespace, row)
                 except (TypeError, ValueError, RecursionError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         finally:
@@ -303,9 +287,8 @@ class SqlMetricStore:
         from sqlalchemy import select
 
         await self._initialize()
-        namespace_key = namespace_digest(namespace)
         values = {
-            "namespace_digest": namespace_key,
+            "namespace": namespace,
             "metric_name": definition.name,
             "revision": definition.revision,
             "observation_kind": definition.observation_kind,
@@ -317,14 +300,14 @@ class SqlMetricStore:
                 session,
                 table=self._definitions,
                 values=cast("Mapping[str, SqlValue]", values),
-                index_elements=("namespace_digest", "metric_name", "revision"),
+                index_elements=("namespace", "metric_name", "revision"),
             ))
             if result.inserted:
                 return values
             row = (
                 await self._context.run_statement(session.execute(
                     select(self._definitions).where(
-                        self._definitions.c.namespace_digest == namespace_key,
+                        self._definitions.c.namespace == namespace,
                         self._definitions.c.metric_name == definition.name,
                         self._definitions.c.revision == definition.revision,
                     )
@@ -338,7 +321,7 @@ class SqlMetricStore:
             write_and_read,
             domain="metrics.definition",
         )
-        stored = self._decode_definition_row(namespace, namespace_key, row)
+        stored = self._decode_definition_row(namespace, row)
         if not same_definition_contract(stored, definition):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return stored
@@ -352,11 +335,10 @@ class SqlMetricStore:
         from sqlalchemy import select
 
         await self._initialize()
-        namespace_key = namespace_digest(namespace)
         statement = (
             select(self._definitions)
             .where(
-                self._definitions.c.namespace_digest == namespace_key,
+                self._definitions.c.namespace == namespace,
                 self._definitions.c.metric_name == name,
                 self._definitions.c.revision == revision,
             )
@@ -366,7 +348,7 @@ class SqlMetricStore:
             row = (await self._context.run_statement(session.execute(statement))).mappings().first()
         if row is None:
             return None
-        return self._decode_definition_row(namespace, namespace_key, row)
+        return self._decode_definition_row(namespace, row)
 
     async def latest_definition(
         self,
@@ -376,11 +358,10 @@ class SqlMetricStore:
         from sqlalchemy import select
 
         await self._initialize()
-        namespace_key = namespace_digest(namespace)
         statement = (
             select(self._definitions)
             .where(
-                self._definitions.c.namespace_digest == namespace_key,
+                self._definitions.c.namespace == namespace,
                 self._definitions.c.metric_name == name,
             )
             .order_by(self._definitions.c.revision.desc())
@@ -390,19 +371,18 @@ class SqlMetricStore:
             row = (await self._context.run_statement(session.execute(statement))).mappings().first()
         if row is None:
             return None
-        return self._decode_definition_row(namespace, namespace_key, row)
+        return self._decode_definition_row(namespace, row)
 
     def _decode_definition_row(
         self,
         namespace: str,
-        namespace_key: str,
         row: "Mapping[str, object]",
     ) -> MetricDefinition:
         definition = decode_definition_envelope(
             row["payload_json"], expected_namespace=namespace
         )
         if (
-            row["namespace_digest"] != namespace_key
+            row["namespace"] != namespace
             or definition.name != row["metric_name"]
             or definition.revision != row["revision"]
             or definition.observation_kind != row["observation_kind"]
@@ -418,7 +398,7 @@ class SqlMetricStore:
         await self._initialize()
         collapsed: dict[str, tuple[str, Observation]] = {}
         for observation in observations:
-            identity = observation_digest(namespace, observation.observation_id)
+            identity = observation.observation_id
             payload = observation_payload_digest(namespace, observation)
             current = collapsed.get(identity)
             if current is not None and current[0] != payload:
@@ -426,13 +406,10 @@ class SqlMetricStore:
             collapsed[identity] = (payload, observation)
         if not collapsed:
             return
-        namespace_key = namespace_digest(namespace)
         rows = [
             {
                 "namespace": namespace,
                 "observation_id": observation.observation_id,
-                "namespace_digest": namespace_key,
-                "observation_digest": identity,
                 "payload_digest": payload,
                 "kind": observation.kind,
                 "occurred_at": observation.occurred_at,
@@ -449,25 +426,28 @@ class SqlMetricStore:
                 session,
                 table=self._observations,
                 rows=cast("list[Mapping[str, SqlValue]]", rows),
-                index_elements=("observation_digest",),
+                index_elements=("namespace", "observation_id"),
             ))
             if inserted == len(rows):
                 return
             result = (
                 await self._context.run_statement(session.execute(
                     self._select_observations().where(
-                        self._observations.c.observation_digest.in_(identities)
+                        self._observations.c.namespace == namespace,
+                        self._observations.c.observation_id.in_(identities)
                     )
                 ))
             ).mappings().all()
-            existing = {str(row["observation_digest"]): row for row in result}
+            existing = {str(row["observation_id"]): row for row in result}
             if len(existing) != len(collapsed):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                # MySQL can ignore a secondary unique collision without creating
+                # the requested identity. Reject the whole mutation as a conflict.
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             for identity, (payload, observation) in collapsed.items():
                 row = existing[identity]
                 if row["payload_digest"] != payload:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                _validate_observation_identity(namespace, namespace_key, row)
+                _validate_observation_identity(namespace, row)
                 if row["observation_id"] != observation.observation_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (
@@ -478,7 +458,7 @@ class SqlMetricStore:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             pruned = False
             for row in existing.values():
-                if self._decode_observation_row(namespace, namespace_key, row) is None:
+                if self._decode_observation_row(namespace, row) is None:
                     pruned = True
             if pruned:
                 raise _observation_pruned()
@@ -491,11 +471,12 @@ class SqlMetricStore:
         observation_id: str,
     ) -> Observation | None:
         await self._initialize()
-        namespace_key = namespace_digest(namespace)
-        identity = observation_digest(namespace, observation_id)
         statement = (
             self._select_observations()
-            .where(self._observations.c.observation_digest == identity)
+            .where(
+                self._observations.c.namespace == namespace,
+                self._observations.c.observation_id == observation_id,
+            )
             .limit(1)
         )
         async with self._context.sessions() as session:
@@ -504,16 +485,15 @@ class SqlMetricStore:
             return None
         if row["observation_id"] != observation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return self._decode_observation_row(namespace, namespace_key, row)
+        return self._decode_observation_row(namespace, row)
 
     def _decode_observation_row(
         self,
         namespace: str,
-        namespace_key: str,
         row: "Mapping[str, object]",
     ) -> Observation | None:
         if row["pruned_at"] is not None:
-            _validate_observation_identity(namespace, namespace_key, row)
+            _validate_observation_identity(namespace, row)
             if (
                 not isinstance(row["pruned_at"], datetime)
                 or row["payload_json"] is not None
@@ -521,7 +501,7 @@ class SqlMetricStore:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return None
-        return _decode_observation_record(namespace, namespace_key, row)
+        return _decode_observation_record(namespace, row)
 
 
     async def scan_observations(
@@ -539,28 +519,27 @@ class SqlMetricStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         await self._initialize()
-        namespace_key = namespace_digest(namespace)
         statement = self._select_observations().where(
-            self._observations.c.namespace_digest == namespace_key,
+            self._observations.c.namespace == namespace,
             self._observations.c.kind == kind,
             self._observations.c.pruned_at.is_(None),
             self._observations.c.active_occurred_at >= start,
             self._observations.c.active_occurred_at < end,
         )
         if cursor is not None:
-            after_time, after_digest = _parse_scan_cursor(cursor)
+            after_time, after_id = _parse_scan_cursor(cursor)
             statement = statement.where(
                 or_(
                     self._observations.c.occurred_at > after_time,
                     and_(
                         self._observations.c.occurred_at == after_time,
-                        self._observations.c.observation_digest > after_digest,
+                        self._observations.c.observation_id > after_id,
                     ),
                 )
             )
         statement = statement.order_by(
             self._observations.c.occurred_at,
-            self._observations.c.observation_digest,
+            self._observations.c.observation_id,
         ).limit(limit + 1)
         async with self._context.sessions() as session:
             rows = (await self._context.run_statement(session.execute(statement))).mappings().all()
@@ -568,7 +547,7 @@ class SqlMetricStore:
         has_more = len(rows) > limit
         selected = rows[:limit]
         values = [
-            _decode_observation_record(namespace, namespace_key, row)
+            _decode_observation_record(namespace, row)
             for row in selected
         ]
 
@@ -577,7 +556,7 @@ class SqlMetricStore:
             last = values[-1]
             next_cursor = _scan_cursor(
                 last.occurred_at,
-                observation_digest(namespace, last.observation_id),
+                last.observation_id,
             )
         return Page(tuple(values), next_cursor)
 
@@ -585,7 +564,6 @@ class SqlMetricStore:
         from sqlalchemy import and_, or_, update
 
         await self._initialize()
-        namespace_key = namespace_digest(namespace)
 
         async def prune_rows(session: "AsyncSession") -> int:
             if not self._context.dialect.single_writer:
@@ -596,7 +574,7 @@ class SqlMetricStore:
             count = 0
             while True:
                 statement = self._select_observations().where(
-                    columns.namespace_digest == namespace_key,
+                    columns.namespace == namespace,
                     columns.pruned_at.is_(None),
                     columns.active_occurred_at < before,
                 )
@@ -604,10 +582,10 @@ class SqlMetricStore:
                     statement = statement.where(or_(
                         columns.active_occurred_at > after[0],
                         and_(columns.active_occurred_at == after[0],
-                             columns.observation_digest > after[1]),
+                             columns.observation_id > after[1]),
                     ))
                 statement = statement.order_by(
-                    columns.active_occurred_at, columns.observation_digest,
+                    columns.active_occurred_at, columns.observation_id,
                 ).limit(256)
                 rows = (await self._context.run_statement(
                     session.execute(statement)
@@ -615,12 +593,12 @@ class SqlMetricStore:
                 if not rows:
                     return count
                 for row in rows:
-                    _decode_observation_record(namespace, namespace_key, row)
-                identities = tuple(row["observation_digest"] for row in rows)
+                    _decode_observation_record(namespace, row)
+                identities = tuple(row["observation_id"] for row in rows)
                 result = await self._context.run_statement(session.execute(
                     update(self._observations).where(
-                        columns.namespace_digest == namespace_key,
-                        columns.observation_digest.in_(identities),
+                        columns.namespace == namespace,
+                        columns.observation_id.in_(identities),
                         columns.pruned_at.is_(None),
                     ).values(
                         pruned_at=pruned_at, payload_json=None,
@@ -629,7 +607,7 @@ class SqlMetricStore:
                 ))
                 count += int(result.rowcount or 0)
                 last = rows[-1]
-                after = (last["active_occurred_at"], last["observation_digest"])
+                after = (last["active_occurred_at"], last["observation_id"])
 
         return await self._context.run_mutation(prune_rows, domain="metrics.prune")
 
@@ -651,7 +629,7 @@ def _configure_sqlite_verifier(
 ) -> None:
     # Pool entry info is cleared when its physical connection is replaced.
     if record.info.get("linktools_metric_verifier") is not _sqlite_record_error:
-        connection.create_function("linktools_metric_verify", 12, _sqlite_record_error)
+        connection.create_function("linktools_metric_verify", 9, _sqlite_record_error)
         record.info["linktools_metric_verifier"] = _sqlite_record_error
 
 
@@ -669,14 +647,11 @@ def _reject_json_constant(value: str) -> None:
 
 def _sqlite_record_error(
     namespace: str,
-    namespace_key: str,
     stored_namespace: str,
-    stored_identity: str,
     stored_payload: str,
     kind: str,
     occurred_at: str,
     payload: str,
-    original_namespace: str,
     observation_id: str,
     active_occurred_at: str | None,
     pruned_at: str | None,
@@ -685,12 +660,9 @@ def _sqlite_record_error(
         timestamp = datetime.fromisoformat(occurred_at)
         _decode_observation_record(
             namespace,
-            namespace_key,
             {
-                "namespace": original_namespace,
+                "namespace": stored_namespace,
                 "observation_id": observation_id,
-                "namespace_digest": stored_namespace,
-                "observation_digest": stored_identity,
                 "payload_digest": stored_payload,
                 "kind": kind,
                 "occurred_at": timestamp,
@@ -711,7 +683,6 @@ def _sqlite_record_error(
 
 def _validate_observation_identity(
     namespace: str,
-    namespace_key: str,
     row: "Mapping[str, object]",
 ) -> None:
     try:
@@ -722,8 +693,6 @@ def _validate_observation_identity(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if (
         row["namespace"] != namespace
-        or row["namespace_digest"] != namespace_key
-        or row["observation_digest"] != observation_digest(namespace, cast(str, row["observation_id"]))
         or not isinstance(row["payload_digest"], str)
         or _SHA256.fullmatch(row["payload_digest"]) is None
         or not isinstance(row["occurred_at"], datetime)
@@ -733,10 +702,9 @@ def _validate_observation_identity(
 
 def _decode_observation_record(
     namespace: str,
-    namespace_key: str,
     row: "Mapping[str, object]",
 ) -> Observation:
-    _validate_observation_identity(namespace, namespace_key, row)
+    _validate_observation_identity(namespace, row)
     payload = row["payload_json"]
     if isinstance(payload, str):
         try:
@@ -755,17 +723,14 @@ def _decode_observation_record(
     observation = decode_observation_envelope(
         payload, expected_namespace=namespace
     )
-    expected_identity = observation_digest(namespace, observation.observation_id)
     if (
-        row["namespace_digest"] != namespace_key
-        or row["observation_id"] != observation.observation_id
+        row["observation_id"] != observation.observation_id
         or row["pruned_at"] is not None
         or not isinstance(row["active_occurred_at"], datetime)
         or _utc_database_datetime(row["active_occurred_at"]) != observation.occurred_at
         or row["kind"] != observation.kind
         or _utc_database_datetime(cast("datetime", row["occurred_at"]))
         != observation.occurred_at
-        or row["observation_digest"] != expected_identity
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return observation

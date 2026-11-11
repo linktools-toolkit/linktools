@@ -33,7 +33,7 @@ async def test_mysql_nonstrict_immutable_rows_preserve_bytes_and_poison_mixed_ba
     await provision_database(engine)
     try:
         for difference in ("exact", "float", "integer", "boolean", "trailing-space", "case"):
-            store = SqlStateStore(engine, store_digest=hashlib.sha256(difference.encode()).digest())
+            store = SqlStateStore(engine, store_key=hashlib.sha256(difference.encode()).digest())
             await store.initialize()
             try:
                 if difference == "exact":

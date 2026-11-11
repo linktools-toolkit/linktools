@@ -9,7 +9,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import _tool as tool_module
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.persistence.durability import DurableCommitResult, DurableCommitState
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore
 
 
 class _Repository:
@@ -35,7 +35,7 @@ async def test_committed_unknown_effect_raises_boundary_error(
         binding_digest="b" * 64,
         owner="owner",
         background_tasks=set(),
-        payload_policy=PayloadPolicy(),
+
     )
 
     with pytest.raises(AIError) as raised:

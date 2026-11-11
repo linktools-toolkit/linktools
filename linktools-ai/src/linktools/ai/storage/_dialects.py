@@ -179,7 +179,7 @@ class SqlAlchemyDialect(Protocol):
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
-    ) -> "Mapping[str, int]": ...
+    ) -> "Mapping[SqlValue, int]": ...
 
     async def delete_returning(
         self,
@@ -417,7 +417,7 @@ class SQLiteDialect:
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
-    ) -> "Mapping[str, int]":
+    ) -> "Mapping[SqlValue, int]":
         if not rows:
             return {}
 
@@ -439,7 +439,7 @@ class SQLiteDialect:
             self.name,
             len(rows),
         )
-        return {str(row[0]): int(row[1]) for row in result}
+        return {row[0]: int(row[1]) for row in result}
 
     async def delete_returning(
         self,
@@ -715,7 +715,7 @@ class MySQLDialect(SQLiteDialect):
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
-    ) -> "Mapping[str, int]":
+    ) -> "Mapping[SqlValue, int]":
         if not rows:
             return {}
         from sqlalchemy import and_, or_, select
@@ -750,7 +750,7 @@ class MySQLDialect(SQLiteDialect):
             self.name,
             len(rows),
         )
-        return {str(row[0]): int(row[1]) for row in result.all()}
+        return {row[0]: int(row[1]) for row in result.all()}
 
     async def delete_returning(
         self,
@@ -1003,7 +1003,7 @@ def sql_unique(table: "Table", *columns: str) -> None:
 def sql_query_index(
     table: "Table", *columns: str, mysql_length: int | None = None
 ) -> "Index":
-    from sqlalchemy import Index
+    from sqlalchemy import Index, String
     from sqlalchemy.schema import conv
 
     _validate_index_columns(columns)
@@ -1014,9 +1014,16 @@ def sql_query_index(
     )
     portable.info["ddl_dialect"] = "portable"
     portable.ddl_if(dialect=("sqlite", "postgresql"))
-    mysql_options: dict[str, object] = {}
+    mysql_prefixes = {
+        column.name: 128 for column in column_objects
+        if isinstance(column.type, String)
+        and (column.type.length is None or column.type.length > 128)
+    }
     if mysql_length is not None:
-        mysql_options["mysql_length"] = {columns[-1]: mysql_length}
+        mysql_prefixes[columns[-1]] = mysql_length
+    mysql_options: dict[str, object] = {}
+    if mysql_prefixes:
+        mysql_options["mysql_length"] = mysql_prefixes
     mysql = Index(
         f"ix_{'_'.join(columns)}",
         *column_objects,

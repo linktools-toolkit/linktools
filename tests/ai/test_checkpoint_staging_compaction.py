@@ -41,8 +41,9 @@ def test_checkpoint_staging_bodies_shared_and_capture_survives_trim(monkeypatch)
     assert len(staging.capture_projection_local("run", _ProjectionOffset(checkpoints=4)).checkpoints) == 0
     messages[0].parts[0].content = "caller mutation"
     first = captured.checkpoints[0]
-    assert len(decoded) == 1
+    assert decoded == []
     assert first.messages[0].parts[0].content == "0"
+    assert len(decoded) == 1
     first.messages[0].parts[0].content = "reader mutation"
     assert captured.checkpoints[0].messages[0].parts[0].content == "0"
     staging.save_checkpoint_local(AgentRunCheckpoint("run", 4, messages))
@@ -53,6 +54,10 @@ def test_checkpoint_staging_bodies_shared_and_capture_survives_trim(monkeypatch)
     del captured
     gc.collect()
     assert len(archive._branches) == 3
+    # The independently retained first checkpoint still owns its original leaf.
+    assert len(archive._leaves) == 5
+    del first
+    gc.collect()
     assert len(archive._leaves) == 4
 
 

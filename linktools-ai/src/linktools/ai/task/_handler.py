@@ -28,7 +28,7 @@ _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class TaskBindingContract:
     """Durable semantic binding for one application-owned task handler."""
 

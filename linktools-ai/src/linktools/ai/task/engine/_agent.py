@@ -26,7 +26,6 @@ from ...core import (
     Principal,
     ThinkingValue,
     canonical_sha256,
-    idempotency_key_digest,
     normalize_json_value,
     normalize_thinking,
     principal_identity_payload,
@@ -242,7 +241,7 @@ class AgentTaskRunner(Generic[AppT]):
         principal: Principal,
         hold_id: str,
     ) -> None:
-        await self.execution_port.service.acquire_dependency_hold(
+        await self.execution_port.acquire_dependency_hold(
             execution_id,
             tenant_id=principal.tenant_id,
             hold_id=hold_id,
@@ -256,7 +255,7 @@ class AgentTaskRunner(Generic[AppT]):
 
 
     async def _inspect_execution(self, execution_id: str, principal: Principal) -> "ExecutionView":
-        return await self.execution_port.service.inspect(execution_id, principal=principal)
+        return await self.execution_port.inspect(execution_id, principal=principal)
 
     async def bind_existing_execution(self, execution_id: str, principal: Principal) -> None:
         await self._get_execution(execution_id, principal)
@@ -315,7 +314,7 @@ class AgentTaskRunner(Generic[AppT]):
         operation = OperationLedgerInput(
             operation_id=canonical_sha256({
                 "action": "task.bound_execution.recover",
-                "graph_operation_id": idempotency_key_digest(request.idempotency_key),
+                "graph_operation_id": request.idempotency_key,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
                 "execution_id": execution.execution_id,

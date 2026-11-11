@@ -98,7 +98,7 @@ async def test_children_metadata_uses_fewer_sql_read_setups_without_skipping_que
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
 async def test_children_read_fails_closed_when_parent_disappears_after_authorization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+    tmp_path: Path, backend: str,
 ) -> None:
     state = _storage(backend, tmp_path)
     state = Persistence(state)
@@ -109,9 +109,9 @@ async def test_children_read_fails_closed_when_parent_disappears_after_authoriza
 
         class Authorization:
             async def authorize(self, principal, action, resource):
-                async def missing(*args, **kwargs):
-                    return None
-                monkeypatch.setattr(repository, "get", missing)
+                await repository.state_store.mutate(lambda transaction: transaction.delete_record(
+                    repository.execution_record_key("execution"),
+                ))
 
         with pytest.raises(AIError) as caught:
             await _service(state, authorization=Authorization()).list_children(
@@ -143,7 +143,7 @@ async def test_children_read_rejects_unauthorized_parent_before_child_query(
         async def forbidden(*args, **kwargs):
             raise AssertionError("Unauthorized child metadata must not be read")
 
-        monkeypatch.setattr(state.execution.executions, "list_children", forbidden)
+        monkeypatch.setattr(state.execution.executions, "list_child_views", forbidden)
         with pytest.raises(AIError) as caught:
             await _service(state, authorization=Authorization()).list_children(
                 "execution", principal=principal,

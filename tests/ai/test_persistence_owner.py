@@ -187,7 +187,7 @@ async def test_persistence_owner_isolates_runtime_callbacks_revisions_and_close(
         async def persist_in_transaction(self, tx: StateTransaction, payload: Mapping[str, JsonValue]) -> None:
             key = sha256(str(payload["execution"]).encode()).digest()
             await tx.insert_record(StoredRecord(
-                key, key, None, "audit", str(payload["execution"]), None,
+                key, key, None, "audit", (str(payload["execution"])).encode("ascii"), None,
                 0, None, 0, None, dict(payload),
             ))
 

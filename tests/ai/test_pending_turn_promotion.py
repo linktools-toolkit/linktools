@@ -62,7 +62,7 @@ async def _assert_promoted(
     storage = state.storage
     assert await storage.execution.executions.get(initial.execution_id, tenant_id="tenant") == execution
     identity = turn.reservation.idempotency
-    assert await storage.execution.idempotency.get(identity.scope, identity.idempotency_key_digest, tenant_id="tenant") == replace(
+    assert await storage.execution.idempotency.get(identity.scope, identity.idempotency_key, tenant_id="tenant") == replace(
         identity, status=IdempotencyStatus.STARTED,
     )
     head = await storage.execution.executions.get(initial.execution_id, tenant_id="tenant")

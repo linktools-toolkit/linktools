@@ -10,9 +10,10 @@ from linktools.core import environ
 from ..core import (
     JsonValue,
     validate_tenant_id,
+    validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
-from .state import StateStore, StateTransaction, StoredRecord, record_key_digest
+from .state import StateStore, StateTransaction, StoredRecord, record_key
 
 _logger = environ.get_logger("ai.persistence.planning")
 _OWNER_KINDS = frozenset({"session", "execution"})
@@ -38,17 +39,18 @@ class PlanStateStore:
             or not owner_id
         ):
             raise ValueError("plan owner is invalid")
+        validate_resource_id(owner_id)
         self._store = store
         validate_tenant_id(tenant_id)
         self._owner_kind = owner_kind
         self._owner_id = owner_id
         domain = "conversation" if owner_kind == "session" else "execution"
-        self._key = record_key_digest(
+        self._key = record_key(
             namespace,
             tenant_id,
             domain,
             _KIND,
-            [owner_kind, owner_id],
+            (owner_kind, owner_id),
         )
 
     @property
@@ -138,11 +140,11 @@ class PlanStateStore:
         current: StoredRecord | None,
     ) -> StoredRecord:
         return StoredRecord(
-            key_digest=self._key,
-            scope_digest=None,
-            parent_digest=None,
+            key=self._key,
+            scope_key=None,
+            parent_key=None,
             kind=_KIND,
-            sort_key="plan:" + self._key.hex(),
+            sort_key=self._key,
             state=None,
             storage_revision=1 if current is None else current.storage_revision + 1,
             lease_owner=None,

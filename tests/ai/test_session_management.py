@@ -168,7 +168,7 @@ async def test_session_mutation_guards_owner_changed_during_policy(tmp_path, ope
 
                 async def remove(transaction):
                     records = await transaction.scan_records()
-                    await transaction.delete_records(tuple(record.key_digest for record in records
+                    await transaction.delete_records(tuple(record.key for record in records
                         if record.kind in {"session", "conversation_history", "transcript_head"}))
 
                 await state.conversation.sessions.state_store.mutate(remove)
