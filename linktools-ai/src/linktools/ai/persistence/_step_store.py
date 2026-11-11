@@ -597,8 +597,7 @@ class SqlStepStore:
     @classmethod
     def decode_event(cls, data: Mapping[str, object]) -> StepEvent:
         """Restore explicit lifecycle fields without changing ordinary upstream inputs."""
-        validate_native_step_ids(run_id=data["run_id"], conversation_id=data.get("conversation_id"),
-                                 parent_run_id=data.get("parent_run_id"))
+        cls._validate_record_ids(data)
         return (_LIFECYCLE_ADAPTER if data.get("outcome") is not None else _EVENT_ADAPTER).validate_python(data)
 
     def events_from_receipt(self, receipt: StepWriteReceipt) -> tuple[StepEvent, ...]:
@@ -736,8 +735,7 @@ class SqlStepStore:
                 if set(row) != columns or row["store_digest"] != backup.store_digest:
                     raise ValueError("native backup row fields or scope are invalid")
                 run_id = row["run_id"]
-                validate_native_step_ids(run_id=run_id, conversation_id=row["conversation_id"],
-                                         parent_run_id=row["parent_run_id"])
+                cls._validate_record_ids(row)
                 key = row["run_id"] if name == "runs" else row["key_digest"]
                 if name != "runs":
                     NativeMessageRoot("validation", key)
@@ -1704,9 +1702,17 @@ class SqlStepStore:
         return values
 
     @classmethod
+    def _validate_record_ids(cls, row: Mapping[str, object]) -> None:
+        try:
+            validate_native_step_ids(run_id=row.get("run_id"), conversation_id=row.get("conversation_id"),
+                                     parent_run_id=row.get("parent_run_id"))
+        except AIError as error:
+            # Persisted identities are integrity evidence, not caller input.
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    @classmethod
     def _record_data(cls, row: "Mapping[str, object] | RowMapping") -> dict[str, object]:
-        validate_native_step_ids(run_id=row["run_id"], conversation_id=row.get("conversation_id"),
-                                 parent_run_id=row.get("parent_run_id"))
+        cls._validate_record_ids(row)
         data = dict(row)
         if "metadata" in data:
             data["metadata"] = json.loads(data["metadata"])

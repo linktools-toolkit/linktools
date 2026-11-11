@@ -70,8 +70,9 @@ async def test_native_writers_reject_oversized_identity_before_publishing(native
         lambda: native.save_snapshot(snapshot),
         lambda: native.commit_step(run=run, events=(event,), snapshot=snapshot),
     ):
-        with pytest.raises(AIError):
+        with pytest.raises(AIError) as caught:
             await operation()
+        assert caught.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert await native.list_runs() == []
     assert await native.list_events(run_id="run") == []
     assert await native.list_snapshots(run_id="run") == []
@@ -94,8 +95,9 @@ async def test_native_queries_and_official_reader_reject_oversized_ids(native: S
         lambda: reader.list_events(agent_run_id=value),
         lambda: reader.latest_snapshot(run_id=value),
     ):
-        with pytest.raises(AIError):
+        with pytest.raises(AIError) as caught:
             await operation()
+        assert caught.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 @pytest.mark.parametrize("field", ("run_id", "conversation_id", "parent_run_id"))
@@ -118,8 +120,9 @@ def test_portable_runs_and_runtime_projections_reject_oversized_ids(field: str) 
             constructor(**(values | {projected_field: invalid}))
     scope = SqlStepStore.scope_digest(namespace="ids", tenant_id="tenant")
     row = SqlStepStore._record_values(RunRecord(run_id="run")) | {"store_digest": scope, field: invalid}
-    with pytest.raises(AIError):
+    with pytest.raises(AIError) as caught:
         SqlStepStore.validate_backup(NativeStepBackup(scope, (row,), (), ()))
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_runtime_id_generators_fit_the_native_resource_contract() -> None:
@@ -148,5 +151,6 @@ async def test_native_sql_readers_reject_ids_beyond_the_byte_contract(native: Sq
         await connection.execute(text(f"UPDATE ai_step_{table} SET conversation_id = :value"),
                                  {"value": "😀" * 32 + "x"})
     operation = {"runs": native.get_run, "events": native.list_events, "snapshots": native.latest_snapshot}[table]
-    with pytest.raises(AIError):
+    with pytest.raises(AIError) as caught:
         await operation(run_id="run")
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

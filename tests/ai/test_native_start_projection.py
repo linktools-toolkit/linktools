@@ -1072,7 +1072,7 @@ def test_terminal_source_join_keeps_explicit_locator_bind_budget(dialect_name: s
     assert locators <= compiled.params.keys()
     assert compiled.params["source_run_id"] == "run"
     assert compiled.params["source_event_key"] == native.event_key_digest(source)
-    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 5
+    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 4
     ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(998))).compile(
         dialect=dialect, compile_kwargs={"render_postcompile": True})
     assert not locators.intersection(ordinary.params)

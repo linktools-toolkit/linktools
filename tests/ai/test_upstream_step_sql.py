@@ -177,13 +177,14 @@ async def test_snapshot_preserves_native_messages_and_official_continue_run(stor
 
 @pytest.mark.asyncio
 async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> None:
+    run_id = "run-" + "x" * (RESOURCE_ID_MAX_BYTES - 4)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scopes.db'}")
     stores = [SqlStepStore(engine, namespace=namespace, tenant_id=tenant, tool_effect_store=InMemoryStepStore())
               for namespace, tenant in [("one", "a"), ("one", "b"), ("two", "a")]]
     try:
         await stores[0].initialize(local=True)
         for index, item in enumerate(stores):
-            await item.register_run(RunRecord(run_id="run-" + "x" * 1024, metadata={"scope": str(index)}))
+            await item.register_run(RunRecord(run_id=run_id, metadata={"scope": str(index)}))
             await item.save_snapshot(ContinuableSnapshot(run_id="same", step_index=0,
                 messages=[ModelRequest(parts=[UserPromptPart(str(index))])], idempotency_key="same"))
         await stores[0].register_run(RunRecord(run_id="offset", parent_run_id="parent",
@@ -192,7 +193,7 @@ async def test_sql_partitions_isolate_run_and_message_keys(tmp_path: Path) -> No
             started_at=datetime.fromisoformat("2026-01-01T01:00:00+00:00")))
         assert [run.run_id for run in await stores[0].list_runs(parent_run_id="parent")] == ["offset", "utc"]
         for index, item in enumerate(stores):
-            assert (await item.get_run(run_id="run-" + "x" * 1024)).metadata == {"scope": str(index)}
+            assert (await item.get_run(run_id=run_id)).metadata == {"scope": str(index)}
             snapshot = await item.latest_snapshot(run_id="same")
             assert snapshot.messages[0].parts[0].content == str(index)
     finally:
