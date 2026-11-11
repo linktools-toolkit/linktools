@@ -163,8 +163,6 @@ class TaskNodeResultRef(Generic[_ResultT]):
 
     def __post_init__(self) -> None:
         _validate_task_id(self.node_id)
-        if not isinstance(self.node_id, str) or not self.node_id.strip():
-            raise ValueError("task node result reference is invalid")
 
 
 @dataclass(frozen=True, init=False)
@@ -632,8 +630,6 @@ class TaskGraph:
 
     def __post_init__(self) -> None:
         _validate_task_id(self.graph_id)
-        if not self.graph_id.strip():
-            raise ValueError("task graph id is required")
         object.__setattr__(self, "nodes", tuple(self.nodes))
         ids = {node.node_id for node in self.nodes}
         if len(ids) != len(self.nodes):
@@ -792,8 +788,6 @@ class TaskGraphLaunch:
         _validate_task_id(self.graph_id)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
-            raise ValueError("task graph id is required")
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
 
@@ -824,8 +818,6 @@ class TaskGraphAdmission:
             not isinstance(self.version, int)
             or isinstance(self.version, bool)
             or self.version < 1
-            or not isinstance(self.graph_id, str)
-            or not self.graph_id.strip()
             or re.fullmatch(r"[0-9a-f]{64}", self.initial_request_digest) is None
         ):
             raise ValueError("task graph admission is invalid")
@@ -922,8 +914,6 @@ class TaskNodeResult:
 
     def __post_init__(self) -> None:
         _validate_task_id(self.node_id)
-        if not isinstance(self.node_id, str) or not self.node_id:
-            raise ValueError("task node result id is invalid")
         try:
             details = ImmutableJsonMapping(self.safe_error_details)
         except (TypeError, ValueError) as error:
@@ -959,10 +949,6 @@ class TaskResultRecord:
     def __post_init__(self) -> None:
         _validate_task_id(self.graph_id)
         _validate_task_id(self.node_id)
-        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
-            raise ValueError("task result graph id is required")
-        if not isinstance(self.node_id, str) or not self.node_id.strip():
-            raise ValueError("task result node id is required")
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task result digest is invalid")
         if not isinstance(self.execution_id, str) or not self.execution_id.strip():
@@ -1075,8 +1061,6 @@ class TaskGraphState:
 
     def __post_init__(self) -> None:
         _validate_task_id(self.graph_id)
-        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
-            raise ValueError("task graph state id is required")
         if not isinstance(self.status, TaskStatus):
             raise ValueError("task graph state status is invalid")
         if (
