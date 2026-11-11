@@ -61,6 +61,7 @@ from pydantic_ai_harness.step_persistence import (
     is_provider_valid,
 )
 
+from ..core import deterministic_id, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..steps import LifecycleOutcome, NativeLifecycleEvent
 
@@ -184,7 +185,7 @@ class StepRunRegistration:
                 run_id=record.run_id, kind="run_started", step_index=step_index,
                 timestamp=timestamp, conversation_id=record.conversation_id,
                 parent_run_id=record.parent_run_id, agent_name=record.agent_name,
-                metadata=dict(record.metadata), idempotency_key=f"0:{step_index}:run_started:",
+                metadata=dict(record.metadata), idempotency_key=deterministic_id(0, step_index, "run_started", None),
             )
         elif self._started.step_index != step_index or self._started.conversation_id != conversation_id:
             raise ValueError("native start boundary changed")
@@ -376,6 +377,8 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         tool_name: str | None = None,
         error: str | None = None,
     ) -> StepEvent:
+        if tool_call_id is not None:
+            validate_resource_id(tool_call_id)
         if self.run_registration is not None and self.run_registration.share_started:
             self._atomic_event_sequence = max(1, self._atomic_event_sequence)
         event_index = self._atomic_event_sequence
@@ -392,7 +395,7 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
             tool_name=tool_name,
             error=error,
             metadata=dict(self.metadata),
-            idempotency_key=f"{event_index}:{ctx.run_step}:{kind}:{tool_call_id or ''}",
+            idempotency_key=deterministic_id(event_index, ctx.run_step, kind, tool_call_id),
         )
 
     def _atomic_prepare_snapshot(
@@ -413,7 +416,7 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
             agent_name=self.agent_name,
             timestamp=datetime.now(UTC),
             state=state,
-            idempotency_key=f"{snapshot_index}:{step_index}:{state}",
+            idempotency_key=deterministic_id(snapshot_index, step_index, state),
         )
         if isinstance(self.store, CapturingStepStore):
             return self.store.capture_snapshot(snapshot)

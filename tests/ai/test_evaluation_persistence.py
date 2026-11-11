@@ -136,7 +136,7 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
 
 @pytest.mark.parametrize("kind", ("record", "tombstone", "human_decision"))
 def test_evaluation_replay_keys_preserve_bytes_and_stay_out_of_repr(kind: str) -> None:
-    key = "界" * 85 + "x"
+    key = "界" * 42 + "ab"
     record = replace(experiment(), idempotency_key=key)
     values = {
         "record": record,

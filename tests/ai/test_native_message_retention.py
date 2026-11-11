@@ -11,7 +11,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.steps import native_store_key
+from linktools.ai.steps import native_store_locator, native_store_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.persistence import NativeMessageRoot, NativeMessageSlice, SqlStepStore
@@ -268,8 +268,8 @@ async def test_native_only_domain_gc_retains_cross_owner_roots_without_snapshot_
         async with engine.begin() as connection:
             for value, node in zip((content, orphan), nodes):
                 await connection.execute(metadata.tables["ai_step_messages"].insert().values(
-                    store_key=native.store_key, sha256=value.raw_digest, **value.to_native_values()))
-                await connection.execute(metadata.tables["ai_step_sequences"].insert().values(_row(node, native.store_key)))
+                    store_key=native.store_key, store_locator=native_store_locator(native.store_key), sha256=value.raw_digest, **value.to_native_values()))
+                await connection.execute(metadata.tables["ai_step_sequences"].insert().values(dict(_row(node, native.store_key), store_locator=native_store_locator(native.store_key))))
         root = NativeMessageRoot(group_id, native.store_key, (NativeMessageSlice(nodes[0].identity, 1, 0, 1),))
         key = hashlib.sha256(b"native-only-owner").digest()
         record = StoredRecord(key, None, None, "test_owner", b'owner', None, 1, None, 0, None,

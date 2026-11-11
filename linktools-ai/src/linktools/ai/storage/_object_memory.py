@@ -164,7 +164,9 @@ class _ScopedObjectStore:
 
     def _physical_key(self, key: str) -> str:
         _validate_key(key)
-        return f"{self._scope}/{key}"
+        physical_key = f"{self._scope}/{key}"
+        _validate_key(physical_key)
+        return physical_key
 
 
 async def _spool_memory(

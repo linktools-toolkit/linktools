@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.core import service_principal
+from linktools.ai.core import Principal, service_principal, validate_idempotency_key
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     AgentCaseInput,
@@ -241,7 +242,7 @@ def evaluation_request(kind: str, key: str) -> StartEvaluationRequest | RescoreR
 
 
 @pytest.mark.parametrize("kind", ("start", "rescore", "human"))
-@pytest.mark.parametrize("key", ("", " invalid ", "invalid\nkey", "\ud800", "x" * 257, "é" * 129))
+@pytest.mark.parametrize("key", ("", " invalid ", "invalid\nkey", "\ud800", "x" * 129, "é" * 64 + "x"))
 def test_evaluation_requests_reject_invalid_idempotency_keys(kind: str, key: str) -> None:
     with pytest.raises(AIError) as raised:
         evaluation_request(kind, key)
@@ -249,6 +250,33 @@ def test_evaluation_requests_reject_invalid_idempotency_keys(kind: str, key: str
 
 
 @pytest.mark.parametrize("kind", ("start", "rescore", "human"))
-@pytest.mark.parametrize("key", ("evaluation:key-1", "x" * 256, "é" * 128))
+@pytest.mark.parametrize("key", ("evaluation:key-1", "x" * 128, "é" * 64))
 def test_evaluation_requests_preserve_valid_idempotency_keys(kind: str, key: str) -> None:
     assert evaluation_request(kind, key).idempotency_key == key
+
+
+@pytest.mark.asyncio
+async def test_graph_case_capture_keys_accept_maximum_node_and_preserve_parent_identity() -> None:
+    from linktools.ai.evaluation.engine._compile import EvaluationCompiler
+
+    async def create_input(prompt: str, *, files: tuple[str, ...], principal: Principal,
+                           idempotency_key: str, expires_at: object) -> AgentInputCaptureRef:
+        validate_idempotency_key(idempotency_key)
+        return AgentInputCaptureRef("namespace", principal.tenant_id, idempotency_key, "a" * 64, None)
+
+    compiler = EvaluationCompiler(SimpleNamespace(create_agent_input=create_input), "namespace")
+    principal = service_principal("tenant", "owner")
+    node = "界" * 42 + "ab"
+    first = CaseSpec.graph(CaseRef("dataset", "first", 1), inputs={node: AgentCaseInput(prompt="hello")})
+    repeat = await compiler.case(first, principal=principal)
+    replay = await compiler.case(first, principal=principal)
+    other_parent = await compiler.case(CaseSpec.graph(
+        CaseRef("dataset", "second", 1), inputs={node: AgentCaseInput(prompt="hello")}), principal=principal)
+    other_node = "界" * 42 + "ac"
+    other_target = await compiler.case(CaseSpec.graph(
+        first.ref, inputs={other_node: AgentCaseInput(prompt="hello")}), principal=principal)
+    identity = repeat.input.inputs[node].capture_id
+    assert identity == replay.input.inputs[node].capture_id
+    assert len(identity) == 36
+    assert len({identity, other_parent.input.inputs[node].capture_id,
+                other_target.input.inputs[other_node].capture_id}) == 3

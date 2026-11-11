@@ -106,6 +106,7 @@ async def _assert_corruption(engine: AsyncEngine) -> None:
         async with engine.begin() as connection:
             result = await connection.execute(insert(objects).values(
                 store_id=store.store_id, object_key=key.encode("utf-8"),
+                object_locator=hashlib.sha256(key.encode("utf-8")).hexdigest(),
                 content_digest=hashlib.sha256(b"wrong" if fault == "digest" else b"abc").hexdigest(),
                 size=4 if fault == "size" else 0 if fault == "empty_digest" else 3,
             ))
@@ -233,6 +234,7 @@ async def test_object_delete_fences_the_header_identity_read(tmp_path: Path) -> 
         connection.execute(delete(objects).where(objects.c.store_id == store.store_id, objects.c.object_key == key.encode("utf-8")))
         connection.execute(insert(objects).values(
             id=999, store_id=store.store_id, object_key=key.encode("utf-8"),
+            object_locator=hashlib.sha256(key.encode("utf-8")).hexdigest(),
             content_digest=new_digest, size=3,
         ))
         connection.execute(insert(chunks).values(object_id=999, chunk_index=0, content=b"new"))

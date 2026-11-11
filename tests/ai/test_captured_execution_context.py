@@ -75,7 +75,10 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_path: Path) -> None:
+@pytest.mark.parametrize("execution_id", ("e" * 128, "界" * 42 + "ab"))
+async def test_captured_memory_preserves_versions_in_new_execution_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution_id: str,
+) -> None:
     group = RuntimeFeatures("context-memory")
     group.capability(MemoryCapability(scope="production"))
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
@@ -91,15 +94,28 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
         value = await runtime_engine.inputs.read_agent(captured, principal=principal)
         assert value.input_context.memory["facts.txt"]["content"] == "old content"
         await memory.write("facts.txt", "new production content", expected_version=original.version)
+        ids = iter((execution_id, "f" * 128))
+        monkeypatch.setattr(runtime._execution_service, "_operation_ids", ids.__next__)
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
+        assert replay.execution_id == execution_id
         assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
+        assert record.memory_scope is not None and len(record.memory_scope.encode("utf-8")) <= 128
         isolated = PersistentMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=replay.execution_id, memory_scope=record.memory_scope)
         frozen = await isolated.read("facts.txt", max_chars=1000)
         assert frozen.content == "old content" and frozen.version == original.version
         await isolated.write("facts.txt", "isolated edit", expected_version=frozen.version)
         assert (await memory.read("facts.txt", max_chars=1000)).content == "new production content"
+        independent = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
+        assert (await independent.wait()).result.status is ExecutionStatus.SUCCEEDED
+        independent_record = await runtime._state.execution.executions.get(independent.execution_id, tenant_id=principal.tenant_id)
+        assert independent_record.memory_scope != record.memory_scope
+        independent_memory = PersistentMemoryStore(
+            runtime._state.memory, object_store=runtime._state.object_store(PersistenceDomain.MEMORY),
+            namespace=runtime.namespace, tenant_id=principal.tenant_id,
+            execution_id=independent.execution_id, memory_scope=independent_record.memory_scope)
+        assert (await independent_memory.read("facts.txt", max_chars=1000)).content == "old content"
 
 
 @pytest.mark.asyncio

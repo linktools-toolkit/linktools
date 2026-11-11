@@ -328,9 +328,9 @@ class AgentRunRecorder:
         if self._pending_parts or not messages:
             return False
         request = freeze_model_messages((messages[-1],))[0]
-        # Recovery can dispatch an existing request from the source attempt.
-        # Its native occurrence is input, not new raw history for this attempt.
-        if initial_request is not None and request == initial_request:
+        # Dispatch may restamp a source request without creating a new raw
+        # occurrence; its source identity and full contents must still match.
+        if initial_request is not None and replace(request, timestamp=initial_request.timestamp) == initial_request:
             return True
         if not self._transcript_messages:
             return False

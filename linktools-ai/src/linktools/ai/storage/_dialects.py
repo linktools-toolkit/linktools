@@ -168,6 +168,7 @@ class SqlAlchemyDialect(Protocol):
         column: str,
         index_elements: "Sequence[str]",
         step: int = 1,
+        identity_columns: "Sequence[str]" = (),
     ) -> int: ...
 
     async def upsert_increment_many(
@@ -179,6 +180,7 @@ class SqlAlchemyDialect(Protocol):
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
+        identity_columns: "Sequence[str]" = (),
     ) -> "Mapping[SqlValue, int]": ...
 
     async def delete_returning(
@@ -369,6 +371,7 @@ class SQLiteDialect:
         column: str,
         index_elements: "Sequence[str]",
         step: int = 1,
+        identity_columns: "Sequence[str]" = (),
     ) -> int:
         from sqlalchemy import func
 
@@ -378,16 +381,21 @@ class SQLiteDialect:
         set_values = {column: value_column + step}
         if "updated_at" in table.c:
             set_values["updated_at"] = func.current_timestamp()
+        insert_statement = self._insert(table).values(insert_values)
         statement = (
-            self._insert(table)
-            .values(insert_values)
+            insert_statement
             .on_conflict_do_update(
                 index_elements=list(index_elements),
                 set_=set_values,
+                where=(self._immutable_match(table, insert_statement.excluded, identity_columns)
+                       if identity_columns else None),
             )
             .returning(value_column)
         )
-        return int((await session.execute(statement)).scalar_one())
+        result = (await session.execute(statement)).scalar_one_or_none()
+        if result is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return int(result)
 
     async def upsert_many(
         self,
@@ -417,6 +425,7 @@ class SQLiteDialect:
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
+        identity_columns: "Sequence[str]" = (),
     ) -> "Mapping[SqlValue, int]":
         if not rows:
             return {}
@@ -431,8 +440,12 @@ class SQLiteDialect:
         statement = insert_statement.on_conflict_do_update(
             index_elements=list(index_elements),
             set_=set_values,
+            where=(self._immutable_match(table, insert_statement.excluded, identity_columns)
+                   if identity_columns else None),
         ).returning(table.c[returning_key], value_column)
         result = (await session.execute(statement)).all()
+        if identity_columns and len(result) != len(rows):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.debug(
             "SQL batch executed: backend=%s operation=reserve_sequences "
             "batch_size=%s statement_count=1",
@@ -663,27 +676,38 @@ class MySQLDialect(SQLiteDialect):
         column: str,
         index_elements: "Sequence[str]",
         step: int = 1,
+        identity_columns: "Sequence[str]" = (),
     ) -> int:
-        from sqlalchemy import func, select
+        from sqlalchemy import case, func, select, true
         from sqlalchemy.dialects.mysql import insert
 
         value_column = table.c[column]
         insert_values = dict(values)
         insert_values[column] = step
-        set_values = {column: func.last_insert_id(value_column + step)}
+        insert_statement = insert(table).values(insert_values)
+        matches = (self._immutable_match(table, insert_statement.inserted, identity_columns)
+                   if identity_columns else true())
+        increment = value_column + step
+        set_values = {column: (case((matches, increment), else_=value_column)
+                               if identity_columns else func.last_insert_id(increment))}
         if "updated_at" in table.c:
-            set_values["updated_at"] = func.current_timestamp()
+            set_values["updated_at"] = (case((matches, func.current_timestamp()), else_=table.c.updated_at)
+                                        if identity_columns else func.current_timestamp())
         statement = (
-            insert(table).values(insert_values).on_duplicate_key_update(**set_values)
+            insert_statement.on_duplicate_key_update(**set_values)
         )
         result = await session.execute(statement)
-        if result.rowcount == 1:
-            return step
-        value = result.lastrowid
-        if value:
-            return int(value)
-        predicates = [table.c[index] == values[index] for index in index_elements]
-        return int(await session.scalar(select(value_column).where(*predicates)))
+        if not identity_columns:
+            if result.rowcount == 1:
+                return step
+            if result.lastrowid:
+                return int(result.lastrowid)
+        predicates = [table.c[name] == values[name]
+                      for name in (*index_elements, *identity_columns)]
+        value = await session.scalar(select(value_column).where(*predicates))
+        if value is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return int(value)
 
     async def upsert_many(
         self,
@@ -715,19 +739,25 @@ class MySQLDialect(SQLiteDialect):
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
+        identity_columns: "Sequence[str]" = (),
     ) -> "Mapping[SqlValue, int]":
         if not rows:
             return {}
-        from sqlalchemy import and_, or_, select
+        from sqlalchemy import and_, case, or_, select, true
         from sqlalchemy.dialects.mysql import insert
 
         insert_statement = insert(table)
         value_column = table.c[column]
-        set_values = {column: value_column + insert_statement.inserted[column]}
+        matches = (self._immutable_match(table, insert_statement.inserted, identity_columns)
+                   if identity_columns else true())
+        increment = value_column + insert_statement.inserted[column]
+        set_values = {column: (case((matches, increment), else_=value_column)
+                               if identity_columns else increment)}
         if "updated_at" in table.c:
             from sqlalchemy import func
 
-            set_values["updated_at"] = func.current_timestamp()
+            set_values["updated_at"] = (case((matches, func.current_timestamp()), else_=table.c.updated_at)
+                                        if identity_columns else func.current_timestamp())
         await session.execute(
             insert_statement.on_duplicate_key_update(**set_values),
             [dict(row) for row in rows],
@@ -736,7 +766,7 @@ class MySQLDialect(SQLiteDialect):
             and_(
                 *(
                     table.c[index_element] == row[index_element]
-                    for index_element in index_elements
+                    for index_element in (*index_elements, *identity_columns)
                 )
             )
             for row in rows
@@ -750,7 +780,10 @@ class MySQLDialect(SQLiteDialect):
             self.name,
             len(rows),
         )
-        return {row[0]: int(row[1]) for row in result.all()}
+        values = {row[0]: int(row[1]) for row in result.all()}
+        if identity_columns and set(values) != {row[returning_key] for row in rows}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values
 
     async def delete_returning(
         self,
@@ -914,6 +947,7 @@ def sql_table_options() -> "Mapping[str, str]":
         "mysql_engine": "InnoDB",
         "mysql_charset": "utf8mb4",
         "mysql_collate": "utf8mb4_bin",
+        "mysql_row_format": "DYNAMIC",
     }
 
 

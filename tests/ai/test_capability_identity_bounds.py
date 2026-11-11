@@ -22,9 +22,9 @@ from linktools.ai.runtime._persistence_configuration import capability_persisten
 from linktools.ai.spec import CapabilityRef
 from linktools.ai.storage import StorageRoute
 
-_CAPABILITY_ID = "界" * 85 + "a"
+_CAPABILITY_ID = "界" * 42 + "ab"
 _RUN_ID = "界" * 42 + "ab"
-_WRITE_KEY = "界" * 85 + "a"
+_WRITE_KEY = "界" * 42 + "ab"
 _REVISION = 9223372036854775807
 
 
@@ -182,7 +182,7 @@ async def test_maximum_capability_receipts_replay_only_within_their_exact_scope(
     await state.initialize(namespace="namespace", tenant_id="tenant")
     store = state.execution.executions.state_store
     persisted = []
-    original = ("界" * 85 + "a", "界" * 42 + "ab", _CAPABILITY_ID, _REVISION, _RUN_ID, _WRITE_KEY)
+    original = ("界" * 42 + "ab", "界" * 42 + "ab", _CAPABILITY_ID, _REVISION, _RUN_ID, _WRITE_KEY)
     scopes = [original]
     for index in range(len(original)):
         scope = list(original)
@@ -211,7 +211,7 @@ async def test_maximum_capability_receipts_replay_only_within_their_exact_scope(
         try:
             bound = writes.bind(_CAPABILITY_ID, _RUN_ID, "execution", _Capability(_CAPABILITY_ID, persisted), revision=_REVISION)
             # Whitespace and control characters remain valid opaque write-key bytes.
-            for key in (" " * 256, "\n\x00", "e\u0301", "é"):
+            for key in (" " * 128, "\n\x00", "e\u0301", "é"):
                 await bound.writer.submit(key=key, payload={"value": 2})
             assert persisted[-4:] == [{"value": 2}] * 4
         finally:

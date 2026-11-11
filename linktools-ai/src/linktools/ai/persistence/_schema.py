@@ -11,6 +11,7 @@ from ..storage import (
     sql_blob,
     sql_id_column,
     sql_query_index,
+    sql_sha256,
     sql_state,
     sql_table_options,
     sql_unique,
@@ -152,15 +153,23 @@ def build_runtime_sql_metadata(
         ),
         Column("payload_bytes", sql_blob(), nullable=True,
                comment="Optional binary content body owned by this record; ordinary domain state remains JSON."),
+        Column("key_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete key; raw identity must also match."),
+        Column("scope_locator", sql_sha256(), nullable=True,
+               comment="Single SHA-256 lookup projection of the complete scope_key; raw identity must also match."),
+        Column("parent_locator", sql_sha256(), nullable=True,
+               comment="Single SHA-256 lookup projection of the complete parent_key; raw identity must also match."),
+        Column("sort_prefix", LargeBinary(128).with_variant(mysql.VARBINARY(128), "mysql"), nullable=False,
+               comment="First 128 bytes of the full sort key; non-unique query projection only."),
         *_audit(),
         comment=_RECORD_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(records, "store_key", "key")
-    sql_query_index(records, "store_key", "kind", "sort_key", mysql_length=128)
-    sql_query_index(records, "scope_key", "sort_key", mysql_length=128)
-    sql_query_index(records, "scope_key", "subject_id")
-    sql_query_index(records, "parent_key", "sort_key", mysql_length=128)
+    sql_unique(records, "store_key", "key_locator")
+    sql_query_index(records, "store_key", "kind", "sort_prefix")
+    sql_query_index(records, "scope_locator", "sort_prefix")
+    sql_query_index(records, "scope_locator", "subject_id")
+    sql_query_index(records, "parent_locator", "sort_prefix")
     sql_audit_indexes(records)
 
     aliases = Table(
@@ -177,7 +186,7 @@ def build_runtime_sql_metadata(
             "alias_key",
             LargeBinary(ALIAS_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(ALIAS_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Binary secondary lookup address with a maximum of 1024 bytes.",
+            comment="Binary secondary lookup address with a maximum of 768 bytes.",
         ),
         Column(
             "record_key",
@@ -185,12 +194,16 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Exact bounded binary identity of the runtime record resolved by this alias.",
         ),
+        Column("alias_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete alias_key; raw identity must also match."),
+        Column("record_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete record_key; raw identity must also match."),
         *_audit(),
         comment=_ALIAS_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(aliases, "store_key", "alias_key")
-    sql_query_index(aliases, "store_key", "record_key")
+    sql_unique(aliases, "store_key", "alias_locator")
+    sql_query_index(aliases, "store_key", "record_locator")
     sql_audit_indexes(aliases)
 
     facts = Table(
@@ -245,13 +258,17 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Canonical immutable fact JSON encoded as a JSON string preserving numeric representations.",
         ),
+        Column("stream_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete stream_key; raw identity must also match."),
+        Column("owner_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete owner_key; raw identity must also match."),
         *_audit(),
         comment=_FACT_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(facts, "store_key", "stream_key", "sequence")
-    sql_query_index(facts, "owner_key")
-    sql_query_index(facts, "stream_key", "subject_id", "sequence")
+    sql_unique(facts, "store_key", "stream_locator", "sequence")
+    sql_query_index(facts, "owner_locator")
+    sql_query_index(facts, "stream_locator", "subject_id", "sequence")
     sql_audit_indexes(facts)
 
     sequences = Table(
@@ -276,11 +293,13 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Last committed value allocated by the sequence.",
         ),
+        Column("stream_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete stream_key; raw identity must also match."),
         *_audit(),
         comment=_SEQUENCE_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(sequences, "store_key", "stream_key")
+    sql_unique(sequences, "store_key", "stream_locator")
     sql_audit_indexes(sequences)
 
     operations = Table(
@@ -297,7 +316,7 @@ def build_runtime_sql_metadata(
             "operation_key",
             LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Binary operation address, at most 1152 bytes.",
+            comment="Binary operation address, at most 768 bytes.",
         ),
         Column(
             "stream_key",
@@ -329,13 +348,17 @@ def build_runtime_sql_metadata(
             nullable=False,
             comment="Canonical operation JSON encoded as a JSON string preserving numeric representations.",
         ),
+        Column("operation_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete operation_key; raw identity must also match."),
+        Column("stream_locator", sql_sha256(), nullable=False,
+               comment="Single SHA-256 lookup projection of the complete stream_key; raw identity must also match."),
         *_audit(),
         comment=_OPERATION_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(operations, "store_key", "operation_key")
-    sql_unique(operations, "store_key", "stream_key", "sequence")
-    sql_query_index(operations, "stream_key", "state", "sequence")
+    sql_unique(operations, "store_key", "operation_locator")
+    sql_unique(operations, "store_key", "stream_locator", "sequence")
+    sql_query_index(operations, "stream_locator", "state", "sequence")
     sql_audit_indexes(operations)
     return metadata
 

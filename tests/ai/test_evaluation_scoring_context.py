@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import JsonValue, canonical_json_bytes
+from linktools.ai.core import JsonValue, canonical_json_bytes, deterministic_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
@@ -170,7 +170,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
                 alternate.pop("label_provenance")
             graph = build_graph(record, saved.trial, record.manifest.scorers[0], ScoringInput.from_mapping(alternate))
             submission = await engine.with_definitions(evaluations._recorder).describe_submission(
-                graph, principal=PRINCIPAL, idempotency_key=f"evaluation:{experiment_id}:{saved.slot_id}",
+                graph, principal=PRINCIPAL, idempotency_key=deterministic_id(experiment_id, "evaluation", saved.slot_id),
                 limits=saved.submission.admission.limits, correlation=saved.submission.admission.correlation)
             assert submission.ref.operation_id == saved.submission.ref.operation_id
             assert submission.ref.graph_id == saved.submission.ref.graph_id

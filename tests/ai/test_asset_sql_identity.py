@@ -92,3 +92,99 @@ async def test_server_asset_identity_and_history(_server: tuple[str, list[str]])
         await _assert_asset_identity(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_asset_locator_collision_cannot_read_or_mutate_another_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.asset import _sql
+    from linktools.ai.storage import StorageEntryRevision
+
+    monkeypatch.setattr(_sql, "_asset_locator", lambda _key: "a" * 64)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'collision.db'}")
+    await provision_asset_database(engine)
+    backend = SqlAssetBackend(engine, namespace="collision", object_store=InMemoryObjectStore())
+    await backend.initialize()
+    first, second = AssetKey("resource", "path/first"), AssetKey("resource", "path/second")
+    try:
+        await backend.put(first, b"same")
+        head = await backend.head_revision()
+        for operation in (
+            lambda: backend.stat(second),
+            lambda: backend.get_many((first, second)),
+            lambda: backend.put(second, b"same"),
+            lambda: backend.delete(second),
+            lambda: backend.reset(second),
+            lambda: backend.list_versions(second),
+            lambda: backend.get_at_revision(second, StorageEntryRevision(1)),
+        ):
+            with pytest.raises(AIError) as collision:
+                await operation()
+            assert collision.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await backend.head_revision() == head
+        assert await backend.get(first) == b"same"
+        assert len(await backend.list_versions(first)) == 1
+    finally:
+        await backend.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_asset_batch_locator_collision_rolls_back_all_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.asset import _sql
+
+    monkeypatch.setattr(_sql, "_asset_locator", lambda _key: "a" * 64)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-collision.db'}")
+    await provision_asset_database(engine)
+    backend = SqlAssetBackend(engine, namespace="collision", object_store=InMemoryObjectStore())
+    await backend.initialize()
+    keys = (AssetKey("resource", "first"), AssetKey("resource", "second"))
+    try:
+        head = await backend.head_revision()
+        with pytest.raises(AIError) as collision:
+            await backend.apply_batch(tuple(
+                StorageChange(StorageOperation.PUT, key, b"same", None) for key in keys
+            ), idempotency_key="batch", request_digest="a" * 64)
+        assert collision.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await backend.head_revision() == head
+        assert await backend.batch_result("batch") is None
+        assert await backend.get_many(keys) == {}
+    finally:
+        await backend.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_asset_locator_collision_preserves_only_the_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from linktools.ai.asset import _sql
+
+    monkeypatch.setattr(_sql, "_asset_locator", lambda _key: "a" * 64)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'race-collision.db'}")
+    await provision_asset_database(engine)
+    backends = [SqlAssetBackend(engine, namespace="collision", object_store=InMemoryObjectStore())
+                for _ in range(2)]
+    keys = (AssetKey("resource", "first"), AssetKey("resource", "second"))
+    try:
+        for backend in backends:
+            await backend.initialize()
+        results = await asyncio.gather(*(
+            backend.put(key, b"same") for backend, key in zip(backends, keys)
+        ), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        assert len(failures) == 1
+        assert isinstance(failures[0], AIError)
+        assert failures[0].code is ErrorCode.STORAGE_CONFLICT
+        winner = next(index for index, result in enumerate(results) if not isinstance(result, BaseException))
+        assert await backends[winner].get(keys[winner]) == b"same"
+        assert len(await backends[winner].list_versions(keys[winner])) == 1
+    finally:
+        for backend in backends:
+            await backend.close()
+        await engine.dispose()

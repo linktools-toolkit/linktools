@@ -68,6 +68,7 @@ from ..core import (
     WorkspaceFileInput,
     canonical_json_bytes,
     canonical_sha256,
+    deterministic_id,
     normalize_json_value,
     overlay_correlation,
     principal_identity_payload,
@@ -1541,7 +1542,8 @@ class DefaultExecutionService(TaskExecutionService):
             fork_base_execution_id=fork_base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_seq=0,
-            memory_scope=("capture:" + execution_id) if request.input_context is not None else request.memory_scope,
+            memory_scope=("capture:" + deterministic_id(execution_id, "capture-memory"))
+            if request.input_context is not None else request.memory_scope,
             conversation_agent_run_id=conversation_agent_run_id,
             mode=request.mode,
             planning=request.planning,

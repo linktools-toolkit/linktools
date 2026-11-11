@@ -10,7 +10,7 @@ from pydantic_ai_harness.step_persistence import RunRecord
 import pytest
 from sqlalchemy import delete, event, select, update
 
-from linktools.ai.core import canonical_json_bytes
+from linktools.ai.core import canonical_json_bytes, deterministic_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, SqlStepStore
 from linktools.ai.persistence._native_event_reference import NativeEventReferences
@@ -444,5 +444,5 @@ async def test_shared_diagnostic_is_produced_once_and_later_native_key_keeps_its
     events = await source.list_events(run_id="run")
     assert [item.kind for item in events] == ["run_started", "run_failed", "run_failed"]
     assert events[1].error == "diagnostic-1" and events[2].error == "diagnostic-2"
-    assert events[2].idempotency_key == f"2:{ctx.run_step}:run_failed:"
+    assert events[2].idempotency_key == deterministic_id(2, ctx.run_step, "run_failed", None)
     assert original.calls == 2

@@ -349,16 +349,16 @@ async def test_session_lookup_does_not_turn_backend_failure_into_absence(monkeyp
 
 
 def test_scope_identity_is_exact_bounded_frozen_and_private() -> None:
-    scope = TurnScopeIdentity('"' * 256, '"' * 128, "é" * 128)
-    assert scope.as_tuple() == ('"' * 256, '"' * 128, "é" * 128)
-    assert scope != TurnScopeIdentity(scope.namespace, scope.tenant_id, "e\u0301" * 85)
+    scope = TurnScopeIdentity('"' * 128, '"' * 128, "é" * 64)
+    assert scope.as_tuple() == ('"' * 128, '"' * 128, "é" * 64)
+    assert scope != TurnScopeIdentity(scope.namespace, scope.tenant_id, "e\u0301" * 42)
     assert all(component not in repr(scope) for component in scope.as_tuple())
     with pytest.raises(FrozenInstanceError):
         scope.scope = "changed"
-    for invalid in ("", "é" * 128 + "a", "\ud800", None):
+    for invalid in ("", "é" * 64 + "a", "\ud800", None):
         with pytest.raises((TypeError, ValueError)):
             TurnScopeIdentity("runtime", "tenant", invalid)
-    for namespace, tenant in (("n" * 257, "tenant"), ("runtime", "t" * 129)):
+    for namespace, tenant in (("n" * 129, "tenant"), ("runtime", "t" * 129)):
         with pytest.raises(AIError):
             TurnScopeIdentity(namespace, tenant, "scope")
 

@@ -32,7 +32,7 @@ from .test_runtime_persistence_evidence import _execution
 
 
 NOW = datetime(2026, 11, 11, tzinfo=timezone.utc)
-KEY = "界" * 84 + ":key"
+KEY = "界" * 41 + ":keys"
 
 
 def _record(scope: str = "execution.run", key: str = KEY) -> IdempotencyRecord:
@@ -46,9 +46,9 @@ async def test_raw_replay_keys_preserve_maximum_bytes_and_component_boundaries(
     backend: str, tmp_path: Path,
 ) -> None:
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
-    namespace, tenant = "n" * 256, "t" * 128
+    namespace, tenant = "n" * 128, "t" * 128
     records = (_record("s" * 128), _record("a:b", "c"), _record("a", "b:c"))
-    assert len(KEY.encode("utf-8")) == 256
+    assert len(KEY.encode("utf-8")) == 128
     async with Persistence.open(namespace, tenant_id=tenant, storage=storage) as state:
         repository = state.execution.idempotency
         for item in records:
@@ -65,7 +65,7 @@ async def test_raw_replay_keys_preserve_maximum_bytes_and_component_boundaries(
             await repository.get(records[0].scope, KEY + "x", tenant_id=tenant)
         assert invalid.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
         address = record_key(namespace, tenant, "execution", "idempotency", (records[0].scope, KEY))
-        assert len(address) <= 1152 and KEY.encode("utf-8") in address
+        assert len(address) <= 768 and KEY.encode("utf-8") in address
 
 
 @pytest.mark.parametrize("value", (

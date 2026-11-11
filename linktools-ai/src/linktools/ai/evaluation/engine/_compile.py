@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from ...agent import AgentBindingContract, AgentInputCaptureRef
 from ...asset import AssetVersionRef
-from ...core import JsonValue, Principal, canonical_sha256
+from ...core import JsonValue, Principal, canonical_sha256, deterministic_id
 from ...errors import AIError, ErrorCode
 from ...evaluation import (
     AgentCaseInput, CandidateContract, CandidateSpec, CaseContract, CaseSpec,
@@ -64,7 +64,7 @@ class EvaluationCompiler:
             return value
         inputs = {}
         for node_id, item in value.inputs.items():
-            resolved = await self._input(item, principal=principal, key=f"{key}:{node_id}", expires_at=expires_at)
+            resolved = await self._input(item, principal=principal, key=deterministic_id(key, "evaluation-case-input", node_id), expires_at=expires_at)
             inputs[node_id] = resolved
         if value.source_capture is not None:
             await self._captures.read_graph(value.source_capture, principal=principal)

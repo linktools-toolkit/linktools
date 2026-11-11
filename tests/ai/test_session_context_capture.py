@@ -3,6 +3,7 @@
 """Session continuation shares one source metadata capture across its readers."""
 
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -48,13 +49,16 @@ async def test_session_context_reuses_one_metadata_query(
             *state.conversation.histories.history_record_keys(history_id),
             repository.projection_key(history_id),
         }
+        key_sources = {token: key for key in keys for token in (key, sha256(key).hexdigest())}
         metadata_queries = []
         statements = []
 
         def capture(_connection, _cursor, statement, parameters, _context, _many):
             statements.append(statement.split()[0].upper())
-            if statement.startswith("SELECT") and keys.intersection(parameters):
-                metadata_queries.append(set(parameters).intersection(keys))
+            if statement.startswith("SELECT"):
+                matched = {key_sources[parameter] for parameter in parameters if parameter in key_sources}
+                if matched:
+                    metadata_queries.append(matched)
 
         async def uncaptured(_history_id, *, tenant_id):
             return None

@@ -16,7 +16,7 @@ from ..asset import AssetVersionRef
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, ImmutableJsonMapping, JsonValue,
     Principal, ResourceKind, ResourceRef, TaskStatus, WorkspaceFileInput, canonical_json_bytes,
-    canonical_sha256, validate_idempotency_key, principal_identity_payload, validate_page_limit,
+    canonical_sha256, deterministic_id, validate_idempotency_key, principal_identity_payload, validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StoredPayload
@@ -828,8 +828,8 @@ class InputCaptures:
                          idempotency_key: str | None = None) -> TaskInvocationInputRef:
         contract = await self.resolve_task_input(reference, principal=principal, input_mode=input_mode,
                                                 exclude_dependencies=exclude_dependencies)
-        key = idempotency_key if idempotency_key is not None else (
-            "capture:" + reference.digest + ":" + input_mode + ":" + canonical_sha256(list(contract.excluded_dependencies)))
+        key = idempotency_key if idempotency_key is not None else deterministic_id(
+            reference.digest, "capture", input_mode, canonical_sha256(list(contract.excluded_dependencies)))
         return await self.create_task_input(contract, principal=principal, source_capture=reference, idempotency_key=key)
 
     async def capture_graph(self, graph_id: str, request: CaptureGraphRequest) -> TaskGraphCaptureRef:
@@ -899,11 +899,11 @@ class InputCaptures:
                         contract = replace(previous, input=clean_input, original_input=original_input)
                         input_capture = await self.create_task_input(contract, principal=principal,
                             source_capture=input_capture,
-                            idempotency_key=request.idempotency_key + ":context-input:" + node.node_id)
+                            idempotency_key=deterministic_id(request.idempotency_key, "context-input", node.node_id))
                 else:
                     from ._agent_task_input import AgentTaskInput
                     reference = await self.capture_input(source, CaptureInputRequest(
-                        principal, request.idempotency_key + ":input:" + node.node_id, request.context_policy))
+                        principal, deterministic_id(request.idempotency_key, "input", node.node_id), request.context_policy))
                     agent = await self.read_agent(reference, principal=principal)
                     agent.require_importable()
                     original_input = self._captured_original_input(
@@ -918,7 +918,7 @@ class InputCaptures:
                         previous = await self.read_task(input_capture, principal=principal)
                         contract = replace(previous, input=body, original_input=original_input, input_mode="fixed_input")
                         identity, digest = await self._publish("task", principal,
-                            request.idempotency_key + ":context-input:" + node.node_id, {"contract": encode_domain(contract)})
+                            deterministic_id(request.idempotency_key, "context-input", node.node_id), {"contract": encode_domain(contract)})
                         input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)
                         body = {}
             elif declaration.get("type") == "function" and input_capture is not None:
@@ -928,10 +928,10 @@ class InputCaptures:
                         raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
                 else:
                     reference = await self.capture_input(source, CaptureInputRequest(
-                        principal, request.idempotency_key + ":input:" + node.node_id, request.context_policy))
+                        principal, deterministic_id(request.idempotency_key, "input", node.node_id), request.context_policy))
                     input_capture = await self.task_input(reference, principal=principal,
                         exclude_dependencies=(*node.dependencies, *input_refs),
-                        idempotency_key=request.idempotency_key + ":accepted-input:" + node.node_id)
+                        idempotency_key=deterministic_id(request.idempotency_key, "accepted-input", node.node_id))
                     # Internal dependencies run again; external results belong to the captured invocation.
                     body = {}
                     original_input = None
@@ -959,7 +959,7 @@ class InputCaptures:
                 source_id = source or "graph:" + graph_id + ":" + node.node_id
                 contract = TaskInvocationInputContract(source_id, node.task, body,
                     original_input if original_input is not None else body, declaration, dependencies)
-                identity, digest = await self._publish("task", principal, request.idempotency_key + ":" + node.node_id,
+                identity, digest = await self._publish("task", principal, deterministic_id(request.idempotency_key, "task-input", node.node_id),
                                                        {"contract": encode_domain(contract)})
                 input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, source_id)
                 body = {}

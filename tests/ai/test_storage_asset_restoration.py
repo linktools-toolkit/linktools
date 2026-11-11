@@ -71,6 +71,9 @@ class _DialectResult:
     def scalar_one(self) -> int:
         return 1
 
+    def scalar_one_or_none(self) -> int | None:
+        return 1
+
 
 class _MappedPathAdapter:
     def validate(self, kinds: "Sequence[str]") -> None:

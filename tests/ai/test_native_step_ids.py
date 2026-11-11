@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.core import RESOURCE_ID_MAX_BYTES, agent_conversation_id, agent_run_id, validate_resource_id
+from linktools.ai.steps import native_store_locator
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._official_step_reader import OfficialStepReader
@@ -119,7 +120,7 @@ def test_portable_runs_and_runtime_projections_reject_oversized_ids(field: str) 
         with pytest.raises(AIError):
             constructor(**(values | {projected_field: invalid}))
     scope = SqlStepStore.scope_key(namespace="ids", tenant_id="tenant")
-    row = SqlStepStore._record_values(RunRecord(run_id="run")) | {"store_key": scope, field: invalid}
+    row = SqlStepStore._record_values(RunRecord(run_id="run")) | {"store_key": scope, "store_locator": native_store_locator(scope), field: invalid}
     with pytest.raises(AIError) as caught:
         SqlStepStore.validate_backup(NativeStepBackup(scope, (row,), (), ()))
     assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

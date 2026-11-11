@@ -15,7 +15,7 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeS
 
 from ..core import canonical_json_bytes, canonical_sha256, validate_resource_id
 from ..errors import AIError, ErrorCode
-from ..steps import encode_native_replay_key
+from ..steps import native_store_locator, encode_native_replay_key
 from ._official_step_reader import OfficialStepReader
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
@@ -51,6 +51,7 @@ class NativeRunReferences:
     def __init__(self, state: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
         self._state = state
         self._store_key = SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
+        self._store_locator = native_store_locator(self._store_key)
         self._native: SqlStepStore | None = None
         self._confirmed: OrderedDict[str, str] = OrderedDict()
         self._projections: WeakKeyDictionary[StateTransaction, dict[bytes, tuple[Mapping[str, object], Mapping[str, object]]]] = WeakKeyDictionary()
@@ -196,6 +197,7 @@ class NativeRunReferences:
                   scan: tuple[RecordScanCursor | None, int] | None = None,
                   expected_start: NativeStepEvent | None = None,
                   expected_terminal: NativeStepEvent | None = None) -> "Select":
+        from ._sql import _key_matches, _keys_match
         from sqlalchemy import JSON, and_, bindparam, cast, select, type_coerce
         from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
@@ -207,7 +209,7 @@ class NativeRunReferences:
         reference = payload["value"]["payload"]
         source_run = reference["run"].as_string()
         run_join = and_(
-            records.c.kind == "agent_run", runs.c.store_key == self._store_key,
+            records.c.kind == "agent_run", runs.c.store_locator == self._store_locator, runs.c.store_key == self._store_key,
             runs.c.run_id == source_run,
             runs.c.registration_id == reference["registration"].as_string(),
         )
@@ -218,14 +220,14 @@ class NativeRunReferences:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             # Inline Run views also require full pending lifecycle proof in
             # this existing SELECT, never a second source read.
-            run_join = and_(records.c.kind == "agent_run", runs.c.store_key == self._store_key,
+            run_join = and_(records.c.kind == "agent_run", runs.c.store_locator == self._store_locator, runs.c.store_key == self._store_key,
                             runs.c.run_id == bindparam("source_run_id", expected.run_id))
         joined = records.outerjoin(runs, run_join)
         for prefix, event in (("start", expected_start), ("terminal", expected_terminal)):
             if event is None:
                 continue
             events = self._events if prefix == "start" else self._events.alias("terminal_source")
-            joined = joined.outerjoin(events, and_(events.c.store_key == runs.c.store_key,
+            joined = joined.outerjoin(events, and_(events.c.store_locator == runs.c.store_locator, events.c.store_key == runs.c.store_key,
                 events.c.run_id == runs.c.run_id,
                 events.c.idempotency_key == bindparam("source_event_key" if prefix == "start" else "source_terminal_key",
                                                 encode_native_replay_key(event.idempotency_key))))
@@ -248,14 +250,14 @@ class NativeRunReferences:
 
         statement = visitors.replacement_traverse(statement, {}, inline_constant).where(records.c.store_key == self._state.store_key)
         if keys is not None:
-            statement = statement.where(records.c.key.in_(tuple(keys)))
+            statement = statement.where(_keys_match(records.c.key, tuple(keys)))
         if query is not None:
             statement = statement.where(records.c.kind == "agent_run")
             if query.scope_key is not None:
-                statement = statement.where(records.c.scope_key == query.scope_key)
+                statement = statement.where(_key_matches(records.c.scope_key, query.scope_key))
             if query.parent_key is not None:
-                statement = statement.where(records.c.parent_key == query.parent_key)
-            statement = statement.order_by(records.c.sort_key, records.c.key)
+                statement = statement.where(_key_matches(records.c.parent_key, query.parent_key))
+            statement = statement.order_by(records.c.sort_prefix, records.c.sort_key, records.c.key)
         if scan is not None:
             after, limit = scan
             if type(limit) is not int or not 1 <= limit <= 1000:
@@ -304,10 +306,25 @@ class NativeRunReferences:
             missing = tuple(dict.fromkeys(unresolved))
             if not missing:
                 return tuple(values[key] for key in dict.fromkeys(keys) if key in values)
-        rows = await transaction.read_joined_records(
-            self._state.context, self.statement(keys=missing, query=query, scan=scan, expected_start=expected_start,
-                expected_terminal=expected_terminal), keys=missing or (),
-        )
+        batches = (missing,)
+        if missing:
+            # Each key binds both its indexed locator and complete raw identity.
+            # Count fixed JOIN/filter binds in the actual dialect before batching.
+            probe = self.statement(keys=missing[:1], query=query, scan=scan,
+                                   expected_start=expected_start, expected_terminal=expected_terminal)
+            compiled = probe.compile(dialect=self._state.context.engine.dialect,
+                                     compile_kwargs={"render_postcompile": True})
+            count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
+            batch_size = 1 + (999 - count) // 2
+            if batch_size < 1:
+                raise ValueError("native record read exceeds the SQL parameter budget")
+            batches = tuple(missing[offset:offset + batch_size] for offset in range(0, len(missing), batch_size))
+        rows = []
+        for batch in batches:
+            rows.extend(await transaction.read_joined_records(
+                self._state.context, self.statement(keys=batch, query=query, scan=scan, expected_start=expected_start,
+                    expected_terminal=expected_terminal), keys=batch or (),
+            ))
         ordered: list[StoredRecord] = []
         for record, row in rows:
             if expected is not None:

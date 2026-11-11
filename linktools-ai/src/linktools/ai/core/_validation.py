@@ -17,7 +17,7 @@ def validate_tenant_id(value: str) -> str:
 
 
 def validate_persistence_namespace(value: str) -> str:
-    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
+    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_asset_namespace(value: str) -> str:
@@ -25,7 +25,7 @@ def validate_asset_namespace(value: str) -> str:
 
 
 def validate_memory_scope(value: str) -> str:
-    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
+    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_asset_kind(value: str) -> str:
@@ -33,11 +33,11 @@ def validate_asset_kind(value: str) -> str:
 
 
 def validate_capability_id(value: str) -> str:
-    """Validate a nonblank capability identity of at most 256 UTF-8 bytes."""
+    """Validate a nonblank capability identity of at most 128 UTF-8 bytes."""
     if not isinstance(value, str) or not value.strip():
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     try:
-        if len(value.encode("utf-8")) > 256:
+        if len(value.encode("utf-8")) > 128:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     except UnicodeEncodeError as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
@@ -52,11 +52,11 @@ def validate_capability_revision(value: int) -> int:
 
 
 def validate_capability_write_key(value: str) -> str:
-    """Keep an exact nonempty write key of at most 256 UTF-8 bytes."""
+    """Keep an exact nonempty write key of at most 128 UTF-8 bytes."""
     if not isinstance(value, str) or not value:
         raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
     try:
-        if len(value.encode("utf-8")) > 256:
+        if len(value.encode("utf-8")) > 128:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
     except UnicodeEncodeError as error:
         raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID) from error
@@ -82,7 +82,7 @@ def validate_lease_seconds(value: int) -> int:
 
 
 def validate_principal_id(value: str) -> str:
-    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
+    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_resource_id(value: str) -> str:
@@ -91,7 +91,7 @@ def validate_resource_id(value: str) -> str:
 
 
 def validate_idempotency_key(value: str) -> str:
-    return _text(value, 256, ErrorCode.IDEMPOTENCY_KEY_INVALID)
+    return _text(value, 128, ErrorCode.IDEMPOTENCY_KEY_INVALID)
 
 
 def validate_logical_id(value: str) -> str:
