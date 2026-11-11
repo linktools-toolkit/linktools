@@ -440,7 +440,9 @@ class SqlMetricStore:
             ).mappings().all()
             existing = {str(row["observation_id"]): row for row in result}
             if len(existing) != len(collapsed):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                # MySQL can ignore a secondary unique collision without creating
+                # the requested identity. Reject the whole mutation as a conflict.
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             for identity, (payload, observation) in collapsed.items():
                 row = existing[identity]
                 if row["payload_digest"] != payload:
