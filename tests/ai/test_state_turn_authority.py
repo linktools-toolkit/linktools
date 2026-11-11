@@ -586,3 +586,50 @@ async def test_recover_logical_turn_with_fresh_owner_after_release_or_expiry(
         assert not await authority.release_turn(first.lease)
         records = await store.read(lambda tx: tx.scan_records())
         validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+async def test_state_turn_sort_reuses_identity_across_pages_and_snapshot(tmp_path, backend):
+    from linktools.ai.persistence import PersistenceDomain
+    from linktools.ai.persistence._snapshot_validation import validate_snapshot_domain
+    from linktools.ai.persistence.codec import decode_record, encode_record
+    from linktools.ai.persistence.state import RecordQuery
+
+    async with _open_store(backend, tmp_path / backend) as store:
+        authority = _backend(store)
+        for index in range(3):
+            claim = await _claim(authority, session=f"s{index}", request=f"r{index}",
+                                 execution=f"e{index}", owner=f"o{index}")
+            assert claim is not None and claim.lease is not None
+            assert await authority.read_turn_by_request("scope", f"r{index}") == replace(claim, lease=None)
+        records = await store.read(lambda tx: tx.scan_records())
+        assert all(record.sort_key == record.key_digest.hex() for record in records)
+        for kind in ("turn_session", "turn_request", "turn_execution"):
+            expected = tuple(sorted((record for record in records if record.kind == kind),
+                                    key=lambda record: record.key_digest))
+            observed = []
+            after = None
+            while True:
+                page = await store.read(lambda tx: tx.list_records(RecordQuery(
+                    kind=kind, limit=1,
+                    after_sort_key=None if after is None else after.sort_key,
+                    after_key_digest=None if after is None else after.key_digest,
+                )))
+                if not page:
+                    break
+                observed.extend(page)
+                after = page[-1]
+            assert tuple(observed) == expected
+        restored = tuple(decode_record(encode_record(record)) for record in records)
+        assert restored == records
+        validate_snapshot_domain(
+            namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
+            records=restored, aliases=(), facts=(), operations=(), sequences={},
+        )
+        invalid = (replace(restored[0], sort_key="not-its-identity"), *restored[1:])
+        with pytest.raises(AIError) as caught:
+            validate_snapshot_domain(
+                namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
+                records=invalid, aliases=(), facts=(), operations=(), sequences={},
+            )
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

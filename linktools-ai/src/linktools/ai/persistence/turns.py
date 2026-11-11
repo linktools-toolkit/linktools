@@ -13,7 +13,7 @@ from datetime import timedelta
 from typing import TypeVar
 from uuid import uuid4
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256, validate_persistence_namespace, validate_tenant_id
+from ..core import JsonValue, canonical_json_bytes, validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScope, RenewingTurnScope
 from .state import (
@@ -65,10 +65,11 @@ class _TurnRecords:
 
     def make(self, kind: str, data: Mapping[str, JsonValue], *, state: str) -> StoredRecord:
         scope, identity = _text(data["scope"]), _text(data[_IDENTITIES[kind]])
+        key = self.key(scope, kind, identity)
         return StoredRecord(
-            self.key(scope, kind, identity),
+            key,
             scope_digest(self.namespace, self.tenant_id, "execution", "turn", "scope", scope),
-            None, kind, canonical_sha256([scope, identity]), state, 0, None, 0, None, dict(data),
+            None, kind, key.hex(), state, 0, None, 0, None, dict(data),
         )
 
     def validate(self, record: StoredRecord) -> StoredRecord:
