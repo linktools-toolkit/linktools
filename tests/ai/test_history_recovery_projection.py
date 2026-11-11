@@ -3,6 +3,7 @@
 """Trace observations and official recovery snapshots stay independent."""
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -662,7 +663,8 @@ async def test_trace_checkpoint_rejects_replaced_producer_before_public_write(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("publication", ("missing", "pending", "complete"))
-async def test_recovered_request_is_prior_attempt_input_not_new_raw_occurrence(publication: str) -> None:
+@pytest.mark.parametrize("restamped", (False, True))
+async def test_recovered_request_is_prior_attempt_input_not_new_raw_occurrence(publication: str, restamped: bool) -> None:
     from linktools.ai.persistence._transcript_staging import StagedTranscript
 
     store = StagingAgentRunStore()
@@ -676,6 +678,8 @@ async def test_recovered_request_is_prior_attempt_input_not_new_raw_occurrence(p
     before = store.staged_transcript("old")
     recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="new", initial_messages=(request,))
     await recorder.register_agent_run(AgentRunRecord("new"))
+    if restamped:
+        request = replace(request, timestamp=datetime(2001, 1, 1, tzinfo=timezone.utc))
     assert recorder.request_already_captured((request,))
     response = ModelResponse(parts=[TextPart("resumed response")], run_id="new")
     recorder.append_transcript_message(response)
@@ -712,3 +716,13 @@ async def test_initial_request_occurrence_is_frozen_and_consumed_only_once() -> 
     later = replace(initial, run_id="new")
     recorder.append_transcript_message(later)
     assert recorder.transcript_messages() == (later,)
+
+
+@pytest.mark.asyncio
+async def test_recovered_request_with_new_run_identity_remains_a_new_occurrence() -> None:
+    store = StagingAgentRunStore()
+    await store.initialize()
+    initial = ModelRequest(parts=[ToolReturnPart("tool", "same", tool_call_id="call")], run_id="old")
+    recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="new", initial_messages=(initial,))
+    await recorder.register_agent_run(AgentRunRecord("new"))
+    assert not recorder.request_already_captured((replace(initial, run_id="new"),))
