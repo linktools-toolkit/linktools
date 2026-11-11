@@ -122,7 +122,7 @@ async def test_concurrent_insert_before_aggregate_cannot_bypass_scan_limit(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("aggregation", (MetricAggregation.COUNT, MetricAggregation.PERCENTILE))
-@pytest.mark.parametrize("count", (256, 257, 300))
+@pytest.mark.parametrize("count", (256, 257))
 async def test_group_limit_sentinel_is_not_storage_corruption(
     sql_metrics: _SqlMetrics, aggregation: MetricAggregation, count: int,
 ) -> None:

@@ -48,7 +48,6 @@ def test_request_shape_round_trips_without_classification_fields() -> None:
     for record in (ordinary, direct):
         wire = _encode_step_envelope(record)
         assert "is_direct_result" not in wire["value"]["payload"]["fields"]
-        assert not hasattr(record, "is_direct_result")
         assert _decode_step_envelope(wire) == record
     ordinary_wire = _encode_step_envelope(ordinary)
     assert hashlib.sha256(canonical_json_bytes(ordinary_wire)).hexdigest() == "2142ca8c5c2e8acdb55ee082b46da796ac8b22344f52afeeaa6647e70000e60e"

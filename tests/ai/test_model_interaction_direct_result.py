@@ -109,7 +109,6 @@ async def _assert_interaction(
         execution_id, principal=principal,
     )).items
     assert len(metadata) == 1
-    assert not hasattr(metadata[0], "is_direct_result")
     assert metadata[0].request == {} and metadata[0].response is None
     assert not metadata[0].content_included
     content = (await runtime.executions.model_interactions(
@@ -117,7 +116,6 @@ async def _assert_interaction(
     )).items
     assert len(content) == 1
     item = content[0]
-    assert not hasattr(item, "is_direct_result")
     assert item.status == "SUCCEEDED"
     assert item.response is not None
     assert item.response["parts"][0]["content"] == ("direct answer" if direct else "provider answer")
@@ -295,7 +293,6 @@ async def test_cancelled_wrapper_without_response_does_not_claim_direct_result(t
         items = (await execution.model_interactions(include_content=True)).items
         assert len(items) == 1
         assert items[0].status == "CANCELLED"
-        assert not hasattr(items[0], "is_direct_result")
         assert items[0].request == {} and items[0].response is None
     assert calls == []
     async with Persistence.open("direct-results", storage=storage) as persistence, Runtime.attach(

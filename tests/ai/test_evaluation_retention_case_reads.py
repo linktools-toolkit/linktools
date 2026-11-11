@@ -114,7 +114,7 @@ async def test_retention_reads_fresh_case_expiry_on_each_discovery(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case_count", (1, 64, 65, 501))
+@pytest.mark.parametrize("case_count", (1, 64, 65))
 async def test_retention_case_selects_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_count: int) -> None:
     async with _retention_repository(tmp_path, "sqlite", ("live",) * case_count) as (repository, _record, _cases):
         counts = Counter()

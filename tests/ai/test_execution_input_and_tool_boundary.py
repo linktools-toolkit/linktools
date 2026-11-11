@@ -4,7 +4,7 @@
 from linktools.ai.model import create_model
 
 from linktools.ai.persistence import Persistence
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -374,17 +374,19 @@ def test_request_file_normalization_preserves_input_meaning(request_type: type, 
     assert "added-later.txt" not in request.files
 
 
-def test_request_types_keep_distinct_identity_and_positional_fields() -> None:
-    first_fields = {
-        ExecutionRequest: ("user_prompt", "principal"),
-        ResumeSessionRequest: ("principal", "user_prompt"),
-        RetryExecutionRequest: ("user_prompt", "principal"),
-        ForkExecutionRequest: ("user_prompt", "principal"),
-    }
-    requests = [_file_request(request_type, ()) for request_type in _REQUEST_TYPES]
-    for request_type, expected in first_fields.items():
-        assert tuple(field.name for field in fields(request_type))[:2] == expected
+def test_request_types_keep_distinct_identity_and_accept_positional_inputs() -> None:
+    principal = Principal("user", "tenant", "local_trusted")
+    options = dict(idempotency_key="file-input", correlation={"trace": "original"})
+    execution_options = dict(memory_scope="memory", mode="plan", planning=True, thinking=False)
+    requests = (
+        ExecutionRequest("inspect", principal, **options, **execution_options),
+        ResumeSessionRequest(principal, "inspect", **options, **execution_options),
+        RetryExecutionRequest("inspect", principal, **options),
+        ForkExecutionRequest("inspect", principal, **options),
+    )
     for index, request in enumerate(requests):
+        assert request.user_prompt == "inspect" and request.principal == principal
+        assert request == _file_request(_REQUEST_TYPES[index], ())
         assert all(request != other for other in requests[index + 1:])
 
 

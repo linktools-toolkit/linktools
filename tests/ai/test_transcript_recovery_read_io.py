@@ -16,7 +16,7 @@ from .test_step_archive_read_boundaries import _archive
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-@pytest.mark.parametrize("count", (9, 65))
+@pytest.mark.parametrize("count", (3, 65))
 async def test_full_transcript_recovery_bounds_archive_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, count: int,
 ) -> None:

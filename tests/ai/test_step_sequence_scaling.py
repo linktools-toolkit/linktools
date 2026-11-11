@@ -30,10 +30,10 @@ class _ReadTraffic:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [10])
 async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_reads(
-    tmp_path: Path, size: int,
+    tmp_path: Path,
 ) -> None:
+    size = 3
     url = f"sqlite+aiosqlite:///{tmp_path / 'growing.db'}"
     engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")

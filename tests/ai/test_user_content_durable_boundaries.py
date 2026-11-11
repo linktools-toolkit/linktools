@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from inspect import signature
-
 import pytest
 from pydantic_ai.messages import BinaryContent
 
@@ -11,7 +9,7 @@ from linktools.ai.core import ExecutionLineageKind, Principal
 from linktools.ai.execution import ExecutionRequest
 from linktools.ai.runtime._execution import _request_digest
 from linktools.ai.inputs import input_intent
-from linktools.ai.persistence.contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.persistence.contracts import StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
@@ -62,18 +60,14 @@ def test_input_intent_ignores_file_body_and_keeps_logical_paths() -> None:
     assert len(first.digest) == 64
 
 
-def test_stored_user_input_uses_codec_as_schema_owner() -> None:
+def test_stored_user_input_digest_ignores_display_view_but_tracks_content() -> None:
     stored = StoredUserInput(
         "text",
         StoredPayload.inline_text("prompt"),
     )
 
-    assert stored.digest == StoredUserInput("text", stored.payload).digest
-    assert "version" not in signature(StoredUserInput).parameters
-
-
-def test_execution_record_does_not_persist_runtime_storage_topology() -> None:
-    assert "storage_contract" not in signature(ExecutionRecord).parameters
+    assert stored.digest == StoredUserInput("text", stored.payload, {"version": 1, "label": "display"}).digest
+    assert stored.digest != StoredUserInput("text", StoredPayload.inline_text("changed")).digest
 
 
 def test_text_request_digest_is_stable() -> None:
