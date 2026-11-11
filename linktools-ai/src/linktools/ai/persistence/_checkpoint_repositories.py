@@ -185,7 +185,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             return ()
         records = await self._records(
             "approval",
-            scope=self._scope("approval", "execution", execution_id),
+            scope=self._scope("approval", "execution", (execution_id,)),
             states=frozenset({ApprovalStatus.PENDING.value}),
         )
         return tuple([await self._decode(record, ApprovalRecord) for record in records])
@@ -303,7 +303,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             return ()
         records = await self._records(
             "external_call",
-            scope=self._scope("external_call", "execution", execution_id),
+            scope=self._scope("external_call", "execution", (execution_id,)),
             states=frozenset({ExternalCallStatus.PENDING.value}),
         )
         return tuple(
@@ -398,7 +398,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         if source_run_id is not None:
             validate_resource_id(source_run_id)
         records = await self._records(
-            "tool_operation", parent=self._parent("tool_operation", "execution", execution_id),
+            "tool_operation", parent=self._parent("tool_operation", "execution", (execution_id,)),
         )
         values = [await self._decode(stored, ToolOperationRecord) for stored in records]
         if any(value.execution_id != execution_id for value in values):
@@ -513,7 +513,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                         request.tool_operation_id,
                         value,
                         scope=self._scope(
-                            "tool_operation", "agent_run", request.agent_run_id
+                            "tool_operation", "agent_run", (request.agent_run_id,)
                         ),
                         state=value.status.value,
                     )
@@ -616,7 +616,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     "tool_operation",
                     record.tool_operation_id,
                     record,
-                    scope=self._scope("tool_operation", "agent_run", record.agent_run_id),
+                    scope=self._scope("tool_operation", "agent_run", (record.agent_run_id,)),
                     state=record.status.value,
                 )
                 await transaction.insert_record(stored)
@@ -789,7 +789,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             return ()
         records = await self._records(
             "tool_operation",
-            parent=self._parent("tool_operation", "execution", execution_id),
+            parent=self._parent("tool_operation", "execution", (execution_id,)),
         )
         values = tuple(
             [await self._decode(record, ToolOperationRecord) for record in records]
@@ -808,7 +808,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             return False
         records = await self._records(
             "tool_operation",
-            scope=self._scope("tool_operation", "agent_run", agent_run_id),
+            scope=self._scope("tool_operation", "agent_run", (agent_run_id,)),
             states=frozenset(status.value for status in ToolOperationStatus),
             limit=1,
         )
@@ -835,15 +835,15 @@ class ToolRepositoryImpl(_RepositoryBase):
             return ()
 
         async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
-            scope = self._scope("tool_operation", "agent_run", agent_run_id)
+            scope = self._scope("tool_operation", "agent_run", (agent_run_id,))
             records = None
             if isinstance(transaction, RecordSubjectReader):
                 records = await transaction.read_record_subjects(
-                    kind="tool_operation", scope_digest=scope,
+                    kind="tool_operation", scope_key=scope,
                     subject_ids=ordered,
                 )
             if records is None:
-                records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_digest=scope))
+                records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_key=scope))
             values = [await self._decode(record, ToolOperationRecord) for record in records]
             selected = {value.tool_call_id: value for value in values
                         if value.agent_run_id == agent_run_id and value.tool_call_id in ordered}
@@ -890,7 +890,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             return tuple(values)
         records = await self._records(
             "tool_operation",
-            scope=self._scope("tool_operation", "agent_run", agent_run_id),
+            scope=self._scope("tool_operation", "agent_run", (agent_run_id,)),
         )
         values = tuple(
             [await self._decode(record, ToolOperationRecord) for record in records]

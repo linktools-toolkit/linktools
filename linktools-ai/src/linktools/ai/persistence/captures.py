@@ -18,7 +18,7 @@ from ..model.attachments import store_attachment_payload, read_attachment_payloa
 from ._archive import ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
 from .codec import decode_domain, encode_domain, decode_envelope, encode_envelope
-from .state import StateStore, StoredRecord, record_key_digest, scope_digest
+from .state import StateStore, StoredRecord, record_key_digest, scope_key
 
 _CAPTURE_TYPES = {
     "agent_input_capture_ref": (AgentInputCaptureRef, "agent"),
@@ -36,7 +36,7 @@ def capture_record(namespace: str, tenant_id: str, key: str, value: JsonValue, *
                    storage_revision: int = 0, source_digest: str | None = None) -> StoredRecord:
     kind = "task_graph_binding_capture" if key.startswith("v1/task-graph-binding-capture/") else "input_capture"
     owner = value.get("principal") if isinstance(value, Mapping) else None
-    scope = (scope_digest(namespace, tenant_id, "task", kind, "owner", owner["principal_id"])
+    scope = (scope_key(namespace, tenant_id, "task", kind, "owner", (owner["principal_id"],))
              if isinstance(owner, Mapping) and isinstance(owner.get("principal_id"), str) else None)
     payload = {"namespace": namespace, "tenant_id": tenant_id, "key": key, "value": value}
     if source_digest is not None:
@@ -457,8 +457,11 @@ def snapshot_capture_size(record: StoredRecord, contents: Mapping[tuple[str, str
 
 def validate_capture_record(record: StoredRecord, *, namespace: str, tenant_id: str) -> None:
     value = capture_record_value(record)
-    expected = capture_record(namespace, tenant_id, capture_record_key(record), value, storage_revision=record.storage_revision,
-                              source_digest=decode_envelope(record.data).value["payload"].get("source_digest"))
+    try:
+        expected = capture_record(namespace, tenant_id, capture_record_key(record), value, storage_revision=record.storage_revision,
+                                  source_digest=decode_envelope(record.data).value["payload"].get("source_digest"))
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     capture_record_digest(record)
     if record != expected or capture_record_scope(record) != (namespace, tenant_id):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

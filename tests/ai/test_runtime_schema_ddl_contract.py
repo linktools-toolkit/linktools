@@ -77,14 +77,14 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     }
     for name in (
         "ix_store_digest_kind_sort_key",
-        "ix_scope_digest_sort_key",
-        "ix_parent_digest_sort_key",
+        "ix_scope_key_sort_key",
+        "ix_parent_key_sort_key",
     ):
         ddl = str(CreateIndex(mysql_indexes[name]).compile(dialect=dialect))
         assert "sort_key)" in ddl
         assert "sort_key(" not in ddl
 
-    assert not mysql_indexes["ix_scope_digest_subject_id"].unique
+    assert not mysql_indexes["ix_scope_key_subject_id"].unique
     migration = (
         Path(__file__).resolve().parents[2]
         / "linktools-ai"
@@ -99,9 +99,9 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     assert "partition_digest" not in migration
     for fragment in (
         "ix_store_digest_kind_sort_key (store_digest, kind, sort_key)",
-        "ix_scope_digest_sort_key (scope_digest, sort_key)",
-        "ix_parent_digest_sort_key (parent_digest, sort_key)",
-        "ix_scope_digest_subject_id (scope_digest, subject_id)",
+        "ix_scope_key_sort_key (scope_key, sort_key)",
+        "ix_parent_key_sort_key (parent_key, sort_key)",
+        "ix_scope_key_subject_id (scope_key, subject_id)",
     ):
         assert fragment in migration
 
@@ -154,9 +154,9 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
         "ai_state_records": {
             "uk_store_digest_key_digest",
             "ix_store_digest_kind_sort_key",
-            "ix_scope_digest_sort_key",
-            "ix_scope_digest_subject_id",
-            "ix_parent_digest_sort_key",
+            "ix_scope_key_sort_key",
+            "ix_scope_key_subject_id",
+            "ix_parent_key_sort_key",
             "ix_updated_at",
             "ix_created_at",
         },
@@ -190,7 +190,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
         "ai_state_records": {
             "uk_key_digest",
             "ix_partition_digest_sort_key",
-            "ix_scope_digest_state_sort_key",
+            "ix_scope_key_state_sort_key",
             "ix_store_digest_kind_key_digest",
         },
         "ai_state_aliases": {"uk_alias_key", "ix_store_digest_alias_key"},

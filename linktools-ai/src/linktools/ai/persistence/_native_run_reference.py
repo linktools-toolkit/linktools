@@ -243,10 +243,10 @@ class NativeRunReferences:
             statement = statement.where(records.c.key_digest.in_(tuple(key.hex() for key in keys)))
         if query is not None:
             statement = statement.where(records.c.kind == "agent_run")
-            if query.scope_digest is not None:
-                statement = statement.where(records.c.scope_digest == query.scope_digest.hex())
-            if query.parent_digest is not None:
-                statement = statement.where(records.c.parent_digest == query.parent_digest.hex())
+            if query.scope_key is not None:
+                statement = statement.where(records.c.scope_key == query.scope_key)
+            if query.parent_key is not None:
+                statement = statement.where(records.c.parent_key == query.parent_key)
             statement = statement.order_by(records.c.sort_key, records.c.key_digest)
         if scan is not None:
             after, limit = scan

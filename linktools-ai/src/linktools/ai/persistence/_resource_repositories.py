@@ -80,7 +80,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             while True:
                 last = rows[-1] if rows else None
                 page = await transaction.list_records(RecordQuery(kind="memory",
-                    scope_digest=self._scope("memory", "memory_scope", memory_scope_digest),
+                    scope_key=self._scope("memory", "memory_scope", (memory_scope_digest,)),
                     after_sort_key=None if last is None else last.sort_key,
                     after_key_digest=None if last is None else last.key_digest, limit=1000))
                 rows.extend(page)
@@ -166,7 +166,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         _validate_page_limit(limit)
         records = await self._records(
             "memory",
-            scope=self._scope("memory", "memory_scope", memory_scope_digest),
+            scope=self._scope("memory", "memory_scope", (memory_scope_digest,)),
             sort_key_prefix=prefix.encode("ascii") if prefix else None,
             cursor=cursor,
             limit=limit + 1,
@@ -316,7 +316,7 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
         _validate_page_limit(limit)
         records = await self._records(
             "artifact",
-            scope=self._scope("artifact", "execution", execution_id),
+            scope=self._scope("artifact", "execution", (execution_id,)),
             cursor=cursor,
             limit=limit + 1,
         )

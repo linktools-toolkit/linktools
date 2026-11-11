@@ -59,9 +59,9 @@ from .state import (
     StoredOperation,
     StoredRecord,
     operation_key,
-    parent_digest,
+    parent_key,
     record_key_digest,
-    scope_digest,
+    scope_key,
     stream_digest,
 )
 
@@ -122,8 +122,8 @@ class _RepositoryBase:
             self._namespace, self._tenant_id, self._domain.value, kind, identity
         )
 
-    def _scope(self, kind: str, relation: str, identity: object) -> bytes:
-        return scope_digest(
+    def _scope(self, kind: str, relation: str, identity: Sequence[str]) -> bytes:
+        return scope_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -132,8 +132,8 @@ class _RepositoryBase:
             identity,
         )
 
-    def _parent(self, kind: str, relation: str, identity: object) -> bytes:
-        return parent_digest(
+    def _parent(self, kind: str, relation: str, identity: Sequence[str]) -> bytes:
+        return parent_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -218,8 +218,8 @@ class _RepositoryBase:
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
             records = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
-                    parent_digest=parent,
+                    scope_key=scope,
+                    parent_key=parent,
                     kind=kind,
                     states=states,
                     sort_key_prefix=sort_key_prefix,
@@ -233,8 +233,8 @@ class _RepositoryBase:
             last = records[-1]
             probe = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
-                    parent_digest=parent,
+                    scope_key=scope,
+                    parent_key=parent,
                     kind=kind,
                     states=states,
                     sort_key_prefix=sort_key_prefix,
@@ -267,8 +267,8 @@ class _RepositoryBase:
         async def read(transaction: StateTransaction) -> bool:
             records = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
-                    parent_digest=parent,
+                    scope_key=scope,
+                    parent_key=parent,
                     kind=kind,
                     states=states,
                     sort_key_prefix=sort_key_prefix,
@@ -748,27 +748,27 @@ def _default_record_scope(
     value: object,
 ) -> bytes | None:
     if isinstance(value, EvaluationReport):
-        return scope_digest(namespace, tenant_id, domain.value, kind, "experiment", value.experiment_id)
+        return scope_key(namespace, tenant_id, domain.value, kind, "experiment", (value.experiment_id,))
     if isinstance(value, SessionRecord):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "owner",
-            value.owner_principal_id,
+            (value.owner_principal_id,),
         )
     if isinstance(value, ExecutionRecord) and value.session_id is not None:
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "session",
-            value.session_id,
+            (value.session_id,),
         )
     if isinstance(value, IdempotencyRecord):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
@@ -780,31 +780,31 @@ def _default_record_scope(
         value,
         (ArtifactRecord, ApprovalRecord, ExternalCallRecord),
     ):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "execution",
-            value.execution_id,
+            (value.execution_id,),
         )
     if isinstance(value, MemoryRecord):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "memory_scope",
-            value.memory_scope_digest,
+            (value.memory_scope_digest,),
         )
     if isinstance(value, ToolOperationRecord):
-        return scope_digest(
+        return scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "agent_run",
-            value.agent_run_id,
+            (value.agent_run_id,),
         )
     return None
 
@@ -817,31 +817,31 @@ def _default_record_parent(
     value: object,
 ) -> bytes | None:
     if isinstance(value, TaskNodeView):
-        return parent_digest(
+        return parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "graph",
-            value.graph_id,
+            (value.graph_id,),
         )
     if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
-        return parent_digest(
+        return parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "execution",
-            value.parent_execution_id,
+            (value.parent_execution_id,),
         )
     if isinstance(value, ToolOperationRecord):
-        return parent_digest(
+        return parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "execution",
-            value.execution_id,
+            (value.execution_id,),
         )
     return None
 

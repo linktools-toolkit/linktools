@@ -279,7 +279,7 @@ def _binding_manifest(copies: int):
 
     _, _, compact, content, key = _shared_record()
     archive_record = replace(compact, kind="archive_content", sort_key=key[2].encode("ascii"),
-        scope_digest=bytes.fromhex(key[1]), data=content.to_json(), payload_bytes=content.body,
+        scope_key=bytes.fromhex(key[1]), data=content.to_json(), payload_bytes=content.body,
         key_digest=record_key_digest("", "", "archive", "archive_content", [key[1], key[2]]))
     manifest = {
         "kind": "runtime-storage-snapshot", "format_version": 1,

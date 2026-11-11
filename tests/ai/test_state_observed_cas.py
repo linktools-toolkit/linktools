@@ -51,7 +51,7 @@ async def test_revision_guard_reuses_current_revision_and_source_payload(
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
-@pytest.mark.parametrize("field,value", (("scope_digest", None), ("parent_digest", _digest("parent")),
+@pytest.mark.parametrize("field,value", (("scope_key", None), ("parent_key", _digest("parent")),
                                         ("kind", "other"), ("kind", "PROBE"), ("kind", "probe "),
                                         ("sort_key", b"other"), ("sort_key", b"0001 ")))
 async def test_conditional_mutation_preserves_every_immutable_identity(
@@ -124,7 +124,7 @@ async def test_known_record_writes_execute_no_select_and_compile_for_mysql(
 ) -> None:
     monkeypatch.setattr(SQLiteDialect, "prefer_update_executemany", property(lambda self: executemany))
     async with _database(tmp_path / "observed.db") as (engine, store, _):
-        records = tuple(replace(_record(index), parent_digest=None if index % 2 else _digest("parent"))
+        records = tuple(replace(_record(index), parent_key=None if index % 2 else _digest("parent"))
                         for index in range(70))
         await store.mutate(lambda tx: tx.insert_records(records))
         statements: list[str] = []
@@ -153,7 +153,7 @@ async def test_known_record_writes_execute_no_select_and_compile_for_mysql(
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
         assert not any(sql.lstrip().upper().startswith("SELECT") for sql in statements), statements
         assert len(mysql_updates) >= 2
-        assert all("scope_digest" in sql and "parent_digest" in sql and "sort_key" in sql
+        assert all("scope_key" in sql and "parent_key" in sql and "sort_key" in sql
                    and "storage_revision" in sql and "RETURNING" not in sql for sql in mysql_updates[1:])
 
 
@@ -165,7 +165,7 @@ async def test_mysql_identity_conditions_compare_bytes_and_bind_text(
     from sqlalchemy.dialects.mysql.asyncmy import dialect
 
     compiler_dialect = dialect(dbapi=dialect.import_dbapi())
-    values = {"scope_digest": None, "parent_digest": None, "subject_id": None,
+    values = {"scope_key": None, "parent_key": None, "subject_id": None,
               "kind": "probe 測🙂 ", "sort_key": b"0001 \x00\xff "}
     async with _database(tmp_path / "compile.db") as (_, store, _):
         async def inspect(tx: StateTransaction) -> None:

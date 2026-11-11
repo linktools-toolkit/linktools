@@ -81,7 +81,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
     backend: str, tmp_path: Path,
 ) -> None:
     deleted = _record(1)
-    retained = replace(_record(2), parent_digest=deleted.key_digest)
+    retained = replace(_record(2), parent_key=deleted.key_digest)
     staged = _record(3)
     staged_alias = StoredAlias(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("recovery", "staged")), deleted.key_digest)
     counter = _digest("counter")

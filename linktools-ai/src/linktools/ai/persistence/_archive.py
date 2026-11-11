@@ -218,6 +218,8 @@ class ContentRecord:
 
     @classmethod
     def from_record(cls, record: StoredRecord) -> "ContentRecord":
+        if record.scope_key is None or len(record.scope_key) != 32:
+            raise _integrity()
         return cls.from_json(record.data, body=record.payload_bytes)
 
     def to_native_values(self) -> dict[str, object]:
@@ -351,7 +353,7 @@ class ContentArchive:
             raise _integrity()
         for key, record in records.items():
             if (record.key_digest != key or record.kind != "archive_content"
-                    or record.scope_digest != bytes.fromhex(self.content_scope)):
+                    or record.scope_key != bytes.fromhex(self.content_scope)):
                 raise _integrity()
             content = ContentRecord.from_record(record)
             if record.sort_key != content.identity.encode("ascii") or self._key("archive_content", content.identity) != key:
@@ -456,7 +458,7 @@ class ContentArchive:
     ) -> Mapping[bytes, StoredRecord]:
         if isinstance(transaction, ArchiveFrontierReader):
             result = await transaction.read_archive_frontiers(
-                scope_digest=bytes.fromhex(self.content_scope), requests=requests,
+                scope_key=bytes.fromhex(self.content_scope), requests=requests,
                 content_keys=content_keys,
             )
             if result is not None:
@@ -496,7 +498,7 @@ class ContentArchive:
         return result
 
     def _decode_node_record(self, record: StoredRecord) -> ImmutableSequenceNode:
-        if record.kind != "archive_sequence" or record.scope_digest != bytes.fromhex(self.content_scope):
+        if record.kind != "archive_sequence" or record.scope_key != bytes.fromhex(self.content_scope):
             raise _integrity()
         node = ImmutableSequenceNode.from_json(record.data)
         if record.sort_key != node.identity.encode("ascii") or record.key_digest != self._key(record.kind, node.identity):
@@ -873,7 +875,7 @@ class ContentArchive:
                     return None
                 rows = await self._frontiers(transaction, tuple(requests.values()))
                 for key, record in rows.items():
-                    if key != record.key_digest or record.scope_digest != bytes.fromhex(self.content_scope):
+                    if key != record.key_digest or record.scope_key != bytes.fromhex(self.content_scope):
                         raise _integrity()
                     if record.kind == "archive_sequence":
                         node = self._decode_node_record(record)

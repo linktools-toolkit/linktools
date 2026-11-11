@@ -184,7 +184,7 @@ async def test_evaluation_read_reuse_rejects_changed_or_failed_storage(tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", (
-    ("scope_digest", b"s" * 32), ("parent_digest", b"p" * 32),
+    ("scope_key", b"s" * 32), ("parent_key", b"p" * 32),
     ("state", "changed"), ("storage_revision", 19),
     ("lease_owner", "other"), ("lease_fence", 7),
     ("lease_expires_at", NOW + timedelta(hours=1)),

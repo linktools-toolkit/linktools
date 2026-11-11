@@ -139,8 +139,8 @@ class PlanStateStore:
     ) -> StoredRecord:
         return StoredRecord(
             key_digest=self._key,
-            scope_digest=None,
-            parent_digest=None,
+            scope_key=None,
+            parent_key=None,
             kind=_KIND,
             sort_key=self._key,
             state=None,

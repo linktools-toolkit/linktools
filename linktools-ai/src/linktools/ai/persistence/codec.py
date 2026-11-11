@@ -215,6 +215,8 @@ from ._step_contracts import (
 )
 from .state import (
     ALIAS_KEY_MAX_BYTES,
+    RELATION_KEY_MAX_BYTES,
+    validate_relation_key,
     StoredAlias,
     StoredFact,
     StoredOperation,
@@ -1297,8 +1299,8 @@ def decode_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
 def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
     return {
         "key": record.key_digest.hex(),
-        "scope": None if record.scope_digest is None else record.scope_digest.hex(),
-        "parent": None if record.parent_digest is None else record.parent_digest.hex(),
+        "scope": None if record.scope_key is None else record.scope_key.hex(),
+        "parent": None if record.parent_key is None else record.parent_key.hex(),
         "subject": record.subject_id,
         "kind": record.kind,
         "sort": base64.b64encode(record.sort_key).decode("ascii"),
@@ -1353,8 +1355,8 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
     try:
         record = StoredRecord(
             _digest_wire(_string(value, "key")),
-            _optional_digest(value["scope"]),
-            _optional_digest(value["parent"]),
+            _optional_relation_key(value["scope"]),
+            _optional_relation_key(value["parent"]),
             _string(value, "kind"),
             _decode_record_sort(_string(value, "sort")),
             _optional_string(value["state"]),
@@ -2755,12 +2757,15 @@ def _digest_wire(value: str) -> bytes:
     return result
 
 
-def _optional_digest(value: object) -> bytes | None:
+def _optional_relation_key(value: object) -> bytes | None:
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise ValueError("digest must be a string or null")  # noqa: TRY004
-    return _digest_wire(value)
+    if not isinstance(value, str) or not 2 <= len(value) <= 2 * RELATION_KEY_MAX_BYTES:
+        raise ValueError("relation key must be bounded canonical lowercase hex or null")
+    result = bytes.fromhex(value)
+    if result.hex() != value:
+        raise ValueError("relation key must be canonical lowercase hex")
+    return validate_relation_key(result)
 
 
 def _optional_datetime(value: object) -> datetime | None:

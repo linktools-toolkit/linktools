@@ -91,7 +91,7 @@ async def test_payload_reference_snapshot_scope_integrity_and_budget(tmp_path: P
         record = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
         scope, archive = repository.state_store.storage_group.opened_archive
         rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
-        contents = {(scope, row.scope_digest.hex(), row.sort_key.decode("ascii")): ContentRecord.from_record(row) for row in rows}
+        contents = {(scope, row.scope_key.hex(), row.sort_key.decode("ascii")): ContentRecord.from_record(row) for row in rows}
         assert snapshot_execution_content_size(record, contents) == sum(item.raw_size for item in contents.values())
         semantic = expand_snapshot_execution_content(record, contents, namespace="payloads", tenant_id="tenant")
         assert _decode_enveloped_domain(semantic.data, ExecutionRecord) == value

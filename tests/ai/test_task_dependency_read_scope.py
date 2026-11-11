@@ -179,7 +179,7 @@ async def test_dependency_read_rejects_corrupt_result_metadata(tmp_path: Path, b
                 record.key_digest,
                 expected_storage_revision=record.storage_revision,
             )
-            await transaction.insert_record(replace(record, parent_digest=b"x" * 32))
+            await transaction.insert_record(replace(record, parent_key=b"x" * 32))
 
         await repository.state_store.mutate(corrupt)
         with pytest.raises(AIError) as raised:

@@ -388,16 +388,16 @@ class TaskRepositoryImpl(RepositoryBase):
         return self._key("task_node_state", [graph_id, node_id])
 
     def _definition_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_node_definition", "graph", graph_id)
+        return self._parent("task_node_definition", "graph", (graph_id,))
 
     def _state_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_node_state", "graph", graph_id)
+        return self._parent("task_node_state", "graph", (graph_id,))
 
     def _admission_key(self, graph_id: str) -> bytes:
         return self._key("task_admission", graph_id)
 
     def _recovery_scope(self) -> bytes:
-        return self._scope("task_admission", "recoverable", "graphs")
+        return self._scope("task_admission", "recoverable", ("graphs",))
 
     def _validate_admission_record(
         self,
@@ -407,8 +407,8 @@ class TaskRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_admission"
             or record.key_digest != self._admission_key(graph_id)
-            or record.scope_digest != self._recovery_scope()
-            or record.parent_digest is not None
+            or record.scope_key != self._recovery_scope()
+            or record.parent_key is not None
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -434,20 +434,20 @@ class TaskRepositoryImpl(RepositoryBase):
         return self._key("task_prepared_input", [graph_id, node_id])
 
     def _prepared_input_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_prepared_input", "graph", graph_id)
+        return self._parent("task_prepared_input", "graph", (graph_id,))
 
     def _result_scope(self, graph_id: str) -> bytes:
-        return self._scope("task_result", "graph", graph_id)
+        return self._scope("task_result", "graph", (graph_id,))
 
     def _result_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_result", "graph", graph_id)
+        return self._parent("task_result", "graph", (graph_id,))
 
     def _validate_graph_record(self, record: StoredRecord, graph_id: str) -> None:
         if (
             record.kind != "task_graph"
             or record.key_digest != self._graph_key(graph_id)
-            or record.scope_digest is not None
-            or record.parent_digest is not None
+            or record.scope_key is not None
+            or record.parent_key is not None
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -461,8 +461,8 @@ class TaskRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_node_state"
             or record.key_digest != self._state_key(graph_id, node_id)
-            or record.scope_digest is not None
-            or record.parent_digest != self._state_parent(graph_id)
+            or record.scope_key is not None
+            or record.parent_key != self._state_parent(graph_id)
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -476,8 +476,8 @@ class TaskRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_node_definition"
             or record.key_digest != self._definition_key(graph_id, node_id)
-            or record.scope_digest is not None
-            or record.parent_digest != self._definition_parent(graph_id)
+            or record.scope_key is not None
+            or record.parent_key != self._definition_parent(graph_id)
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -491,8 +491,8 @@ class TaskRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_result"
             or record.key_digest != self._result_key(graph_id, node_id)
-            or record.scope_digest != self._result_scope(graph_id)
-            or record.parent_digest != self._result_parent(graph_id)
+            or record.scope_key != self._result_scope(graph_id)
+            or record.parent_key != self._result_parent(graph_id)
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -670,8 +670,8 @@ class TaskRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_prepared_input"
             or record.key_digest != self._prepared_input_key(graph_id, node_id)
-            or record.scope_digest is not None
-            or record.parent_digest != self._prepared_input_parent(graph_id)
+            or record.scope_key is not None
+            or record.parent_key != self._prepared_input_parent(graph_id)
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -749,7 +749,7 @@ class TaskRepositoryImpl(RepositoryBase):
     ) -> tuple[tuple[TaskNode, ...], tuple[TaskNodeView, ...]]:
         state_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._state_parent(graph_id),
+                parent_key=self._state_parent(graph_id),
                 kind="task_node_state",
             )
         )
@@ -766,7 +766,7 @@ class TaskRepositoryImpl(RepositoryBase):
         if cached_definitions is None or set(definitions) != set(states):
             definition_records = await transaction.list_records(
                 RecordQuery(
-                    parent_digest=self._definition_parent(graph_id),
+                    parent_key=self._definition_parent(graph_id),
                     kind="task_node_definition",
                 )
             )
@@ -1156,7 +1156,7 @@ class TaskRepositoryImpl(RepositoryBase):
             _require_canonical_graph_status(graph_header.status)
             definition_records = await transaction.list_records(
                 RecordQuery(
-                    parent_digest=self._definition_parent(graph_id),
+                    parent_key=self._definition_parent(graph_id),
                     kind="task_node_definition",
                 )
             )
@@ -2612,7 +2612,7 @@ class TaskRepositoryImpl(RepositoryBase):
             active = 0
             active_records = await transaction.list_records(
                 RecordQuery(
-                    parent_digest=self._state_parent(graph_id),
+                    parent_key=self._state_parent(graph_id),
                     kind="task_node_state",
                     states=frozenset({TaskStatus.RUNNING.value, TaskStatus.WAITING.value}),
                 )
@@ -2784,7 +2784,7 @@ class TaskRepositoryImpl(RepositoryBase):
         _require_canonical_graph_status(header.status)
         state_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._state_parent(graph_id),
+                parent_key=self._state_parent(graph_id),
                 kind="task_node_state",
             )
         )

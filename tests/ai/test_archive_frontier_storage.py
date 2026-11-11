@@ -73,9 +73,9 @@ class _OptionalReader(_UnsupportedReader):
         self.calls: list[tuple[bytes, Sequence[ArchiveNodeRead], Sequence[bytes]]] = []
 
     async def read_archive_frontiers(
-        self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes] = (),
+        self, *, scope_key: bytes, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes] = (),
     ) -> Mapping[bytes, StoredRecord] | None:
-        self.calls.append((scope_digest, requests, content_keys))
+        self.calls.append((scope_key, requests, content_keys))
         if self.error is not None:
             raise self.error
         return {}
@@ -85,17 +85,17 @@ class _OptionalReader(_UnsupportedReader):
 async def test_readonly_optional_reader_distinguishes_unsupported_empty_and_errors() -> None:
     unsupported = _ReadOnlyStateTransaction(cast(StateTransaction, _UnsupportedReader()))
     assert isinstance(unsupported, ArchiveFrontierReader)
-    assert await unsupported.read_archive_frontiers(scope_digest=_digest("scope"), requests=()) is None
+    assert await unsupported.read_archive_frontiers(scope_key=_digest("scope"), requests=()) is None
     source = _OptionalReader()
     supported = _ReadOnlyStateTransaction(cast(StateTransaction, source))
     request = (ArchiveNodeRead(_digest("node")),)
     content = (_digest("body"),)
-    assert await supported.read_archive_frontiers(scope_digest=_digest("scope"), requests=request, content_keys=content) == {}
+    assert await supported.read_archive_frontiers(scope_key=_digest("scope"), requests=request, content_keys=content) == {}
     assert source.calls == [(_digest("scope"), request, content)]
     for error in (AIError(ErrorCode.STORAGE_INTEGRITY_ERROR), asyncio.CancelledError()):
         failing = _ReadOnlyStateTransaction(cast(StateTransaction, _OptionalReader(error)))
         with pytest.raises(type(error)) as caught:
-            await failing.read_archive_frontiers(scope_digest=_digest("scope"), requests=request)
+            await failing.read_archive_frontiers(scope_key=_digest("scope"), requests=request)
         assert caught.value is error
 
 
@@ -119,7 +119,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         async def read(transaction: StateTransaction) -> Mapping[bytes, StoredRecord]:
             assert isinstance(transaction, ArchiveFrontierReader)
             records = await transaction.read_archive_frontiers(
-                scope_digest=bytes.fromhex(archive.content_scope),
+                scope_key=bytes.fromhex(archive.content_scope),
                 requests=(ArchiveNodeRead(first_key, ALL, ArchiveNodeSlot.SELF),),
             )
             assert records is not None
@@ -132,7 +132,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         event.remove(engine.sync_engine, "before_cursor_execute", record_query)
         assert set(records) == expected_nodes | {expected_content}
         assert len(statements) == 1
-        assert all(record.scope_digest == bytes.fromhex(archive.content_scope) for record in records.values())
+        assert all(record.scope_key == bytes.fromhex(archive.content_scope) for record in records.values())
         sql = str(statements[0].compile(dialect=sqlite.dialect(), compile_kwargs={"literal_binds": True}))
         async with engine.connect() as connection:
             plan = (await connection.execute(text("EXPLAIN QUERY PLAN " + sql))).all()
@@ -156,7 +156,7 @@ async def test_frontier_unions_overlaps_direct_keys_and_preserves_scope(tmp_path
 
         async def read(transaction: StateTransaction, scope: bytes) -> Mapping[bytes, StoredRecord] | None:
             assert isinstance(transaction, ArchiveFrontierReader)
-            return await transaction.read_archive_frontiers(scope_digest=scope, requests=requests,
+            return await transaction.read_archive_frontiers(scope_key=scope, requests=requests,
                                                             content_keys=(direct, extra, extra, _digest("missing")))
 
         records = await archive.store.read(lambda tx: read(tx, bytes.fromhex(archive.content_scope)))
@@ -190,7 +190,7 @@ async def test_sql_frontier_batches_stay_within_999_parameters(tmp_path: Path) -
 
         async def read(transaction: StateTransaction) -> Mapping[bytes, StoredRecord] | None:
             assert isinstance(transaction, ArchiveFrontierReader)
-            return await transaction.read_archive_frontiers(scope_digest=bytes.fromhex(archive.content_scope),
+            return await transaction.read_archive_frontiers(scope_key=bytes.fromhex(archive.content_scope),
                                                             requests=requests, content_keys=contents)
 
         records = await archive.store.read(read)
@@ -210,7 +210,7 @@ def test_fixed_frontier_compiles_for_supported_server_dialects_with_bounded_para
     for dialect in (sqlite.dialect(), mysql.dialect(server_version_info=(5, 7, 44)), postgresql.dialect()):
         transaction._context.dialect = dialect_for_name(dialect.name)
         for nodes, contents in transaction._archive_read_batches(requests, content_keys):
-            statement = transaction._archive_read_statement(_digest("scope").hex(), nodes, contents)
+            statement = transaction._archive_read_statement(_digest("scope"), nodes, contents)
             compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
             parameters = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
             assert parameters <= 999

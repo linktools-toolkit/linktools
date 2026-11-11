@@ -36,7 +36,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
-from linktools.ai.persistence.state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, StoredAlias, alias_key, operation_key
+from linktools.ai.persistence.state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, StoredAlias, alias_key, operation_key, parent_key, scope_key
 from linktools.ai.task import TaskBindingContract
 from linktools.ai.steps import NativeStepSource
 from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
@@ -97,6 +97,8 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     primitives = fixture["stored_primitives"]
     record = decode_record(primitives["record"])
     assert record.kind == "golden"
+    assert record.scope_key == scope_key("namespace", "tenant", "execution", "golden", "owner", ("principal",))
+    assert record.parent_key == parent_key("namespace", "tenant", "execution", "golden", "graph", ("graph",))
     assert record.storage_revision == primitives["record"]["storage_revision"]
     assert record.payload_bytes is None
     assert encode_record(record) == {**primitives["record"], "payload_bytes": None}

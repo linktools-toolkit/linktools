@@ -48,7 +48,7 @@ from ..persistence.captures import (
     read_capture_record, publish_capture_record, prepare_capture_value, restore_capture_value,
 )
 from ..persistence.codec import decode_domain, encode_domain, iter_runtime_object_refs
-from ..persistence.state import RecordQuery, StateTransaction, scope_digest
+from ..persistence.state import RecordQuery, StateTransaction, scope_key
 from ..execution import StoredUserInput
 
 ExecutionInputCaptureRef: TypeAlias = AgentInputCaptureRef | TaskInvocationInputRef
@@ -345,13 +345,13 @@ class InputCaptures:
         if now.tzinfo is None:
             raise ValueError("capture expiry time must be timezone-aware")
         await self._authorize(principal, ResourceKind.EVALUATION, "retention", AuthorizationAction.EVALUATION_PURGE)
-        owner_scope = scope_digest(self._namespace, principal.tenant_id, "task", "input_capture",
-                                   "owner", principal.principal_id)
+        owner_scope = scope_key(self._namespace, principal.tenant_id, "task", "input_capture",
+                                   "owner", (principal.principal_id,))
         candidates = []
         for kind in ("expired", "agent", "template"):
             cursor = None
             while len(candidates) < limit:
-                query = RecordQuery(kind="input_capture", scope_digest=owner_scope,
+                query = RecordQuery(kind="input_capture", scope_key=owner_scope,
                     sort_key_prefix=f"v1/input-capture/{kind}/".encode("ascii"), limit=1000,
                     after_sort_key=None if cursor is None else cursor.sort_key,
                     after_key_digest=None if cursor is None else cursor.key_digest)

@@ -309,8 +309,8 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         source_key = self._key("context_projection", source_history_id)
         if (
             source.key_digest != source_key
-            or source.scope_digest is not None
-            or source.parent_digest
+            or source.scope_key is not None
+            or source.parent_key
             != self._key("transcript_head", source_history_id)
             or source.kind != "context_projection"
             or source.sort_key != source_history_id.encode("ascii")
@@ -472,7 +472,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         key = self._timeline_commit_key(value.session_id, value.turn_seq)
         return StoredRecord(
             key,
-            self._scope("session_turn_commit", "session", value.session_id),
+            self._scope("session_turn_commit", "session", (value.session_id,)),
             None,
             "session_turn_commit",
             key,
@@ -505,9 +505,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> SessionTurnCommit:
         if (
             record.key_digest != self._timeline_commit_key(session_id, turn_seq)
-            or record.scope_digest
-            != self._scope("session_turn_commit", "session", session_id)
-            or record.parent_digest is not None
+            or record.scope_key
+            != self._scope("session_turn_commit", "session", (session_id,))
+            or record.parent_key is not None
             or record.kind != "session_turn_commit"
             or record.sort_key != record.key_digest
             or record.state is not None
@@ -553,7 +553,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         "session",
                         value.session_id,
                         value,
-                        scope=self._scope("session", "owner", value.owner_principal_id),
+                        scope=self._scope("session", "owner", (value.owner_principal_id,)),
                         state=value.status.value,
                     ),
                     self._stored(
@@ -602,7 +602,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         record.session_id,
                         record,
                         scope=self._scope(
-                            "session", "owner", record.owner_principal_id
+                            "session", "owner", (record.owner_principal_id,)
                         ),
                         state=record.status.value,
                     ),
@@ -819,7 +819,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     scope=self._scope(
                         "session",
                         "owner",
-                        expected_target.owner_principal_id,
+                        (expected_target.owner_principal_id,),
                     ),
                     state=expected_target.status.value,
                 ),
@@ -1047,13 +1047,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         scope = (
             None
             if owner_principal_id is None
-            else self._scope("session", "owner", owner_principal_id)
+            else self._scope("session", "owner", (owner_principal_id,))
         )
 
         async def read(transaction: StateTransaction) -> tuple[SessionRecord, ...]:
             records = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
+                    scope_key=scope,
                     kind="session",
                 )
             )
@@ -1081,7 +1081,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             else self._scope(
                 "session",
                 "owner",
-                owner_principal_id,
+                (owner_principal_id,),
             )
         )
 
@@ -1096,7 +1096,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             after_sort_key, after_key_digest = _decode_record_cursor(cursor)
             records = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=scope,
+                    scope_key=scope,
                     kind="session",
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
@@ -1107,7 +1107,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 last = records[-1]
                 probe = await transaction.list_records(
                     RecordQuery(
-                        scope_digest=scope,
+                        scope_key=scope,
                         kind="session",
                         after_sort_key=last.sort_key,
                         after_key_digest=last.key_digest,

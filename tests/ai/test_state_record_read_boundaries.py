@@ -104,8 +104,8 @@ def test_record_identity_still_validates_custom_mapping_behavior() -> None:
 @pytest.mark.parametrize("source", ("filesystem", "sql"))
 @pytest.mark.parametrize("field,value", (
     ("key_digest", "ab" * 31),
-    ("scope_digest", "not-a-digest"),
-    ("parent_digest", "AB" * 32),
+    ("scope_key", "not-a-digest"),
+    ("parent_key", "AB" * 32),
     ("subject_id", 1),
     ("sort_key", "non-ascii-\N{LATIN SMALL LETTER E WITH ACUTE}"),
 ))
@@ -116,7 +116,7 @@ def test_record_readers_reject_malformed_physical_identity(
     with pytest.raises(AIError) as raised:
         if source == "filesystem":
             wire_field = {
-                "key_digest": "key", "scope_digest": "scope", "parent_digest": "parent",
+                "key_digest": "key", "scope_key": "scope", "parent_key": "parent",
                 "subject_id": "subject", "sort_key": "sort",
             }[field]
             decode_record({**encode_record(record), wire_field: value})
@@ -153,8 +153,8 @@ def test_interaction_read_does_not_encode_a_second_body(
 
 @pytest.mark.parametrize("field,value", (
     ("key_digest", b"x" * 32),
-    ("scope_digest", b"x" * 32),
-    ("parent_digest", b"x" * 32),
+    ("scope_key", b"x" * 32),
+    ("parent_key", b"x" * 32),
     ("kind", "other"),
     ("sort_key", b"m:2"),
     ("state", "FAILED"),

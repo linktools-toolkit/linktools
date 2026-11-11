@@ -93,7 +93,7 @@ async def _stored_message_records(
         return tuple(ContentRecord.from_native_row(body) for body in bodies)
     content = await archive.transcript_repository.content_archive()
     records = await content.store.read(lambda tx: tx.list_records(RecordQuery(
-        kind="archive_content", scope_digest=bytes.fromhex(root.content_scope),
+        kind="archive_content", scope_key=bytes.fromhex(root.content_scope),
     )))
     return tuple(value for record in records for value in (ContentRecord.from_record(record),)
                  if value.codec == "model-message" and value.raw_digest in raw_ids)
@@ -438,7 +438,7 @@ async def test_identical_responses_keep_occurrences_through_trace_reopen_and_cle
 
             async def remove_retained_history(transaction: StateTransaction) -> None:
                 head_key = transcript.head_key("run")
-                children = await transaction.list_records(RecordQuery(parent_digest=head_key))
+                children = await transaction.list_records(RecordQuery(parent_key=head_key))
                 await transaction.delete_records((
                     *(item.key_digest for item in children),
                     transcript.projection_key("run"), head_key,

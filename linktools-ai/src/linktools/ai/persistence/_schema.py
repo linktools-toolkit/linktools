@@ -17,7 +17,7 @@ from ..storage import (
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES
+from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -86,10 +86,10 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 identity of the persisted runtime record.",
         ),
         Column(
-            "scope_digest",
-            digest,
+            "scope_key",
+            LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
             nullable=True,
-            comment="Canonical SHA-256 grouping key used by the record kind's primary list query.",
+            comment="Bounded binary grouping identity used by the record kind's primary list query.",
         ),
         Column(
             "subject_id",
@@ -98,10 +98,10 @@ def build_runtime_sql_metadata(
             comment="Exact UTF-8 subject identifier used for lookups within a record scope.",
         ),
         Column(
-            "parent_digest",
-            digest,
+            "parent_key",
+            LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
             nullable=True,
-            comment="Canonical SHA-256 identity of the logical parent used by hierarchical list queries.",
+            comment="Bounded binary parent identity used by hierarchical list queries.",
         ),
         Column(
             "kind",
@@ -160,9 +160,9 @@ def build_runtime_sql_metadata(
     )
     sql_unique(records, "store_digest", "key_digest")
     sql_query_index(records, "store_digest", "kind", "sort_key")
-    sql_query_index(records, "scope_digest", "sort_key")
-    sql_query_index(records, "scope_digest", "subject_id")
-    sql_query_index(records, "parent_digest", "sort_key")
+    sql_query_index(records, "scope_key", "sort_key")
+    sql_query_index(records, "scope_key", "subject_id")
+    sql_query_index(records, "parent_key", "sort_key")
     sql_audit_indexes(records)
 
     aliases = Table(

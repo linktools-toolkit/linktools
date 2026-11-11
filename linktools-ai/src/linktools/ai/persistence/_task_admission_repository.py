@@ -142,16 +142,16 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         return self._key("task_node_state", [graph_id, node_id])
 
     def _definition_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_node_definition", "graph", graph_id)
+        return self._parent("task_node_definition", "graph", (graph_id,))
 
     def _state_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_node_state", "graph", graph_id)
+        return self._parent("task_node_state", "graph", (graph_id,))
 
     def _admission_key(self, graph_id: str) -> bytes:
         return self._key("task_admission", graph_id)
 
     def _recovery_scope(self) -> bytes:
-        return self._scope("task_admission", "recoverable", "graphs")
+        return self._scope("task_admission", "recoverable", ("graphs",))
 
     def _submission_key(self, graph_id: str) -> bytes:
         return self._key("task_submission", graph_id)
@@ -178,8 +178,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_submission"
             or record.key_digest != self._submission_key(graph_id)
-            or record.scope_digest is not None
-            or record.parent_digest is not None
+            or record.scope_key is not None
+            or record.parent_key is not None
             or record.sort_key != record.key_digest
             or record.state not in {"prepared", "admitted", "cancelled"}
             or stored.namespace != self._namespace
@@ -469,13 +469,13 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         definition_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._definition_parent(graph_id),
+                parent_key=self._definition_parent(graph_id),
                 kind="task_node_definition",
             )
         )
         state_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._state_parent(graph_id),
+                parent_key=self._state_parent(graph_id),
                 kind="task_node_state",
             )
         )
@@ -518,8 +518,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_graph"
             or record.key_digest != self._graph_key(graph_id)
-            or record.scope_digest is not None
-            or record.parent_digest is not None
+            or record.scope_key is not None
+            or record.parent_key is not None
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -532,8 +532,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_admission"
             or record.key_digest != self._admission_key(graph_id)
-            or record.scope_digest != self._recovery_scope()
-            or record.parent_digest is not None
+            or record.scope_key != self._recovery_scope()
+            or record.parent_key is not None
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -547,8 +547,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_node_definition"
             or record.key_digest != self._definition_key(graph_id, node_id)
-            or record.scope_digest is not None
-            or record.parent_digest != self._definition_parent(graph_id)
+            or record.scope_key is not None
+            or record.parent_key != self._definition_parent(graph_id)
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -562,8 +562,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_node_state"
             or record.key_digest != self._state_key(graph_id, node_id)
-            or record.scope_digest is not None
-            or record.parent_digest != self._state_parent(graph_id)
+            or record.scope_key is not None
+            or record.parent_key != self._state_parent(graph_id)
             or record.sort_key != record.key_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -786,13 +786,13 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         stored_operation = await transaction.get_operation(operation_key_value)
         definition_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._definition_parent(graph.graph_id),
+                parent_key=self._definition_parent(graph.graph_id),
                 kind="task_node_definition",
             )
         )
         state_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._state_parent(graph.graph_id),
+                parent_key=self._state_parent(graph.graph_id),
                 kind="task_node_state",
             )
         )
@@ -979,13 +979,13 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         )
         definition_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._definition_parent(graph.graph_id),
+                parent_key=self._definition_parent(graph.graph_id),
                 kind="task_node_definition",
             )
         )
         state_records = await transaction.list_records(
             RecordQuery(
-                parent_digest=self._state_parent(graph.graph_id),
+                parent_key=self._state_parent(graph.graph_id),
                 kind="task_node_state",
             )
         )

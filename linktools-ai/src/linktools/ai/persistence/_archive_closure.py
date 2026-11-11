@@ -335,9 +335,9 @@ class ArchiveClosure(_SequenceClosure):
         for record in records:
             if record.kind not in {"archive_content", "archive_sequence"}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if record.scope_digest is None:
+            if record.scope_key is None or len(record.scope_key) != 32:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            scope = record.scope_digest.hex()
+            scope = record.scope_key.hex()
             try:
                 sort = record.sort_key.decode("ascii")
             except UnicodeError as error:

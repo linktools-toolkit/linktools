@@ -23,6 +23,7 @@ from .state import (
     StoredOperation,
     StoredRecord,
     validate_alias_key,
+    validate_relation_key,
     validate_operation_replacement,
     validate_record_identity,
     validate_record_replacement,
@@ -325,14 +326,15 @@ class _MemoryTransaction:
             self.guarded_record_keys.discard(key)
 
     async def read_record_subjects(
-        self, *, scope_digest: bytes, kind: str, subject_ids: Sequence[str],
+        self, *, scope_key: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...]:
+        validate_relation_key(scope_key)
         subjects = frozenset(validate_resource_id(subject) for subject in subject_ids)
         if not subjects:
             return ()
         return tuple(sorted(
             (record for record in self.records.values()
-             if record.scope_digest == scope_digest and record.kind == kind
+             if record.scope_key == scope_key and record.kind == kind
              and record.subject_id in subjects),
             key=lambda record: (record.sort_key, record.key_digest),
         ))
@@ -662,9 +664,9 @@ class _MemoryTransaction:
 
 
 def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
-    if query.scope_digest is not None and record.scope_digest != query.scope_digest:
+    if query.scope_key is not None and record.scope_key != query.scope_key:
         return False
-    if query.parent_digest is not None and record.parent_digest != query.parent_digest:
+    if query.parent_key is not None and record.parent_key != query.parent_key:
         return False
     if query.kind is not None and record.kind != query.kind:
         return False

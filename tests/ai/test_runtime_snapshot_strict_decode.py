@@ -53,7 +53,7 @@ from linktools.ai.persistence.state import (
     StoredRecord,
     alias_key,
     operation_key,
-    scope_digest,
+    scope_key,
     stream_digest,
 )
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
@@ -420,13 +420,13 @@ async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_bef
     )
     record = StoredRecord(
         b"x" * 32,
-        scope_digest(
+        scope_key(
             namespace,
             tenant_id,
             "conversation",
             "session",
             "owner",
-            session.owner_principal_id,
+            (session.owner_principal_id,),
         ),
         None,
         "session",
@@ -737,3 +737,25 @@ def test_snapshot_alias_binary_transport_roundtrips() -> None:
     with pytest.raises(AIError) as rejected:
         runtime_storage_snapshot_module._decode_snapshot_aliases([raw, raw])
     assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("family", ("memory_scope", "graph_parent"))
+def test_snapshot_oversized_relation_owners_report_integrity_errors(family: str) -> None:
+    from linktools.ai.persistence.contracts import MemoryRecord
+    from linktools.ai.storage import StoredPayload
+    from linktools.ai.task import TaskGraphView, TaskStatus
+
+    oversized = "x" * 1024
+    if family == "memory_scope":
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        value = MemoryRecord("memory", oversized, StoredPayload.inline_text("body"), {"path": "memory"}, 0, now, now)
+        domain, kind, identity = PersistenceDomain.MEMORY, "memory", "memory"
+    else:
+        value = TaskGraphView(oversized, TaskStatus.PENDING, ())
+        domain, kind, identity = PersistenceDomain.TASK, "task_graph", oversized
+    record = project_record(namespace="namespace", tenant_id="tenant", domain=domain,
+                            kind=kind, identity=identity, value=value, scope=b"s" * 32)
+    with pytest.raises(AIError) as error:
+        validate_snapshot_domain(namespace="namespace", tenant_id="tenant", domain=domain,
+                                 records=(record,), aliases=(), facts=(), operations=(), sequences={})
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

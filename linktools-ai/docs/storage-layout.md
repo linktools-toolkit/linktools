@@ -64,7 +64,7 @@ an equality predicate compatible with MySQL 5.7 index selection.
 
 Record and fact `subject_id` projections keep the original resource ID, using
 its existing nonempty, exact UTF-8 contract and 128-byte limit. They do not add a
-subject hash. Record lookup remains scoped by `scope_digest`; fact lookup and
+subject hash. Record lookup remains scoped by `scope_key`; fact lookup and
 latest-per-subject grouping remain scoped by `stream_digest`. Subject identity
 is immutable during record CAS, including changes between `None` and an ID.
 
@@ -72,8 +72,8 @@ The wire stores the original string. SQL encodes it once as UTF-8 in MySQL
 `VARBINARY(128)`, PostgreSQL `BYTEA` or SQLite `BLOB`, preserving case and Unicode
 code points without collation or normalization changes. Application validation
 enforces the byte limit on every backend. The record subject index declares at
-most 384 MySQL key bytes; the fact subject index declares 392 including its
-sequence. Their PostgreSQL payloads remain at most 192 and 200 bytes before
+most 1152 bytes on MySQL and PostgreSQL. The fact subject index declares 392
+MySQL key bytes including its sequence, or 200 PostgreSQL field bytes before
 index tuple overhead, well below an ordinary B-tree entry limit.
 
 This removes subject JSON serialization and hashing without another lookup or
@@ -128,6 +128,54 @@ Scope is repeated to preserve public shared-store isolation. A generated
 in-memory digest bytes. No universal storage or measured runtime speedup is
 implied.
 
+## State record relations
+
+`scope_key` and `parent_key` are nonempty binary addresses of at most 1024
+bytes. Direct relation helpers encode a flat sequence of exact UTF-8 strings:
+role (`scope` or `parent`), namespace, tenant, domain, record kind, relation,
+then each logical identity component. Every component has a fixed two-byte
+big-endian byte length. Scalars and nested JSON are not alternative encodings.
+The role keeps relation addresses distinct from other address families. Global
+scope remains in every key because public repositories can share one bare or
+custom StateStore across namespaces, tenants and domains.
+
+The complete encoded bound is checked at construction, queries and current
+SQL/file readers. Namespace and tenant keep their 256- and 128-byte limits;
+validated resource IDs use 128 bytes, principal IDs and local turn purposes
+use 256. Some domain DTOs, including graph and budget scope IDs, do not impose
+those individual bounds. Their actual restriction here is the complete encoded
+1024-byte relation limit, not a new 128-byte ID limit. With a 384-byte
+namespace/tenant pair, representative sizes at these component budgets are:
+
+| Relation family | Remaining payload and all frame bytes | Encoded bytes |
+| --- | --- | --- |
+| Session principal owner | scope5 + conversation12 + session7 + owner5 + principal256 + 14 | 683 |
+| Input capture principal owner | scope5 + task4 + input_capture13 + owner5 + principal256 + 14 | 681 |
+| Graph binding principal owner | scope5 + task4 + task_graph_binding_capture26 + owner5 + principal256 + 14 | 694 |
+| Turn purpose | scope5 + execution9 + turn4 + scope5 + purpose256 + 14 | 677 |
+| Idempotency resource pair | scope5 + domain12 + idempotency11 + resource8 + resource-kind14 + resource-ID128 + 16 | 578 |
+| Task definition parent with a 128-byte graph ID | parent6 + task4 + task_node_definition20 + graph5 + graph-ID128 + 14 | 561 |
+| Tool execution parent | parent6 + checkpoint10 + tool_operation14 + execution9 + execution-ID128 + 14 | 565 |
+
+Other direct resource relations use the same framing with their existing owner
+components; custom primitive relations are bounded by the complete 1024-byte
+limit. The existing memory-scope digest is a component, not recomputed as a
+second relation hash. Raw reused record-parent digests and ContentArchive's
+independent scope digest remain 32-byte values. Record keys, store identities,
+fact streams, fact owners, alias targets and native Step scopes retain their
+separate digest contracts in this change.
+
+SQL binds raw bytes as MySQL `VARBINARY(1024)`, PostgreSQL `BYTEA` or SQLite
+`BLOB`. `(scope_key, sort_key)` and `(parent_key, sort_key)` remain two-column
+indexes, with a complete field payload of 1024 + 1152 = 2176 bytes. Allowing
+40 bytes for headers, alignment and tuple overhead still fits PostgreSQL's
+ordinary approximately 2704-byte B-tree limit and MySQL's 3072-byte limit.
+`(scope_key, subject_id)` has at most 1152 field bytes. SQL still filters the
+store partition; no new mapping, SQL round trip, index prefix or compatibility
+encoding is introduced. Portable wire keeps canonical lowercase hex for these
+bounded binary values, with the existing format version. Snapshot readers
+recompute direct keys against the manifest scope rather than the destination.
+
 ## State record ordering
 
 `StoredRecord.sort_key`, query prefixes and pagination boundaries are nonempty
@@ -139,14 +187,15 @@ orders retain their ASCII semantics as ASCII bytes. No hex or Base64 encoding
 participates in SQL ordering.
 
 State uses `VARBINARY(1152)` on MySQL, `BYTEA` on PostgreSQL and `BLOB` on SQLite.
-Its indexes cover the full sort value, never a text or binary prefix. The widest
-sort index has three columns: `(store_digest, kind, sort_key)`. MySQL's declared
+Its indexes cover the full sort value, never a text or binary prefix. The
+three-column sort index is `(store_digest, kind, sort_key)`. MySQL's declared
 field budget is 256 + 128 + 1152 = 1536 bytes, below 3072 even allowing 32 bytes
 for variable-length and record overhead. PostgreSQL's maximum actual field
 payload is 64 + 128 + 1152 = 1344 bytes; a conservative 40-byte allowance for
 field headers, alignment and the index tuple remains below its approximately
-2704-byte B-tree entry limit. Scope/parent plus sort indexes are smaller. These
-are size calculations, not measurements on a deployed server.
+2704-byte B-tree entry limit. The wider two-column relation indexes have the
+2176-byte field budget described above. These are size calculations, not
+measurements on a deployed server.
 
 Binary prefixes use a lexicographic lower bound and their least upper bound;
 an all-`ff` prefix has no finite upper bound. Pagination uses `(sort, record

@@ -23,7 +23,7 @@ async def test_record_subject_reads_preserve_scope_kind_and_transaction_view(
     records = tuple(replace(_record(index), subject_id=subject, sort_key=b"equal")
                     for index in (1, 2))
     expected = tuple(sorted(records, key=lambda record: record.key_digest))
-    excluded = (replace(_record(3), subject_id=subject, scope_digest=_digest("other")),
+    excluded = (replace(_record(3), subject_id=subject, scope_key=_digest("other")),
                 replace(_record(4), subject_id=subject, kind="other"), _record(5))
     async with _open_store(backend, tmp_path / backend) as store:
         other = await store.storage_group.open_partition(_digest("other-store"), create=True)
@@ -33,15 +33,15 @@ async def test_record_subject_reads_preserve_scope_kind_and_transaction_view(
             assert isinstance(tx, RecordSubjectReader)
             await tx.insert_records((*records, *excluded))
             assert await tx.read_record_subjects(
-                scope_digest=scope, kind="probe", subject_ids=(subject, subject),
+                scope_key=scope, kind="probe", subject_ids=(subject, subject),
             ) == expected
         await store.mutate(seed)
         await other.mutate(lambda tx: tx.insert_record(replace(_record(6), subject_id=subject)))
         assert await store.read(lambda tx: tx.read_record_subjects(
-            scope_digest=scope, kind="probe", subject_ids=(subject, "absent"),
+            scope_key=scope, kind="probe", subject_ids=(subject, "absent"),
         )) == expected
         assert await store.read(lambda tx: tx.read_record_subjects(
-            scope_digest=scope, kind="probe", subject_ids=(),
+            scope_key=scope, kind="probe", subject_ids=(),
         )) == ()
 
 
@@ -85,11 +85,11 @@ async def test_sql_subject_reads_bound_parameters_and_globally_order_chunks(tmp_
         event.listen(engine, "before_cursor_execute", capture)
         try:
             assert await store.read(lambda tx: tx.read_record_subjects(
-                scope_digest=first.scope_digest, kind=first.kind, subject_ids=(),
+                scope_key=first.scope_key, kind=first.kind, subject_ids=(),
             )) == ()
             assert counts == []
             assert await store.read(lambda tx: tx.read_record_subjects(
-                scope_digest=first.scope_digest, kind=first.kind, subject_ids=(*subjects, *subjects),
+                scope_key=first.scope_key, kind=first.kind, subject_ids=(*subjects, *subjects),
             )) == (last, first)
         finally:
             event.remove(engine, "before_cursor_execute", capture)
@@ -98,7 +98,7 @@ async def test_sql_subject_reads_bound_parameters_and_globally_order_chunks(tmp_
 
 async def test_sql_subject_cas_batches_stay_within_parameter_budget(tmp_path: Path) -> None:
     records = tuple(replace(_record(index), subject_id=f"subject-{index}",
-                            parent_digest=_digest("parent")) for index in range(65))
+                            parent_key=_digest("parent")) for index in range(65))
     async with _open_store("sql", tmp_path / "sql") as store:
         await store.mutate(lambda tx: tx.insert_records(records))
         counts = []
@@ -140,7 +140,7 @@ async def test_sql_subject_lookup_query_plan(tmp_path: Path) -> None:
         try:
             selected = (records[0], records[1099])
             assert await store.read(lambda tx: tx.read_record_subjects(
-                scope_digest=records[0].scope_digest, kind="probe",
+                scope_key=records[0].scope_key, kind="probe",
                 subject_ids=tuple(record.subject_id for record in selected),
             )) == selected
         finally:
@@ -152,7 +152,7 @@ async def test_sql_subject_lookup_query_plan(tmp_path: Path) -> None:
             analyzed = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).all()
         for plan in (fresh, analyzed):
             details = " ".join(row[3] for row in plan)
-            assert "scope_digest_subject_id" in details
+            assert "scope_key_subject_id" in details
             assert "store_digest_kind_sort_key" not in details
         print(f"subject lookup fresh EXPLAIN: {fresh!r}")
         print(f"subject lookup analyzed EXPLAIN: {analyzed!r}")
@@ -200,7 +200,7 @@ async def test_subject_ids_preserve_exact_utf8_and_resource_boundaries(
         await store.mutate(seed)
         for record in records:
             assert await store.read(lambda tx: tx.read_record_subjects(
-                scope_digest=record.scope_digest, kind=record.kind, subject_ids=(record.subject_id,),
+                scope_key=record.scope_key, kind=record.kind, subject_ids=(record.subject_id,),
             )) == (record,)
         latest = await store.read(lambda tx: tx.list_facts(FactQuery(stream, latest_per_subject=True)))
         assert latest == facts[1:]

@@ -39,7 +39,7 @@ class ArchiveNodeRead:
 @runtime_checkable
 class ArchiveFrontierReader(Protocol):
     async def read_archive_frontiers(
-        self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
+        self, *, scope_key: bytes, requests: Sequence[ArchiveNodeRead],
         content_keys: Sequence[bytes] = (),
     ) -> "Mapping[bytes, StoredRecord] | None":
         """Return selected scoped records, or None only when unsupported."""

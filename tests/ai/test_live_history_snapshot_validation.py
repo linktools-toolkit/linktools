@@ -159,7 +159,7 @@ async def test_snapshot_model_interaction_records_validate_identity_and_sequence
         second = _interaction("run", 3 if corruption == "gap" else 2)
         record = archive._stored_interaction(first)
         if corruption == "owner":
-            record = replace(record, parent_digest=b"x" * 32)
+            record = replace(record, parent_key=b"x" * 32)
         elif corruption == "sequence":
             record = replace(record, sort_key=b"m:00000000000000000002")
         elif corruption == "state":
@@ -214,7 +214,7 @@ async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
         elif corruption == "ahead":
             records[records.index(marker)] = replace(marker, data={"sequence": 2})
         elif corruption == "wrong-owner":
-            records[records.index(marker)] = replace(marker, parent_digest=b"x" * 32)
+            records[records.index(marker)] = replace(marker, parent_key=b"x" * 32)
         aliases, sequences = canonical_snapshot_indexes(
             namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=tuple(records), facts=facts, operations=(),

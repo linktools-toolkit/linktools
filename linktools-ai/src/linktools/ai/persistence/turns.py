@@ -18,7 +18,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import Lease, TurnCoordination, TurnScope, TurnScopeIdentity, RenewingTurnScope
 from .state import (
     RecordLeaseTransition, RecordReplacement, StateStore, StateTransaction, StateTransactionNestingError,
-    StoredRecord, active_state_scope, record_key_digest, scope_digest,
+    StoredRecord, active_state_scope, record_key_digest, scope_key,
 )
 
 _Value = TypeVar("_Value")
@@ -69,7 +69,7 @@ class _TurnRecords:
         key = self.key(scope, kind, identity)
         return StoredRecord(
             key,
-            scope_digest(self.namespace, self.tenant_id, "execution", "turn", "scope", scope),
+            scope_key(self.namespace, self.tenant_id, "execution", "turn", "scope", (scope,)),
             None, kind, key, state, 0, None, 0, None, dict(data),
         )
 
@@ -83,8 +83,8 @@ class _TurnRecords:
                     continue
                 _text(data[key])
             expected = self.make(record.kind, data, state=record.state)
-            if (record.key_digest != expected.key_digest or record.scope_digest != expected.scope_digest
-                    or record.parent_digest is not None or record.sort_key != expected.sort_key):
+            if (record.key_digest != expected.key_digest or record.scope_key != expected.scope_key
+                    or record.parent_key is not None or record.sort_key != expected.sort_key):
                 raise _integrity()
             if record.kind == "turn_session":
                 if record.state == "IDLE":

@@ -273,7 +273,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def list_child_views(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        records = await self._records("execution", parent=self._parent("execution", "execution", execution_id))
+        records = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
         values = []
         for record in await self._execution_content.expand_bindings(records):
             header = decode_execution_header(record.data, tenant_id=tenant_id)
@@ -296,7 +296,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if parent is None:
                 return None, ()
             children = await self._records(
-                "execution", parent=self._parent("execution", "execution", execution_id),
+                "execution", parent=self._parent("execution", "execution", (execution_id,)),
             )
             return parent, tuple(children)
 
@@ -556,7 +556,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return ()
         records = await self._records(
             "execution",
-            scope=self._scope("execution", "session", session_id),
+            scope=self._scope("execution", "session", (session_id,)),
             states=None
             if statuses is None
             else frozenset(status.value for status in statuses) | {"execution_handoff"},
@@ -571,7 +571,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return ()
         records = await self._records(
             "execution",
-            parent=self._parent("execution", "execution", execution_id),
+            parent=self._parent("execution", "execution", (execution_id,)),
         )
         return await self._decode_many(records)
 
@@ -595,12 +595,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         scope = (
             None
             if session_id is None or parent_execution_id is not None
-            else self._scope("execution", "session", session_id)
+            else self._scope("execution", "session", (session_id,))
         )
         parent = (
             None
             if parent_execution_id is None
-            else self._parent("execution", "execution", parent_execution_id)
+            else self._parent("execution", "execution", (parent_execution_id,))
         )
         records = await self._records(
             "execution",
@@ -1525,7 +1525,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 "idempotency", "resource",
                 [ResourceKind.EXECUTION.value, commit.execution.execution_id],
             )
-            records = await transaction.list_records(RecordQuery(scope_digest=scope, kind="idempotency"))
+            records = await transaction.list_records(RecordQuery(scope_key=scope, kind="idempotency"))
             if len(records) > 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if not records:

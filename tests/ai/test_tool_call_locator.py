@@ -275,3 +275,24 @@ async def test_public_tool_repositories_isolate_recovery_aliases_on_one_store(
             repository = ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant)
             with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
                 await repository.get_by_call("foreign", "call", tenant_id=tenant)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sql"))
+@pytest.mark.parametrize("custom", (False, True))
+async def test_public_tool_relations_isolate_shared_run_and_execution_on_one_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, custom: bool,
+) -> None:
+    async with Persistence.open("host", tenant_id="host", storage=_storage(backend, tmp_path / "relations.db")) as state:
+        store = state.checkpoint.tools.state_store
+        if custom:
+            _custom_transactions(monkeypatch, backend, _WithoutSubjectReads)
+        scopes = (("namespace", "tenant"), ("other", "tenant"), ("namespace", "other"))
+        repositories = [ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant) for namespace, tenant in scopes]
+        values = [await repository.admit(replace(_request(), tool_operation_id=f"operation-{index}",
+                                                agent_run_id="shared-run", execution_id="shared-execution"))
+                  for index, repository in enumerate(repositories)]
+        for repository, (_, tenant), value in zip(repositories, scopes, values, strict=True):
+            assert await repository.list_by_agent_run("shared-run", tenant_id=tenant) == (value,)
+            assert await repository.list_by_execution("shared-execution", tenant_id=tenant) == (value,)
+            assert await repository.get_by_call_ids("shared-run", (value.tool_call_id,), tenant_id=tenant) == (value,)

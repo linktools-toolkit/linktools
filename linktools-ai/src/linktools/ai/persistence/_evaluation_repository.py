@@ -38,7 +38,7 @@ ValueT = TypeVar("ValueT")
 
 
 def _read_header(record: StoredRecord) -> tuple[object, ...]:
-    return (record.key_digest, record.scope_digest, record.parent_digest,
+    return (record.key_digest, record.scope_key, record.parent_key,
             record.kind, record.sort_key, record.state, record.storage_revision,
             record.lease_owner, record.lease_fence, record.lease_expires_at)
 
@@ -631,7 +631,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
         cursor = None
         while True:
             records = await self._records("evaluation_report", cursor=cursor, limit=1000,
-                scope=self._scope("evaluation_report", "experiment", cutoff.experiment_id))
+                scope=self._scope("evaluation_report", "experiment", (cutoff.experiment_id,)))
             for record in records:
                 report = await self._decode(record, EvaluationReport)
                 if report.cutoff == cutoff:

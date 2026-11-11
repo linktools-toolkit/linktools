@@ -53,6 +53,7 @@ from .state import (
     bind_state_scope,
     reset_state_transaction,
     validate_alias_key,
+    validate_relation_key,
     validate_operation_replacement,
     validate_record_identity,
     validate_record_replacement,
@@ -282,7 +283,7 @@ class SqlStateStorageGroup:
                 if existing is not None:
                     return existing
                 value = StoredRecord(
-                    key_digest=key, scope_digest=None, parent_digest=None,
+                    key_digest=key, scope_key=None, parent_key=None,
                     kind="archive_scope", sort_key=b"archive_scope", state=None,
                     storage_revision=0, lease_owner=None, lease_fence=0,
                     lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
@@ -339,7 +340,7 @@ class SqlStateStorageGroup:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
         record = StoredRecord(
-            key_digest=key, scope_digest=None, parent_digest=None,
+            key_digest=key, scope_key=None, parent_key=None,
             kind="archive_scope", sort_key=b"archive_scope", state=None,
             storage_revision=0, lease_owner=None, lease_fence=0,
             lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
@@ -1173,20 +1174,20 @@ class _SqlTransaction:
         }
 
     async def read_record_subjects(
-        self, *, scope_digest: bytes, kind: str, subject_ids: Sequence[str],
+        self, *, scope_key: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...]:
+        validate_relation_key(scope_key)
         subjects = tuple(dict.fromkeys(subject_ids))
         if not subjects:
             return ()
         from sqlalchemy import select
 
-        scope_hex = _hex(scope_digest)
         subject_values = tuple(validate_resource_id(subject).encode("utf-8") for subject in subjects)
         table = self._table("ai_state_records")
         records: list[StoredRecord] = []
         for offset in range(0, len(subjects), _RECORD_SUBJECT_READ_BATCH_SIZE):
             matches = select(table.c.id).where(
-                table.c.scope_digest == scope_hex,
+                table.c.scope_key == scope_key,
                 table.c.subject_id.in_(
                     subject_values[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]
                 ),
@@ -1203,13 +1204,13 @@ class _SqlTransaction:
         return tuple(records)
 
     async def read_archive_frontiers(
-        self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
+        self, *, scope_key: bytes, requests: Sequence[ArchiveNodeRead],
         content_keys: Sequence[bytes] = (),
     ) -> Mapping[bytes, StoredRecord] | None:
         dialect = self._context.engine.dialect
         if dialect.name not in {"sqlite", "mysql", "postgresql"}:
             return None
-        scope_hex = _hex(scope_digest)
+        validate_relation_key(scope_key)
         merged: dict[bytes, ArchiveNodeRead] = {}
         for request in requests:
             previous = merged.get(request.key_digest)
@@ -1222,7 +1223,7 @@ class _SqlTransaction:
             _hex(key)
         result: dict[bytes, StoredRecord] = {}
         for nodes, contents in self._archive_read_batches(tuple(merged.values()), direct):
-            statement = self._archive_read_statement(scope_hex, nodes, contents)
+            statement = self._archive_read_statement(scope_key, nodes, contents)
             compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
             parameter_count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
             if parameter_count > _ARCHIVE_READ_BIND_BUDGET:
@@ -1282,14 +1283,14 @@ class _SqlTransaction:
         return cast(text, BINARY() if self._context.dialect.name == "mysql" else LargeBinary())
 
     def _archive_read_statement(
-        self, scope_hex: str, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
+        self, scope_key: bytes, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
     ) -> "Select":
         from sqlalchemy import and_, literal, select, union
 
         table = self._table("ai_state_records")
         current = table.alias("archive_current")
         current_scope = and_(current.c.store_digest == self._store_hex,
-                             current.c.scope_digest == scope_hex, current.c.kind == "archive_sequence")
+                             current.c.scope_key == scope_key, current.c.kind == "archive_sequence")
         branches = []
         for slot, field in ((ArchiveNodeSlot.SELF, None), (ArchiveNodeSlot.LEFT, "left"),
                             (ArchiveNodeSlot.RIGHT, "right"), (ArchiveNodeSlot.NEXT, "next")):
@@ -1308,7 +1309,7 @@ class _SqlTransaction:
             if field is not None:
                 node = table.alias("archive_" + field)
                 joined = current.outerjoin(node, and_(
-                    node.c.store_digest == self._store_hex, node.c.scope_digest == scope_hex,
+                    node.c.store_digest == self._store_hex, node.c.scope_key == scope_key,
                     node.c.kind == "archive_sequence", node.c.sort_key == identity,
                 ))
             branches.append(select(literal("archive_content").label("kind"),
@@ -1317,13 +1318,13 @@ class _SqlTransaction:
         if content_keys:
             content = table.alias("archive_direct_content")
             branches.append(select(content.c.kind.label("kind"), content.c.sort_key.label("identity")).where(
-                content.c.store_digest == self._store_hex, content.c.scope_digest == scope_hex,
+                content.c.store_digest == self._store_hex, content.c.scope_key == scope_key,
                 content.c.kind == "archive_content", content.c.key_digest.in_(tuple(_hex(key) for key in content_keys)),
             ))
         keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
         # Keep the bounded identity set on the driving side of the row lookup.
         return select(table).select_from(keys.outerjoin(table, and_(
-            table.c.store_digest == self._store_hex, table.c.scope_digest == scope_hex,
+            table.c.store_digest == self._store_hex, table.c.scope_key == scope_key,
             table.c.kind == keys.c.kind, table.c.sort_key == keys.c.identity,
         )))
 
@@ -1457,7 +1458,7 @@ class _SqlTransaction:
         prepared = tuple(_record_values(value.record) for value in ordered)
         columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json", "payload_bytes")
-        identity_columns = ("scope_digest", "parent_digest", "subject_id", "kind", "sort_key")
+        identity_columns = ("scope_key", "parent_key", "subject_id", "kind", "sort_key")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
@@ -1776,10 +1777,10 @@ class _SqlTransaction:
 
         table = self._table("ai_state_records")
         conditions = [table.c.store_digest == self._store_hex]
-        if query.scope_digest is not None:
-            conditions.append(table.c.scope_digest == _hex(query.scope_digest))
-        if query.parent_digest is not None:
-            conditions.append(table.c.parent_digest == _hex(query.parent_digest))
+        if query.scope_key is not None:
+            conditions.append(table.c.scope_key == query.scope_key)
+        if query.parent_key is not None:
+            conditions.append(table.c.parent_key == query.parent_key)
         if query.kind is not None:
             conditions.append(table.c.kind == query.kind)
         if query.states is not None:
@@ -2460,7 +2461,7 @@ class _SqlTransaction:
         from sqlalchemy.dialects.mysql import BINARY
 
         conditions = []
-        for name in ("scope_digest", "parent_digest", "subject_id", "kind", "sort_key"):
+        for name in ("scope_key", "parent_key", "subject_id", "kind", "sort_key"):
             column = table.c[name]
             # MySQL text equality may ignore case or trailing spaces even when
             # the in-memory identity contract distinguishes those values.
@@ -2491,12 +2492,8 @@ def _record_values(
 ) -> dict[str, object]:
     values: dict[str, object] = {
         "key_digest": _hex(record.key_digest),
-        "scope_digest": None
-        if record.scope_digest is None
-        else _hex(record.scope_digest),
-        "parent_digest": None
-        if record.parent_digest is None
-        else _hex(record.parent_digest),
+        "scope_key": record.scope_key,
+        "parent_key": record.parent_key,
         "subject_id": None
         if record.subject_id is None
         else record.subject_id.encode("utf-8"),
@@ -2521,8 +2518,8 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
     try:
         record = StoredRecord(
             _row_digest(row["key_digest"]),
-            _row_digest_or_none(row["scope_digest"]),
-            _row_digest_or_none(row["parent_digest"]),
+            row["scope_key"],
+            row["parent_key"],
             _row_string(row["kind"]),
             row["sort_key"],
             _row_optional_string(row["state"]),
@@ -2639,10 +2636,6 @@ def _row_digest(value: object) -> bytes:
     if len(result) != 32 or result.hex() != value:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return result
-
-
-def _row_digest_or_none(value: object) -> bytes | None:
-    return None if value is None else _row_digest(value)
 
 
 def _row_subject_id(value: object) -> str | None:

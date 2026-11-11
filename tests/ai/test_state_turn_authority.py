@@ -686,7 +686,7 @@ async def test_pending_turn_uses_local_scope_with_maximum_namespace_and_compound
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(tmp_path, backend):
-    from linktools.ai.persistence.state import record_key_digest, scope_digest
+    from linktools.ai.persistence.state import record_key_digest, scope_key
 
     async with _open_store(backend, tmp_path / backend) as store:
         authority = _backend(store)
@@ -706,7 +706,7 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
                                     [invalid_scope, identity])
             invalid_records.append(replace(
                 record, key_digest=key, sort_key=key,
-                scope_digest=scope_digest(scope.namespace, scope.tenant_id, "execution", "turn", "scope", invalid_scope),
+                scope_key=scope_key(scope.namespace, scope.tenant_id, "execution", "turn", "scope", (invalid_scope,)),
                 data={**record.data, "scope": invalid_scope},
             ))
         with pytest.raises(AIError) as caught:

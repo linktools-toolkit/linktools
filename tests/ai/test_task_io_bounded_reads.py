@@ -314,7 +314,7 @@ async def test_execution_binding_rejects_corrupt_definition_without_changes(
             assert len(records) == 1
             record = records[0]
             assert await transaction.delete_record(record.key_digest, expected_storage_revision=record.storage_revision)
-            await transaction.insert_record(replace(record, parent_digest=b"x" * 32))
+            await transaction.insert_record(replace(record, parent_key=b"x" * 32))
 
         await repository.state_store.mutate(corrupt)
         method = repository.bind_execution if operation == "bind" else repository.handoff_execution

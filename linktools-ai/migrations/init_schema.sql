@@ -5,9 +5,9 @@ CREATE TABLE ai_state_records (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the persisted runtime record.',
-    scope_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping key used by the record kind''s primary list query.',
+    scope_key VARBINARY(1024) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
     subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
-    parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 identity of the logical parent used by hierarchical list queries.',
+    parent_key VARBINARY(1024) NULL COMMENT 'Bounded binary parent identity used by hierarchical list queries.',
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
     sort_key VARBINARY(1152) NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
@@ -21,9 +21,9 @@ CREATE TABLE ai_state_records (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest),
     KEY ix_store_digest_kind_sort_key (store_digest, kind, sort_key),
-    KEY ix_scope_digest_sort_key (scope_digest, sort_key),
-    KEY ix_scope_digest_subject_id (scope_digest, subject_id),
-    KEY ix_parent_digest_sort_key (parent_digest, sort_key),
+    KEY ix_scope_key_sort_key (scope_key, sort_key),
+    KEY ix_scope_key_subject_id (scope_key, subject_id),
+    KEY ix_parent_key_sort_key (parent_key, sort_key),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current durable state for runtime and step resources persisted as versioned records.';
 

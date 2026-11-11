@@ -891,8 +891,8 @@ class TranscriptRepository:
                 replacements.append(RecordReplacement(
                     replace(
                         value,
-                        scope_digest=current.scope_digest,
-                        parent_digest=current.parent_digest,
+                        scope_key=current.scope_key,
+                        parent_key=current.parent_key,
                         storage_revision=current.storage_revision + 1,
                     ),
                     current.storage_revision,
@@ -1584,8 +1584,8 @@ class TranscriptRepository:
         if not await transaction.replace_record(
             replace(
                 value,
-                scope_digest=current.scope_digest,
-                parent_digest=current.parent_digest,
+                scope_key=current.scope_key,
+                parent_key=current.parent_key,
                 storage_revision=current.storage_revision + 1,
             ),
             expected_storage_revision=current.storage_revision,

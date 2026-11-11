@@ -238,7 +238,7 @@ class BudgetRepositoryImpl(RepositoryBase):
             self._reject(usage.scope_id, "total_tokens", "unknown_usage")
         if usage.in_flight_model_requests:
             rows = await transaction.list_records(RecordQuery(
-                kind="budget_model", scope_digest=self._scope("budget_model", "budget", usage.scope_id),
+                kind="budget_model", scope_key=self._scope("budget_model", "budget", (usage.scope_id,)),
                 states=frozenset({"in_flight"}),
             ))
             if len(rows) != usage.in_flight_model_requests:
@@ -275,7 +275,7 @@ class BudgetRepositoryImpl(RepositoryBase):
                               in_flight_model_requests=usage.in_flight_model_requests + 1)
             await transaction.insert_record(self._stored(
                 "budget_model", identity, reservation,
-                scope=self._scope("budget_model", "budget", scope_id), state="in_flight",
+                scope=self._scope("budget_model", "budget", (scope_id,)), state="in_flight",
             ))
             await self._replace_usage(transaction, row, updated)
             return updated
@@ -334,7 +334,7 @@ class BudgetRepositoryImpl(RepositoryBase):
             )
             candidate = self._stored(
                 "budget_model", identity, replace(reservation, status=status, total_tokens=total_tokens),
-                scope=self._scope("budget_model", "budget", scope_id), state=status,
+                scope=self._scope("budget_model", "budget", (scope_id,)), state=status,
             )
             scope_candidate = self._stored("budget_scope", scope_id, updated)
             await transaction.replace_records((

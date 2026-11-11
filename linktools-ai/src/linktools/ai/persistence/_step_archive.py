@@ -100,10 +100,10 @@ from .state import (
     active_state_transaction,
     enter_run_history_lock,
     exit_run_history_lock,
-    parent_digest,
+    parent_key,
     record_key_digest,
     require_no_run_history_lock,
-    scope_digest,
+    scope_key,
     sortable_timestamp,
     stream_digest,
 )
@@ -2089,23 +2089,23 @@ class StateStepArchive(AgentRunStore):
             key,
             None
             if record.agent_conversation_id is None
-            else scope_digest(
+            else scope_key(
                 self._namespace,
                 self._tenant_id,
                 self._runtime_domain.value,
                 "agent_run",
                 "conversation",
-                record.agent_conversation_id,
+                (record.agent_conversation_id,),
             ),
             None
             if record.parent_agent_run_id is None
-            else parent_digest(
+            else parent_key(
                 self._namespace,
                 self._tenant_id,
                 self._runtime_domain.value,
                 "agent_run",
                 "parent",
-                record.parent_agent_run_id,
+                (record.parent_agent_run_id,),
             ),
             "agent_run",
             sortable_timestamp(record.started_at, key),
@@ -2131,25 +2131,25 @@ class StateStepArchive(AgentRunStore):
         if parent_agent_run_id is not None:
             query = RecordQuery(
                 kind="agent_run",
-                parent_digest=parent_digest(
+                parent_key=parent_key(
                     self._namespace,
                     self._tenant_id,
                     self._runtime_domain.value,
                     "agent_run",
                     "parent",
-                    parent_agent_run_id,
+                    (parent_agent_run_id,),
                 )
             )
         elif agent_conversation_id is not None:
             query = RecordQuery(
                 kind="agent_run",
-                scope_digest=scope_digest(
+                scope_key=scope_key(
                     self._namespace,
                     self._tenant_id,
                     self._runtime_domain.value,
                     "agent_run",
                     "conversation",
-                    agent_conversation_id,
+                    (agent_conversation_id,),
                 )
             )
         else:
@@ -3349,7 +3349,7 @@ class StateStepArchive(AgentRunStore):
                 None,
             )
             interactions = await transaction.list_records(RecordQuery(
-                parent_digest=self._agent_run_key(agent_run_id),
+                parent_key=self._agent_run_key(agent_run_id),
             ))
             await transaction.delete_records((
                 *(interaction.key_digest for interaction in interactions),
@@ -3480,7 +3480,7 @@ class StateStepArchive(AgentRunStore):
         sequence = record.data.get("sequence")
         if (record.key_digest != self._history_association_key(agent_run_id, "coverage", "event")
                 or record.kind != "history_association" or record.sort_key != b"coverage:event"
-                or record.parent_digest != self._agent_run_key(agent_run_id)
+                or record.parent_key != self._agent_run_key(agent_run_id)
                 or set(record.data) != {"sequence"} or isinstance(sequence, bool)
                 or not isinstance(sequence, int) or sequence < 1):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3689,7 +3689,7 @@ class StateStepArchive(AgentRunStore):
             if filtered:
                 return await scan_captured(transaction)
             records = await transaction.list_records(RecordQuery(
-                parent_digest=self._agent_run_key(agent_run_id), kind="history_association",
+                parent_key=self._agent_run_key(agent_run_id), kind="history_association",
                 sort_key_prefix=b"trace:", after_sort_key=after_sort_key,
                 limit=limit,
             ))

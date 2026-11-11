@@ -21,7 +21,7 @@ from .test_incremental_history_read_cost import _capture_fact_batches, _seed_tra
 async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> None:
     async def mutate(transaction) -> None:
         records = await transaction.list_records(RecordQuery(
-            parent_digest=archive._agent_run_key(run_id), kind="history_association",
+            parent_key=archive._agent_run_key(run_id), kind="history_association",
         ))
         await transaction.delete_records(tuple(
             record.key_digest for record in records

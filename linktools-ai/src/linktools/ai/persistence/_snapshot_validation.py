@@ -74,9 +74,9 @@ from .state import (
     StoredRecord,
     alias_key,
     operation_key,
-    parent_digest,
+    parent_key,
     record_key_digest,
-    scope_digest,
+    scope_key,
     sortable_timestamp,
     stream_digest,
 )
@@ -235,12 +235,15 @@ def validate_snapshot_domain(
 
     _validate_budget_projections(values)
 
-    graph_parents = _task_graph_parents(
-        namespace,
-        tenant_id,
-        domain,
-        values,
-    )
+    try:
+        graph_parents = _task_graph_parents(
+            namespace,
+            tenant_id,
+            domain,
+            values,
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if domain is PersistenceDomain.TASK:
         for record in records:
             if record.kind != "task_graph":
@@ -250,20 +253,20 @@ def validate_snapshot_domain(
                 continue
             graph = values[record.key_digest]
             states = tuple(value for value in values.values() if isinstance(value, TaskNodeView) and value.graph_id == graph.graph_id)
-            definition_parent = parent_digest(namespace, tenant_id, domain.value, "task_node_definition", "graph", graph.graph_id)
-            definitions = tuple(values[item.key_digest] for item in records if item.kind == "task_node_definition" and item.parent_digest == definition_parent)
+            definition_parent = parent_key(namespace, tenant_id, domain.value, "task_node_definition", "graph", (graph.graph_id,))
+            definitions = tuple(values[item.key_digest] for item in records if item.kind == "task_node_definition" and item.parent_key == definition_parent)
             summary.validate(states, definitions)
     associations = _history_association_records(namespace, tenant_id, domain, facts, values)
     associations_by_owner: dict[bytes | None, dict[bytes, StoredRecord]] = {}
     for key, association in associations.items():
-        associations_by_owner.setdefault(association.parent_digest, {})[key] = association
+        associations_by_owner.setdefault(association.parent_key, {})[key] = association
     event_counts: dict[bytes, int] = {}
     for fact in facts:
         if fact.kind == "step_event":
             event_counts[fact.owner_key_digest] = max(event_counts.get(fact.owner_key_digest, 0), fact.sequence)
     if domain is PersistenceDomain.TRACE:
         covered_owners = {
-            record.parent_digest for record in records
+            record.parent_key for record in records
             if record.kind == "history_association" and record.sort_key == b"coverage:event"
         }
         if set(event_counts) != covered_owners:
@@ -275,23 +278,26 @@ def validate_snapshot_domain(
             if record.sort_key == b"coverage:event":
                 _validate_history_association_coverage(
                     namespace, tenant_id, domain, record, records_by_key,
-                    event_counts.get(record.parent_digest, 0), values,
-                    associations_by_owner.get(record.parent_digest, {}),
+                    event_counts.get(record.parent_key, 0), values,
+                    associations_by_owner.get(record.parent_key, {}),
                 )
                 continue
             expected = associations.get(record.key_digest)
             if expected is None or not _same_physical_identity(record, expected) or record.data != expected.data:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             continue
-        expected = _expected_record(
-            namespace,
-            tenant_id,
-            domain,
-            record,
-            values[record.key_digest],
-            records_by_key,
-            graph_parents,
-        )
+        try:
+            expected = _expected_record(
+                namespace,
+                tenant_id,
+                domain,
+                record,
+                values[record.key_digest],
+                records_by_key,
+                graph_parents,
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if not _same_physical_identity(record, expected):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -535,14 +541,14 @@ def _validate_history_association_coverage(
     values: Mapping[bytes, object],
     associations: Mapping[bytes, StoredRecord],
 ) -> None:
-    run = values.get(record.parent_digest)
+    run = values.get(record.parent_key)
     if domain is not PersistenceDomain.TRACE or not isinstance(run, AgentRunRecord):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     covered = cast(int, record.data["sequence"])
     expected = StoredRecord(
         record_key_digest(namespace, tenant_id, domain.value, "history_association",
                           [run.agent_run_id, "coverage", "event"]),
-        None, record.parent_digest, "history_association", b"coverage:event",
+        None, record.parent_key, "history_association", b"coverage:event",
         None, record.storage_revision, None, 0, None, {"sequence": covered},
     )
     if covered != event_count or record.storage_revision < 1 or not _same_physical_identity(record, expected):
@@ -566,13 +572,13 @@ def _task_graph_parents(
     for value in values.values():
         if not isinstance(value, (TaskGraphView, TaskGraphAdmission)):
             continue
-        digest = parent_digest(
+        digest = parent_key(
             namespace,
             tenant_id,
             domain.value,
             "task_node_definition",
             "graph",
-            value.graph_id,
+            (value.graph_id,),
         )
         previous = result.get(digest)
         if previous is not None and previous != value.graph_id:
@@ -612,7 +618,7 @@ def _expected_record(
 
     if isinstance(value, BudgetModelReservation):
         _require_anchor(namespace, tenant_id, domain, records, "budget_scope", value.scope_id)
-        scope = scope_digest(namespace, tenant_id, domain.value, kind, "budget", value.scope_id)
+        scope = scope_key(namespace, tenant_id, domain.value, kind, "budget", (value.scope_id,))
         state = value.status
     elif isinstance(value, BudgetToolReservation):
         _require_anchor(namespace, tenant_id, domain, records, "budget_scope", value.scope_id)
@@ -670,18 +676,18 @@ def _expected_record(
         if (head is None or head.state not in {"admitted", "cancelled"}
                 or _decode_record(head) != TaskSubmissionRef.from_admission(namespace, value)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        scope = scope_digest(
+        scope = scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "recoverable",
-            "graphs",
+            ("graphs",),
         )
     elif isinstance(value, TaskNode):
-        if record.parent_digest is None or record.parent_digest not in graph_parents:
+        if record.parent_key is None or record.parent_key not in graph_parents:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        parent = record.parent_digest
+        parent = record.parent_key
         if any(
             reference.namespace != namespace or reference.tenant_id != tenant_id
             for reference in value.input_refs.values()
@@ -696,21 +702,21 @@ def _expected_record(
         _require_anchor(
             namespace, tenant_id, domain, records, "task_graph", value.graph_id
         )
-        scope = scope_digest(
+        scope = scope_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "graph",
-            value.graph_id,
+            (value.graph_id,),
         )
-        parent = parent_digest(
+        parent = parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "graph",
-            value.graph_id,
+            (value.graph_id,),
         )
     elif isinstance(value, TaskPreparedInputRecord):
         _require_anchor(
@@ -738,13 +744,13 @@ def _expected_record(
             )
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        parent = parent_digest(
+        parent = parent_key(
             namespace,
             tenant_id,
             domain.value,
             kind,
             "graph",
-            value.graph_id,
+            (value.graph_id,),
         )
     elif isinstance(value, TranscriptHeadRecord):
         if (
@@ -802,22 +808,22 @@ def _expected_record(
         state = value.status
     elif isinstance(value, AgentRunRecord):
         if value.agent_conversation_id is not None:
-            scope = scope_digest(
+            scope = scope_key(
                 namespace,
                 tenant_id,
                 domain.value,
                 kind,
                 "conversation",
-                value.agent_conversation_id,
+                (value.agent_conversation_id,),
             )
         if value.parent_agent_run_id is not None:
-            parent = parent_digest(
+            parent = parent_key(
                 namespace,
                 tenant_id,
                 domain.value,
                 kind,
                 "parent",
-                value.parent_agent_run_id,
+                (value.parent_agent_run_id,),
             )
         sort_key = sortable_timestamp(value.started_at, record.key_digest)
     elif isinstance(value, MemoryRecord):
@@ -865,8 +871,8 @@ def _record_identity(
     if isinstance(value, TaskNode):
         graph_id = (
             None
-            if record.parent_digest is None
-            else graph_parents.get(record.parent_digest)
+            if record.parent_key is None
+            else graph_parents.get(record.parent_key)
         )
         if graph_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -935,13 +941,13 @@ def _expected_session_turn_commit(
     )
     return StoredRecord(
         key,
-        scope_digest(
+        scope_key(
             namespace,
             tenant_id,
             domain.value,
             "session_turn_commit",
             "session",
-            session_id,
+            (session_id,),
         ),
         None,
         "session_turn_commit",
@@ -971,8 +977,8 @@ def _require_anchor(
 def _same_physical_identity(left: StoredRecord, right: StoredRecord) -> bool:
     return (
         left.key_digest == right.key_digest
-        and left.scope_digest == right.scope_digest
-        and left.parent_digest == right.parent_digest
+        and left.scope_key == right.scope_key
+        and left.parent_key == right.parent_key
         and left.subject_id == right.subject_id
         and left.kind == right.kind
         and left.sort_key == right.sort_key
