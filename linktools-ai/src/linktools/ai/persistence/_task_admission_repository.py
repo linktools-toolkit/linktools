@@ -49,7 +49,6 @@ from .state import (
     StoredOperation,
     StoredRecord,
     operation_key,
-    sortable_identity,
 )
 from ._task_events import (
     _TaskEventState,
@@ -181,7 +180,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             or record.key_digest != self._submission_key(graph_id)
             or record.scope_digest is not None
             or record.parent_digest is not None
-            or record.sort_key != sortable_identity(graph_id)
+            or record.sort_key != "i:" + record.key_digest.hex()
             or record.state not in {"prepared", "admitted", "cancelled"}
             or stored.namespace != self._namespace
             or stored.tenant_id != self._tenant_id
@@ -527,7 +526,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             or record.key_digest != self._graph_key(graph_id)
             or record.scope_digest is not None
             or record.parent_digest is not None
-            or record.sort_key != sortable_identity(graph_id)
+            or record.sort_key != "i:" + record.key_digest.hex()
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -541,7 +540,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             or record.key_digest != self._admission_key(graph_id)
             or record.scope_digest != self._recovery_scope()
             or record.parent_digest is not None
-            or record.sort_key != sortable_identity(graph_id)
+            or record.sort_key != "i:" + record.key_digest.hex()
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -556,7 +555,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             or record.key_digest != self._definition_key(graph_id, node_id)
             or record.scope_digest is not None
             or record.parent_digest != self._definition_parent(graph_id)
-            or record.sort_key != sortable_identity([graph_id, node_id])
+            or record.sort_key != "i:" + record.key_digest.hex()
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -571,7 +570,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             or record.key_digest != self._state_key(graph_id, node_id)
             or record.scope_digest is not None
             or record.parent_digest != self._state_parent(graph_id)
-            or record.sort_key != sortable_identity([graph_id, node_id])
+            or record.sort_key != "i:" + record.key_digest.hex()
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

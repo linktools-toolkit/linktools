@@ -63,7 +63,6 @@ from .state import (
     record_key_digest,
     require_no_run_history_lock,
     sequence_key,
-    sortable_identity,
     stream_digest,
 )
 
@@ -343,7 +342,7 @@ class TranscriptRepository:
             None,
             None,
             "transcript_head",
-            sortable_identity(head.owner_id),
+            "i:" + key.hex(),
             None,
             0,
             None,

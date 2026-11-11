@@ -652,12 +652,12 @@ async def test_operation_compaction_keeps_one_stream_anchor() -> None:
         )
         assert tuple(value.sequence for value in values) == (1, 2, 3)
 
-        await state.conversation.operations.compact_terminal(
+        assert await state.conversation.operations.compact_terminal(
             ResourceKind.SESSION,
             "session",
             tenant_id="tenant",
             through_sequence=3,
-        )
+        ) is None
 
         assert await state.conversation.operations.get(
             values[0].operation_id,

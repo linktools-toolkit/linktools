@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, TextContent, UserPromptPart
 
-from linktools.ai.core import canonical_json_bytes, canonical_sha256
+from linktools.ai.core import canonical_json_bytes, canonical_sha256, service_principal
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.inputs import AgentTaskInput, TaskGraphBindingCaptureStore, task_prompt_draft
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
@@ -30,19 +30,20 @@ from .test_evaluation_retention import Offline
 
 @pytest.mark.asyncio
 async def test_agent_capture_stores_only_binary_files_in_objects_and_roundtrips_snapshot(tmp_path: Path) -> None:
-    namespace = "capture-state"
+    namespace = "capture/命名:空间"
+    principal = service_principal("tenant/租户:2", "capture-owner")
     body = b"\x00\xffcapture-file" * 500
     prompt = ("Inspect this file", BinaryContent(body, media_type="application/octet-stream"))
     objects = InMemoryObjectStore()
     plan = PersistenceStorage.from_root(tmp_path / "source", exclusive_writer=True).plan
     source = PersistenceStorage.from_plan(plan, object_store=objects)
-    async with Persistence.open(namespace, storage=source, tenant_id=PRINCIPAL.tenant_id) as state, TaskEngine.open(persistence=state, context=CONTEXT) as engine:
-        text = await engine.inputs.create_agent_input("plain text" * 10000, principal=PRINCIPAL, idempotency_key="text")
+    async with Persistence.open(namespace, storage=source, tenant_id=principal.tenant_id) as state, TaskEngine.open(persistence=state, context=CONTEXT) as engine:
+        text = await engine.inputs.create_agent_input("plain text" * 10000, principal=principal, idempotency_key="text")
         assert [item async for item in objects.list_objects()] == []
-        captured = await engine.inputs.create_agent_input(prompt, principal=PRINCIPAL, idempotency_key="binary")
-        assert await engine.inputs.create_agent_input(prompt, principal=PRINCIPAL, idempotency_key="binary") == captured
+        captured = await engine.inputs.create_agent_input(prompt, principal=principal, idempotency_key="binary")
+        assert await engine.inputs.create_agent_input(prompt, principal=principal, idempotency_key="binary") == captured
         key, _ = input_capture_state_dependency(captured)
-        stored = await read_capture_record(state.task.tasks.state_store, namespace=namespace, tenant_id=PRINCIPAL.tenant_id, key=key)
+        stored = await read_capture_record(state.task.tasks.state_store, namespace=namespace, tenant_id=principal.tenant_id, key=key)
         assert base64.b64encode(body) not in canonical_json_bytes(dict(stored.data))
         refs = tuple(iter_runtime_object_refs(capture_retention_value(stored), default_domain=PersistenceDomain.TASK))
         assert refs
@@ -51,20 +52,20 @@ async def test_agent_capture_stores_only_binary_files_in_objects_and_roundtrips_
         for _domain, ref in refs:
             assert await read_runtime_object(objects, ref) == body
         assert len([item async for item in objects.list_objects()]) == 1
-        restored = await engine.inputs.read_agent(captured, principal=PRINCIPAL)
+        restored = await engine.inputs.read_agent(captured, principal=principal)
         assert [item.data for item in restored.prompt if isinstance(item, BinaryContent)] == [body]
         assert restored.prompt[0] == "Inspect this file" or (
             isinstance(restored.prompt[0], TextContent) and restored.prompt[0].text == "Inspect this file")
-        assert (await engine.inputs.read_agent(text, principal=PRINCIPAL)).prompt == "plain text" * 10000
+        assert (await engine.inputs.read_agent(text, principal=principal)).prompt == "plain text" * 10000
 
     snapshots = InMemoryObjectStore()
     limits = SnapshotLimits(max_entries=1000, max_bytes=4 * 1024 * 1024)
-    async with Persistence.open(namespace, storage=source, tenant_id=PRINCIPAL.tenant_id, read_only=True) as state:
+    async with Persistence.open(namespace, storage=source, tenant_id=principal.tenant_id, read_only=True) as state:
         snapshot = await state.export_snapshot(object_store=snapshots, limits=limits)
     target = tmp_path / "restored"
     await Persistence.restore_snapshot(snapshot, object_store=snapshots, root=target, limits=limits)
-    async with Persistence.open(namespace, storage=PersistenceStorage.from_root(target), tenant_id=PRINCIPAL.tenant_id) as state, TaskEngine.open(persistence=state, context=CONTEXT) as engine:
-        assert [item.data for item in (await engine.inputs.read_agent(captured, principal=PRINCIPAL)).prompt
+    async with Persistence.open(namespace, storage=PersistenceStorage.from_root(target), tenant_id=principal.tenant_id) as state, TaskEngine.open(persistence=state, context=CONTEXT) as engine:
+        assert [item.data for item in (await engine.inputs.read_agent(captured, principal=principal)).prompt
                 if isinstance(item, BinaryContent)] == [body]
 
 

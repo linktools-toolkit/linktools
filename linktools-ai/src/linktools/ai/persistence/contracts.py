@@ -1874,7 +1874,7 @@ class OperationLedgerRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         through_sequence: int,
-    ) -> str: ...
+    ) -> None: ...
 
 
 class TaskRepository(RuntimeRepository, Protocol):

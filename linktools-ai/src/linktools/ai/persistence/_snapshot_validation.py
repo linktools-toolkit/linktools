@@ -78,7 +78,6 @@ from .state import (
     record_key_digest,
     scope_digest,
     sequence_key,
-    sortable_identity,
     sortable_timestamp,
     stream_digest,
     subject_digest,
@@ -943,15 +942,11 @@ def _expected_session_turn_commit(
     _require_anchor(
         namespace, tenant_id, domain, records, "session", session_id
     )
-    identity = [session_id, turn_seq]
+    key = record_key_digest(
+        namespace, tenant_id, domain.value, "session_turn_commit", [session_id, turn_seq]
+    )
     return StoredRecord(
-        record_key_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            "session_turn_commit",
-            identity,
-        ),
+        key,
         scope_digest(
             namespace,
             tenant_id,
@@ -962,7 +957,7 @@ def _expected_session_turn_commit(
         ),
         None,
         "session_turn_commit",
-        sortable_identity(identity),
+        "i:" + key.hex(),
         None,
         record.storage_revision,
         None,

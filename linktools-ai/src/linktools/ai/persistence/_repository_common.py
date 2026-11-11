@@ -3,7 +3,6 @@
 """Shared backend-neutral repository primitives."""
 
 import base64
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -64,7 +63,6 @@ from .state import (
     record_key_digest,
     scope_digest,
     sequence_key,
-    sortable_identity,
     stream_digest,
     subject_digest,
 )
@@ -689,7 +687,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         *,
         tenant_id: str,
         through_sequence: int,
-    ) -> str:
+    ) -> None:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         stream = stream_digest(
@@ -701,7 +699,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         )
         async def compact(
             transaction: StateTransaction,
-        ) -> tuple[StoredOperation, ...]:
+        ) -> None:
             query = OperationQuery(
                 stream_digest=stream,
                 states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
@@ -710,12 +708,12 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
             )
             candidates = await transaction.list_operations(query)
             if len(candidates) <= 1:
-                return ()
+                return
             anchor = max(
                 candidates,
                 key=lambda value: (value.sequence, value.key_digest),
             )
-            return await transaction.delete_operations(
+            await transaction.delete_operations(
                 OperationQuery(
                     stream_digest=stream,
                     states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
@@ -724,20 +722,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
                 )
             )
 
-        values = await self._store.mutate(compact)
-        return hashlib.sha256(
-            canonical_json_bytes(
-                [
-                    {
-                        "key": value.key_digest.hex(),
-                        "stream": value.stream_digest.hex(),
-                        "sequence": value.sequence,
-                        "data": dict(value.data),
-                    }
-                    for value in values
-                ]
-            )
-        ).hexdigest()
+        await self._store.mutate(compact)
 
 
 def project_record(
@@ -775,12 +760,13 @@ def project_record(
     if isinstance(value, ExecutionRecord):
         state = _record_state(value)
     lease_owner, lease_fence, lease_expires_at = _record_lease(value)
+    key = record_key_digest(namespace, tenant_id, domain.value, kind, identity)
     return StoredRecord(
-        record_key_digest(namespace, tenant_id, domain.value, kind, identity),
+        key,
         scope,
         parent,
         kind,
-        sortable_identity(identity) if sort_key is None else sort_key,
+        "i:" + key.hex() if sort_key is None else sort_key,
         state,
         storage_revision,
         lease_owner,

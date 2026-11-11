@@ -43,7 +43,6 @@ from .state import (
     StoredFact,
     StoredRecord,
     sequence_key,
-    sortable_identity,
     stream_digest,
     subject_digest,
 )
@@ -481,13 +480,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     def _stored_timeline_commit(
         self, value: SessionTurnCommit
     ) -> StoredRecord:
-        identity = [value.session_id, value.turn_seq]
+        key = self._timeline_commit_key(value.session_id, value.turn_seq)
         return StoredRecord(
-            self._timeline_commit_key(value.session_id, value.turn_seq),
+            key,
             self._scope("session_turn_commit", "session", value.session_id),
             None,
             "session_turn_commit",
-            sortable_identity(identity),
+            "i:" + key.hex(),
             None,
             0,
             None,
@@ -525,7 +524,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             != self._scope("session_turn_commit", "session", session_id)
             or record.parent_digest is not None
             or record.kind != "session_turn_commit"
-            or record.sort_key != sortable_identity([session_id, turn_seq])
+            or record.sort_key != "i:" + record.key_digest.hex()
             or record.state is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -54,7 +54,6 @@ from linktools.ai.persistence.state import (
     operation_key,
     scope_digest,
     sequence_key,
-    sortable_identity,
     stream_digest,
 )
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
@@ -431,7 +430,7 @@ async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_bef
         ),
         None,
         "session",
-        sortable_identity(session.session_id),
+        "i:" + (b"x" * 32).hex(),
         session.status.value,
         0,
         None,
