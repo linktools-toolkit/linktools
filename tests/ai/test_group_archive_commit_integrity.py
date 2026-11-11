@@ -21,6 +21,7 @@ from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRu
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StoredRecord, active_state_scope
 from linktools.ai.storage import InMemoryObjectStore
+from linktools.ai.steps import native_store_locator
 
 from .test_pending_turn_commit import _commit, _pending_turn, _snapshot, _turn_state
 from .test_state_group_record_batch import _database, _record
@@ -96,7 +97,7 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
             prepared = result[1][0].archive
             retained = next(iter(prepared.native_messages.values()))
             identity, body = retained.messages[0]
-            rival = {"store_key": native.store_key, "sha256": identity,
+            rival = {"store_key": native.store_key, "store_locator": native_store_locator(native.store_key), "sha256": identity,
                      **body.to_native_values(), "raw_size": body.raw_size + 1}
             async with native.storage_context.engine.begin() as connection:
                 await connection.execute(insert(messages).values(**rival))
@@ -112,7 +113,7 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
         assert (await _snapshot(state), await native_snapshot()) == captured[0]
         async with native.storage_context.engine.connect() as connection:
             remaining = await connection.execute(select(
-                messages.c.store_key, messages.c.sha256, messages.c.message,
+                messages.c.store_key, messages.c.store_locator, messages.c.sha256, messages.c.message,
                 messages.c.compression, messages.c.raw_size, messages.c.payload_json,
             ))
             assert tuple(dict(row) for row in remaining.mappings()) == tuple(rivals)

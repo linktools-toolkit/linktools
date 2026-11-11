@@ -184,12 +184,13 @@ class _StateSnapshotReader:
         if self._trace_events is None:
             return None
         async def read(transaction: StateTransaction):
-            rows = await self._trace_events.scan(transaction, after=after, limit=limit)
+            rows = await self._trace_events.scan(transaction, after=after, limit=limit,
+                                                 native_events=self._native_events, full_source=True)
             if not rows:
                 return None
             facts = tuple(self._trace_events.row_to_fact(row) for row in rows)
             if self._native_events is not None:
-                facts = await self._native_events.resolve_trace_facts(transaction, facts, rows=rows, full_source=True)
+                facts = self._native_events.project_trace_facts(facts, rows=rows, full_source=True)
             return (rows[-1]["run_id"], rows[-1]["sequence"]), facts
         return await self._store.read(read)
 
@@ -1486,11 +1487,13 @@ async def restore_snapshot(
                     state_facts = tuple(value for value in facts if value.kind != "step_event")
                 await _insert_snapshot_values(transaction, records, aliases, state_facts, operations, sequences)
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
-                    from ._step_archive import StateStepArchive
+                    from ._model_interaction_store import ModelInteractionStateStepArchive
                     from ._step_contracts import AgentRunRecord, StepEvent
-                    trace = StateStepArchive(store, object_store=resources.object_stores[domain],
-                                             namespace=resources.namespace, tenant_id=resources.tenant_id,
-                                             runtime_domain=PersistenceDomain.TRACE)
+                    trace = ModelInteractionStateStepArchive(
+                        store, object_store=resources.object_stores[domain],
+                        namespace=resources.namespace, tenant_id=resources.tenant_id,
+                        runtime_domain=PersistenceDomain.TRACE,
+                    )
                     by_run = {}
                     for fact in facts:
                         if fact.kind == "step_event":

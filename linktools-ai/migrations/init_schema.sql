@@ -385,4 +385,4 @@ CREATE TABLE ai_trace_events (
 	KEY ix_store_key_run_id_tool_call_id (store_key, run_id, tool_call_id),
 	KEY ix_updated_at (updated_at),
 	UNIQUE KEY uk_store_key_run_id_sequence (store_key, run_id, sequence)
-)COMMENT='Immutable Trace events with direct history correlation and chronological queries.' ROW_FORMAT=DYNAMIC CHARSET=utf8mb4 ENGINE=InnoDB COLLATE utf8mb4_bin;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=DYNAMIC COMMENT='Immutable Trace events with direct history correlation and chronological queries.';

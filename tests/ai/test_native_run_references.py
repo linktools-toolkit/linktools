@@ -277,7 +277,7 @@ async def test_reference_promotion_rolls_back_with_original_projection_transacti
         state.run_store.confirm_step_run(source)
 
         def fail(_connection, _cursor, statement, _parameters, _context, _many):
-            if statement.startswith("INSERT INTO ai_state_facts "):
+            if statement.startswith("INSERT INTO ai_trace_events "):
                 raise RuntimeError("publication failed")
 
         engine = native.storage_context.engine
@@ -513,7 +513,8 @@ async def test_native_join_batches_full_record_keys_within_bind_budget(dialect_n
             parameters = compiled.params if compiled.positiontup is None else compiled.positiontup
             assert len(parameters) <= 999
             sql = str(compiled)
-            assert "ai_state_records.key_locator IN" in sql and "ai_state_records.key IN" in sql
+            raw_key = dialect.identifier_preparer.quote("key")
+            assert "ai_state_records.key_locator IN" in sql and f"ai_state_records.{raw_key} IN" in sql
             batches.append(tuple(keys))
             return ()
 

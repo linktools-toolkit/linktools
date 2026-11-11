@@ -22,6 +22,7 @@ from .state import (FactQuery, SqlStateRowReader, SqlStateTransaction, StateTran
 if TYPE_CHECKING:
     from sqlalchemy import Table, Select
     from sqlalchemy.ext.asyncio import AsyncSession
+    from ._native_event_reference import NativeEventReferences
 
 _REQUEST = "linktools.ai.model_request_seq"
 _MESSAGE = "linktools.ai.message_seq"
@@ -186,11 +187,16 @@ class SqlTraceEventStore:
         return tuple(self.row_to_fact(row) for row in await self.read_rows(transaction, query, sequences=sequences))
 
     async def read_rows(self, transaction: StateTransaction, query: FactQuery, *,
-                        sequences: Sequence[int] | None = None) -> tuple[Mapping[str, object], ...]:
+                        sequences: Sequence[int] | None = None,
+                        native_events: "NativeEventReferences | None" = None,
+                        full_source: bool = False) -> tuple[Mapping[str, object], ...]:
         from sqlalchemy import select
         table = self.table
-        statement = select(table).where(table.c.store_key == self.state.store_key,
-                                         table.c.run_id == _identity(self.run_id(query.stream_key)))
+        statement = select(table)
+        if native_events is not None:
+            statement = native_events.join_trace(statement, table, full_source=full_source)
+        statement = statement.where(table.c.store_key == self.state.store_key,
+                                    table.c.run_id == _identity(self.run_id(query.stream_key)))
         if query.subject_id is not None or sequences is not None and not sequences:
             return ()
         if query.after_sequence is not None:
@@ -286,12 +292,16 @@ class SqlTraceEventStore:
         await transaction.run_sql(self.state.context, write)
 
     async def scan(self, transaction: StateTransaction, *, after: tuple[bytes, int] | None = None,
-                   limit: int = 256) -> tuple[Mapping[str, object], ...]:
+                   limit: int = 256, native_events: "NativeEventReferences | None" = None,
+                   full_source: bool = False) -> tuple[Mapping[str, object], ...]:
         from sqlalchemy import and_, or_, select
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("Trace page limit must be between 1 and 1000")
         t = self.table.c
-        statement = select(self.table).where(t.store_key == self.state.store_key)
+        statement = select(self.table)
+        if native_events is not None:
+            statement = native_events.join_trace(statement, self.table, full_source=full_source)
+        statement = statement.where(t.store_key == self.state.store_key)
         if after is not None:
             statement = statement.where(or_(t.run_id > after[0], and_(t.run_id == after[0], t.sequence > after[1])))
         return await self._rows(transaction, statement.order_by(t.run_id, t.sequence).limit(limit))

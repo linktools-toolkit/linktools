@@ -59,8 +59,11 @@ def build_runtime_sql_metadata(
 
     if metadata is None:
         metadata = MetaData()
-    trace_selected = (PersistenceDomain.TRACE in plan if isinstance(plan, frozenset)
-                      else plan.route(PersistenceDomain.TRACE).retention.value == "durable")
+    if isinstance(plan, frozenset):
+        # Execution's default Trace route owns retained history in this schema.
+        trace_selected = bool(plan.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}))
+    else:
+        trace_selected = plan.route(PersistenceDomain.TRACE).retention.value == "durable"
     if trace_selected:
         from ._trace_schema import build_trace_sql_metadata
         build_trace_sql_metadata(metadata=metadata)

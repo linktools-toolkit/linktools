@@ -692,7 +692,7 @@ async def test_turn_reader_rejects_oversize_local_scope_with_matching_addresses(
         authority = _backend(store)
         scope = replace(_SCOPE, scope="é" * 64)
         owner = await authority.claim_turn(scope, session_key="session:" + "s" * 128,
-                                          request_key="r" * 385, request_digest="digest",
+                                          request_key="r" * 257, request_digest="digest",
                                           execution_id="e", owner_id="o", lease_seconds=60)
         assert await authority.read_turn(scope, "e") == replace(owner, lease=None)
         records = await store.read(lambda tx: tx.scan_records())

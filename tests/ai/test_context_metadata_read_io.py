@@ -3,6 +3,7 @@
 """Context metadata is captured together before loading any payloads."""
 
 from linktools.ai.persistence import Persistence
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,8 @@ async def test_empty_context_batches_projection_and_head(
         assert cold.model_messages() == ()
         cold_selects = [(sql, parameters) for sql, parameters in cold_queries if sql.startswith("SELECT")]
         scope_key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
-        assert sum(scope_key in parameters for _, parameters in cold_selects) == 1
+        scope_locator = sha256(scope_key).hexdigest()
+        assert sum(scope_key in parameters or scope_locator in parameters for _, parameters in cold_selects) == 1
         assert len(cold_selects) == 2
         assert not any(name in sql for sql, _ in cold_selects
                        for name in ("ai_step_messages", "ai_step_sequences", "ai_objects"))

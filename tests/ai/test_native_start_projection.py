@@ -165,7 +165,9 @@ async def _runtime_start(tmp_path: Path, *, outcome: str = "success", backend: s
 
 
 async def _raw_events(archive, run_id: str):
-    return await archive.state_store.read(lambda tx: tx.list_facts(FactQuery(archive._stream(run_id, "event"))))
+    assert archive._trace_events is not None
+    return await archive.state_store.read(lambda tx: archive._trace_events.read(
+        tx, FactQuery(archive._stream(run_id, "event"))))
 
 
 @pytest.mark.asyncio
@@ -339,10 +341,12 @@ async def test_portable_trace_exports_complete_start_without_rewriting_sidecar(t
                 object_store=target, limits=SnapshotLimits(max_entries=10000, max_bytes=10000000))
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
-        fact_reads = [sql for sql in traffic.sql if sql.lstrip().upper().startswith("SELECT") and "FROM ai_state_facts" in sql]
+        trace_reads = [sql for sql in traffic.sql if sql.lstrip().upper().startswith("SELECT") and "FROM ai_trace_events" in sql]
         traffic.report(record_property, "portable_export")
-        assert len(fact_reads) == 1
-        assert "JOIN ai_step_events" in fact_reads[0]
+        assert len(trace_reads) == 1
+        assert "JOIN ai_step_events" in trace_reads[0]
+        assert "ai_step_events.metadata" in trace_reads[0]
+        assert "ai_step_runs.metadata" in trace_reads[0]
         manifest = json.loads(await read_object(target, ref.key, expected_digest=ref.digest, expected_size=ref.size))
         facts = [decode_fact(value) for value in manifest["domains"]["trace"]["facts"]]
         exported = next(fact for fact in facts if fact.kind == "step_event" and fact.state == "AGENT_RUN_STARTED")
@@ -664,25 +668,33 @@ async def test_large_metadata_is_not_returned_by_cold_trace_select(tmp_path: Pat
             cold = await state.create_agent_run_store()
             try:
                 archive = cold.read_store(PersistenceDomain.TRACE)
-                references = NativeEventReferences(archive.state_store, namespace="native-start", tenant_id="default")
-                query = references.statement(query=FactQuery(archive._stream(run.run_id, "event"), limit=1))
+                assert archive._trace_events is not None and archive._native_events is not None
+                query = FactQuery(archive._stream(run.run_id, "event"), limit=1)
                 traffic = _Traffic()
                 engine = native.storage_context.engine
                 event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
                 try:
-                    rows = await archive.state_store.read(lambda tx: tx.read_joined_facts(archive.state_store.context, query))
+                    rows = await archive.state_store.read(lambda tx: archive._trace_events.read_rows(
+                        tx, query, native_events=archive._native_events))
                 finally:
                     event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
-                # Values come from the actual returned SQL mapping, not a DTO.
+                # Count returned SQL values, including the driver-decoded JSON
+                # payload in canonical bytes, not a projected event DTO.
                 # Numeric/driver framing/disk bytes are deliberately not included.
-                returned_bytes = sum(_SqlTraffic._bytes(value) for _, row in rows for value in row.values())
+                assert len(rows) == 1
+                assert rows[0]["kind"] == "AGENT_RUN_STARTED"
+                assert rows[0]["native_kind"] == "run_started"
+                returned_bytes = sum(len(canonical_json_bytes(value)) if isinstance(value, dict)
+                                     else _SqlTraffic._bytes(value) for row in rows for value in row.values())
                 returned_sizes.append(returned_bytes)
                 traffic.report(record_property, f"metadata_{size}")
-                record_property(f"metadata_{size}_returned_sql_text_binary_bytes", returned_bytes)
+                record_property(f"metadata_{size}_returned_sql_value_logical_bytes", returned_bytes)
                 assert traffic.statements["SELECT"] == 1
+                assert "FROM ai_trace_events" in traffic.selects[0]
+                assert "JOIN ai_step_events" in traffic.selects[0]
                 assert "ai_step_events.metadata" not in traffic.selects[0]
                 assert "ai_step_runs.metadata" not in traffic.selects[0]
-                assert all("native_metadata" not in row for _, row in rows)
+                assert all("native_metadata" not in row for row in rows)
             finally:
                 await cold.preflight_close()
                 await cold.close()
@@ -758,7 +770,7 @@ async def test_runtime_recovers_trace_start_commit_ack_loss_with_joined_readback
     marker = "native_start_test_ack_loss"
 
     def mark_start(connection, _cursor, statement, parameters, _context, _many):
-        if (not lost and statement.startswith("INSERT INTO ai_state_facts ")
+        if (not lost and statement.startswith("INSERT INTO ai_trace_events ")
                 and "native_event_reference" in str(parameters)):
             connection.info[marker] = True
 
@@ -788,6 +800,7 @@ async def test_runtime_recovers_trace_start_commit_ack_loss_with_joined_readback
         assert traffic.statements["SELECT"] == 1
         assert "JOIN ai_step_events" in traffic.selects[0]
         assert "ai_step_events.metadata" in traffic.selects[0]
+        assert "ai_step_runs.metadata" in traffic.selects[0]
         checked_ranges.append(result)
         return result
 
@@ -1073,8 +1086,9 @@ def test_terminal_source_join_keeps_explicit_locator_bind_budget(dialect_name: s
     assert locators <= compiled.params.keys()
     assert compiled.params["source_run_id"] == "run"
     assert compiled.params["source_event_key"] == source.idempotency_key.encode("utf-8")
-    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 4
-    ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(998))).compile(
+    assert len(compiled.params if compiled.positiontup is None else compiled.positiontup) == 5
+    # Each record binds its indexed locator and exact key beside the partition.
+    ordinary = references.statement(keys=tuple(index.to_bytes(32, "big") for index in range(499))).compile(
         dialect=dialect, compile_kwargs={"render_postcompile": True})
     assert not locators.intersection(ordinary.params)
     assert len(ordinary.params if ordinary.positiontup is None else ordinary.positiontup) == 999

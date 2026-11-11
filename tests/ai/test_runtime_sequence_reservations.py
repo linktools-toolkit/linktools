@@ -3,6 +3,7 @@
 """Sequence reservations retain transaction truth across scalar and batch SQL."""
 
 import asyncio
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -73,8 +74,8 @@ async def test_sequence_reservations_preserve_batch_rollback_and_concurrent_trut
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rowcount,lastrowid,expected", ((1, 41, 5), (2, 12, 12)))
-async def test_mysql_single_sequence_uses_insert_or_increment_result(
+@pytest.mark.parametrize("rowcount,lastrowid,expected", ((1, 41, 5), (2, 12, 17)))
+async def test_mysql_single_sequence_validates_identity_before_caching_result(
     rowcount: int, lastrowid: int, expected: int,
 ) -> None:
     statements: list[Executable] = []
@@ -84,6 +85,10 @@ async def test_mysql_single_sequence_uses_insert_or_increment_result(
             statements.append(statement)
             return SimpleNamespace(rowcount=rowcount, lastrowid=lastrowid)
 
+        async def scalar(self, statement: Executable) -> int:
+            statements.append(statement)
+            return expected
+
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     context = SqlStorageContext(engine, async_sessionmaker(engine), MySQLDialect())
     transaction = _SqlTransaction(Session(), build_runtime_sql_metadata(frozenset(PersistenceDomain)), context, b"s" * 32)
@@ -91,10 +96,24 @@ async def test_mysql_single_sequence_uses_insert_or_increment_result(
     try:
         assert await transaction.reserve_sequences({key: 5}) == {key: expected}
         assert await transaction.get_sequence(key) == expected
-        assert len(statements) == 1
+        assert len(statements) == 2
         compiled = statements[0].compile(dialect=mysql.dialect())
-        assert "last_insert_id(ai_state_sequences.value + " in str(compiled)
+        assert (
+            "ON DUPLICATE KEY UPDATE value = CASE WHEN "
+            "(ai_state_sequences.stream_key <=> VALUES(stream_key)) "
+            "THEN ai_state_sequences.value + %s ELSE ai_state_sequences.value END"
+        ) in str(compiled)
+        assert compiled.params[compiled.positiontup[-1]] == 5
         assert compiled.params["value"] == 5
+        assert compiled.params["stream_key"] == key
+        readback = statements[1].compile(dialect=mysql.dialect())
+        assert (
+            "WHERE ai_state_sequences.store_key = %s AND "
+            "ai_state_sequences.stream_locator = %s AND ai_state_sequences.stream_key = %s"
+        ) in str(readback)
+        assert tuple(readback.params[name] for name in readback.positiontup) == (
+            b"s" * 32, sha256(key).hexdigest(), key,
+        )
     finally:
         await engine.dispose()
 

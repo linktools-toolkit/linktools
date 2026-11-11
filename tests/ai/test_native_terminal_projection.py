@@ -10,14 +10,14 @@ from pydantic_ai_harness.step_persistence import RunRecord
 import pytest
 from sqlalchemy import delete, event, select, update
 
-from linktools.ai.core import canonical_json_bytes
+from linktools.ai.core import canonical_json_bytes, deterministic_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain, SqlStepStore
 from linktools.ai.persistence._native_event_reference import NativeEventReferences
 from linktools.ai.persistence._official_step_reader import OfficialStepReader
 from linktools.ai.persistence._step_archive import PreparedExecutionProjection
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
-from linktools.ai.persistence.codec import _encode_step_envelope
+from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
 from linktools.ai.steps import NativeLifecycleEvent
 
 from .test_native_started_source import native, records, managed_commit
@@ -129,7 +129,7 @@ async def test_owned_runtime_terminal_is_native_with_only_trace_position(
             "run": ended.run_id, "replay": ended.idempotency_key, "index": projected.event_index,
         }}
         assert [item.event_index for item in trace] == list(range(len(trace)))
-        assert [item.sequence for item in raw] == list(range(1, len(raw) + 1))
+        assert [item.sequence for item in raw] == list(range(1, len(trace) + 1))
         traffic.report(record_property, outcome)
         record_property("terminal_sidecar_logical_json_bytes", len(canonical_json_bytes(dict(fact.data))))
         record_property("terminal_former_inline_logical_json_bytes", len(canonical_json_bytes(_encode_step_envelope(projected))))
@@ -237,7 +237,9 @@ async def test_resolved_error_transform_keeps_original_native_and_trace_observat
         assert failures[0].error == repr(RuntimeError("transformed terminal diagnostic"))
         assert not any(isinstance(item, NativeLifecycleEvent) for item in sources)
         raw = await _raw_events(archive, run.run_id)
-        assert next(item for item in raw if item.state == "AGENT_RUN_FAILED").data["value"]["type"] != "native_event_reference"
+        failure, = [item for item in raw if item.state == "AGENT_RUN_FAILED"]
+        assert failure.data["value"]["type"] != "native_event_reference"
+        assert _decode_step_envelope(failure.data) == trace_failures[0]
 
 
 @pytest.mark.asyncio
@@ -444,5 +446,5 @@ async def test_shared_diagnostic_is_produced_once_and_later_native_key_keeps_its
     events = await source.list_events(run_id="run")
     assert [item.kind for item in events] == ["run_started", "run_failed", "run_failed"]
     assert events[1].error == "diagnostic-1" and events[2].error == "diagnostic-2"
-    assert events[2].idempotency_key == f"2:{ctx.run_step}:run_failed:"
+    assert events[2].idempotency_key == deterministic_id(2, ctx.run_step, "run_failed", None)
     assert original.calls == 2

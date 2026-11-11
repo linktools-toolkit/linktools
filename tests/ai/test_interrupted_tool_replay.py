@@ -131,7 +131,8 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
         assert [event.error for event in events if event.error is not None] == [
             "unknown attempt 0", "unknown attempt 1",
         ]
-        records = await archive.state_store.read(lambda tx: tx.scan_records())
+        records = tuple(record for record in await archive.state_store.read(lambda tx: tx.scan_records())
+                        if record.kind != "history_association")
         facts = tuple(sorted(
             await archive.state_store.read(lambda tx: tx.scan_facts()),
             key=lambda fact: (fact.stream_key, fact.sequence),

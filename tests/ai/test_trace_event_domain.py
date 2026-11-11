@@ -167,8 +167,8 @@ async def test_trace_event_has_no_state_fact_or_association_shadow(
             archive._stream(run_id, "event"),
         )))
         if backend == "sqlite":
-            assert records == []
-            assert facts == []
+            assert not records
+            assert not facts
         assert await archive.list_events(agent_run_id=run_id) == [event]
 
 

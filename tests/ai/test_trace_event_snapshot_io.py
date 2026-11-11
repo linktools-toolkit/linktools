@@ -18,7 +18,8 @@ from .test_step_archive_read_boundaries import _archive
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, backend: str) -> None:
+@pytest.mark.parametrize("target_backend", ("memory", "sqlite"))
+async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, backend: str, target_backend: str) -> None:
     limits = SnapshotLimits(1000, 2**20)
     transport = InMemoryObjectStore("portable")
     objects = InMemoryObjectStore("runtime")
@@ -32,8 +33,9 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
 
     async with _archive(tmp_path, backend) as (_state, archive, run):
         await archive.register_agent_run(run, execution_id="execution")
-        events = [StepEvent("run", "MODEL_REQUEST_STARTED", index,
-                            metadata={"linktools.ai.model_request_seq": str(index)}) for index in range(1, 4)]
+        events = [StepEvent("run", "MODEL_REQUEST_SUCCEEDED", index,
+                            metadata={"linktools.ai.model_request_seq": str(index),
+                                      "linktools.ai.message_seq": str(index)}) for index in range(1, 4)]
         for value in events:
             await archive.append_event(value, execution_id="execution")
         source = resources(archive.state_store, read_only=True)
@@ -43,7 +45,8 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
         assert limited.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
         reference = await operations.export_snapshot(object_store=transport, limits=limits)
 
-    storage = PersistenceStorage.sqlite(tmp_path / "restored.sqlite")
+    storage = (PersistenceStorage.in_memory() if target_backend == "memory"
+               else PersistenceStorage.sqlite(tmp_path / "restored.sqlite"))
     async with Persistence.open("archive-boundaries", tenant_id="tenant", storage=storage) as target:
         restored = target.run_store.read_store(PersistenceDomain.TRACE)
 
@@ -54,8 +57,14 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
         await restore_snapshot(reference, object_store=transport, root=tmp_path / "restored",
                                limits=limits, open_target=open_target)
         assert await restored.list_events(agent_run_id="run") == events
-        assert not any(value.kind == "step_event" for value in await restored.state_store.read(lambda tx: tx.scan_facts()))
-        assert not any(value.kind == "history_association" for value in await restored.state_store.read(lambda tx: tx.scan_records()))
+        if target_backend == "sqlite":
+            assert not any(value.kind == "step_event" for value in await restored.state_store.read(lambda tx: tx.scan_facts()))
+            assert not any(value.kind == "history_association" for value in await restored.state_store.read(lambda tx: tx.scan_records()))
+        else:
+            assert await restored.read_history_associations(
+                agent_run_id="run", message_seqs=(1, 2, 3),
+                tool_call_ids=(), event_high_water=3,
+            ) == events
         roundtrip = await RuntimeSnapshotOperations(resources(restored.state_store, read_only=True),
                                                     require_ready=lambda: None).export_snapshot(
             object_store=transport, limits=limits,

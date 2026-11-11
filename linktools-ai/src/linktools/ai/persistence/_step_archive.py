@@ -1235,9 +1235,10 @@ class StateStepArchive(AgentRunStore):
                                *, sequences: Sequence[int] | None = None,
                                full_source: bool = False) -> tuple[StoredFact, ...]:
         if self._trace_events is not None:
-            rows = await self._trace_events.read_rows(transaction, query, sequences=sequences)
+            rows = await self._trace_events.read_rows(transaction, query, sequences=sequences,
+                native_events=self._native_events, full_source=full_source)
             facts = tuple(self._trace_events.row_to_fact(row) for row in rows)
-            return (await self._native_events.resolve_trace_facts(transaction, facts, rows=rows, full_source=full_source)
+            return (self._native_events.project_trace_facts(facts, rows=rows, full_source=full_source)
                     if self._native_events is not None else facts)
         if self._native_events is not None:
             return await self._native_events.read(transaction, query=query, sequences=sequences, full_source=full_source)

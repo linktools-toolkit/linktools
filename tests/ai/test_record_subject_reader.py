@@ -152,8 +152,8 @@ async def test_sql_subject_lookup_query_plan(tmp_path: Path) -> None:
             analyzed = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).all()
         for plan in (fresh, analyzed):
             details = " ".join(row[3] for row in plan)
-            assert "scope_key_subject_id" in details
-            assert "store_key_kind_sort_key" not in details
+            assert "scope_locator_subject_id" in details
+            assert "store_key_kind_sort_prefix" not in details
         print(f"subject lookup fresh EXPLAIN: {fresh!r}")
         print(f"subject lookup analyzed EXPLAIN: {analyzed!r}")
         assert fresh and analyzed
