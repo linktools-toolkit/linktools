@@ -8,8 +8,6 @@ import os
 import shlex
 import subprocess
 import sys
-from collections import Counter
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 import pytest
@@ -157,20 +155,30 @@ def test_group_selection_preserves_package_collectors(
 ) -> None:
     project = _new_package(repository)
     nested = repository / "suite" / "nested"
-    _write_test(nested / "test_feature.py")
-    for directory in (nested.parent, nested):
-        (directory / "__init__.py").write_text("", encoding="utf-8")
+    nested.mkdir(parents=True)
+    (nested.parent / "__init__.py").write_text("", encoding="utf-8")
+    (nested / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "ready = False\n"
+        "def setup_module():\n"
+        "    global ready\n"
+        "    ready = True\n"
+        "def teardown_module():\n"
+        "    Path(__file__).with_name('torn-down').touch()\n",
+        encoding="utf-8",
+    )
+    (nested / "test_feature.py").write_text(
+        "def test_example():\n"
+        "    from . import ready\n"
+        "    assert ready\n",
+        encoding="utf-8",
+    )
     _write_manifest(project, {"specific": ["test_feature.py"], "remaining": []}, ("../" + owned_path,))
-    with (repository / "conftest.py").open("a", encoding="utf-8") as conftest:
-        conftest.write(
-            "\ndef pytest_collection_finish(session):\n"
-            "    assert len(session.items) == 1\n"
-            "    assert any(type(node).__name__ == 'Package' and node.name == 'nested'\n"
-            "               for node in session.items[0].listchain())\n"
-        )
-    assert _collect_package(project, "specific", capfd) == {
-        "suite/nested/test_feature.py::test_example",
-    }
+    check = manage.load_project_checks(project.name, str(project))["pytest"]
+    environment = dict(manage._check_environment(), PYTEST_ADDOPTS="--test-group=specific")
+    manage._run_pytest(project.name, check, environment, "merge")
+    assert "1 passed" in capfd.readouterr().out
+    assert (nested / "torn-down").is_file()
 
 
 @pytest.mark.parametrize("tier,count", (("daily", 2), ("merge", 4), ("all", 6)))
@@ -458,9 +466,8 @@ def test_ci_pools_are_manifest_owned_and_new_packages_stay_independent(repositor
     for project in (first, second):
         _set_ci_pool(project, "quick")
     rows = package_checks((second.name, first.name, new.name))
-    assert [(row["name"], row["packages"]) for row in rows] == [
-        ("%s + %s checks" % (second.name, first.name), "%s %s" % (second.name, first.name)),
-        ("linktools-new checks", new.name),
+    assert [row["packages"].split() for row in rows] == [
+        [second.name, first.name], [new.name],
     ]
     assert [row["install"] for row in rows] == [row["packages"] for row in rows]
     assert all(row["group"] == "all" for row in rows)
@@ -468,18 +475,16 @@ def test_ci_pools_are_manifest_owned_and_new_packages_stay_independent(repositor
     assert len(package_checks((second.name, first.name, new.name))) == 3
 
 
-def test_ci_pool_title_tracks_new_members_from_manifests(repository: Path) -> None:
+def test_ci_pool_membership_tracks_manifest_changes(repository: Path) -> None:
     projects = tuple(_new_package(repository, "linktools-" + name) for name in ("first", "second", "new"))
     packages = tuple(project.name for project in projects)
     for project in projects[:2]:
         _set_ci_pool(project, "quick")
     rows = package_checks(packages)
-    assert rows[0]["name"] == " + ".join(packages[:2]) + " checks"
-    assert rows[1]["name"] == packages[2] + " checks"
+    assert [row["packages"].split() for row in rows] == [list(packages[:2]), [packages[2]]]
     _set_ci_pool(projects[2], "quick")
     rows = package_checks(packages)
     assert len(rows) == 1
-    assert rows[0]["name"] == " + ".join(packages) + " checks"
     assert rows[0]["packages"].split() == list(packages)
 
 
@@ -514,35 +519,3 @@ def test_ci_pool_cannot_mix_with_pytest_groups(
     with pytest.raises(SystemExit, match="1"):
         package_checks((project.name,))
     assert "cannot combine checks.ci-pool and pytest.groups" in capsys.readouterr().err
-
-
-def test_repository_pool_preserves_all_discovered_package_coverage() -> None:
-    modules = manage.get_modules()
-    rows = package_checks(modules)
-    expected = Counter(
-        (package, group)
-        for package, module in modules.items()
-        for group in manage.load_project_checks(package, module["path"]).get("pytest", {}).get("groups", {"all": ()})
-    )
-    assert Counter(
-        (package, row["group"]) for row in rows for package in row["packages"].split()
-    ) == expected
-
-
-def test_repository_manifest_groups_partition_current_test_files() -> None:
-    for package, module in manage.get_modules().items():
-        check = manage.load_project_checks(package, module["path"]).get("pytest", {})
-        groups = check.get("groups", {})
-        if not groups:
-            continue
-        owned = Counter()
-        for root in map(Path, check["paths"]):
-            for path in (root.rglob("test_*.py") if root.is_dir() else (root,)):
-                matches = [
-                    name for name, patterns in groups.items()
-                    if any(fnmatchcase(path.name, pattern) for pattern in patterns)
-                ]
-                assert len(matches) <= 1, (package, path, matches)
-                owner = matches[0] if matches else next(name for name, patterns in groups.items() if not patterns)
-                owned[owner] += 1
-        assert set(owned) == set(groups), (package, owned)

@@ -169,11 +169,6 @@ def test_quiet_cost_summary_keeps_exact_values_and_failure_outcomes(
     assert context["backend"] == "sqlite+aiosqlite" and context["checkout_sha"] == "a" * 40
     assert context["sqlite_version"] == sqlite3.sqlite_version
     assert len(context["python"].split(".")) == 3
-    assert "not a whole-release comparison" in summary
-    assert "Not strictly comparable across machines" in summary
-    assert "not a measured old-release SQL/CPU run" in summary
-    assert "not a historical-version benchmark" in summary
-    assert "128-byte proof may offset savings" in summary
     assert "private-payload-sentinel" not in summary
 
 

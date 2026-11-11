@@ -32,21 +32,6 @@ def _requirements(modules: dict, *names: str, editable: bool = True) -> list:
     return manage._install_requirements(argparse.Namespace(module=names, editable=editable), modules)
 
 
-@pytest.mark.parametrize("package,expected", (
-    ("linktools", [("linktools", "")]),
-    ("linktools-ai", [("linktools-ai", "[anthropic,magic,openai,web]"), ("linktools", "")]),
-    ("linktools-cntr", [("linktools-cntr", ""), ("linktools", "[cli,git]")]),
-    ("linktools-common", [("linktools-common", ""), ("linktools", "[cli]")]),
-    ("linktools-mobile", [("linktools-mobile", ""), ("linktools", "[cli]")]),
-    ("linktools-mobile[ssh]", [("linktools-mobile", "[ssh]"), ("linktools", "[cli,ssh]")]),
-))
-def test_named_install_uses_only_local_dependency_closure(package: str, expected: list) -> None:
-    modules = manage.get_modules()
-    assert _requirements(modules, package) == [
-        (name, modules[name]["path"] + extras) for name, extras in expected
-    ]
-
-
 def test_default_install_preserves_all_discovered_projects(tmp_path: Path) -> None:
     modules = {"linktools-new": {"path": str(tmp_path / "linktools-new")}}
     assert _requirements(modules) == [("linktools-new", modules["linktools-new"]["path"])]

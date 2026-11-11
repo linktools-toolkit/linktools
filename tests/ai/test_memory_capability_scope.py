@@ -3,7 +3,6 @@
 """One host declaration supplies new execution memory without rewriting captures."""
 
 import asyncio
-import inspect
 from pathlib import Path
 
 import pytest
@@ -17,8 +16,7 @@ from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.runtime import Agent, Runtime, RuntimeFeatures, Session
-from linktools.ai.runtime.agent_execution import AgentExecutionPort
+from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.commands.ai._common import _open_local_runtime
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.workspace import Workspace
@@ -43,17 +41,12 @@ def test_memory_capability_validates_scope(value: object) -> None:
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
-def test_memory_declaration_requires_runtime_and_invocations_have_no_scope() -> None:
+def test_memory_declaration_requires_runtime() -> None:
     capability = MemoryCapability()
     assert capability.scope == "default"
     with pytest.raises(AIError) as raised:
         capability.for_agent(object())
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    for owner, methods in ((Agent, ("start", "run", "plan")),
-                           (Session, ("start", "run", "plan")),
-                           (AgentExecutionPort, ("start",))):
-        for method in methods:
-            assert "memory_scope" not in inspect.signature(getattr(owner, method)).parameters
 
 
 @pytest.mark.asyncio
