@@ -235,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check_parser.add_argument(
         "--test-tier", choices=("daily", "merge", "all"), default="merge",
-        help="Test coverage: daily representatives, merge acceptance, or all including manual probes",
+        help="Test coverage: daily representatives, merge acceptance, or local all including manual probes",
     )
     check_parser.set_defaults(func=handle_check)
 

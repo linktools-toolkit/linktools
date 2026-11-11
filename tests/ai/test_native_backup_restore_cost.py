@@ -88,7 +88,11 @@ async def _empty_owner(session, metadata):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", (16, 64))
+@pytest.mark.parametrize("count", (
+    4,
+    pytest.param(16, marks=pytest.mark.manual, id="stress-16"),
+    pytest.param(64, marks=pytest.mark.manual, id="stress-64"),
+))
 async def test_restore_shared_prefixes_reads_linear_body_volume_and_preserves_snapshots(tmp_path: Path, count: int) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'native.db'}")
     store = SqlStepStore(engine, namespace="restore-cost", tenant_id="tenant")
@@ -123,7 +127,7 @@ async def test_restore_rejects_corrupt_prefix_content_nodes_and_checkpoint_heade
     store = SqlStepStore(engine, namespace="restore-cost", tenant_id="tenant")
     await store.initialize(local=True)
     try:
-        backup, _ = await _prefix_backup(store, 8)
+        backup, _ = await _prefix_backup(store, 2)
         metadata = build_step_sql_metadata()
         nodes, bodies = metadata.tables["ai_step_sequences"], metadata.tables["ai_step_messages"]
         async with store.storage_context.sessions() as session, session.begin():

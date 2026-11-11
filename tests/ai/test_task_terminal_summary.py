@@ -28,7 +28,7 @@ def storage(tmp_path: Path, request: pytest.FixtureRequest) -> PersistenceStorag
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", (2, 8, 200))
+@pytest.mark.parametrize("width", (2, 8, pytest.param(200, marks=pytest.mark.manual, id="stress-200")))
 async def test_terminal_summary_completion_rows_are_linear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, width: int) -> None:
     async with Persistence.open("summary-budget", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id="tenant") as state:
         await _admit(state, tuple(TaskNode(f"node-{index}") for index in range(width)))

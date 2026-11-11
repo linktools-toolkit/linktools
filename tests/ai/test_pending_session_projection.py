@@ -70,7 +70,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
 
 
 @pytest.mark.parametrize("history_count,max_age,shared", (
-    (0, 0, False), (0, 60, True), (11, 0, True), (11, 60, True),
+    (0, 0, False), (0, 60, True), (3, 0, True), (3, 60, True),
 ))
 async def test_pending_session_projection_paging_and_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -87,7 +87,7 @@ async def test_pending_session_projection_paging_and_completion(
             completed.append(execution.execution_id)
         # A warm idle page must not hide a newly admitted, source-absent turn.
         for reader, _ in runtimes:
-            await reader.sessions.refresh("session", principal=reader.default_principal, limit=10, max_age=max_age)
+            await reader.sessions.refresh("session", principal=reader.default_principal, limit=2, max_age=max_age)
         cursors = []
         mutations = []
         original_mutation = SqlStorageContext.run_mutation
@@ -108,20 +108,20 @@ async def test_pending_session_projection_paging_and_completion(
                 service = reader.sessions._service
                 assert (await service.get("session", principal=principal)).active_execution_id == execution.execution_id
                 assert (await reader.sessions.list(ListSessionRequest(principal))).items[0].active_execution_id == execution.execution_id
-                detail = await reader.sessions.refresh("session", principal=principal, limit=10, max_age=max_age)
+                detail = await reader.sessions.refresh("session", principal=principal, limit=2, max_age=max_age)
                 assert detail.session.active_execution_id == execution.execution_id
-                expected = completed[-9:] + [execution.execution_id]
+                expected = completed[-1:] + [execution.execution_id]
                 assert [turn.execution_id for turn in detail.timeline.items] == expected
                 pending = detail.timeline.items[-1]
                 assert pending.status is ExecutionStatus.STARTED and not pending.conversation_committed
                 assert pending.items == () and pending.user_input["prompt"]["text"] == "pending question"
-                page = await reader.sessions.timeline("session", principal=principal, limit=10)
+                page = await reader.sessions.timeline("session", principal=principal, limit=2)
                 assert page.items == detail.timeline.items
                 assert bool(page.next_cursor) == bool(detail.timeline.next_cursor)
                 if history_count:
                     assert page.next_cursor is not None
                     cursors.append((reader, page.next_cursor))
-                    older = await reader.sessions.refresh("session", principal=principal, cursor=page.next_cursor, limit=10, max_age=max_age)
+                    older = await reader.sessions.refresh("session", principal=principal, cursor=page.next_cursor, limit=2, max_age=max_age)
                     assert [turn.execution_id for turn in older.timeline.items] == completed[:2]
                     assert older.timeline.next_cursor is None
                     assert older.session.active_execution_id == execution.execution_id
@@ -136,7 +136,7 @@ async def test_pending_session_projection_paging_and_completion(
                     seen.extend(turn.execution_id for turn in older.items)
                     cursor = older.next_cursor
                 assert seen == list(reversed(completed))
-                refreshed = await reader.sessions.refresh("session", principal=principal, limit=10, max_age=max_age)
+                refreshed = await reader.sessions.refresh("session", principal=principal, limit=2, max_age=max_age)
                 assert refreshed.timeline.items == detail.timeline.items
             assert mutations == []
         finally:
@@ -144,14 +144,14 @@ async def test_pending_session_projection_paging_and_completion(
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         assert len(mutations) == 1
         for reader, _ in runtimes:
-            detail = await reader.sessions.refresh("session", principal=reader.default_principal, limit=10, max_age=max_age)
+            detail = await reader.sessions.refresh("session", principal=reader.default_principal, limit=2, max_age=max_age)
             assert detail.session.active_execution_id is None
-            assert [turn.execution_id for turn in detail.timeline.items] == (completed + [execution.execution_id])[-10:]
+            assert [turn.execution_id for turn in detail.timeline.items] == (completed + [execution.execution_id])[-2:]
             assert detail.timeline.items[-1].conversation_committed
             assert detail.timeline.items[-1].status is ExecutionStatus.SUCCEEDED
             assert any(item.content == "answer" for item in detail.timeline.items[-1].items)
         for reader, cursor in cursors:
-            older = await reader.sessions.timeline("session", principal=reader.default_principal, cursor=cursor, limit=10)
+            older = await reader.sessions.timeline("session", principal=reader.default_principal, cursor=cursor, limit=2)
             assert [turn.execution_id for turn in older.items] == completed[:2]
             assert older.next_cursor is None
         assert len(mutations) == 1

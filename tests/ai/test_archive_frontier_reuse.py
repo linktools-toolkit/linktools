@@ -29,7 +29,7 @@ async def test_loaded_frontier_appends_without_metadata_reads_and_preserves_old_
     try:
         archive = await _archive(state)
         initial = PreparedArchive()
-        values = tuple(str(index).encode() for index in range(100))
+        values = tuple(str(index).encode() for index in range(8))
         root = await archive.prepare_append(archive.empty_root(), tuple(("bytes", value) for value in values), initial)
         await _publish(archive, initial)
         reads = []

@@ -120,7 +120,9 @@ async def _native_counts(engine) -> tuple[int, int, int]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('size', (10, 100, 1000))
+@pytest.mark.parametrize('size', (
+    10, pytest.param(100, marks=pytest.mark.manual), pytest.param(1000, marks=pytest.mark.manual),
+))
 async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property, size: int,
 ) -> None:

@@ -22,7 +22,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addoption(
         "--test-tier", choices=("daily", "merge", "all"), default="merge",
-        help="daily: representative regressions; merge: automatic acceptance; all: include manual probes",
+        help="daily: representative regressions; merge: automatic acceptance; all: include local manual probes",
     )
     parser.addoption(
         "--test-group", default="all",

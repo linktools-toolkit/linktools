@@ -15,26 +15,32 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.parametrize("backend", ("memory", "sqlite",))
-async def test_archive_plans_preserve_all_ranges_and_unpublished_occurrences(tmp_path: Path, backend: str) -> None:
+@pytest.mark.parametrize("count", (
+    8,
+    pytest.param(32, marks=pytest.mark.manual, id="stress-32"),
+))
+async def test_archive_plans_preserve_all_ranges_and_unpublished_occurrences(
+    tmp_path: Path, backend: str, count: int,
+) -> None:
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
         root = archive.empty_root()
-        values = tuple(str(index % 5).encode() for index in range(32))
+        values = tuple(str(index % 5).encode() for index in range(count))
         for start in range(0, len(values), 2):
             prepared = PreparedArchive()
             root = await archive.prepare_append(root, tuple(("bytes", value) for value in values[start:start + 2]), prepared)
             # The same plan also resolves nodes not yet visible to durable readers.
             assert len(await archive.content_ids(root, prepared=prepared)) == start + 2
             await _publish(archive, prepared)
-        ranges = tuple((start, end) for start in range(33) for end in range(start, 33))
+        ranges = tuple((start, end) for start in range(count + 1) for end in range(start, count + 1))
         actual = await archive.read_ranges(tuple(root.slice(start, end) for start, end in ranges), codec="bytes")
         assert actual == tuple(values[start:end] for start, end in ranges)
         prepared = PreparedArchive()
-        branch = await archive.prepare_append(root.slice(7, 12), (("bytes", b"branch"),), prepared)
+        branch = await archive.prepare_append(root.slice(1, 6), (("bytes", b"branch"),), prepared)
         await _publish(archive, prepared)
-        assert await archive.read_ranges((branch, root), codec="bytes") == (values[7:12] + (b"branch",), values)
+        assert await archive.read_ranges((branch, root), codec="bytes") == (values[1:6] + (b"branch",), values)
     finally:
         await state.close()
 

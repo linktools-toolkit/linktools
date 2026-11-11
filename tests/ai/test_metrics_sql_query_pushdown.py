@@ -210,7 +210,13 @@ async def test_sql_pushdown_percentile_matches_nearest_rank_with_groups_and_buck
 
 
 @pytest.mark.asyncio
-async def test_sql_pushdown_bounds_observation_select_round_trips(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sample_count", (
+    3,
+    pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
+))
+async def test_sql_pushdown_bounds_observation_select_round_trips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample_count: int,
+) -> None:
     path = tmp_path / "statements.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     metrics = Metrics.sql(engine, namespace="statements")
@@ -242,32 +248,38 @@ async def test_sql_pushdown_bounds_observation_select_round_trips(tmp_path: Path
                 correlation_value=1,
                 latency=index + 1,
             )
-            for index in range(1500)
+            for index in range(sample_count)
         )
         for offset in range(0, len(observations), 256):
             await metrics.record_observations(observations[offset : offset + 256])
 
+        async def reject_client_scan(*args, **kwargs):
+            raise AssertionError("SQL aggregation must not materialize raw observation pages")
+
+        monkeypatch.setattr(metrics._store, "scan_observations", reject_client_scan)
         event.listen(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
         window = MetricWindow.between(
             occurred_at - timedelta(seconds=1),
             occurred_at + timedelta(seconds=1),
         )
 
-        await metrics.query(MetricQuery("business.request.count", window))
+        result = await metrics.query(MetricQuery("business.request.count", window))
+        assert result.points[0].value == sample_count
         assert len(statements) == 1
 
         statements.clear()
-        await metrics.query(
+        result = await metrics.query(
             MetricQuery(
                 "business.request.count",
                 window,
                 group_by=("route",),
             )
         )
+        assert result.points[0].value == sample_count
         assert len(statements) == 1
 
         statements.clear()
-        await metrics.query(
+        result = await metrics.query(
             MetricQuery(
                 "business.request.latency",
                 window,
@@ -275,6 +287,7 @@ async def test_sql_pushdown_bounds_observation_select_round_trips(tmp_path: Path
                 percentile=0.95,
             )
         )
+        assert result.points[0].value == (95 * sample_count + 99) // 100
         assert len(statements) == 1
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", before_cursor_execute):

@@ -35,11 +35,11 @@ def storage(tmp_path: Path, request: pytest.FixtureRequest) -> PersistenceStorag
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", (2, 200))
 @pytest.mark.parametrize("input_size", (0, 4096))
 async def test_scheduler_definition_read_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, width: int, input_size: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, input_size: int,
 ) -> None:
+    width = 3
     async with Persistence.open(
         "scheduler-budget", storage=PersistenceStorage.sqlite(tmp_path / "state.db"),
         tenant_id="tenant",

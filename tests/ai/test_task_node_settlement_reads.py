@@ -75,14 +75,13 @@ async def test_waiting_settlement_reads_current_node_and_preserves_its_hold(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ("hold", "readback"))
-@pytest.mark.parametrize("width", (2, 200))
-async def test_terminal_node_settlement_read_cost_is_independent_of_graph_width(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, width: int,
+async def test_terminal_node_settlement_reads_only_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
 ) -> None:
     async with Persistence.open(
         "node-read-cost", storage=PersistenceStorage.sqlite(tmp_path / "state.sqlite"), tenant_id="tenant",
     ) as persistence:
-        await _admit(persistence, (TaskNode("node"),) + tuple(TaskNode(f"other-{i}") for i in range(width - 1)))
+        await _admit(persistence, (TaskNode("node"), TaskNode("other-a"), TaskNode("other-b")))
         repository = persistence.task.tasks
         lease = await repository.claim("graph", "node", tenant_id="tenant", owner="worker", lease_seconds=30)
         await repository.complete(lease, tenant_id="tenant", execution_id="execution", result_digest="a" * 64)

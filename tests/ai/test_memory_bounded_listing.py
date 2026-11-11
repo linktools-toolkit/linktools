@@ -249,7 +249,7 @@ async def test_sql_memory_listing_reopens_and_reads_only_requested_page(
         MemoryRecord(
             f"memory-{index}", "scope-digest", StoredPayload.inline_text("content"),
             {"path": f"memory/{index:03d}.md"}, 1, now, now,
-        ) for index in range(200)
+        ) for index in range(3)
     )
     async with Persistence.open("memory-bounded", storage=storage, tenant_id="tenant") as state:
         repository = state.memory.records

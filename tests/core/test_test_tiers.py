@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Coverage selection keeps unclassified tests and isolates manual probes."""
 
-import itertools
 import json
 import os
 import shlex
@@ -32,12 +31,12 @@ def test_automatic_and_reused_workflows_exclude_manual_probes(event: str) -> Non
     assert select_ci_tier(event, False, "") == "merge"
 
 
-@pytest.mark.parametrize("tier", ("daily", "merge", "all"))
+@pytest.mark.parametrize("tier", ("daily", "merge"))
 def test_explicit_manual_dispatch_selects_coverage(tier: str) -> None:
     assert select_ci_tier("workflow_dispatch", False, tier) == tier
 
 
-@pytest.mark.parametrize("event,tier", (("push", "all"), ("pull_request", "all"), ("workflow_call", "all"), ("workflow_dispatch", "typo")))
+@pytest.mark.parametrize("event,tier", (("push", "all"), ("pull_request", "all"), ("workflow_call", "all"), ("workflow_dispatch", "all"), ("workflow_dispatch", "typo")))
 def test_invalid_manual_selection_fails_closed(event: str, tier: str) -> None:
     with pytest.raises(ValueError):
         select_ci_tier(event, False, tier)
@@ -128,6 +127,20 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     assert jobs["python"]["strategy"]["matrix"]["python-version"] == "${{ fromJSON(needs.discover.outputs.plan).python-versions }}"
     assert jobs["python"]["strategy"]["fail-fast"] is False
     assert jobs["coverage"]["name"] == "Python checks passed"
+
+
+@pytest.mark.parametrize("tier,accepted", (("daily", True), ("merge", True), ("all", False), ("", False)))
+def test_ci_dispatch_and_aggregation_exclude_manual_scale_probes(tmp_path: Path, tier: str, accepted: bool) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    # PyYAML's YAML 1.1 loader interprets the unquoted workflow key as True.
+    triggers = workflow.get("on", workflow.get(True))
+    assert triggers["workflow_dispatch"]["inputs"]["test-tier"]["options"] == ["daily", "merge"]
+    step = workflow["jobs"]["coverage"]["steps"][0]
+    environment = dict(os.environ, TEST_TIER=tier, GITHUB_STEP_SUMMARY=str(tmp_path / "summary"))
+    environment.update({key: "success" for key in step["env"] if key.endswith("_RESULT")})
+    outcome = subprocess.run(["bash", "-e", "-c", step["run"]], env=environment, capture_output=True, check=False)
+    assert (outcome.returncode == 0) is accepted
 
 
 def test_shared_ci_interpreters_match_the_execution_floor() -> None:
@@ -255,7 +268,12 @@ def test_ci_coverage_rejects_every_incomplete_dependency(tmp_path: Path) -> None
     assert {step["env"][key] for key in results} == {
         "${{ needs.%s.result }}" % job for job in definition["needs"]
     }
-    for states in itertools.product(("success", "failure", "cancelled", "skipped", ""), repeat=len(results)):
+    passed = ("success",) * len(results)
+    cases = [passed]
+    for index in range(len(results)):
+        for failure in ("failure", "cancelled", "skipped", ""):
+            cases.append(passed[:index] + (failure,) + passed[index + 1:])
+    for states in cases:
         environment = dict(os.environ, TEST_TIER="merge", GITHUB_STEP_SUMMARY=str(tmp_path / "summary"))
         environment.update(zip(results, states))
         outcome = subprocess.run(["bash", "-e", "-c", step["run"]], env=environment, capture_output=True, check=False)

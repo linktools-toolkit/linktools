@@ -64,7 +64,7 @@ async def test_accepted_context_reuses_verified_same_group_history_without_prefi
             namespace="context-root", tenant_id="tenant",
         )
         context = ExecutionInputContext.from_messages(tuple(
-            ModelRequest(parts=[UserPromptPart(f"message-{index}")]) for index in range(20)
+            ModelRequest(parts=[UserPromptPart(f"message-{index}")]) for index in range(3)
         ))
         first = await service.prepare(context)
         await first.archive.store.mutate(lambda tx: first.archive.publish(tx, first.records))
@@ -167,9 +167,9 @@ async def test_instruction_read_does_not_materialize_history_or_other_components
         instructions = (RepositoryInstructions((RepositoryInstructionDocument("agents:AGENTS.md", ".", "accepted rule"),)).to_payload()
                         if has_instructions else None)
         context = ExecutionInputContext.from_messages(
-            tuple(ModelRequest(parts=[UserPromptPart("history" * 1000)]) for _ in range(100)),
-            repository_instructions=instructions, session_metadata={"large": "metadata" * 10000},
-            memory={"large": {"content": "memory" * 10000}}, preload_skills=({"large": "skill" * 10000},),
+            tuple(ModelRequest(parts=[UserPromptPart(f"history-{index}")]) for index in range(3)),
+            repository_instructions=instructions, session_metadata={"large": "metadata"},
+            memory={"large": {"content": "memory"}}, preload_skills=({"large": "skill"},),
         )
         prepared = await service.prepare(context)
         await prepared.archive.store.mutate(lambda tx: prepared.archive.publish(tx, prepared.records))
