@@ -82,6 +82,46 @@ than 64 ASCII hex characters: short IDs shrink, while a maximum-length ID can
 use 128 bytes. It is not a claim that every ID or in-memory representation uses
 less storage.
 
+## State operation addresses
+
+`StoredOperation.key` is a store-local binary address of 1..257 bytes. Its
+namespace, tenant and domain belong to the existing `store_digest` partition,
+not a repeated prefix or a second physical identity hash. Built-in families
+reserve distinct first bytes:
+
+| Family | Physical address | Maximum bytes |
+| --- | --- | --- |
+| Ordinary ledger | `01` followed by the original operation ID in UTF-8 | 257 |
+| Capability receipt | `02` followed by the existing 32-byte composite receipt digest | 33 |
+| Capability partition marker | `00` followed by ASCII `capability-partitions` | 22 |
+
+Ordinary operation IDs use the existing idempotency-key contract: nonempty,
+at most 256 UTF-8 bytes, no edge whitespace or Unicode control characters
+(`Cc`). Case and Unicode code points are preserved without normalization or
+truncation. Primitive callers may still supply any bounded binary key, including
+32-byte values; callers sharing built-in partitions must avoid their reserved
+addresses. Request digests and upstream idempotency ID generators are unchanged.
+Capability receipts retain their composite SHA-256 of namespace, tenant,
+capability ID, revision, run ID and write key, including currently unbounded
+custom write keys. Their streams and the marker stream retain their existing
+32-byte digests. Ordinary stream digests also remain globally scoped so their
+state/sequence index stays within three columns.
+
+SQL stores the address directly in `operation_key`: MySQL `VARBINARY(257)`,
+PostgreSQL `BYTEA`, SQLite `BLOB`. The unique `(store_digest, operation_key)`
+index declares at most 513 MySQL key bytes; the PostgreSQL field payload is at
+most 321 bytes before index tuple overhead. Binary comparison defines scan
+ordering on all backends. Current snapshot wire encodes the key as canonical
+lowercase hex and decodes the same bounded bytes. Native content ownership
+uses that binary address to select the existing operation row ID.
+
+This removes ordinary physical-key JSON serialization and hashing, with no
+additional SQL, mapping table or encoded sort key. It does not remove the
+capability composite hash or request/content checks. A generated 64-ASCII-byte
+operation ID takes 65 physical bytes instead of the previous 64 SQL hex bytes
+(or 32 in-memory digest bytes); shorter IDs shrink and maximum-size IDs grow.
+No universal storage or measured runtime speedup is implied.
+
 ## Native Step identities and digest ownership
 
 Native `run_id`, `conversation_id` and `parent_run_id` use the resource ID

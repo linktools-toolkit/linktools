@@ -95,7 +95,7 @@ async def _capture_owners(partitions: Mapping[StateStore, PersistenceDomain]) ->
             values.extend(dict(value.data) for value in page)
             if len(page) < 1000:
                 break
-            cursor = OperationScanCursor(page[-1].key_digest)
+            cursor = OperationScanCursor(page[-1].key)
     return records, values
 
 
@@ -355,7 +355,7 @@ async def _purge_unreferenced_objects(
                 await collect(dict(operation.data), domain)
             if len(operations) < 1000:
                 break
-            operation_cursor = OperationScanCursor(operations[-1].key_digest)
+            operation_cursor = OperationScanCursor(operations[-1].key)
 
     # Captures are public durable handles and need not occur in a state row.
     inspected: set[int] = set()

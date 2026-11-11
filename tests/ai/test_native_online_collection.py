@@ -20,7 +20,7 @@ from linktools.ai.persistence._sql import SqlStateStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence.codec import encode_domain
 from linktools.ai.persistence.contracts import ArchivedContextBlock
-from linktools.ai.persistence.state import OperationQuery, StoredFact, StoredOperation, StoredRecord
+from linktools.ai.persistence.state import OperationQuery, StoredFact, StoredOperation, StoredRecord, operation_key
 from linktools.ai.storage import SqlObjectStore
 
 from .test_step_content_cleanup import _snapshot
@@ -73,7 +73,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
             if owner == "fact":
                 await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key_digest, "chunk", None, "UNKNOWN", payload))
             elif owner == "operation":
-                await tx.insert_operation(StoredOperation(b"o" * 32, b"s" * 32, 1, "UNKNOWN", False, payload))
+                await tx.insert_operation(StoredOperation(operation_key("界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
 
         await state.mutate(publish)
         current = _snapshot("run", 2, "current")
@@ -81,6 +81,11 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
         assert await _count(engine, "ai_step_messages") == 2
         assert (await native.read_message_roots((root,)))[0]
         if owner == "operation":
+            async def transition(tx):
+                previous = await tx.get_operation(operation_key("界" * 85 + "x"))
+                assert await tx.replace_operation(replace(previous, state="DONE"), expected_state="UNKNOWN")
+            await state.mutate(transition)
+            assert (await native.read_message_roots((root,)))[0]
             await state.mutate(lambda tx: tx.delete_operations(OperationQuery(stream_digest=b"s" * 32)))
         elif owner == "record":
             assert await state.mutate(lambda tx: tx.replace_record(
@@ -181,7 +186,7 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
                     if kind == "fact":
                         await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key_digest, "chunk", None, "UNKNOWN", payload))
                     elif kind == "operation":
-                        await tx.insert_operation(StoredOperation(b"o" * 32, b"s" * 32, 1, "UNKNOWN", False, payload))
+                        await tx.insert_operation(StoredOperation(operation_key("界" * 85 + "x"), b"s" * 32, 1, "UNKNOWN", False, payload))
                 except AIError:
                     # Catching the direct failure must not allow a partial commit.
                     pass

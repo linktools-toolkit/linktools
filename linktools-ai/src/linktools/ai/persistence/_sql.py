@@ -891,7 +891,7 @@ class SqlStateStore:
             )
             if not values:
                 break
-            operation_cursor = OperationScanCursor(values[-1].key_digest)
+            operation_cursor = OperationScanCursor(values[-1].key)
         _logger.info(
             "SQL StateStore integrity validated: domain=%s", self.partition
         )
@@ -1043,7 +1043,7 @@ class _SqlTransaction:
             raise
 
     def _stage_native_owner(
-        self, kind: str, identity: Sequence[str | int], data: object | None, *,
+        self, kind: str, identity: Sequence[str | int | bytes], data: object | None, *,
         state: object = None, inserting: bool = False,
     ) -> None:
         if self._native_content_index:
@@ -2313,7 +2313,7 @@ class _SqlTransaction:
                 {**_operation_values(value), "store_digest": self._store_hex}
             )
         )
-        self._stage_native_owner("operation", (_hex(value.key_digest),), value.data, state=value.state, inserting=True)
+        self._stage_native_owner("operation", (value.key,), value.data, state=value.state, inserting=True)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         from sqlalchemy import select
@@ -2324,7 +2324,7 @@ class _SqlTransaction:
                 await self._execute(
                     select(table).where(
                         table.c.store_digest == self._store_hex,
-                        table.c.key_digest == _hex(key),
+                        table.c.operation_key == key,
                     )
                 )
             )
@@ -2336,7 +2336,7 @@ class _SqlTransaction:
     async def replace_operation(
         self, value: StoredOperation, *, expected_state: str
     ) -> bool:
-        current = await self.get_operation(value.key_digest)
+        current = await self.get_operation(value.key)
         if current is None or current.state != expected_state:
             return False
         validate_operation_replacement(current, value)
@@ -2347,13 +2347,13 @@ class _SqlTransaction:
             update(table)
             .where(
                 table.c.store_digest == self._store_hex,
-                table.c.key_digest == _hex(value.key_digest),
+                table.c.operation_key == value.key,
                 table.c.state == expected_state,
             )
             .values(_operation_values(value, updating=True))
         )
         if result.rowcount == 1:
-            self._stage_native_owner("operation", (_hex(value.key_digest),), value.data, state=value.state)
+            self._stage_native_owner("operation", (value.key,), value.data, state=value.state)
         return result.rowcount == 1
 
     async def list_operations(
@@ -2376,7 +2376,7 @@ class _SqlTransaction:
         statement = (
             select(table)
             .where(*conditions)
-            .order_by(table.c.sequence, table.c.key_digest)
+            .order_by(table.c.sequence, table.c.operation_key)
         )
         if query.limit is not None:
             statement = statement.limit(query.limit)
@@ -2407,8 +2407,8 @@ class _SqlTransaction:
         table = self._table("ai_state_operations")
         statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
-            statement = statement.where(table.c.key_digest > _hex(after.key_digest))
-        statement = statement.order_by(table.c.key_digest).limit(limit)
+            statement = statement.where(table.c.operation_key > after.key)
+        statement = statement.order_by(table.c.operation_key).limit(limit)
         rows = (await self._execute(statement)).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
 
@@ -2422,7 +2422,7 @@ class _SqlTransaction:
             table = self._table("ai_state_operations")
             for value in values:
                 guarded = await self._execute(update(table).where(
-                    table.c.store_digest == self._store_hex, table.c.key_digest == _hex(value.key_digest),
+                    table.c.store_digest == self._store_hex, table.c.operation_key == value.key,
                     table.c.state == value.state,
                 ).values(state=value.state))
                 if guarded.rowcount != 1:
@@ -2430,17 +2430,17 @@ class _SqlTransaction:
                     self._abort_mutation(error)
                     raise error
             await self._retire_native_rows("operation", table,
-                table.c.store_digest == self._store_hex, table.c.key_digest.in_(tuple(_hex(value.key_digest) for value in values)))
+                table.c.store_digest == self._store_hex, table.c.operation_key.in_(tuple(value.key for value in values)))
             await self._execute(
                 delete(self._table("ai_state_operations")).where(
                     self._table("ai_state_operations").c.store_digest == self._store_hex,
-                    self._table("ai_state_operations").c.key_digest.in_(
-                        tuple(_hex(value.key_digest) for value in values)
+                    self._table("ai_state_operations").c.operation_key.in_(
+                        tuple(value.key for value in values)
                     ),
                 )
             )
         for value in values:
-            self._stage_native_owner("operation", (_hex(value.key_digest),), None)
+            self._stage_native_owner("operation", (value.key,), None)
         return values
 
     def _record_identity_conditions(
@@ -2566,7 +2566,7 @@ def _operation_values(
     value: StoredOperation, *, updating: bool = False
 ) -> dict[str, object]:
     values: dict[str, object] = {
-        "key_digest": _hex(value.key_digest),
+        "operation_key": value.key,
         "stream_digest": _hex(value.stream_digest),
         "sequence": value.sequence,
         "state": value.state,
@@ -2583,7 +2583,7 @@ def _operation_values(
 def _operation_from_row(row: Mapping[str, object]) -> StoredOperation:
     try:
         return StoredOperation(
-            _row_digest(row["key_digest"]),
+            row["operation_key"],
             _row_digest(row["stream_digest"]),
             _row_nonnegative_int(row["sequence"]),
             _row_string(row["state"]),

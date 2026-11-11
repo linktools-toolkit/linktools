@@ -172,7 +172,6 @@ async def test_session_request_identity_retry_after_committed_response_fault(sto
 async def test_session_request_identity_reads_unmarked_receipt_without_rewriting(storage: PersistenceStorage, kind: str) -> None:
     import json
     from pathlib import Path
-    from linktools.ai.core import PersistenceDomain
     from linktools.ai.persistence.state import operation_key
 
     async with Persistence.open("session-identity", storage=storage, tenant_id="tenant") as state:
@@ -183,8 +182,7 @@ async def test_session_request_identity_reads_unmarked_receipt_without_rewriting
         action = manager.update if kind == "update" else manager.fork
         first = await action("agent", "session", request)
         data = json.loads((Path(__file__).parent / "fixtures/session_request_v1" / f"{kind}.json").read_text())
-        key = operation_key("session-identity", "tenant", PersistenceDomain.CONVERSATION.value,
-                            "request")
+        key = operation_key("request")
         store = state.conversation.sessions.state_store
 
         async def install(transaction):

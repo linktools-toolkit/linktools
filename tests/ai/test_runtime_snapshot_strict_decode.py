@@ -570,12 +570,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
         updated_at=now,
     )
     stored = StoredOperation(
-        operation_key(
-            "runtime",
-            "tenant",
-            PersistenceDomain.CONVERSATION.value,
-            operation.operation_id,
-        ),
+        operation_key(operation.operation_id),
         stream_digest(
             "runtime",
             "tenant",

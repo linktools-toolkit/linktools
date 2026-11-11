@@ -100,7 +100,7 @@ async def test_sql_payloads_keep_numeric_identity_across_read_queries_and_reopen
                 lambda tx: tx.list_facts(FactQuery(FACT.stream_digest, latest_per_subject=True)),
                 lambda tx: tx.scan_facts(),
                 lambda tx: tx.scan_facts_page(after=None, limit=2),
-                lambda tx: tx.get_operation(OPERATION.key_digest),
+                lambda tx: tx.get_operation(OPERATION.key),
                 lambda tx: tx.list_operations(OperationQuery()),
                 lambda tx: tx.scan_operations(),
                 lambda tx: tx.scan_operations_page(after=None, limit=2),

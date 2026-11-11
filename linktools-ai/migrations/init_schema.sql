@@ -70,7 +70,7 @@ CREATE TABLE ai_state_sequences (
 CREATE TABLE ai_state_operations (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
-    key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the durable operation.',
+    operation_key VARBINARY(257) NOT NULL COMMENT 'Store-local binary operation address, at most 257 bytes.',
     stream_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the ordered operation stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current durable operation state used by replay and completion logic.',
@@ -78,7 +78,7 @@ CREATE TABLE ai_state_operations (
     payload_json JSON NOT NULL COMMENT 'Canonical operation JSON encoded as a JSON string preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_operation_key (store_digest, operation_key), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
     KEY ix_stream_digest_state_sequence (stream_digest, state, sequence),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Ordered durable operation ledger for replay, result recovery, status transition, and compaction.';

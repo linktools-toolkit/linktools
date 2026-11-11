@@ -178,7 +178,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_created_at",
         },
         "ai_state_operations": {
-            "uk_store_digest_key_digest",
+            "uk_store_digest_operation_key",
             "uk_store_digest_stream_digest_sequence",
             "ix_stream_digest_state_sequence",
             "ix_updated_at",
@@ -313,3 +313,17 @@ def test_native_domain_schema_composes_without_replacing_canonical_tables(domain
     for name, table in metadata.tables.items():
         assert set(index.name for index in table.indexes) == set(index.name for index in complete.tables[name].indexes)
         assert len(table.indexes) == len(complete.tables[name].indexes)
+
+
+@pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
+def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(dialect_name: str) -> None:
+    from sqlalchemy.dialects import postgresql, sqlite
+    table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})).tables["ai_state_operations"]
+    dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
+    assert table.c.operation_key.type.length == 257
+    assert table.c.operation_key.type.compile(dialect=dialect) == {
+        "mysql": "VARBINARY(257)", "postgresql": "BYTEA", "sqlite": "BLOB",
+    }[dialect_name]
+    assert any(index.unique and tuple(column.name for column in index.columns) == ("store_digest", "operation_key")
+               for index in table.indexes)
+    assert all(len(index.columns) <= 3 for index in table.indexes)

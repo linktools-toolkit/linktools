@@ -8,7 +8,8 @@ from typing import Protocol
 from ..errors import AIError, ErrorCode
 from .state import StateTransaction, StoredOperation
 
-_KEY = hashlib.sha256(b"linktools.runtime.capability-partitions").digest()
+_KEY = b"\x00capability-partitions"
+_STREAM = hashlib.sha256(b"linktools.runtime.capability-partitions").digest()
 
 
 class _OperationReader(Protocol):
@@ -29,7 +30,7 @@ async def ensure_capability_partition_marker(transaction: StateTransaction) -> N
     """Establish sticky evidence before optional partition writes can commit."""
     if not await has_capability_partition_marker(transaction):
         await transaction.insert_operation(StoredOperation(
-            key_digest=_KEY, stream_digest=_KEY, sequence=0, state="present",
+            key=_KEY, stream_digest=_STREAM, sequence=0, state="present",
             compactable=False, data={"capability_partitions": True},
         ))
 

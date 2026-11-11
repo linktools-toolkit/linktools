@@ -18,6 +18,7 @@ from ..storage import (
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
+from .state import OPERATION_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -296,10 +297,10 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
         ),
         Column(
-            "key_digest",
-            digest,
+            "operation_key",
+            LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of the durable operation.",
+            comment="Store-local binary operation address, at most 257 bytes.",
         ),
         Column(
             "stream_digest",
@@ -335,7 +336,7 @@ def build_runtime_sql_metadata(
         comment=_OPERATION_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(operations, "store_digest", "key_digest")
+    sql_unique(operations, "store_digest", "operation_key")
     sql_unique(operations, "store_digest", "stream_digest", "sequence")
     sql_query_index(operations, "stream_digest", "state", "sequence")
     sql_audit_indexes(operations)

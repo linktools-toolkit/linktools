@@ -100,7 +100,7 @@ async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeM
                 roots.extend(iter_native_message_roots(row.data))
             if len(page) < 1000:
                 break
-            cursor = OperationScanCursor(page[-1].key_digest)
+            cursor = OperationScanCursor(page[-1].key)
     return tuple(roots)
 
 

@@ -28,6 +28,7 @@ from linktools.ai.persistence.codec import (
     decode_operation,
     decode_record,
     encode_domain,
+    encode_operation,
     encode_record,
     parse_envelope,
     wire_type_id,
@@ -429,3 +430,28 @@ def test_checkpoint_boundary_rejects_invalid_explicit_values(value: object) -> N
     with pytest.raises(AIError) as raised:
         _decode_domain(payload, StoredAgentRunCheckpoint, _CURRENT_CODEC, persisted=True)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("key", (b"x", b"x" * 32, b"\x01" + ("界" * 85 + "x").encode("utf-8")))
+def test_operation_wire_roundtrips_bounded_binary_addresses(key: bytes) -> None:
+    from linktools.ai.persistence.state import OperationScanCursor, StoredOperation
+    value = StoredOperation(key, b"s" * 32, 1, "pending", True, {})
+    assert decode_operation(encode_operation(value)) == value
+    assert OperationScanCursor(key).key == key
+
+
+@pytest.mark.parametrize("key", ("", "ab" * 258, "AB", "aa bb", "a", "zz"))
+def test_operation_wire_rejects_noncanonical_or_unbounded_addresses(key: str) -> None:
+    value = {**_fixture()["stored_primitives"]["operation"], "key": key}
+    with pytest.raises(AIError) as error:
+        decode_operation(value)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("key", (b"", b"x" * 258, "not-bytes"))
+def test_operation_primitives_reject_out_of_contract_addresses(key: object) -> None:
+    from linktools.ai.persistence.state import OperationScanCursor, StoredOperation
+    with pytest.raises(ValueError):
+        StoredOperation(key, b"s" * 32, 1, "pending", False, {})
+    with pytest.raises(ValueError):
+        OperationScanCursor(key)

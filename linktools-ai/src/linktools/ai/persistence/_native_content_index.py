@@ -74,7 +74,7 @@ class NativeContentUnavailable(Exception):
 
 
 def stage_owner(
-    session: "AsyncSession", kind: str, store: str, identity: Sequence[str | int],
+    session: "AsyncSession", kind: str, store: str, identity: Sequence[str | int | bytes],
     data: object | None, *, state: object = None, inserting: bool = False,
 ) -> None:
     from ._archive_closure import iter_native_message_roots
@@ -317,13 +317,14 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
             group_id = json.loads(wire)["archive_scope_id"]
     for (kind, store, identity), roots in pending.items():
         names = {"record": "ai_state_records", "fact": "ai_state_facts", "operation": "ai_state_operations"}
-        owner = table(names[kind], column("id"), column("store_digest"), column("key_digest"),
+        key_column = "operation_key" if kind == "operation" else "key_digest"
+        owner = table(names[kind], column("id"), column("store_digest"), column(key_column),
                       column("stream_digest"), column("sequence"))
         conditions = (owner.c.store_digest == store,)
         if kind == "fact":
             conditions += (owner.c.stream_digest == identity[0], owner.c.sequence == identity[1])
         else:
-            conditions += (owner.c.key_digest == identity[0],)
+            conditions += (owner.c[key_column] == identity[0],)
         sources = select(owner.c.id).where(*conditions)
         targets = []
         for root in roots:

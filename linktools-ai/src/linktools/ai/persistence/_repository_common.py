@@ -527,12 +527,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         value: OperationLedgerInput,
     ) -> OperationLedgerRecord:
         _require_tenant(value, self._tenant_id)
-        key = operation_key(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            value.operation_id,
-        )
+        key = operation_key(value.operation_id)
         existing = await transaction.get_operation(key)
         if existing is not None:
             current = _decode_operation(existing)
@@ -554,9 +549,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
     ) -> OperationLedgerRecord | None:
         if tenant_id != self._tenant_id:
             return None
-        key = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, operation_id
-        )
+        key = operation_key(operation_id)
         stored = await self._store.read(
             lambda transaction: transaction.get_operation(key)
         )
@@ -570,9 +563,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         tenant_id: str,
     ) -> OperationLedgerRecord | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        key = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, operation_id
-        )
+        key = operation_key(operation_id)
         stored = await transaction.get_operation(key)
         return None if stored is None else _decode_operation(stored)
 
@@ -587,9 +578,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
-        key = operation_key(
-            self._namespace, self._tenant_id, self._domain.value, operation_id
-        )
+        key = operation_key(operation_id)
 
         async def mutate(transaction: StateTransaction) -> OperationLedgerRecord:
             current = await transaction.get_operation(key)
@@ -684,7 +673,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
                 return
             anchor = max(
                 candidates,
-                key=lambda value: (value.sequence, value.key_digest),
+                key=lambda value: (value.sequence, value.key),
             )
             await transaction.delete_operations(
                 OperationQuery(
@@ -1058,12 +1047,7 @@ async def _reserve_operation(
     repository: _RepositoryBase,
     value: OperationLedgerInput,
 ) -> tuple[OperationLedgerRecord | None, bool]:
-    key = operation_key(
-        repository._namespace,
-        repository._tenant_id,
-        repository._domain.value,
-        value.operation_id,
-    )
+    key = operation_key(value.operation_id)
     existing = await transaction.get_operation(key)
     if existing is not None:
         current = _decode_operation(existing)
@@ -1088,12 +1072,7 @@ async def _insert_operation(
     value: OperationLedgerInput,
     sequence: int,
 ) -> None:
-    key = operation_key(
-        repository._namespace,
-        repository._tenant_id,
-        repository._domain.value,
-        value.operation_id,
-    )
+    key = operation_key(value.operation_id)
     await transaction.insert_operation(
         StoredOperation(
             key,
@@ -1114,6 +1093,12 @@ async def _insert_operation(
 
 def _decode_operation(value: StoredOperation) -> OperationLedgerRecord:
     candidate = _decode_enveloped_domain(value.data, OperationLedgerInput)
+    try:
+        expected_key = operation_key(candidate.operation_id)
+    except AIError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if value.key != expected_key:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _operation_record(candidate, value.sequence)  # type: ignore[arg-type]
 
 

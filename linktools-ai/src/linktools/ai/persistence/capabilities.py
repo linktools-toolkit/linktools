@@ -35,6 +35,10 @@ class _Write:
     durable: bool
     queued: bool = False
 
+    @property
+    def operation_key(self) -> bytes:
+        return b"\x02" + self.receipt_key
+
 
 class _PartitionMarker:
     def __init__(self, store: StateStore, tasks: set[asyncio.Task[object]]) -> None:
@@ -311,13 +315,13 @@ class PreparedCapabilityWrites:
             await ensure_capability_partition_marker(group.transaction(marker.store))
         for write in self.writes:
             transaction = group.transaction(write.store)
-            receipt = await transaction.get_operation(write.receipt_key)
+            receipt = await transaction.get_operation(write.operation_key)
             if receipt is not None:
                 self._validate_receipt(receipt, write)
                 continue
             await write.persist(transaction, write.payload)
             await transaction.insert_operation(StoredOperation(
-                key_digest=write.receipt_key, stream_digest=write.receipt_key,
+                key=write.operation_key, stream_digest=write.receipt_key,
                 sequence=0, state="committed", compactable=False,
                 data={"request_digest": write.digest},
             ))
@@ -334,7 +338,7 @@ class PreparedCapabilityWrites:
         async def read(group: StateGroupTransaction) -> bool:
             complete = True
             for write in self.writes:
-                receipt = await group.transaction(write.store).get_operation(write.receipt_key)
+                receipt = await group.transaction(write.store).get_operation(write.operation_key)
                 if receipt is None:
                     complete = False
                 else:
@@ -402,6 +406,8 @@ class _BoundWriter(CapabilityWriter):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         content = canonical_json_bytes(dict(payload))
         copied = ImmutableJsonMapping(json.loads(content))
+        # Keep the composite receipt identity and stream; its operation address
+        # uses a separate family from ordinary ledger IDs and partition markers.
         receipt_key = hashlib.sha256(canonical_json_bytes([
             "capability-write", self.namespace, self.tenant_id, *self.identity, key,
         ])).digest()

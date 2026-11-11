@@ -112,7 +112,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
             assert await transaction.list_facts(FactQuery(_fact(staged).stream_digest)) == ()
             assert await transaction.list_records(RecordQuery(kind="probe")) == (retained,)
             assert await transaction.get_sequence(counter) == 1
-            assert await transaction.get_operation(operation.key_digest) == operation
+            assert await transaction.get_operation(operation.key) == operation
             await transaction.delete_records(())
             await transaction.delete_records((deleted.key_digest, staged.key_digest, _digest("missing")))
 

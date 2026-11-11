@@ -1632,12 +1632,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             operation_record = None
             current_operation = None
             if commit.operation is not None:
-                operation_key_value = operation_key(
-                    self._namespace,
-                    self._tenant_id,
-                    self._domain.value,
-                    commit.operation.operation_id,
-                )
+                operation_key_value = operation_key(commit.operation.operation_id)
                 operation_record = await transaction.get_operation(operation_key_value)
                 if operation_record is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

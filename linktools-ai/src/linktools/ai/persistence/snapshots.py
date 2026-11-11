@@ -155,9 +155,9 @@ class _CapturedSnapshotReader:
     operations: tuple[StoredOperation, ...]
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
-        index = bisect_left(self.operations, key, key=lambda value: value.key_digest)
+        index = bisect_left(self.operations, key, key=lambda value: value.key)
         return (self.operations[index] if index < len(self.operations)
-                and self.operations[index].key_digest == key else None)
+                and self.operations[index].key == key else None)
 
     async def scan_records_page(self, *, after: RecordScanCursor | None, limit: int) -> tuple[StoredRecord, ...]:
         start = 0 if after is None else bisect_right(self.records, (after.kind, after.key_digest),
@@ -170,7 +170,7 @@ class _CapturedSnapshotReader:
         return self.facts[start:start + limit]
 
     async def scan_operations_page(self, *, after: OperationScanCursor | None, limit: int) -> tuple[StoredOperation, ...]:
-        start = 0 if after is None else bisect_right(self.operations, after.key_digest, key=lambda value: value.key_digest)
+        start = 0 if after is None else bisect_right(self.operations, after.key, key=lambda value: value.key)
         return self.operations[start:start + limit]
 
 
@@ -231,7 +231,7 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
             operations.append(value)
         if len(page) < limit:
             break
-        cursor = OperationScanCursor(page[-1].key_digest)
+        cursor = OperationScanCursor(page[-1].key)
     return _CapturedSnapshotReader(tuple(records), tuple(facts), tuple(operations))
 
 
@@ -717,7 +717,7 @@ async def _export_snapshot(
                 encoded = encode_operation(value)
                 raw_domain["operations"].append(accept(encoded))
                 await copy_references(encoded, domain)
-            operation_cursor = OperationScanCursor(page[-1].key_digest)
+            operation_cursor = OperationScanCursor(page[-1].key)
             if len(page) < 128:
                 break
 

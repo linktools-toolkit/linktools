@@ -1237,6 +1237,10 @@ def _validate_operations(
     positions: set[tuple[bytes, int]] = set()
     for operation in operations:
         value = _decode_enveloped_domain(operation.data, OperationLedgerInput)
+        try:
+            expected_key = operation_key(value.operation_id)
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         expected_stream = stream_digest(
             namespace,
             tenant_id,
@@ -1247,13 +1251,7 @@ def _validate_operations(
         position = (operation.stream_digest, operation.sequence)
         if (
             value.tenant_id != tenant_id
-            or operation.key_digest
-            != operation_key(
-                namespace,
-                tenant_id,
-                domain.value,
-                value.operation_id,
-            )
+            or operation.key != expected_key
             or operation.stream_digest != expected_stream
             or operation.state != value.status.value
             or operation.compactable != value.compactable

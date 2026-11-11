@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_resource_id
+from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_idempotency_key, validate_resource_id
 from ..errors import AIError
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 
@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from ..storage import SqlStorageContext, SqlValue
 
 ValueT = TypeVar("ValueT")
+
+OPERATION_KEY_MAX_BYTES = 257
 
 
 class StateLockOrderError(RuntimeError):
@@ -232,6 +234,12 @@ def _digest(value: JsonValue) -> bytes:
     return hashlib.sha256(canonical_json_bytes(value)).digest()
 
 
+def _require_operation_key(value: bytes) -> bytes:
+    if not isinstance(value, bytes) or not 1 <= len(value) <= OPERATION_KEY_MAX_BYTES:
+        raise ValueError(f"operation key must contain 1..{OPERATION_KEY_MAX_BYTES} bytes")
+    return value
+
+
 def _require_digest(value: bytes, name: str) -> bytes:
     if not isinstance(value, bytes) or len(value) != 32:
         raise ValueError(f"{name} must be a 32-byte digest")
@@ -399,7 +407,7 @@ class StoredFact:
 
 @dataclass(frozen=True, slots=True)
 class StoredOperation:
-    key_digest: bytes
+    key: bytes
     stream_digest: bytes
     sequence: int
     state: str
@@ -407,7 +415,7 @@ class StoredOperation:
     data: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        _require_digest(self.key_digest, "key_digest")
+        _require_operation_key(self.key)
         _require_digest(self.stream_digest, "stream_digest")
         _require_nonnegative_int(self.sequence, "operation sequence")
         _require_state(self.state, "operation state", optional=False)
@@ -444,10 +452,10 @@ class FactScanCursor:
 
 @dataclass(frozen=True, slots=True)
 class OperationScanCursor:
-    key_digest: bytes
+    key: bytes
 
     def __post_init__(self) -> None:
-        _require_digest(self.key_digest, "key_digest")
+        _require_operation_key(self.key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1298,13 +1306,9 @@ def stream_digest(
     return _digest(["stream", namespace, tenant_id, runtime_domain, relation, identity])
 
 
-def operation_key(
-    namespace: str,
-    tenant_id: str,
-    runtime_domain: str,
-    identity: JsonValue,
-) -> bytes:
-    return _digest(["operation", namespace, tenant_id, runtime_domain, identity])
+def operation_key(identity: str) -> bytes:
+    """Address an ordinary ledger ID within its StateStore partition."""
+    return b"\x01" + validate_idempotency_key(identity).encode("utf-8")
 
 
 def sortable_timestamp(value: datetime, key: bytes) -> str:
@@ -1368,7 +1372,7 @@ def validate_operation_replacement(
 ) -> None:
     """Keep immutable operation identity stable across a state replacement."""
     if (
-        current.key_digest != candidate.key_digest
+        current.key != candidate.key
         or current.stream_digest != candidate.stream_digest
         or current.sequence != candidate.sequence
         or current.compactable != candidate.compactable
@@ -1383,4 +1387,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

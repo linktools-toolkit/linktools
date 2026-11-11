@@ -1399,7 +1399,7 @@ def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
 
 def encode_operation(operation: StoredOperation) -> dict[str, JsonValue]:
     return {
-        "key": operation.key_digest.hex(),
+        "key": operation.key.hex(),
         "stream": operation.stream_digest.hex(),
         "sequence": operation.sequence,
         "state": operation.state,
@@ -1420,7 +1420,7 @@ def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         return StoredOperation(
-            _digest_wire(_string(value, "key")),
+            _operation_key_wire(_string(value, "key")),
             _digest_wire(_string(value, "stream")),
             _integer(value, "sequence"),
             _string(value, "state"),
@@ -2714,6 +2714,13 @@ def _bool(value: Mapping[str, object], key: str) -> bool:
     result = value[key]
     if not isinstance(result, bool):
         raise ValueError(f"{key} must be a boolean")  # noqa: TRY004
+    return result
+
+
+def _operation_key_wire(value: str) -> bytes:
+    result = bytes.fromhex(value)
+    if result.hex() != value:
+        raise ValueError("operation key must be canonical lowercase hex")
     return result
 
 

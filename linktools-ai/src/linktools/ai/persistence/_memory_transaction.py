@@ -564,12 +564,12 @@ class _MemoryTransaction:
                 del self.facts[key]
 
     async def insert_operation(self, value: StoredOperation) -> None:
-        if value.key_digest in self.operations:
+        if value.key in self.operations:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if self._operation_key(value.stream_digest, value.sequence) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self.operations[value.key_digest] = value
-        self._set_operation_key(value.stream_digest, value.sequence, value.key_digest)
+        self.operations[value.key] = value
+        self._set_operation_key(value.stream_digest, value.sequence, value.key)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return self.operations.get(key)
@@ -580,11 +580,11 @@ class _MemoryTransaction:
         *,
         expected_state: str,
     ) -> bool:
-        current = self.operations.get(value.key_digest)
+        current = self.operations.get(value.key)
         if current is None or current.state != expected_state:
             return False
         validate_operation_replacement(current, value)
-        self.operations[value.key_digest] = value
+        self.operations[value.key] = value
         return True
 
     async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
@@ -606,7 +606,7 @@ class _MemoryTransaction:
                 or operation.compactable == query.compactable
             )
         ]
-        values.sort(key=lambda operation: (operation.sequence, operation.key_digest))
+        values.sort(key=lambda operation: (operation.sequence, operation.key))
         if query.limit is not None:
             values = values[: query.limit]
         return tuple(values)
@@ -623,11 +623,11 @@ class _MemoryTransaction:
         _require_scan_limit(limit)
         values = sorted(
             self.operations.values(),
-            key=lambda value: value.key_digest,
+            key=lambda value: value.key,
         )
         if after is not None:
             values = [
-                value for value in values if value.key_digest > after.key_digest
+                value for value in values if value.key > after.key
             ]
         return tuple(values[:limit])
 
@@ -637,7 +637,7 @@ class _MemoryTransaction:
     ) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)
         for value in values:
-            del self.operations[value.key_digest]
+            del self.operations[value.key]
             self._set_operation_key(value.stream_digest, value.sequence, None)
         return values
 

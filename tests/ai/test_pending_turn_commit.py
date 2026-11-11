@@ -139,7 +139,7 @@ async def _snapshot(state: _TurnState) -> tuple[object, ...]:
             tuple(sorted(await transaction.scan_facts(), key=lambda value: (value.stream_digest, value.sequence))),
             dict(await transaction.scan_sequences()),
             tuple(sorted(await transaction.scan_aliases(), key=lambda value: value.alias_digest)),
-            tuple(sorted(await transaction.scan_operations(), key=lambda value: value.key_digest)),
+            tuple(sorted(await transaction.scan_operations(), key=lambda value: value.key)),
         )
     return tuple([await store.read(read) for store in dict.fromkeys(state.storage._stores.values())])
 
