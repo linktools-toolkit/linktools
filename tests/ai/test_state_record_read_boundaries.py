@@ -38,7 +38,7 @@ def test_record_identity_reuses_canonical_immutable_data(
     elif source == "filesystem":
         record = decode_record(encode_record(record))
     elif source == "sql":
-        record = _record_from_row(_record_values(record))
+        record = _record_from_row({**_record_values(record), "store_key": b"store"})
     expected = encode_record(record)
     data["value"][0]["nested"].append("source mutation")
     record.data["value"][0]["nested"].append("read mutation")
@@ -87,7 +87,7 @@ def test_record_construction_rejects_malformed_data(
         if source == "filesystem":
             decode_record({**encode_record(record), "data": data})
         else:
-            _record_from_row({**_record_values(record), "payload_json": data})
+            _record_from_row({**_record_values(record), "store_key": b"store", "payload_json": data})
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -121,7 +121,7 @@ def test_record_readers_reject_malformed_physical_identity(
             }[field]
             decode_record({**encode_record(record), wire_field: value})
         else:
-            _record_from_row({**_record_values(record), field: value})
+            _record_from_row({**_record_values(record), "store_key": b"store", field: value})
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

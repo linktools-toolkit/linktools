@@ -164,7 +164,7 @@ async def test_frontier_unions_overlaps_direct_keys_and_preserves_scope(tmp_path
                     archive._key("archive_content", prepared.nodes[first.next_forest].content_id)}
         assert set(records) == expected
         assert await archive.store.read(lambda tx: read(tx, _digest("other-scope"))) == {}
-        other = SqlStateStore(engine, group=archive.store.storage_group, store_digest=_digest("other-store"))
+        other = SqlStateStore(engine, group=archive.store.storage_group, store_key=_digest("other-store"))
         await other.initialize()
         try:
             assert await other.read(lambda tx: read(tx, bytes.fromhex(archive.content_scope))) == {}

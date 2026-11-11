@@ -238,7 +238,7 @@ class NativeRunReferences:
             bindparam(None, node.value, type_=node.type, literal_execute=True)
             if isinstance(node, BindParameter) and node.key not in {"source_run_id", "source_event_key", "source_terminal_key"}
             else None
-        )).where(records.c.store_digest == self._state.store_digest.hex())
+        )).where(records.c.store_key == self._state.store_key)
         if keys is not None:
             statement = statement.where(records.c.key.in_(tuple(keys)))
         if query is not None:

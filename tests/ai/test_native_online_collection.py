@@ -175,7 +175,7 @@ async def test_undeclared_native_owner_fails_closed_without_rejecting_business_j
     tmp_path: Path, kind: str,
 ) -> None:
     async with _shared(tmp_path / "undeclared.db") as (engine, _state, _native, root):
-        owner = SqlStateStore(engine, store_digest=b"u" * 32)
+        owner = SqlStateStore(engine, store_key=b"state-partition")
         await owner.initialize()
         try:
             payload = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))

@@ -22,9 +22,9 @@ async def _assert_caught_failure(
     engine: AsyncEngine, failure: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await provision_database(engine)
-    store = SqlStateStore(engine, store_digest=_digest(f"delete-failure:{failure}"))
+    store = SqlStateStore(engine, store_key=_digest(f"delete-failure:{failure}"))
     other = SqlStateStore(engine, group=store._storage_group,
-                          store_digest=_digest(f"delete-other:{failure}"))
+                          store_key=_digest(f"delete-other:{failure}"))
     await store.initialize()
     await other.initialize()
     records = tuple(_record(index) for index in range(260 if failure == "conflict" else 2))
@@ -35,7 +35,7 @@ async def _assert_caught_failure(
     execute = _SqlTransaction._execute
 
     async def interrupt(transaction, statement, parameters=None):
-        if (transaction._store_digest == store.store_digest
+        if (transaction._store_key == store.store_key
                 and getattr(statement, "is_delete", False)
                 and statement.table.name == "ai_state_aliases"):
             if failure == "cancel":
@@ -52,7 +52,7 @@ async def _assert_caught_failure(
             table = transaction._table("ai_state_records")
             # The stale cached version models losing a CAS after an earlier batch.
             await transaction._execute(update(table).where(
-                table.c.store_digest == store.store_digest.hex(),
+                table.c.store_key == store.store_key,
                 table.c.key == records[-1].key,
             ).values(storage_revision=1))
         await transaction.delete_records((*keys, keys[0], _digest("missing")))

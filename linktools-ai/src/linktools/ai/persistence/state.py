@@ -7,7 +7,6 @@ small physical contract shared by memory, filesystem, and SQL stores.
 """
 
 import asyncio
-import hashlib
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
@@ -30,6 +29,7 @@ ValueT = TypeVar("ValueT")
 ALIAS_KEY_MAX_BYTES = 1024
 OPERATION_KEY_MAX_BYTES = 1152
 STREAM_KEY_MAX_BYTES = 1280
+STORE_KEY_MAX_BYTES = 768
 SORT_KEY_MAX_BYTES = 1152
 RELATION_KEY_MAX_BYTES = 1024
 PARENT_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
@@ -234,10 +234,6 @@ def active_state_group_transaction(
 
 def reset_state_transaction(token: Token) -> None:
     _active_state_scope.reset(token)
-
-
-def _digest(value: JsonValue) -> bytes:
-    return hashlib.sha256(canonical_json_bytes(value)).digest()
 
 
 def _require_operation_key(value: bytes) -> bytes:
@@ -1167,8 +1163,8 @@ class StateStorageGroup(Protocol):
     ) -> "StateStore | None":
         """Borrow an isolated logical store owned by this existing group.
 
-        Keys are opaque 32-byte storage identities. Open outside transaction
-        callbacks; opening never changes record keys or transaction boundaries.
+        Keys are opaque binary storage identities of 1..768 bytes. Open outside
+        transaction callbacks; opening never changes record keys or transaction boundaries.
         Read-only opens do not create partitions. The group owns their lifetime.
         """
         ...
@@ -1272,8 +1268,37 @@ def validate_parent_key(value: bytes) -> bytes:
     return value
 
 
-def state_store_digest(namespace: str, tenant_id: str, runtime_domain: str) -> bytes:
-    return _digest(["state_store", namespace, tenant_id, runtime_domain])
+def state_store_key(namespace: str, tenant_id: str, partition: str) -> bytes:
+    """Address an ordinary domain or explicitly configured capability partition."""
+    if not isinstance(partition, str) or not partition:
+        raise ValueError("store partition must be a non-empty string")
+    return _encode_key_components(
+        ("state_store", validate_persistence_namespace(namespace), validate_tenant_id(tenant_id), partition),
+        STORE_KEY_MAX_BYTES,
+    )
+
+
+def capability_store_key(namespace: str, tenant_id: str, capability_id: str) -> bytes:
+    """Address a dynamically opened capability independently of configured routes."""
+    return _encode_key_components(
+        ("capability-store", validate_persistence_namespace(namespace),
+         validate_tenant_id(tenant_id), validate_capability_id(capability_id)),
+        STORE_KEY_MAX_BYTES,
+    )
+
+
+def standalone_store_key(partition: str) -> bytes:
+    """Address one standalone SQL store's declared partition."""
+    if not isinstance(partition, str) or not partition:
+        raise ValueError("store partition must be a non-empty string")
+    return _encode_key_components(("standalone", partition), STORE_KEY_MAX_BYTES)
+
+
+def validate_store_key(value: bytes) -> bytes:
+    """Accept bounded opaque keys without imposing built-in tuple syntax."""
+    if type(value) is not bytes or not 1 <= len(value) <= STORE_KEY_MAX_BYTES:
+        raise ValueError(f"store key must contain 1..{STORE_KEY_MAX_BYTES} bytes")
+    return value
 
 
 def scope_key(
@@ -1492,4 +1517,8 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'SORT_KEY_MAX_BYTES', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_digest', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+STATE_GROUP_METADATA_KEY = _encode_key_components(("state-group-metadata",), STORE_KEY_MAX_BYTES)
+STATE_GROUP_ARCHIVE_KEY = _encode_key_components(("state-group-archive",), STORE_KEY_MAX_BYTES)
+
+
+__all__ = ['STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'SORT_KEY_MAX_BYTES', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

@@ -390,7 +390,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
             if target is not None:
                 table = transaction._table('ai_state_records')
                 await transaction._execute(update(table).where(
-                    table.c.store_digest == transaction._store_hex,
+                    table.c.store_key == transaction._store_key,
                     table.c.key == target.record.key,
                 ).values(storage_revision=target.expected_storage_revision + 1))
                 conflicts.append(member)

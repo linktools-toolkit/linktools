@@ -3,7 +3,7 @@
 
 CREATE TABLE ai_state_records (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
+    store_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
     `key` VARBINARY(1152) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
     scope_key VARBINARY(1024) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
     subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
@@ -19,8 +19,8 @@ CREATE TABLE ai_state_records (
     payload_bytes LONGBLOB NULL COMMENT 'Optional binary content body owned by this record; ordinary domain state remains JSON.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key (store_digest, `key`),
-    KEY ix_store_digest_kind_sort_key (store_digest, kind, sort_key),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_key_key (store_key, `key`),
+    KEY ix_store_key_kind_sort_key (store_key, kind, sort_key),
     KEY ix_scope_key_sort_key (scope_key, sort_key),
     KEY ix_scope_key_subject_id (scope_key, subject_id),
     KEY ix_parent_key_sort_key (parent_key, sort_key),
@@ -29,19 +29,19 @@ CREATE TABLE ai_state_records (
 
 CREATE TABLE ai_state_aliases (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
+    store_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
     alias_key VARBINARY(1024) NOT NULL COMMENT 'Binary secondary lookup address with a maximum of 1024 bytes.',
     record_key VARBINARY(1152) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record resolved by this alias.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_alias_key (store_digest, alias_key),
-    KEY ix_store_digest_record_key (store_digest, record_key),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_key_alias_key (store_key, alias_key),
+    KEY ix_store_key_record_key (store_key, record_key),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Secondary unique lookup identities that resolve to canonical runtime records.';
 
 CREATE TABLE ai_state_facts (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
+    store_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
     stream_key VARBINARY(1280) NOT NULL COMMENT 'Exact bounded binary identity of the append-only fact stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
     owner_key VARBINARY(1152) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record that owns this fact.',
@@ -51,25 +51,25 @@ CREATE TABLE ai_state_facts (
     payload_json JSON NOT NULL COMMENT 'Canonical immutable fact JSON encoded as a JSON string preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_stream_key_sequence (store_digest, stream_key, sequence),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_key_stream_key_sequence (store_key, stream_key, sequence),
     KEY ix_owner_key (owner_key), KEY ix_stream_key_subject_id_sequence (stream_key, subject_id, sequence),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ordered runtime facts including events, checkpoints, and effects.';
 
 CREATE TABLE ai_state_sequences (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
+    store_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
     stream_key VARBINARY(1280) NOT NULL COMMENT 'Exact bounded binary identity of the monotonic sequence counter.',
     value BIGINT NOT NULL COMMENT 'Last committed value allocated by the sequence.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_stream_key (store_digest, stream_key),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_key_stream_key (store_key, stream_key),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Durable monotonic counters used to allocate ordered runtime sequence numbers.';
 
 CREATE TABLE ai_state_operations (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
+    store_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
     operation_key VARBINARY(1152) NOT NULL COMMENT 'Binary operation address, at most 1152 bytes.',
     stream_key VARBINARY(1280) NOT NULL COMMENT 'Exact bounded binary identity of the ordered operation stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
@@ -78,7 +78,7 @@ CREATE TABLE ai_state_operations (
     payload_json JSON NOT NULL COMMENT 'Canonical operation JSON encoded as a JSON string preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_store_digest_operation_key (store_digest, operation_key), UNIQUE KEY uk_store_digest_stream_key_sequence (store_digest, stream_key, sequence),
+    PRIMARY KEY (id), UNIQUE KEY uk_store_key_operation_key (store_key, operation_key), UNIQUE KEY uk_store_key_stream_key_sequence (store_key, stream_key, sequence),
     KEY ix_stream_key_state_sequence (stream_key, state, sequence),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Ordered durable operation ledger for replay, result recovery, status transition, and compaction.';

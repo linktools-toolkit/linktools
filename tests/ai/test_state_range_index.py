@@ -92,7 +92,7 @@ def test_sort_columns_use_binary_types_for_supported_backends() -> None:
 def test_binary_sorts_roundtrip_through_current_wire_rows_and_cursors(sort: bytes) -> None:
     record = _record(sort)
     assert decode_record(encode_record(record)) == record
-    assert _record_from_row(_record_values(record)) == record
+    assert _record_from_row({**_record_values(record), "store_key": b"store"}) == record
     assert decode_record_cursor(record_cursor(record)) == (sort, record.key)
 
 
@@ -105,7 +105,7 @@ def test_sort_producers_queries_and_readers_reject_unbounded_or_nonbinary_values
         with pytest.raises(ValueError):
             RecordQuery(kind="probe", **{field: sort})
     with pytest.raises(AIError) as error:
-        _record_from_row({**_record_values(record), "sort_key": sort})
+        _record_from_row({**_record_values(record), "store_key": b"store", "sort_key": sort})
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     encoded = (base64.b64encode(sort).decode("ascii") if isinstance(sort, bytes)
                else "invalid Base64 sort" if isinstance(sort, str) else sort)
@@ -188,7 +188,7 @@ def test_relation_address_enforces_the_complete_encoded_byte_budget(address: _Re
 def test_binary_relations_roundtrip_through_current_wire_and_rows(relation: bytes) -> None:
     record = replace(_record(b"sort"), scope_key=relation, parent_key=relation)
     assert decode_record(encode_record(record)) == record
-    assert _record_from_row(_record_values(record)) == record
+    assert _record_from_row({**_record_values(record), "store_key": b"store"}) == record
     validate_record_identity(record)
 
 
@@ -203,7 +203,7 @@ def test_relation_producers_queries_and_readers_reject_invalid_binary_bounds(fie
     with pytest.raises(ValueError):
         RecordQuery(kind="probe", **{field: relation})
     with pytest.raises(AIError) as error:
-        _record_from_row({**_record_values(record), field: relation})
+        _record_from_row({**_record_values(record), "store_key": b"store", field: relation})
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     encoded = relation.hex() if isinstance(relation, bytes) else relation
     with pytest.raises(AIError) as error:

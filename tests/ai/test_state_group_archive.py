@@ -16,7 +16,7 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._sql import SqlStateStorageGroup, SqlStateStore
 from linktools.ai.persistence._schema import build_runtime_sql_metadata
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import StateGroupTransaction, StoredRecord
+from linktools.ai.persistence.state import STATE_GROUP_METADATA_KEY, StateGroupTransaction, StoredRecord
 from linktools.ai.storage import create_sql_storage_context
 
 pytestmark = pytest.mark.asyncio
@@ -125,7 +125,7 @@ async def test_group_archive_sql_shared_identity_and_unopened_partition_scan(tmp
             second.storage_group.open_archive(create=True),
         )
         assert results[0][0] == results[1][0]
-        hidden = SqlStateStore(engine, group=first._storage_group, store_digest=hashlib.sha256(b"hidden").digest())
+        hidden = SqlStateStore(engine, group=first._storage_group, store_key=hashlib.sha256(b"hidden").digest())
         await hidden.initialize()
         await hidden.mutate(lambda tx: tx.insert_record(_record("hidden")))
         await hidden.close()
@@ -159,7 +159,7 @@ async def test_group_archive_resource_scope_survives_reduced_routes(tmp_path: Pa
     first = await StorageResourceScope.open(requests, namespace="namespace", tenant_id="tenant")
     stores = tuple(SqlStateStore(
         resource.context.engine, context=resource.context, metadata=resource.metadata,
-        group=resource.group, store_digest=hashlib.sha256(request.name.encode()).digest(),
+        group=resource.group, store_key=hashlib.sha256(request.name.encode()).digest(),
     ) for request, resource in zip(requests, first.resources))
     for store in stores:
         await store.initialize()
@@ -172,7 +172,7 @@ async def test_group_archive_resource_scope_survives_reduced_routes(tmp_path: Pa
     second = await StorageResourceScope.open(requests[:1], namespace="namespace", tenant_id="tenant", read_only=True)
     resource = second.resources[0]
     store = SqlStateStore(resource.context.engine, context=resource.context, metadata=resource.metadata,
-                          group=resource.group, store_digest=hashlib.sha256(b"owner").digest())
+                          group=resource.group, store_key=hashlib.sha256(b"owner").digest())
     await store.initialize()
     try:
         assert (await store.storage_group.open_archive())[0] == scope
@@ -196,7 +196,7 @@ async def test_group_archive_object_resource_survives_route_reduction(tmp_path: 
     context = create_sql_storage_context(engine)
     first = SqlStateStore(engine, context=context)
     hidden = SqlStateStore(engine, context=context, group=first.storage_group,
-                           store_digest=hashlib.sha256(b"hidden").digest())
+                           store_key=hashlib.sha256(b"hidden").digest())
     route = StorageRoute.sqlite(path)
     plan = PersistencePlan(conversation=route, execution=route)
     domains = (PersistenceDomain.CONVERSATION, PersistenceDomain.EXECUTION)
@@ -399,7 +399,7 @@ async def test_sql_first_owner_write_rejects_orphan_archive_without_repair(tmp_p
         table = owner.storage_group.metadata.tables["ai_state_records"]
         async with engine.begin() as connection:
             await connection.execute(delete(table).where(
-                table.c.store_digest == hashlib.sha256(b"linktools-ai:state-group-metadata").hexdigest(),
+                table.c.store_key == STATE_GROUP_METADATA_KEY,
             ))
         await reopened.initialize()
         with pytest.raises(AIError) as error:

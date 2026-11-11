@@ -133,7 +133,7 @@ async def test_group_prefetch_does_not_replace_physical_cas_or_partial_rollback(
             table = first.storage_group.metadata.tables["ai_state_records"]
             # Change physical revision without refreshing the local observation.
             await transaction._execute(update(table).where(
-                table.c.store_digest == first.store_digest.hex(),
+                table.c.store_key == first.store_key,
                 table.c.key == existing.key,
             ).values(storage_revision=1))
             assert await transaction.guard_record(existing.key, expected_storage_revision=0) is None
@@ -195,7 +195,7 @@ async def test_group_reader_rejects_foreign_unenlisted_child_and_expired_scope(t
 async def test_group_reads_demultiplex_aliases_of_one_physical_partition(tmp_path: Path) -> None:
     async with _database(tmp_path / "aliases.db", cache=InMemoryCacheBackend(max_bytes=65536)) as (engine, first, second):
         alias = SqlStateStore(engine, context=first.context, metadata=first.storage_group.metadata,
-                              runtime_domain="alias", group=first.storage_group, store_digest=first.store_digest)
+                              runtime_domain="alias", group=first.storage_group, store_key=first.store_key)
         await alias.initialize()
         one, two = _record("one"), _record("two")
         await first.mutate(lambda tx: tx.insert_records((one, two)))
@@ -228,7 +228,7 @@ async def _partition_handles(
 ) -> AsyncIterator[tuple[SqlStateStore, SqlStateStore]]:
     async with _database(path, cache=cache) as (engine, first, _):
         alias = SqlStateStore(engine, context=first.context, metadata=first.storage_group.metadata,
-                              runtime_domain="alias", group=first.storage_group, store_digest=first.store_digest,
+                              runtime_domain="alias", group=first.storage_group, store_key=first.store_key,
                               cache=alias_cache)
         await alias.initialize()
         try:

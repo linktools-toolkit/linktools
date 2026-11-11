@@ -11,7 +11,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StoredRecord
-from linktools.ai.persistence.state import StoredAlias, StateTransactionNestingError, state_store_digest
+from linktools.ai.persistence.state import StoredAlias, StateTransactionNestingError, state_store_key
 
 
 def _key(value: str) -> bytes:
@@ -152,7 +152,7 @@ async def test_binary_alias_boundaries_remain_partition_local(tmp_path: Path, ba
     alias_keys = (b"a", b"z" * 1024)
     async with Persistence.open("scope", storage=_storage(tmp_path, backend)) as persistence:
         owner = persistence.execution.executions.state_store
-        stores = [await owner.storage_group.open_partition(state_store_digest(*scope), create=True) for scope in scopes]
+        stores = [await owner.storage_group.open_partition(state_store_key(*scope), create=True) for scope in scopes]
         for index, store in enumerate(stores):
             assert store is not None
             async def seed(tx):

@@ -43,7 +43,7 @@ from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStore
 from ._step_materializer import build_runtime_agent_run_store
 from .runs import RuntimeAgentRunStore
-from .state import StateStore, state_store_digest
+from .state import StateStore, state_store_key
 from ._task_admission_repository import TaskAdmissionRepositoryImpl
 from ._task_repository import TaskRepositoryImpl
 
@@ -170,7 +170,7 @@ async def materialize_runtime_storage(
                 runtime_domain=domain,
                 group=resource.group,
                 cache=cache,
-                store_digest=state_store_digest(namespace, tenant_id, domain.value),
+                store_key=state_store_key(namespace, tenant_id, domain.value),
             )
             sql_contexts[domain] = resource.context
         stores[domain] = store
@@ -185,7 +185,7 @@ async def materialize_runtime_storage(
             store = SqlStateStore(
                 resource.context.engine, metadata=resource.metadata, context=resource.context,
                 runtime_domain=partition, group=resource.group, cache=route.cache,
-                store_digest=state_store_digest(namespace, tenant_id, partition),
+                store_key=state_store_key(namespace, tenant_id, partition),
             )
         capability_stores[identity] = store
         cleanups.append(store.close)

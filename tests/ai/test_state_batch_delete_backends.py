@@ -203,7 +203,7 @@ async def test_sql_batch_delete_later_chunk_conflict_rolls_back_entire_batch(tmp
             table = transaction._table("ai_state_records")
             # Leave the read version stale to exercise the same CAS failure as a competing writer.
             await transaction._execute(update(table).where(
-                table.c.store_digest == store.store_digest.hex(),
+                table.c.store_key == store.store_key,
                 table.c.key == records[-1].key,
             ).values(storage_revision=1))
             await transaction.delete_records(keys)
@@ -263,7 +263,7 @@ async def test_sql_batch_delete_preserves_other_logical_stores(tmp_path: Path) -
     async with _open_store("sql", tmp_path / "sql") as store:
         assert isinstance(store, SqlStateStore)
         other = SqlStateStore(
-            store.context.engine, context=store.context, store_digest=_digest("other-store"),
+            store.context.engine, context=store.context, store_key=_digest("other-store"),
         )
         await other.initialize()
         try:

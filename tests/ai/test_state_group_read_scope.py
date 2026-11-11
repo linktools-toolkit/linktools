@@ -51,7 +51,7 @@ async def _open_stores(backend: str, root: Path) -> AsyncIterator[tuple[StateSto
         await provision_database(engine)
         first = SqlStateStore(engine)
         stores = (first, *(SqlStateStore(
-            engine, group=first._storage_group, store_digest=_digest(str(index)),
+            engine, group=first._storage_group, store_key=_digest(str(index)),
         ) for index in range(2)))
     for store in stores:
         await store.initialize()

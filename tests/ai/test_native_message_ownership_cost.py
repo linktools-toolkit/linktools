@@ -111,14 +111,14 @@ class _Traffic:
             assert lookups[table] == (bound + 127) // 128
 
     def assert_owner_metadata(
-        self, start: int, *, store_digest: str, record_store: str, root: str,
+        self, start: int, *, store_digest: str, record_store: bytes, root: str,
         collecting: bool, replacing: bool = False,
     ) -> None:
         kinds: Counter[str] = Counter()
         for statement, parameters in self.reads[start:]:
             projection = " ".join(statement.split("FROM", 1)[0].split())
             if projection.startswith("SELECT ai_state_records.id,"):
-                assert "ai_state_records.store_digest =" in statement and "ai_state_records.key =" in statement
+                assert "ai_state_records.store_key =" in statement and "ai_state_records.key =" in statement
                 assert parameters[0] == record_store and len(parameters) == 2
                 kinds['owner'] += 1
             elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
@@ -561,7 +561,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                 write_start = len(writer_traffic.writes)
                 await archive.state_store.mutate(publish)
                 writer_traffic.assert_owner_metadata(
-                    reads, store_digest=native.store_digest, record_store=archive.state_store.store_digest.hex(),
+                    reads, store_digest=native.store_digest, record_store=archive.state_store.store_key,
                     root=projection.items[0].root.slices[0].first, collecting=True, replacing=turn > 1,
                 )
                 phase_reads['archive'] += writer_traffic.statements['SELECT'] - reads
@@ -600,7 +600,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             write_start = len(writer_traffic.writes)
             await store.mutate(admit)
             writer_traffic.assert_owner_metadata(
-                reads, store_digest=native.store_digest, record_store=store.store_digest.hex(),
+                reads, store_digest=native.store_digest, record_store=store.store_key,
                 root=roots[0].slices[0].first, collecting=False,
             )
             phase_reads['context'] += writer_traffic.statements['SELECT'] - reads

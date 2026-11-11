@@ -183,7 +183,7 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
                 target = next(item for item in replacements if item.record.kind == member)
                 table = transaction._table("ai_state_records")
                 await transaction._execute(update(table).where(
-                    table.c.store_digest == transaction._store_hex,
+                    table.c.store_key == transaction._store_key,
                     table.c.key == target.record.key,
                 ).values(storage_revision=target.expected_storage_revision + 1))
                 conflicts.append(member)

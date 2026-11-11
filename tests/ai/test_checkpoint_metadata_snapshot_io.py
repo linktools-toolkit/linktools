@@ -120,7 +120,7 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
                     event.remove(engine, "before_cursor_execute", capture)
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
             counts.append(statements.count("SELECT"))
-            domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
+            domain_counts.append(select_stores.count(archive.state_store.store_key))
         await _assert_prepared_values_equal(archive, results[0], results[1])
         # Native message preparation needs no body existence lookup. The three
         # domain metadata keys still collapse to one grouped read.
@@ -216,7 +216,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
                     # not rewrite transcript records, checkpoint facts or content.
                     assert len(writes) == 1 and writes[0][0].startswith("UPDATE ai_state_records")
                     repository = state.execution.executions
-                    assert repository.state_store.store_digest.hex() in writes[0][1]
+                    assert repository.state_store.store_key in writes[0][1]
                     assert repository._key("execution", ("execution",)) in writes[0][1]
         finally:
             await state.close()

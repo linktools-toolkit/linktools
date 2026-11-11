@@ -44,8 +44,8 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
         archive = state.run_store.read_store(PersistenceDomain.CONVERSATION)
         repository = archive.transcript_repository
         contents = await repository.content_archive()
-        domain_partition = archive.state_store.store_digest.hex()
-        archive_partition = contents.store.store_digest.hex()
+        domain_partition = archive.state_store.store_key
+        archive_partition = contents.store.store_key
         latest = await repository.latest_chunk(session.history_id)
         assert latest is not None and isinstance(latest.content, NativeMessageRoot)
         native_partition = latest.content.store_digest

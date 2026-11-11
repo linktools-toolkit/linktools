@@ -161,7 +161,7 @@ async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
                 member = next(value for value in replacements if value.record.kind == target)
                 table = transaction._table("ai_state_records")
                 await transaction._execute(update(table).where(
-                    table.c.store_digest == transaction._store_hex,
+                    table.c.store_key == transaction._store_key,
                     table.c.key == member.record.key,
                 ).values(storage_revision=member.expected_storage_revision + 1))
                 lost.append(target)
@@ -318,7 +318,7 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
             member = next(value for value in replacements if value.record.kind == target)
             table = transaction._table("ai_state_records")
             await transaction._execute(update(table).where(
-                table.c.store_digest == transaction._store_hex,
+                table.c.store_key == transaction._store_key,
                 table.c.key == member.record.key,
             ).values(storage_revision=member.expected_storage_revision + 1))
             lost.append(target)

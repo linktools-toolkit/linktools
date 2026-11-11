@@ -74,7 +74,7 @@ class NativeContentUnavailable(Exception):
 
 
 def stage_owner(
-    session: "AsyncSession", kind: str, store: str, identity: Sequence[str | int | bytes],
+    session: "AsyncSession", kind: str, store: bytes, identity: Sequence[str | int | bytes],
     data: object | None, *, state: object = None, inserting: bool = False,
 ) -> None:
     from ._archive_closure import iter_native_message_roots
@@ -303,15 +303,14 @@ async def finish_publications(context: "SqlStorageContext", session: "AsyncSessi
 
 
 async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *, group_id: str | None) -> None:
-    import hashlib
     import json
     from sqlalchemy import JSON, LargeBinary, column, select, table
-    from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, record_key
+    from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, STORE_KEY_MAX_BYTES, STATE_GROUP_METADATA_KEY, record_key
     pending = session.info.pop(_PENDING, {})
     if group_id is None and any(pending.values()):
-        records = table("ai_state_records", column("store_digest"), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()))
+        records = table("ai_state_records", column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()))
         wire = await session.scalar(select(records.c.payload_json).where(
-            records.c.store_digest == hashlib.sha256(b"linktools-ai:state-group-metadata").hexdigest(),
+            records.c.store_key == STATE_GROUP_METADATA_KEY,
             records.c.key == record_key("", "", "archive", "archive_scope", ("archive_scope_id",)),
         ))
         if wire is not None:
@@ -319,9 +318,9 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
     for (kind, store, identity), roots in pending.items():
         names = {"record": "ai_state_records", "fact": "ai_state_facts", "operation": "ai_state_operations"}
         key_column = "operation_key" if kind == "operation" else "key"
-        owner = table(names[kind], column("id"), column("store_digest"), column(key_column, LargeBinary(RECORD_KEY_MAX_BYTES)),
+        owner = table(names[kind], column("id"), column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column(key_column, LargeBinary(RECORD_KEY_MAX_BYTES)),
                       column("stream_key", LargeBinary(STREAM_KEY_MAX_BYTES)), column("sequence"))
-        conditions = (owner.c.store_digest == store,)
+        conditions = (owner.c.store_key == store,)
         if kind == "fact":
             conditions += (owner.c.stream_key == identity[0], owner.c.sequence == identity[1])
         else:

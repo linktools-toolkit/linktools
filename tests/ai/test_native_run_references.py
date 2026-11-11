@@ -497,7 +497,7 @@ def test_native_join_preserves_full_record_key_bind_budget(dialect_name: str) ->
     from linktools.ai.persistence._native_run_reference import NativeRunReferences
 
     dialect = {"sqlite": sqlite, "postgresql": postgresql, "mysql": mysql}[dialect_name].dialect()
-    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect), store_digest=b"a" * 32)
+    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect), store_key=b"state-partition")
     reader = NativeRunReferences(state, namespace="native-run-facts", tenant_id="tenant")
     keys = tuple(index.to_bytes(32, "big") for index in range(998))
     compiled = reader.statement(keys=keys).compile(dialect=dialect, compile_kwargs={"render_postcompile": True})

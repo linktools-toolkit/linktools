@@ -11,13 +11,12 @@ from ..storage import (
     sql_blob,
     sql_id_column,
     sql_query_index,
-    sql_sha256,
     sql_state,
     sql_table_options,
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import STREAM_KEY_MAX_BYTES, ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
+from .state import STORE_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -68,16 +67,15 @@ def build_runtime_sql_metadata(
     ):
         raise ValueError("at least one durable PersistenceDomain is required")
 
-    digest = sql_sha256()
     records = Table(
         "ai_state_records",
         metadata,
         sql_id_column(),
         Column(
-            "store_digest",
-            digest,
+            "store_key",
+            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
+            comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "key",
@@ -158,8 +156,8 @@ def build_runtime_sql_metadata(
         comment=_RECORD_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(records, "store_digest", "key")
-    sql_query_index(records, "store_digest", "kind", "sort_key")
+    sql_unique(records, "store_key", "key")
+    sql_query_index(records, "store_key", "kind", "sort_key")
     sql_query_index(records, "scope_key", "sort_key")
     sql_query_index(records, "scope_key", "subject_id")
     sql_query_index(records, "parent_key", "sort_key")
@@ -170,10 +168,10 @@ def build_runtime_sql_metadata(
         metadata,
         sql_id_column(),
         Column(
-            "store_digest",
-            digest,
+            "store_key",
+            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
+            comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "alias_key",
@@ -191,8 +189,8 @@ def build_runtime_sql_metadata(
         comment=_ALIAS_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(aliases, "store_digest", "alias_key")
-    sql_query_index(aliases, "store_digest", "record_key")
+    sql_unique(aliases, "store_key", "alias_key")
+    sql_query_index(aliases, "store_key", "record_key")
     sql_audit_indexes(aliases)
 
     facts = Table(
@@ -200,10 +198,10 @@ def build_runtime_sql_metadata(
         metadata,
         sql_id_column(),
         Column(
-            "store_digest",
-            digest,
+            "store_key",
+            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
+            comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "stream_key",
@@ -251,7 +249,7 @@ def build_runtime_sql_metadata(
         comment=_FACT_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(facts, "store_digest", "stream_key", "sequence")
+    sql_unique(facts, "store_key", "stream_key", "sequence")
     sql_query_index(facts, "owner_key")
     sql_query_index(facts, "stream_key", "subject_id", "sequence")
     sql_audit_indexes(facts)
@@ -261,10 +259,10 @@ def build_runtime_sql_metadata(
         metadata,
         sql_id_column(),
         Column(
-            "store_digest",
-            digest,
+            "store_key",
+            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
+            comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "stream_key",
@@ -282,7 +280,7 @@ def build_runtime_sql_metadata(
         comment=_SEQUENCE_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(sequences, "store_digest", "stream_key")
+    sql_unique(sequences, "store_key", "stream_key")
     sql_audit_indexes(sequences)
 
     operations = Table(
@@ -290,10 +288,10 @@ def build_runtime_sql_metadata(
         metadata,
         sql_id_column(),
         Column(
-            "store_digest",
-            digest,
+            "store_key",
+            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
+            comment="Exact bounded binary identity of the physical State store partition.",
         ),
         Column(
             "operation_key",
@@ -335,8 +333,8 @@ def build_runtime_sql_metadata(
         comment=_OPERATION_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(operations, "store_digest", "operation_key")
-    sql_unique(operations, "store_digest", "stream_key", "sequence")
+    sql_unique(operations, "store_key", "operation_key")
+    sql_unique(operations, "store_key", "stream_key", "sequence")
     sql_query_index(operations, "stream_key", "state", "sequence")
     sql_audit_indexes(operations)
     return metadata

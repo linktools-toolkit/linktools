@@ -1062,7 +1062,7 @@ def test_terminal_source_join_keeps_explicit_locator_bind_budget(dialect_name: s
     # Compile only: the engine never opens a connection or provisions a schema.
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     native = SqlStepStore(engine, namespace="native-start", tenant_id="tenant")
-    state = SimpleNamespace(context=SimpleNamespace(engine=engine, dialect=dialect), store_digest=b"a" * 32)
+    state = SimpleNamespace(context=SimpleNamespace(engine=engine, dialect=dialect), store_key=b"state-partition")
     references = NativeRunReferences(state, namespace="native-start", tenant_id="tenant")
     references.bind(native)
     source = NativeEvent(run_id="run", kind="run_started", step_index=0, idempotency_key="0:0:run_started:")

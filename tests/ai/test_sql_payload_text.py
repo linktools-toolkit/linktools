@@ -43,7 +43,7 @@ OPERATION = StoredOperation(b"o" * 32, b"s" * 32, 1, "pending", False, DATA)
     (OPERATION, _operation_values, _operation_from_row),
 ))
 def test_sql_payload_text_preserves_original_json_and_rejects_invalid_roots(value, encode, decode) -> None:
-    row = encode(value)
+    row = {**encode(value), "store_key": b"store"}
     assert isinstance(row["payload_json"], str)
     assert row["payload_json"].encode("utf-8") == canonical_json_bytes(DATA)
     restored = decode(row)

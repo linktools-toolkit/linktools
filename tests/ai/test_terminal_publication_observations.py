@@ -83,7 +83,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                     # A competing physical revision must defeat the later CAS even
                     # when the transaction has already captured the previous row.
                     await tx._execute(update(table).where(
-                        table.c.store_digest == store.store_digest.hex(),
+                        table.c.store_key == store.store_key,
                         table.c.key == record.key,
                     ).values(storage_revision=record.storage_revision + 1))
                     return result

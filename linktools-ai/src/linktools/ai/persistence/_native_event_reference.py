@@ -339,7 +339,7 @@ class NativeEventReferences:
         statement = visitors.replacement_traverse(statement, {}, lambda node: (
             bindparam(None, node.value, type_=node.type, literal_execute=True)
             if isinstance(node, BindParameter) else None
-        )).where(facts.c.store_digest == self._state.store_digest.hex())
+        )).where(facts.c.store_key == self._state.store_key)
         if query is not None:
             conditions = [facts.c.stream_key == query.stream_key]
             if query.after_sequence is not None:
@@ -350,7 +350,7 @@ class NativeEventReferences:
                 conditions.append(facts.c.sequence.in_(tuple(sequences)))
             if query.latest_per_subject:
                 latest = select(func.max(facts.c.sequence)).where(
-                    facts.c.store_digest == self._state.store_digest.hex(), *conditions,
+                    facts.c.store_key == self._state.store_key, *conditions,
                 ).group_by(facts.c.subject_id)
                 conditions = [facts.c.stream_key == query.stream_key, facts.c.sequence.in_(latest)]
             statement = statement.where(*conditions).order_by(facts.c.sequence.desc() if query.latest else facts.c.sequence)

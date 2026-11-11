@@ -503,8 +503,8 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
     path = tmp_path / "scoped-runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    first = SqlStateStore(engine, store_digest=b"a" * 32)
-    second = SqlStateStore(engine, store_digest=b"b" * 32)
+    first = SqlStateStore(engine, store_key=b"a" * 32)
+    second = SqlStateStore(engine, store_key=b"b" * 32)
     await first.initialize()
     await second.initialize()
 

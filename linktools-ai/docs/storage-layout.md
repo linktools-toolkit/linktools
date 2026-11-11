@@ -107,8 +107,7 @@ complete eight-byte prefix plus key against the same 1152-byte sort limit.
 Parent references also permit 1152 bytes. The two-column parent/sort index
 therefore has at most 2304 field bytes, below ordinary backend index limits.
 The record unique index has at most 1408 MySQL declared key bytes with the
-current store digest. Store, stream and independent native Step digests retain
-their own contracts in this change.
+current store key. Independent native Step digests retain their own contracts.
 
 Current wire record references are canonical lowercase hex decoded back to
 bytes. The record cursor frames sort and key with two-byte lengths before one
@@ -117,12 +116,48 @@ sorted, deduplicated key by its length, keeping variable component boundaries
 and single-record/batch families distinct. Raw record, target, owner and
 cursor addresses are omitted from object representations.
 
+## State store partitions
+
+Physical State stores use one exact `store_key` of 1..768 bytes. Built-in
+addresses use the same fixed two-byte big-endian UTF-8 component framing as
+record and stream keys, with distinct families:
+
+- Ordinary and configured capability routes: `(state_store, namespace, tenant, partition)`.
+  Configured capability partitions retain `capability:` followed by the validated capability ID.
+- Dynamic capability routes: `(capability-store, namespace, tenant, capability ID)`.
+  They remain distinct from explicitly configured routes.
+- Standalone SQL stores: `(standalone, partition)`.
+- Group metadata and archive stores: `(state-group-metadata)` and `(state-group-archive)`.
+
+Namespace256, tenant128 and capability ID256 UTF-8 limits give a configured
+capability maximum of670 bytes and a dynamic maximum of664 bytes. Generic
+custom binary partitions need not parse as these tuples but must obey the
+complete768-byte bound. No normalization, hash, fallback, shadow lookup or
+schema version bump is used. All families reopen at the exact same bytes.
+Group archive scope UUIDs and native Step/message store digests are unchanged.
+
+All five State table columns are MySQL `VARBINARY(768)`, PostgreSQL `BYTEA`
+and SQLite `BLOB`, never hex text. Current SQL readers validate the same raw
+bound. Store-qualified predicates and native owner selections reuse those
+bytes without another query; native ownership edges remain existing row IDs.
+The record cache's string transport uses an injective hex rendering of the
+same raw address. Raw partition names are not included in mutation log context.
+
+Store plus record or operation consumes at most1920 index field bytes; store
+plus alias1792; store plus stream and sequence2056; store plus kind and sort2048.
+All indexes have at most three physical columns. Global scope/parent indexes
+remain unchanged because their addresses already contain complete scope.
+These budgets fit MySQL3072 and ordinary PostgreSQL approximately2704-byte
+B-tree tuples with overhead, not every PostgreSQL page-size configuration.
+Direct tuples can exceed the former64 SQL hex bytes, so this is not a claim
+of universal byte savings or measured latency improvement.
+
 ## State operation addresses
 
 `StoredOperation.key` is a binary address of 1..1152 bytes. Public repositories
 can share a bare or custom StateStore, so ordinary ledger keys carry their
 namespace, tenant and domain even when standard stores also use a
-`store_digest` partition. Built-in families reserve distinct first bytes:
+`store_key` partition. Built-in families reserve distinct first bytes:
 
 | Family | Physical address | Maximum bytes |
 | --- | --- | --- |
@@ -144,9 +179,8 @@ bounds, as detailed below. All streams remain globally scoped, and repository
 reads verify the key, stream and payload against the bound scope.
 
 SQL stores operation and alias addresses directly: MySQL `VARBINARY(1152)` and `VARBINARY(1024)`,
-PostgreSQL `BYTEA`, SQLite `BLOB`. Each unique `(store_digest, address)` index
-declares at most 1408 MySQL key bytes; PostgreSQL field payload is at most 1216
-bytes before index tuple overhead. Binary comparison defines scan ordering on
+PostgreSQL `BYTEA`, SQLite `BLOB`. Each unique `(store_key, address)` index
+declares at most 1920 field bytes on MySQL and PostgreSQL before index tuple overhead. Binary comparison defines scan ordering on
 all backends. Current snapshot wire encodes the key as canonical lowercase hex
 and decodes the same bounded bytes. Native content ownership uses that binary
 address to select the existing operation row ID. Snapshot aliases are rebuilt
@@ -247,18 +281,18 @@ recompute direct keys against the manifest scope rather than the destination.
 
 `StoredRecord.sort_key`, query prefixes and pagination boundaries are nonempty
 binary values of at most 1152 bytes, including every prefix. Writers and readers
-validate the same bound. Ordinary record order reuses the existing 32-byte
-record key directly. Chronological order uses eight big-endian epoch-microsecond
-bytes followed by that key, totaling 40 bytes. Explicit path, sequence and trace
+validate the same bound. Ordinary record order reuses the complete record key directly. Chronological
+order adds eight big-endian epoch-microsecond bytes before that key; the complete
+value must still fit the 1152-byte sort bound. Explicit path, sequence and trace
 orders retain their ASCII semantics as ASCII bytes. No hex or Base64 encoding
 participates in SQL ordering.
 
 State uses `VARBINARY(1152)` on MySQL, `BYTEA` on PostgreSQL and `BLOB` on SQLite.
 Its indexes cover the full sort value, never a text or binary prefix. The
-three-column sort index is `(store_digest, kind, sort_key)`. MySQL's declared
-field budget is 256 + 128 + 1152 = 1536 bytes, below 3072 even allowing 32 bytes
+three-column sort index is `(store_key, kind, sort_key)`. MySQL's declared
+field budget is 768 + 128 + 1152 = 2048 bytes, below 3072 even allowing 32 bytes
 for variable-length and record overhead. PostgreSQL's maximum actual field
-payload is 64 + 128 + 1152 = 1344 bytes; a conservative 40-byte allowance for
+payload is 768 + 128 + 1152 = 2048 bytes; a conservative 40-byte allowance for
 field headers, alignment and the index tuple remains below its approximately
 2704-byte B-tree entry limit. The wider two-column relation indexes have the
 2176-byte field budget described above. These are size calculations, not
@@ -294,7 +328,7 @@ UTF-8 bytes; application validation enforces the tighter byte bound on every
 backend, including SQLite. With `utf8mb4`, a scope `CHAR(64)` plus an ID declares
 768 key bytes, or 769 with the snapshot boolean. These fit InnoDB's 3072-byte
 large-prefix budget, not its legacy 767-byte configuration. Existing Runtime
-indexes already exceed 767 bytes, including `(store_digest, kind, sort_key)`.
+indexes already exceed 767 bytes, including `(store_key, kind, sort_key)`.
 Provision MySQL 5.7 with the applicable large-prefix row format/settings; this
 contract adds no fallback for legacy index settings. The same bounded IDs stay
 well below PostgreSQL's ordinary B-tree entry limit. DDL compilation is distinct

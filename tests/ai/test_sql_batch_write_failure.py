@@ -35,7 +35,7 @@ async def test_caught_replace_failure_rolls_back_group(
     await provision_database(engine)
     context = SqlStorageContext(engine, async_sessionmaker(engine), Dialect())
     store = SqlStateStore(engine, context=context)
-    other = SqlStateStore(engine, group=store._storage_group, store_digest=_digest("other"))
+    other = SqlStateStore(engine, group=store._storage_group, store_key=_digest("other"))
     await store.initialize()
     await other.initialize()
     records = tuple(sorted((_record(index) for index in range(size)), key=lambda r: r.key))
@@ -47,7 +47,7 @@ async def test_caught_replace_failure_rolls_back_group(
 
     async def interrupt(transaction, statement, parameters=None):
         nonlocal writes
-        if (transaction._store_digest == store.store_digest
+        if (transaction._store_key == store.store_key
                 and getattr(statement, "is_update", False)
                 and statement.table.name == "ai_state_records"):
             writes += 1
@@ -65,7 +65,7 @@ async def test_caught_replace_failure_rolls_back_group(
             table = transaction._table("ai_state_records")
             # Preserve stale cached CAS revisions to model a competing winner.
             await execute(transaction, update(table).where(
-                table.c.store_digest == store.store_digest.hex(),
+                table.c.store_key == store.store_key,
                 table.c.key == records[-1].key,
             ).values(storage_revision=1))
         try:
@@ -122,7 +122,7 @@ async def test_lost_scalar_cas_does_not_abort_unrelated_write(tmp_path: Path) ->
         await transaction.get_record(record.key)
         table = transaction._table("ai_state_records")
         await transaction._execute(update(table).where(
-            table.c.store_digest == store.store_digest.hex(),
+            table.c.store_key == store.store_key,
             table.c.key == record.key,
         ).values(storage_revision=1))
         assert not await transaction.replace_record(
