@@ -20,7 +20,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -2003,6 +2003,51 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             stored.storage_revision,
         )
         return True, next_value
+
+    async def require_active_producer(
+        self, execution_id: str, *, tenant_id: str, expected_producer_generation: int,
+        allow_cancelling: bool = True, fresh: bool = False,
+    ) -> None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        key = self._key("execution", execution_id)
+        record = ((await self._refresh_records((key,))).get(key) if fresh else
+                  await self._store.read_record(key))
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._decode_header(record, execution_id)
+        generation, status, _durable_trace, _seal = decode_execution_producer_control(record.data)
+        if generation != expected_producer_generation:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if status is ExecutionStatus.CANCELLING and not allow_cancelling:
+            raise AIError(ErrorCode.EXECUTION_CANCELLED)
+        allowed = ({ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
+                   if allow_cancelling else {ExecutionStatus.STARTED})
+        if status not in allowed:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def require_revoked_producer(
+        self, execution_id: str, *, tenant_id: str, producer_generation: int,
+    ) -> None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        async def read(transaction: StateTransaction) -> None:
+            record = await transaction.get_record(self._key("execution", execution_id))
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            self._decode_header(record, execution_id)
+            generation, status, durable_trace, seal_digest = decode_execution_producer_control(record.data)
+            if generation > producer_generation:
+                return
+            if generation == producer_generation and status is ExecutionStatus.RECOVERY_REQUIRED:
+                return
+            if (generation < producer_generation or status not in {
+                    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if not durable_trace:
+                return
+            seal = await self._get_history_seal_in_transaction(transaction, execution_id)
+            if seal is None or seal.seal_digest != seal_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._store.read(read)
 
     async def get_history_seal(
         self,

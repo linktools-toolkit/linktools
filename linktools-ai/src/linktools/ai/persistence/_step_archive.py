@@ -2445,27 +2445,9 @@ class StateStepArchive(AgentRunStore):
                 and terminal_execution.recovery_state is not ExecutionRecoveryState.HANDOFF
                 and terminal_execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}):
             return
-        async def read(_transaction: StateTransaction) -> None:
-            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
-            if execution is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if execution.producer_generation > producer_generation:
-                return
-            if (execution.producer_generation == producer_generation
-                    and execution.status is ExecutionStatus.RECOVERY_REQUIRED):
-                return
-            if (execution.producer_generation < producer_generation
-                    or execution.status not in {
-                        ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-                    }):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if not execution.durable_trace:
-                return
-            seal = await repository.get_history_seal(execution_id, tenant_id=self._tenant_id)
-            if seal is None or seal.seal_digest != execution.history_seal_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        await repository.state_store.read(read)
+        await repository.require_revoked_producer(
+            execution_id, tenant_id=self._tenant_id, producer_generation=producer_generation,
+        )
 
     async def sync_projection(
         self,

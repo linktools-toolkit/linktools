@@ -1744,6 +1744,22 @@ def decode_execution_header(value: Mapping[str, JsonValue], *, tenant_id: str) -
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+def decode_execution_producer_control(
+    value: Mapping[str, JsonValue],
+) -> tuple[int, ExecutionStatus, bool, str | None]:
+    """Decode producer authority without reading input, output, or binding content."""
+    source, codec = _execution_projection_fields(value)
+    generation = _execution_projection_field(source, "producer_generation", codec)
+    claim = _execution_projection_field(source, "producer_claim_id", codec)
+    status = _execution_projection_field(source, "status", codec)
+    durable_trace = _execution_projection_field(source, "durable_trace", codec)
+    seal = _execution_projection_field(source, "history_seal_digest", codec)
+    if (generation < 0 or claim is not None and (not claim or generation < 1)
+            or seal is not None and (not durable_trace or len(seal) != 64)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return generation, status, durable_trace, seal
+
+
 def _validate_execution_view(view: ExecutionView, binding: AgentBindingContract | TaskBindingContract) -> None:
     # Preserve the owner's invariants for fields consumed by this projection.
     if isinstance(binding, AgentBindingContract):
@@ -2812,4 +2828,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ['CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'canonical_digest', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

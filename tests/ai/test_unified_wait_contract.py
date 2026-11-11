@@ -6,6 +6,7 @@ from linktools.ai.core import ExecutionContext
 
 import ast
 import asyncio
+import gc
 import inspect
 import time
 from collections import deque
@@ -660,6 +661,8 @@ async def test_failure_revealed_during_deadline_cleanup_keeps_its_source_priorit
         bundle.execution.wait = authority
     run = Execution(bundle.runtime._execution_binding, "execution", _PRINCIPAL, tree)
     try:
+        # Keep collection-time cyclic garbage outside the cleanup priority window.
+        gc.collect()
         with pytest.raises(ObservationError if failure == "callback" else AIError) as raised:
             await run.wait(on_event=callback, timeout_seconds=0.01, close_timeout_seconds=0.2,
                            raise_on_stream_error=raise_on_stream_error)

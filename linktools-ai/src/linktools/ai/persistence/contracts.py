@@ -1546,6 +1546,17 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def get_result(
         self, execution_id: str, *, tenant_id: str
     ) -> ResultRecord | None: ...
+    async def require_active_producer(
+        self, execution_id: str, *, tenant_id: str, expected_producer_generation: int,
+        allow_cancelling: bool = True, fresh: bool = False,
+    ) -> None:
+        """Check current producer control; fresh observations also refresh ordinary reads."""
+        raise NotImplementedError
+    async def require_revoked_producer(
+        self, execution_id: str, *, tenant_id: str, producer_generation: int,
+    ) -> None:
+        """Prove revocation from authoritative control and any required seal in one snapshot."""
+        raise NotImplementedError
     async def get_history_seal(
         self,
         execution_id: str,

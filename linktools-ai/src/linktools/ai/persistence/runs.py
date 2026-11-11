@@ -639,19 +639,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         if repository is None or self._tenant_id is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-        execution = (await repository.get_fresh(execution_id, tenant_id=self._tenant_id)
-                     if authoritative and isinstance(repository, ExecutionRepositoryImpl) else
-                     await repository.get(execution_id, tenant_id=self._tenant_id))
-        if execution is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if execution.producer_generation != producer_generation:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if execution.status is ExecutionStatus.CANCELLING and not allow_cancelling:
-            raise AIError(ErrorCode.EXECUTION_CANCELLED)
-        allowed = ({ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING}
-                   if allow_cancelling else {ExecutionStatus.STARTED})
-        if execution.status not in allowed:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await repository.require_active_producer(
+            execution_id, tenant_id=self._tenant_id, expected_producer_generation=producer_generation,
+            allow_cancelling=allow_cancelling, fresh=authoritative,
+        )
 
 
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:

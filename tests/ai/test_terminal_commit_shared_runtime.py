@@ -117,7 +117,7 @@ async def test_remote_cancel_signals_owner_then_confirms_source(
             return await commit_cancel_checkpoint(self, commit, expected_status=expected_status)
 
         monkeypatch.setattr(LocalExecutionBackend, 'commit_cancel_checkpoint', ordered_cancel_checkpoint)
-    cache = InMemoryCacheBackend(max_bytes=2**20)
+    cache = _ObservedCache()
     entered, stopped = asyncio.Event(), asyncio.Event()
     async def model(messages, info):
         entered.set()
