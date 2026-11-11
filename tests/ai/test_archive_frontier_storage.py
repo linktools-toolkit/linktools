@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import event
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
@@ -112,7 +112,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
 
         def record_query(connection, cursor, statement, parameters, context, executemany) -> None:
             if statement.lstrip().upper().startswith("SELECT"):
-                statements.append(context.compiled.statement)
+                statements.append((statement, parameters))
 
         event.listen(engine.sync_engine, "before_cursor_execute", record_query)
 
@@ -133,9 +133,9 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         assert set(records) == expected_nodes | {expected_content}
         assert len(statements) == 1
         assert all(record.scope_key == bytes.fromhex(archive.content_scope) for record in records.values())
-        sql = str(statements[0].compile(dialect=sqlite.dialect(), compile_kwargs={"literal_binds": True}))
+        sql, parameters = statements[0]
         async with engine.connect() as connection:
-            plan = (await connection.execute(text("EXPLAIN QUERY PLAN " + sql))).all()
+            plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
         assert any("SEARCH ai_state_records USING INDEX" in row[3] and "sort_key=?" in row[3] for row in plan), plan
         assert not any("SCAN ai_state_records" in row[3] for row in plan), plan
         assert all("sort_key=?" in row[3] or "key_digest=?" in row[3]
