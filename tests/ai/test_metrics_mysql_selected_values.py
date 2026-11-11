@@ -54,7 +54,7 @@ def test_mysql_selected_value_matches_python(
     script = """DROP TABLE IF EXISTS ai_metric_observations;
 CREATE TABLE ai_metric_observations (
     namespace_digest VARCHAR(64), kind VARCHAR(128), occurred_at DATETIME(6),
-    observation_digest VARCHAR(64), payload_json JSON, pruned_at DATETIME(6), active_occurred_at DATETIME(6)
+    observation_id VARCHAR(64), payload_json JSON, pruned_at DATETIME(6), active_occurred_at DATETIME(6)
 );
 """
     partitions = ((None, 0), ("x", 0), (None, 1), ("x", 1)) if partitioned else ((None, 0),)

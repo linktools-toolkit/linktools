@@ -3824,7 +3824,7 @@ class StateCommands:
                     session = await self._load_session(session_id, tenant_id=self._tenant_id)
                     if session is not None and session.active_execution_id is None:
                         if publish_turn:
-                            await self.verify_conversation_turn(effective_commit.execution, effective_commit.result)
+                            await self.verify_conversation_turn(result.execution, result.result)
                         break
         return result
 
@@ -4121,6 +4121,7 @@ class StateCommands:
         expected_execution: ExecutionRecord | None = None,
         start_identity: IdempotencyRecord | None = None,
     ) -> ExecutionTerminalCommit:
+        commit = replace(commit, execution=commit.execution.finalize_terminal(commit.result))
         if expected_execution is not None:
             current = await self._execution.get_in_transaction(
                 transaction, commit.execution.execution_id, tenant_id=self._tenant_id,
@@ -4136,7 +4137,6 @@ class StateCommands:
                     updated_at=max(commit.execution.updated_at, current.updated_at),
                 ),
             )
-        commit = replace(commit, execution=commit.execution.finalize_terminal(commit.result))
         if commit.idempotency is not None:
             return commit
         return replace(
@@ -4342,7 +4342,7 @@ class StateCommands:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is not None and commit.execution.conversation and require_session_release:
-            await self.verify_conversation_turn(commit.execution, commit.result)
+            await self.verify_conversation_turn(execution, commit.result)
         if conversation_agent_run is not None or conversation_checkpoint is not None:
             archive = self._conversation_run_store
             run, checkpoint = conversation_agent_run, conversation_checkpoint

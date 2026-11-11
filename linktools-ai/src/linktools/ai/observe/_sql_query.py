@@ -207,7 +207,7 @@ def _bounded_observations_sql(
     if verify:
         columns = tuple(dict.fromkeys((
             *columns, "namespace_digest", "kind", "occurred_at",
-            "observation_digest", "payload_digest", "payload_json",
+            "payload_digest", "payload_json",
             "namespace", "observation_id", "active_occurred_at", "pruned_at",
         )))
     projection = ", ".join(columns)
@@ -232,7 +232,7 @@ def _bounded_observations_sql(
     SELECT scanned_count,
         CASE WHEN scanned_count < :scan_cap THEN (
             SELECT MAX(linktools_metric_verify(
-                :verified_namespace, :namespace_key, namespace_digest, observation_digest, payload_digest,
+                :verified_namespace, :namespace_key, namespace_digest, payload_digest,
                 kind, occurred_at, payload_json, namespace, observation_id,
                 active_occurred_at, pruned_at
             )) FROM bounded_observations
@@ -388,7 +388,7 @@ def _measurement_sql(
     )
     columns = ["payload_json"]
     if ordered:
-        columns.extend(("occurred_at", "observation_digest"))
+        columns.extend(("occurred_at", "observation_id"))
     elif plan.bucket_microseconds is not None:
         columns.append("occurred_at")
     filtered_select = ",\n        ".join(
@@ -568,7 +568,7 @@ def _measurement_source_sql(
     if ordered:
         common += (
             "f.occurred_at AS occurred_at,\n"
-            "        f.observation_digest AS observation_digest,\n        "
+            "        f.observation_id AS observation_id,\n        "
         )
     if dialect_name == "sqlite":
         raw_value = "json_extract(m.value, '$.value')"
@@ -760,21 +760,21 @@ def _server_sum_sql(dialect_name: str, partition_columns: list[str]) -> str:
             SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) AS floating_count
         FROM valid_samples{group_sql}
     ), floating_rows AS (
-        SELECT {source_prefix}v.occurred_at, v.observation_digest,
+        SELECT {source_prefix}v.occurred_at, v.observation_id,
             t.sample_count, t.floating_count, {floating_value} AS floating_value,
             CASE WHEN {integer_test} THEN 0 ELSE 1 END AS is_floating,
             SUM(CASE WHEN {integer_test} THEN {integer_value} ELSE 0 END) OVER (
-                {source_partition}ORDER BY v.occurred_at, v.observation_digest
+                {source_partition}ORDER BY v.occurred_at, v.observation_id
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS integer_prefix,
             SUM(CASE WHEN {integer_test} THEN 0 ELSE 1 END) OVER (
-                {source_partition}ORDER BY v.occurred_at, v.observation_digest
+                {source_partition}ORDER BY v.occurred_at, v.observation_id
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS floating_seen
         FROM valid_samples AS v JOIN totals AS t ON {join_sql}
         WHERE t.floating_count > 0
     ), floating_values AS (
-        SELECT {prefix}occurred_at, observation_digest, sample_count, floating_count,
+        SELECT {prefix}occurred_at, observation_id, sample_count, floating_count,
             CASE WHEN floating_seen = 0 THEN NULL
                 WHEN floating_seen = 1 AND is_floating = 1
                     THEN {prefix_value} + floating_value
@@ -784,17 +784,17 @@ def _server_sum_sql(dialect_name: str, partition_columns: list[str]) -> str:
     if dialect_name == "postgresql":
         reduction = f"""SELECT {prefix}MAX(sample_count) AS sample_count,
             MAX(floating_count) AS floating_count,
-            SUM(value ORDER BY occurred_at, observation_digest) AS sample_sum
+            SUM(value ORDER BY occurred_at, observation_id) AS sample_sum
         FROM floating_values{group_sql}"""
     else:
         reduction = f"""SELECT {prefix}sample_count, floating_count, sample_sum
         FROM (
             SELECT {prefix}sample_count, floating_count,
                 ROW_NUMBER() OVER (
-                    {partition_sql}ORDER BY occurred_at, observation_digest
+                    {partition_sql}ORDER BY occurred_at, observation_id
                 ) AS ordinal,
                 SUM(value) OVER (
-                    {partition_sql}ORDER BY occurred_at, observation_digest
+                    {partition_sql}ORDER BY occurred_at, observation_id
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                 ) AS sample_sum
             FROM floating_values
@@ -841,7 +841,7 @@ def _sqlite_sum_sql(partition_columns: list[str]) -> str:
     ), ordered AS (
         SELECT {source_prefix}v.numeric_value, v.value_type, t.sample_count,
             ROW_NUMBER() OVER (
-                {partition_sql}ORDER BY occurred_at, observation_digest
+                {partition_sql}ORDER BY occurred_at, observation_id
             ) AS ordinal
         FROM valid_samples AS v
         JOIN totals AS t ON {totals_join}
@@ -893,7 +893,7 @@ def _measurement_pick_sql(
         else ""
     )
     if aggregation is MetricAggregation.LATEST:
-        order_sql = "occurred_at DESC, observation_digest DESC"
+        order_sql = "occurred_at DESC, observation_id DESC"
     else:
         direction = "ASC" if aggregation is MetricAggregation.MIN else "DESC"
         if dialect_name == "postgresql":
@@ -904,7 +904,7 @@ def _measurement_pick_sql(
             value_order = f"{coarse} {direction}, {residual} {direction}"
         else:
             value_order = f"numeric_value {direction}"
-        order_sql = f"{value_order}, occurred_at ASC, observation_digest ASC"
+        order_sql = f"{value_order}, occurred_at ASC, observation_id ASC"
     return f"""SELECT
         {select_prefix}sample_count,
         raw_value AS selected_value
@@ -931,7 +931,7 @@ def _percentile_pick_sql(
         return f"""SELECT
         {select_prefix}COUNT(*) AS sample_count,
         row_to_json(percentile_disc(CAST(:percentile AS DOUBLE PRECISION)) WITHIN GROUP (
-            ORDER BY ROW({coarse}, {residual}, occurred_at, observation_digest, raw_value)
+            ORDER BY ROW({coarse}, {residual}, occurred_at, observation_id, raw_value)
         )) ->> 'f5' AS selected_value
     FROM valid_samples{group_sql}"""
 
@@ -962,7 +962,7 @@ def _percentile_pick_sql(
             {select_prefix}raw_value,
             COUNT(*) OVER ({partition_sql}) AS sample_count,
             ROW_NUMBER() OVER (
-                {partition_sql}ORDER BY {order_sql}, occurred_at ASC, observation_digest ASC
+                {partition_sql}ORDER BY {order_sql}, occurred_at ASC, observation_id ASC
             ) AS sample_rank
         FROM valid_samples
     ) AS ranked

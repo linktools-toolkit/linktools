@@ -60,7 +60,7 @@ def _query(
     script = """BEGIN;
 CREATE TEMP TABLE ai_metric_observations (
     namespace_digest TEXT, kind TEXT, occurred_at TIMESTAMPTZ,
-    observation_digest TEXT, payload_json JSON, pruned_at TIMESTAMPTZ, active_occurred_at TIMESTAMPTZ
+    observation_id TEXT, payload_json JSON, pruned_at TIMESTAMPTZ, active_occurred_at TIMESTAMPTZ
 );
 """ + "\n".join(inserts) + "\nSELECT COALESCE(json_agg(q), '[]') FROM (" + sql + ") AS q;\nROLLBACK;"
     result = subprocess.run(

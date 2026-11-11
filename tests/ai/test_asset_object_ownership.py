@@ -55,6 +55,8 @@ async def test_sql_asset_files_have_one_byte_owner_across_metadata_and_receipts(
             receipt = metadata.tables["ai_asset_batch_receipts"]
             payload = await connection.scalar(select(receipt.c.payload_json))
             assert payload["results"][0]["info"]["content"] == descriptor
+            assert payload["idempotency_key"] == "upload"
+            assert "idempotency_key_digest" not in payload
             objects = metadata.tables["ai_objects"]
             assert (await connection.execute(select(objects.c.content_digest, objects.c.size))).all() == [
                 (info.digest, info.size),
@@ -102,4 +104,63 @@ async def test_small_asset_object_failure_does_not_publish_metadata(tmp_path: Pa
         assert await backend.batch_result("upload") is None
     finally:
         await backend.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_asset_namespace_and_content_identity_need_no_nested_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+    from linktools.ai.asset import _sql
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'namespace.db'}")
+    backend = SqlAssetBackend(engine, namespace="files/中文")
+    other = SqlAssetBackend(engine, namespace="files/other")
+    content = b"one immutable payload"
+    key = AssetKey("file", "same")
+    try:
+        await provision_asset_database(engine)
+        await backend.initialize()
+        await other.initialize()
+        await backend.put(key, b"previous")
+        expected = hashlib.sha256(content).hexdigest()
+        change = StorageChange(StorageOperation.PUT, key, content, None)
+        request_digest = _batch_request_digest((change,), None)
+        tracked = Mock(wraps=hashlib.sha256)
+        with monkeypatch.context() as patch:
+            patch.setattr(_sql.hashlib, "sha256", tracked)
+            committed = await backend.apply_batch(
+                (change,), idempotency_key="same-receipt", request_digest=request_digest,
+            )
+        assert sum(call.args == (content,) for call in tracked.call_args_list) == 1
+        assert await backend.batch_result("same-receipt") == committed
+        other_change = StorageChange(StorageOperation.PUT, key, b"other namespace", None)
+        other_digest = _batch_request_digest((other_change,), None)
+        await other.apply_batch(
+            (other_change,), idempotency_key="same-receipt", request_digest=other_digest,
+        )
+        with pytest.raises(AIError) as conflict:
+            await backend.apply_batch(
+                (other_change,), idempotency_key="same-receipt", request_digest=other_digest,
+            )
+        assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        info = await backend.stat(key)
+        assert info is not None and info.content is not None and info.content.ref is not None
+        assert info.digest == expected
+        assert info.content.ref.key == f"asset/files/中文/{expected}"
+        metadata = build_asset_sql_metadata()
+        async with engine.connect() as connection:
+            heads = metadata.tables["ai_asset_heads"]
+            assert "namespace_digest" not in heads.c
+            assert set((await connection.execute(select(heads.c.namespace))).scalars()) == {
+                "files/中文", "files/other",
+            }
+        assert await backend.get(key) == content
+        assert await other.get(key) == b"other namespace"
+        await backend.validate_integrity()
+        await other.validate_integrity()
+    finally:
+        await backend.close()
+        await other.close()
         await engine.dispose()

@@ -199,7 +199,7 @@ async def test_sql_retains_minimal_original_receipt_and_first_pruned_time(tmp_pa
             ))
         assert pruned["pruned_at"] is not None
         assert pruned["active_occurred_at"] is None
-        for field in ("namespace", "observation_id", "namespace_digest", "observation_digest",
+        for field in ("namespace", "observation_id", "namespace_digest",
                       "payload_digest", "kind", "occurred_at"):
             assert pruned[field] == before[field]
         assert await metrics.prune(before=_END) == 0
@@ -348,3 +348,35 @@ async def test_unconfirmed_rollback_does_not_expose_pruned_proof(
         assert caught.value.safe_details.get("reason") != _REASON
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_observation_ids_order_ties_and_remain_namespace_scoped(
+    retention_store: MetricStore,
+) -> None:
+    identities = ("é", "a|b", "Z", "中", "a", "A")
+    observations = tuple(_observation(identity) for identity in identities)
+    await retention_store.put_observations("first", observations)
+    await retention_store.put_observations("second", (
+        replace(observations[0], status="FAILED"),
+    ))
+    await retention_store.put_observations("first", observations)
+    assert await retention_store.get_observation("first", "é") == observations[0]
+    assert (await retention_store.get_observation("second", "é")).status == "FAILED"
+    with pytest.raises(AIError, match="STORAGE_CONFLICT"):
+        await retention_store.put_observations("first", (
+            replace(observations[0], status="FAILED"),
+        ))
+    cursor = None
+    scanned = []
+    while True:
+        page = await retention_store.scan_observations(
+            "first", "app.retention", _START, _END, cursor=cursor, limit=1,
+        )
+        scanned.extend(item.observation_id for item in page.items)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert scanned == sorted(identities)
+    assert await retention_store.prune_observations("first", before=_BEFORE) == len(identities)
+    assert (await retention_store.get_observation("second", "é")).status == "FAILED"

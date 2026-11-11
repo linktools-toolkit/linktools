@@ -85,23 +85,23 @@ CREATE TABLE ai_state_operations (
 
 CREATE TABLE ai_asset_heads (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the AssetStore namespace.',
+    namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original AssetStore namespace.',
     store_revision BIGINT NOT NULL COMMENT 'Last committed namespace-wide AssetStore revision.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_namespace_digest (namespace_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+    PRIMARY KEY (id), UNIQUE KEY uk_namespace (namespace), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Namespace-level optimistic revision head that serializes AssetStore mutations.';
 
 CREATE TABLE ai_asset_entries (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the asset key including namespace identity.',
-    namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the AssetStore namespace.',
+    namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original AssetStore namespace.',
     entry_revision BIGINT NOT NULL COMMENT 'Latest committed per-asset revision.',
     store_revision BIGINT NOT NULL COMMENT 'Namespace-wide revision that produced this current projection.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical current AssetInfo payload including status, metadata, content reference, and semantic timestamps.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_namespace_digest_store_revision (namespace_digest, store_revision),
+    PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_namespace_store_revision (namespace, store_revision),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current AssetStore projection for the latest committed revision of each asset key.';
 
@@ -109,24 +109,24 @@ CREATE TABLE ai_asset_changes (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the asset key including namespace identity.',
     entry_revision BIGINT NOT NULL COMMENT 'Immutable per-asset revision number represented by this history row.',
-    namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the AssetStore namespace.',
+    namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original AssetStore namespace.',
     store_revision BIGINT NOT NULL COMMENT 'Namespace-wide revision in which this asset change committed.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical immutable AssetInfo history payload.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest_entry_revision (key_digest, entry_revision),
-    UNIQUE KEY uk_namespace_digest_store_revision_key_digest (namespace_digest, store_revision, key_digest),
+    UNIQUE KEY uk_namespace_store_revision_key_digest (namespace, store_revision, key_digest),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable AssetStore history containing every committed per-asset revision.';
 
 CREATE TABLE ai_asset_batch_receipts (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the AssetStore namespace.',
-    idempotency_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 digest of the caller batch idempotency key.',
+    namespace VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original AssetStore namespace.',
+    idempotency_key VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original caller batch idempotency key.',
     payload_json JSON NOT NULL COMMENT 'Versioned committed Asset batch receipt without input file bytes.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_namespace_digest_idempotency_key_digest (namespace_digest, idempotency_key_digest),
+    PRIMARY KEY (id), UNIQUE KEY uk_namespace_idempotency_key (namespace, idempotency_key),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Durable idempotency receipts for committed atomic AssetStore batches.';
 
@@ -144,12 +144,12 @@ CREATE TABLE ai_objects (
 
 CREATE TABLE ai_object_chunks (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
-    key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the immutable ObjectStore object owning this chunk.',
+    object_id BIGINT NOT NULL COMMENT 'Surrogate identifier of the immutable ObjectStore object owning this chunk.',
     chunk_index BIGINT NOT NULL COMMENT 'Zero-based ordered chunk position within the immutable object.',
     content LONGBLOB NOT NULL COMMENT 'Binary content bytes for this immutable object chunk.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_key_digest_chunk_index (key_digest, chunk_index), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+    PRIMARY KEY (id), UNIQUE KEY uk_object_id_chunk_index (object_id, chunk_index), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Ordered binary chunks that compose immutable ObjectStore content.';
 
 CREATE TABLE ai_metric_definitions (
@@ -171,7 +171,6 @@ CREATE TABLE ai_metric_observations (
     namespace VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original Metrics namespace retained after pruning.',
     observation_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Original observation identity retained after pruning.',
     namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 partition identity of the Metrics namespace.',
-    observation_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 identity of namespace plus observation_id.',
     payload_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 of the canonical ObservationEnvelope payload.',
     kind VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical observation kind query projection.',
     occurred_at DATETIME(6) NOT NULL COMMENT 'Canonical UTC observation occurrence time.',
@@ -181,7 +180,7 @@ CREATE TABLE ai_metric_observations (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id),
-    UNIQUE KEY uk_observation_digest (observation_digest),
+    UNIQUE KEY uk_namespace_digest_observation_id (namespace_digest, observation_id),
     KEY ix_namespace_digest_kind_active_occurred_at (namespace_digest, kind, active_occurred_at),
     KEY ix_namespace_digest_active_occurred_at (namespace_digest, active_occurred_at),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)

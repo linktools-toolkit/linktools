@@ -60,7 +60,7 @@ async def test_cancelled_metric_read_releases_cursor_before_followup_write(
     async def pause_fetchall(cursor: Cursor):
         columns = {column[0] for column in cursor.description or ()}
         selected = (
-            "observation_digest" in columns
+            "observation_id" in columns
             if operation == "point"
             else "sample_count" in columns
         )

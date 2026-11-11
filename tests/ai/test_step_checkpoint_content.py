@@ -135,3 +135,26 @@ async def test_checkpoint_digest_roundtrips_canonical_media(tmp_path: Path, meta
     finally:
         await store.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", ("store_digest", "run_digest", "run_id", "key_digest"))
+async def test_snapshot_lookup_keeps_scope_and_replay_identity(atomic_store, column) -> None:
+    store, engine = atomic_store
+    snapshot = ContinuableSnapshot(run_id="run", step_index=1,
+        messages=[ModelRequest(parts=[UserPromptPart("question")])], idempotency_key="first")
+    await store.save_snapshot(snapshot)
+    async with engine.begin() as connection:
+        await connection.execute(store._table("snapshots").update().values(
+            **{column: "different" if column == "run_id" else "0" * 64},
+        ))
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    try:
+        assert await cold.list_snapshots(run_id="run", include_interrupted=True) == []
+        if column == "key_digest":
+            with pytest.raises(ValueError, match="snapshot owner identity"):
+                await cold.latest_snapshot(run_id="run")
+        else:
+            assert await cold.latest_snapshot(run_id="run") is None
+    finally:
+        await cold.close()

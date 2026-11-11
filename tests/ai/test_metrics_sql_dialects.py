@@ -40,6 +40,10 @@ def test_metrics_schema_compiles_for_supported_sql_dialects(
     assert tables == set(metadata.tables)
     assert {"ai_metric_definitions", "ai_metric_observations"} <= tables
     assert indexes
+    observations = metadata.tables["ai_metric_observations"]
+    assert "observation_digest" not in observations.c
+    if dialect_name == "postgresql":
+        assert 'COLLATE "C"' in str(observations.c.observation_id.type.compile(dialect=engine.dialect))
 
 
 def test_metrics_retention_mysql_ddl_matches_canonical_metadata() -> None:
@@ -65,6 +69,7 @@ def test_metrics_retention_mysql_ddl_matches_canonical_metadata() -> None:
     assert indexes["ix_namespace_digest_active_occurred_at"] == (
         "namespace_digest", "active_occurred_at",
     )
+    assert indexes["uk_namespace_digest_observation_id"] == ("namespace_digest", "observation_id")
     for name, columns in indexes.items():
         assert f"KEY {name} ({', '.join(columns)})" in migration
     assert f"COMMENT='{table.comment}'" in migration

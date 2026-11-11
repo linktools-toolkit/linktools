@@ -1589,10 +1589,11 @@ class SqlStepStore:
                     _logger.warning("Skipping corrupt snapshot for run %s", run_id)
                     continue
                 try:
-                    if (row["store_digest"] != self._store_digest or row["run_id"] != run_id
-                            or row["run_digest"] != _digest(run_id)
+                    # SQL already matches the partition and run digest. Keep the
+                    # raw ID comparison because SQL text equality may ignore padding.
+                    if (row["run_id"] != run_id
                             or row["idempotency_key"] is not None and row["key_digest"] !=
-                               _replay_digest(self._store_digest, _digest(run_id), row["idempotency_key"])):
+                               _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])):
                         raise ValueError("snapshot owner identity is invalid")
                     data = self._record_data(row)
                     snapshot, raw = self._decode_snapshot(data, readback.payloads)

@@ -138,7 +138,7 @@ class SqlObjectStore:
         key_digest = _key_digest(self.store_id, key)
 
         async def execute(session) -> None:
-            await self._context.run_statement(session.execute(
+            result = await self._context.run_statement(session.execute(
                 insert(table).values(
                     key_digest=key_digest.hex(),
                     store_id=self.store_id,
@@ -147,6 +147,7 @@ class SqlObjectStore:
                     size=size,
                 )
             ))
+            object_id = result.inserted_primary_key[0]
             index = 0
             offset = 0
             while True:
@@ -160,7 +161,7 @@ class SqlObjectStore:
                 if not rows:
                     break
                 for row in rows:
-                    row["key_digest"] = key_digest.hex()
+                    row["object_id"] = object_id
                 await self._context.run_statement(session.execute(insert(chunks), rows))
                 index += len(rows)
 
@@ -202,12 +203,12 @@ class SqlObjectStore:
         try:
             orphan = (
                 await self._context.run_statement(session.execute(
-                    select(chunks.c.key_digest)
+                    select(chunks.c.object_id)
                     .outerjoin(
                         objects,
-                        objects.c.key_digest == chunks.c.key_digest,
+                        objects.c.id == chunks.c.object_id,
                     )
-                    .where(objects.c.key_digest.is_(None))
+                    .where(objects.c.id.is_(None))
                     .limit(1)
                 ))
             ).scalar_one_or_none()
@@ -307,24 +308,25 @@ class SqlObjectStore:
             table = self._metadata.tables["ai_objects"]
             current = (
                 await self._context.run_statement(session.execute(
-                    select(table.c.content_digest).where(
+                    select(table.c.id, table.c.content_digest).where(
                         table.c.key_digest == key_digest,
                         table.c.store_id == self.store_id,
                     )
                 ))
-            ).scalar_one_or_none()
+            ).one_or_none()
             if current is None:
                 return False
-            if str(current) != expected_digest:
+            if str(current.content_digest) != expected_digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await self._context.run_statement(session.execute(
                 delete(self._metadata.tables["ai_object_chunks"]).where(
-                    self._metadata.tables["ai_object_chunks"].c.key_digest
-                    == key_digest
+                    self._metadata.tables["ai_object_chunks"].c.object_id
+                    == current.id
                 )
             ))
             result = await self._context.run_statement(session.execute(
                 delete(table).where(
+                    table.c.id == current.id,
                     table.c.key_digest == key_digest,
                     table.c.store_id == self.store_id,
                 )
@@ -375,7 +377,7 @@ class SqlObjectStore:
                 nonlocal result
                 result = await session.stream(
                     select(*header_columns, chunks.c.chunk_index, chunks.c.content)
-                    .select_from(table.outerjoin(chunks, chunks.c.key_digest == table.c.key_digest))
+                    .select_from(table.outerjoin(chunks, chunks.c.object_id == table.c.id))
                     .where(table.c.key_digest == _key_digest(self.store_id, key).hex())
                     .order_by(chunks.c.chunk_index)
                 )
@@ -483,10 +485,10 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         metadata,
         sql_id_column(),
         Column(
-            "key_digest",
-            digest,
+            "object_id",
+            BigInteger,
             nullable=False,
-            comment="Canonical SHA-256 identity of the immutable ObjectStore object owning this chunk.",
+            comment="Surrogate identifier of the immutable ObjectStore object owning this chunk.",
         ),
         Column(
             "chunk_index",
@@ -504,7 +506,7 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         comment="Ordered binary chunks that compose immutable ObjectStore content.",
         **sql_table_options(),
     )
-    sql_unique(chunks, "key_digest", "chunk_index")
+    sql_unique(chunks, "object_id", "chunk_index")
     sql_audit_indexes(chunks)
     return metadata
 
