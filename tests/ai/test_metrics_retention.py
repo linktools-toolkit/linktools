@@ -105,8 +105,8 @@ async def test_retention_preserves_identity_and_atomic_batch_contract(retention_
 
 
 async def _assert_namespace_partitions(store: MetricStore) -> None:
-    namespaces = ("A", "a", "é", "e\u0301", "测" * 85 + "a", "😀" * 64,
-                  "n" * 255 + "a", "n" * 255 + "b")
+    namespaces = ("A", "a", "é", "e\u0301", "测" * 42 + "ab", "😀" * 32,
+                  "n" * 127 + "a", "n" * 127 + "b")
     definition = MetricDefinition(
         name="partition", revision=1, observation_kind="app.retention",
         source=MetricSource.observation_count(), metric_type=MetricType.COUNTER,

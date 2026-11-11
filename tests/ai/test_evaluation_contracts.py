@@ -241,7 +241,7 @@ def evaluation_request(kind: str, key: str) -> StartEvaluationRequest | RescoreR
 
 
 @pytest.mark.parametrize("kind", ("start", "rescore", "human"))
-@pytest.mark.parametrize("key", ("", " invalid ", "invalid\nkey", "\ud800", "x" * 257, "é" * 129))
+@pytest.mark.parametrize("key", ("", " invalid ", "invalid\nkey", "\ud800", "x" * 129, "é" * 64 + "x"))
 def test_evaluation_requests_reject_invalid_idempotency_keys(kind: str, key: str) -> None:
     with pytest.raises(AIError) as raised:
         evaluation_request(kind, key)
@@ -249,6 +249,6 @@ def test_evaluation_requests_reject_invalid_idempotency_keys(kind: str, key: str
 
 
 @pytest.mark.parametrize("kind", ("start", "rescore", "human"))
-@pytest.mark.parametrize("key", ("evaluation:key-1", "x" * 256, "é" * 128))
+@pytest.mark.parametrize("key", ("evaluation:key-1", "x" * 128, "é" * 64))
 def test_evaluation_requests_preserve_valid_idempotency_keys(kind: str, key: str) -> None:
     assert evaluation_request(kind, key).idempotency_key == key

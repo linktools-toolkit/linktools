@@ -37,6 +37,7 @@ from ..storage import (
     sql_audit_indexes,
     sql_id_column,
     sql_query_index,
+    sql_sha256,
     sql_table_options,
     sql_text_key,
     sql_unique,
@@ -123,11 +124,15 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
                 "content reference, and semantic timestamps."
             ),
         ),
+        Column(
+            "asset_locator", sql_sha256(), nullable=False,
+            comment="Single SHA-256 lookup projection of the complete asset_id; raw identity must also match.",
+        ),
         *sql_audit_columns(),
         comment="Current AssetStore projection for the latest committed revision of each asset key.",
         **sql_table_options(),
     )
-    sql_unique(entries, "namespace", "kind", "asset_id")
+    sql_unique(entries, "namespace", "kind", "asset_locator")
     sql_query_index(entries, "namespace", "store_revision")
     sql_audit_indexes(entries)
     changes = Table(
@@ -178,7 +183,7 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
         ),
         Column(
             "idempotency_key",
-            sql_text_key(256),
+            sql_text_key(128),
             nullable=False,
             comment="Original caller batch idempotency key.",
         ),
@@ -269,13 +274,14 @@ class SqlAssetBackend:
             # snapshot. Mutually exclusive branches avoid scanning entries when
             # the head is unchanged, including on SQLite's nested-loop join.
             statement = (
-                select(heads.c.store_revision, entries.c.id, entries.c.payload_json)
+                select(heads.c.store_revision, entries.c.id, entries.c.kind, entries.c.asset_id,
+                       entries.c.asset_locator, entries.c.payload_json)
                 .select_from(heads.outerjoin(entries, heads.c.namespace == entries.c.namespace))
                 .where(heads.c.namespace == self._namespace)
             )
             if after is not None:
                 statement = statement.where(heads.c.store_revision != after).union_all(
-                    select(heads.c.store_revision, null(), null()).where(
+                    select(heads.c.store_revision, null(), null(), null(), null(), null()).where(
                         heads.c.namespace == self._namespace,
                         heads.c.store_revision == after,
                     )
@@ -294,6 +300,12 @@ class SqlAssetBackend:
         current = int(rows[0]["store_revision"])
         if after == current:
             return MetadataLoad(MetadataLoadMode.PATCH, StorageRevision(str(current)), ())
+        for row in rows:
+            if row["id"] is not None:
+                key = _key_from_data(row["payload_json"])
+                if (row["kind"] != key.kind or bytes(row["asset_id"]) != key.id.encode("utf-8")
+                        or row["asset_locator"] != _asset_locator(key.id)):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return MetadataLoad(
             MetadataLoadMode.REPLACE,
             StorageRevision(str(current)),
@@ -327,23 +339,8 @@ class SqlAssetBackend:
 
     async def stat(self, key: AssetKey) -> AssetInfo | None:
         self._ensure_ready()
-        entries = self._metadata.tables["ai_asset_entries"]
-        session = self._context.sessions()
-        try:
-            from sqlalchemy import select
-
-            row = (
-                await self._context.run_statement(session.execute(
-                    select(entries.c.payload_json).where(
-                        entries.c.kind == key.kind,
-                        entries.c.asset_id == key.id.encode("utf-8"),
-                        entries.c.namespace == self._namespace,
-                    )
-                ))
-            ).scalar_one_or_none()
-        finally:
-            await session.close()
-        return None if row is None else _info_from_data(row)
+        entry = (await self._load_current((key,)))[key]
+        return None if entry is None else entry[1]
 
     async def put(
         self,
@@ -456,6 +453,8 @@ class SqlAssetBackend:
         idempotency_key: str | None,
         request_digest: str | None,
     ) -> StorageBatchResult[AssetInfo, AssetKey] | None:
+        from sqlalchemy.exc import IntegrityError
+
         try:
             return await self._apply_once_transaction(
                 changes,
@@ -465,6 +464,8 @@ class SqlAssetBackend:
             )
         except AIError:
             raise
+        except IntegrityError as error:
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
         except Exception as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
@@ -583,6 +584,7 @@ class SqlAssetBackend:
                             namespace=self._namespace,
                             kind=change.key.kind,
                             asset_id=change.key.id.encode("utf-8"),
+                            asset_locator=_asset_locator(change.key.id),
                             **entry_values,
                         )
                     ))
@@ -631,22 +633,30 @@ class SqlAssetBackend:
 
             rows = (
                 await self._context.run_statement(session.execute(
-                    select(entries.c.id, entries.c.kind, entries.c.asset_id, entries.c.payload_json).where(
+                    select(entries.c.id, entries.c.kind, entries.c.asset_id, entries.c.asset_locator, entries.c.payload_json).where(
                         entries.c.namespace == self._namespace,
-                        tuple_(entries.c.kind, entries.c.asset_id).in_(
-                            tuple((key.kind, key.id.encode("utf-8")) for key in keys)
+                        tuple_(entries.c.kind, entries.c.asset_locator).in_(
+                            tuple((key.kind, _asset_locator(key.id)) for key in keys)
                         ),
                     )
                 ))
             ).all()
         finally:
             await session.close()
-        by_key = {
-            AssetKey(row.kind, bytes(row.asset_id).decode("utf-8")):
-                (int(row.id), _info_from_data(row.payload_json))
-            for row in rows
-        }
-        return {key: by_key.get(key) for key in keys}
+        by_locator = {(row.kind, row.asset_locator): row for row in rows}
+        result: dict[AssetKey, tuple[int, AssetInfo] | None] = {}
+        for key in keys:
+            row = by_locator.get((key.kind, _asset_locator(key.id)))
+            if row is None:
+                result[key] = None
+                continue
+            if bytes(row.asset_id) != key.id.encode("utf-8"):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            info = _info_from_data(row.payload_json)
+            if info.key != key:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result[key] = (int(row.id), info)
+        return result
 
     async def list_versions(self, key: AssetKey) -> tuple[VersionSummary, ...]:
         self._ensure_ready()
@@ -659,23 +669,28 @@ class SqlAssetBackend:
             rows = (
                 (
                     await self._context.run_statement(session.execute(
-                        select(history.c.payload_json)
+                        select(entries.c.asset_id, history.c.payload_json)
                         .join(entries, entries.c.id == history.c.entry_id)
                         .where(
                             entries.c.namespace == self._namespace,
                             entries.c.kind == key.kind,
-                            entries.c.asset_id == key.id.encode("utf-8"),
+                            entries.c.asset_locator == _asset_locator(key.id),
                             history.c.namespace == self._namespace,
                         )
                         .order_by(history.c.entry_revision)
                     ))
                 )
-                .scalars()
+                .mappings()
                 .all()
             )
         finally:
             await session.close()
-        return tuple(_summary(_info_from_data(row)) for row in rows)
+        for row in rows:
+            if bytes(row["asset_id"]) != key.id.encode("utf-8"):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if _info_from_data(row["payload_json"]).key != key:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(_summary(_info_from_data(row["payload_json"])) for row in rows)
 
     async def get_at_revision(self, key: AssetKey, entry_revision: StorageEntryRevision) -> bytes | None:
         history = self._metadata.tables["ai_asset_changes"]
@@ -684,20 +699,25 @@ class SqlAssetBackend:
         try:
             from sqlalchemy import select
 
-            data = await self._context.run_statement(session.scalar(
-                select(history.c.payload_json).join(entries, entries.c.id == history.c.entry_id).where(
+            row = (await self._context.run_statement(session.execute(
+                select(entries.c.asset_id, history.c.payload_json)
+                .join(entries, entries.c.id == history.c.entry_id).where(
                     entries.c.namespace == self._namespace,
                     entries.c.kind == key.kind,
-                    entries.c.asset_id == key.id.encode("utf-8"),
+                    entries.c.asset_locator == _asset_locator(key.id),
                     history.c.entry_revision == entry_revision.value,
                     history.c.namespace == self._namespace,
                 )
-            ))
+            ))).mappings().one_or_none()
         finally:
             await session.close()
-        if data is None:
+        if row is None:
             return None
-        info = _info_from_data(data)
+        if bytes(row["asset_id"]) != key.id.encode("utf-8"):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        info = _info_from_data(row["payload_json"])
+        if info.key != key:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return (
             None
             if info.status is not StorageEntryStatus.NORMAL
@@ -738,7 +758,7 @@ class SqlAssetBackend:
             entry_rows = (
                 (
                     await self._context.run_statement(session.execute(
-                        select(entries.c.kind, entries.c.asset_id, entries.c.entry_revision, entries.c.payload_json).where(
+                        select(entries.c.kind, entries.c.asset_id, entries.c.asset_locator, entries.c.entry_revision, entries.c.payload_json).where(
                             entries.c.namespace == namespace
                         )
                     ))
@@ -749,7 +769,7 @@ class SqlAssetBackend:
             history_rows = (
                 (
                     await self._context.run_statement(session.execute(
-                        select(entries.c.kind, entries.c.asset_id, history.c.entry_revision, history.c.payload_json)
+                        select(entries.c.kind, entries.c.asset_id, entries.c.asset_locator, history.c.entry_revision, history.c.payload_json)
                         .select_from(history.outerjoin(
                             entries,
                             (entries.c.id == history.c.entry_id) & (entries.c.namespace == history.c.namespace),
@@ -806,6 +826,8 @@ class SqlAssetBackend:
             info = _info_from_data(row["payload_json"])
             if row["kind"] != info.key.kind or row["asset_id"] != info.key.id.encode("utf-8"):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if row["asset_locator"] != _asset_locator(info.key.id):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if int(row["entry_revision"]) != info.revision.value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             store_revision = int(info.store_revision.value)
@@ -820,6 +842,10 @@ class SqlAssetBackend:
     def _ensure_ready(self) -> None:
         if not self._ready:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+
+def _asset_locator(asset_id: str) -> str:
+    return hashlib.sha256(asset_id.encode("utf-8")).hexdigest()
 
 
 def _info_data(info: AssetInfo) -> dict[str, JsonValue]:

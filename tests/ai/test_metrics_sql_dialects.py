@@ -45,7 +45,7 @@ def test_metrics_schema_compiles_for_supported_sql_dialects(
     assert "observation_digest" not in observations.c
     for table in (definitions, observations):
         assert "namespace_digest" not in table.c
-        assert table.c.namespace.type.length == 256
+        assert table.c.namespace.type.length == 128
         if dialect_name == "postgresql":
             assert 'COLLATE "C"' in str(table.c.namespace.type.compile(dialect=engine.dialect))
     if dialect_name == "postgresql":
@@ -83,7 +83,7 @@ def test_metrics_mysql_ddl_matches_canonical_metadata(table_name: str) -> None:
         assert tuple(column.name for column in indexes[name].columns) == columns
     for name, index in indexes.items():
         prefixes = index.dialect_options["mysql"]["length"] or {}
-        assert prefixes == ({"namespace": 128} if name.startswith("ix_namespace_") else {})
+        assert prefixes == {}
         columns = (
             f"{column.name}({prefixes[column.name]})" if column.name in prefixes else column.name
             for column in index.columns

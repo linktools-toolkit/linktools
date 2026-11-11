@@ -30,6 +30,7 @@ from ..core import (
     ResourceKind,
     ResourceRef,
     SessionStatus,
+    deterministic_id,
     canonical_sha256,
     validate_agent_id,
     validate_page_limit,
@@ -650,7 +651,7 @@ class SessionManager(Generic[HandleT]):
                 await self._execution.cancel(
                     pending.execution_id,
                     principal=request.principal,
-                    idempotency_key=f"{request.idempotency_key}/{pending.execution_id}",
+                    idempotency_key=deterministic_id(request.idempotency_key, "session-close-cancel", pending.execution_id),
                 )
                 current = await self._read_session(
                     session_id, tenant_id=request.principal.tenant_id,
@@ -805,7 +806,7 @@ class SessionManager(Generic[HandleT]):
                     await self._execution.cancel(
                         execution.execution_id,
                         principal=request.principal,
-                        idempotency_key=f"{request.idempotency_key}/{execution.execution_id}",
+                        idempotency_key=deterministic_id(request.idempotency_key, "session-close-cancel", execution.execution_id),
                     )
                 try:
                     await asyncio.wait_for(

@@ -180,3 +180,62 @@ async def test_object_keys_keep_exact_opaque_identity_within_byte_limit(object_s
 def test_object_ref_rejects_keys_outside_utf8_byte_contract(key: str) -> None:
     with pytest.raises(ValueError):
         ObjectRef("objects", key, "a" * 64, 0)
+
+
+@pytest.mark.asyncio
+async def test_scoped_object_keys_validate_the_complete_physical_byte_length() -> None:
+    from linktools.ai.storage import TransientObjectStore
+
+    store = TransientObjectStore().scoped("🪷")
+    key = "x" * 1019
+    await store.put(key, _chunks(b"x"), expected_size=1, expected_digest=_DIGEST)
+    assert b"".join([part async for part in store.open(key)]) == b"x"
+    assert [value.key async for value in store.list_objects()] == [key]
+    consumed = False
+
+    async def chunks() -> AsyncIterator[bytes]:
+        nonlocal consumed
+        consumed = True
+        yield b"x"
+
+    with pytest.raises(ValueError):
+        await store.put(key + "x", chunks(), expected_size=1, expected_digest=_DIGEST)
+    assert not consumed
+    with pytest.raises(ValueError):
+        await store.stat(key + "x")
+    with pytest.raises(ValueError):
+        await store.delete_object(key + "x", expected_digest=_DIGEST)
+    with pytest.raises(ValueError):
+        _ = [part async for part in store.open(key + "x")]
+    assert await store.delete_object(key, expected_digest=_DIGEST)
+
+
+@pytest.mark.asyncio
+async def test_sql_object_locator_collision_never_aliases_content_or_deletes_other_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.storage import _object_sql
+
+    monkeypatch.setattr(_object_sql, "_object_locator", lambda _key: "a" * 64)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'collision.db'}")
+    try:
+        await provision_database(engine)
+        store = SqlObjectStore(engine)
+        await store.put("first", _chunks(b"x"), expected_size=1, expected_digest=_DIGEST)
+        for operation in (
+            lambda: store.stat("second"),
+            lambda: store.put("second", _chunks(b"x"), expected_size=1, expected_digest=_DIGEST),
+            lambda: store.delete_object("second", expected_digest=_DIGEST),
+        ):
+            with pytest.raises(AIError) as collision:
+                await operation()
+            assert collision.value.code is ErrorCode.STORAGE_CONFLICT
+        with pytest.raises(AIError) as collision:
+            _ = [part async for part in store.open("second")]
+        assert collision.value.code is ErrorCode.STORAGE_CONFLICT
+        assert [value.key async for value in store.list_objects()] == ["first"]
+        assert b"".join([part async for part in store.open("first")]) == b"x"
+        await store.validate_integrity()
+        assert await store.delete_object("first", expected_digest=_DIGEST)
+    finally:
+        await engine.dispose()

@@ -28,7 +28,7 @@ def test_runtime_object_keys_preserve_unambiguous_logical_scope() -> None:
 
 
 def test_runtime_object_key_accepts_maximum_utf8_scope_sizes() -> None:
-    namespace = "界" * 85 + "a"
+    namespace = "界" * 42 + "ab"
     tenant = "户" * 42 + "aa"
     digest = "a" * 64
     key = ObjectKeyFactory(namespace).key(PersistenceDomain.EXECUTION, tenant, digest)
@@ -39,7 +39,7 @@ def test_runtime_object_key_accepts_maximum_utf8_scope_sizes() -> None:
 
 
 @pytest.mark.parametrize(("namespace", "tenant"), [
-    ("界" * 85 + "ab", "tenant"),
+    ("界" * 43, "tenant"),
     ("namespace", "户" * 43),
 ])
 def test_runtime_object_key_rejects_scope_beyond_utf8_limits(namespace: str, tenant: str) -> None:

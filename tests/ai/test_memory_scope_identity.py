@@ -44,7 +44,7 @@ async def test_memory_maximum_scope_and_long_path_preserve_capture_replay(
     tmp_path: Path, backend: str,
 ) -> None:
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "memory.db")
-    namespace, tenant, scope, execution = "n" * 256, "t" * 128, "é" * 128, "e" * 128
+    namespace, tenant, scope, execution = "n" * 128, "t" * 128, "é" * 64, "e" * 128
     path = "/".join("x" * 200 for _ in range(6))
     assert len(path.encode()) == 1205
     async with Persistence.open(namespace, tenant_id=tenant, storage=storage) as state:
@@ -122,7 +122,7 @@ def _record() -> MemoryRecord:
                         {"path": "memory/note"}, 1, now, now, transient_execution_id="private-execution")
 
 
-@pytest.mark.parametrize("field,value", (("memory_scope", "x" * 257),
+@pytest.mark.parametrize("field,value", (("memory_scope", "x" * 129),
                                         ("transient_execution_id", "x" * 129),
                                         ("memory_scope", ""), ("transient_execution_id", "")))
 def test_memory_scope_codec_and_snapshot_classify_invalid_owner_as_integrity(
@@ -201,7 +201,7 @@ async def test_memory_scope_is_private_in_record_repr_and_mutation_logs(monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owner", ({"memory_scope": "x" * 257},
+@pytest.mark.parametrize("owner", ({"memory_scope": "x" * 129},
                                    {"memory_scope": "scope", "transient_execution_id": "x" * 129}))
 async def test_memory_scope_queries_validate_raw_owner_before_storage(owner: dict[str, str]) -> None:
     repository = MemoryRepositoryImpl(InMemoryStateStore(InMemoryStateStorageGroup()), namespace="namespace", tenant_id="tenant")
@@ -249,7 +249,7 @@ async def test_memory_long_random_path_preserves_server_write_read_prefix_and_re
     engine = create_async_engine(url)
     rng = random.Random(90210)
     alphabet = string.ascii_letters + string.digits
-    namespace = "".join(rng.choices(alphabet, k=256))
+    namespace = "".join(rng.choices(alphabet, k=128))
     tenant = "".join(rng.choices(alphabet, k=128))
     path = "/".join("".join(rng.choices(alphabet, k=size)) for size in (*([200] * 11), 189))
     assert len(path) == 2400

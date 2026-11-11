@@ -63,7 +63,7 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         target,
         sql_id_column(),
         Column(
-            "namespace", sql_text_key(256).with_variant(String(256, collation="C"), "postgresql"),
+            "namespace", sql_text_key(128).with_variant(String(128, collation="C"), "postgresql"),
             nullable=False, comment="Metrics namespace owning the definition.",
         ),
         Column(
@@ -102,7 +102,7 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
         target,
         sql_id_column(),
         Column(
-            "namespace", sql_text_key(256).with_variant(String(256, collation="C"), "postgresql"),
+            "namespace", sql_text_key(128).with_variant(String(128, collation="C"), "postgresql"),
             nullable=False,
             comment="Original Metrics namespace retained after pruning.",
         ),
