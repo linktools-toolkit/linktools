@@ -338,6 +338,32 @@ class SqlStepStore:
             query = query.select_from(joined)
         return query.where(*self._run_predicates(table, record.run_id))
 
+    async def import_run(self, record: RunRecord) -> None:
+        """Import immutable run metadata without replaying a native boundary.
+
+        A run header records lineage, not successful lifecycle-event publication.
+        Native event receipts continue to prove their own boundary separately.
+        """
+        from sqlalchemy import select
+
+        await self.initialize()
+        values = self._run_values(record.run_id) | self._record_values(record)
+        table = self._table("runs")
+
+        async def write(session: "AsyncSession") -> _RunFields:
+            result = await self._context.dialect.insert_ignore_conflict(
+                session, table=table, values=values, index_elements=("store_locator", "run_id"),
+            )
+            if result.inserted:
+                return _RunFields.from_row(values, engine=self._context.engine)
+            row = (await session.execute(select(table).where(*self._run_predicates(table, record.run_id)))).mappings().one()
+            if _RUN_ADAPTER.validate_python(self._record_data(row)) != record:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return _RunFields.from_row(row, engine=self._context.engine)
+
+        source = await self._context.run_mutation(write, domain="steps.run_metadata")
+        self._confirm_run(source)
+
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         from sqlalchemy import select
 
@@ -352,6 +378,29 @@ class SqlStepStore:
         record = _RUN_ADAPTER.validate_python(self._record_data(row))
         self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
         return record
+
+    async def get_runs(self, run_ids: Sequence[str]) -> Mapping[str, RunRecord]:
+        """Resolve a bounded set of run registrations without scanning other runs."""
+        from sqlalchemy import select
+
+        identifiers = tuple(dict.fromkeys(run_ids))
+        for identity in identifiers:
+            validate_resource_id(identity)
+        if not identifiers:
+            return {}
+        await self.initialize()
+        table = self._table("runs")
+        result = {}
+        async with self._context.sessions() as session:
+            for offset in range(0, len(identifiers), 128):
+                rows = (await self._context.run_statement(session.execute(select(table).where(
+                    table.c.store_locator == self._store_locator, table.c.store_key == self._store_key,
+                    table.c.run_id.in_(identifiers[offset:offset + 128]),
+                )))).mappings().all()
+                for row in rows:
+                    result[row["run_id"]] = _RUN_ADAPTER.validate_python(self._record_data(row))
+                    self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
+        return result
 
     async def list_runs(
         self, *, parent_run_id: str | None = None, conversation_id: str | None = None,
@@ -935,22 +984,39 @@ class SqlStepStore:
             raise ValueError("native backup message closure is incomplete")
 
     async def restore_backup(self, session: "AsyncSession", backup: NativeStepBackup) -> None:
-        """Restore into an empty owner after message closure import, without replaying writers."""
+        """Restore native history, reusing equal canonical run registrations."""
         from sqlalchemy import select
 
         async def read(statement: "Select") -> Sequence[Mapping[str, object]]:
             return (await session.execute(statement)).mappings().all()
         await self._validate_backup_messages(read, backup)
-        for name in ("runs", "events", "snapshots"):
+        for name in ("events", "snapshots"):
             table = self._table(name)
             if (await session.execute(select(table.c.id).where(
                     table.c.store_locator == self._store_locator, table.c.store_key == self._store_key).limit(1))).first() is not None:
                 raise ValueError("native backup restore requires an empty owner")
+        run_table = self._table("runs")
+        existing_runs = {}
+        identifiers = tuple(row["run_id"] for row in backup.runs)
+        for offset in range(0, len(identifiers), _BATCH_SIZE):
+            rows = (await session.execute(select(run_table).where(
+                run_table.c.store_locator == self._store_locator,
+                run_table.c.store_key == self._store_key,
+                run_table.c.run_id.in_(identifiers[offset:offset + _BATCH_SIZE]),
+            ))).mappings().all()
+            existing_runs.update((row["run_id"], row) for row in rows)
+        for row in backup.runs:
+            existing = existing_runs.get(row["run_id"])
+            if existing is not None and (_RUN_ADAPTER.validate_python(self._record_data(existing))
+                                         != _RUN_ADAPTER.validate_python(self._record_data(row))):
+                raise ValueError("native backup registration differs from its canonical owner")
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
             # Individual inserts preserve ordering even on dialects that do not
             # guarantee the generated ID order of executemany operations.
             for row in getattr(backup, name):
+                if name == "runs" and row["run_id"] in existing_runs:
+                    continue
                 inserted = await session.execute(table.insert().values(**dict(row)))
                 if name == "snapshots" and not row["pruned"]:
                     from ._native_content_index import replace_edges, resolve_targets

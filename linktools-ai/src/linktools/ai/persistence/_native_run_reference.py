@@ -6,24 +6,22 @@ import json
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, replace
-from datetime import datetime
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeStepEvent
 
-from ..core import canonical_json_bytes, canonical_sha256, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..steps import native_store_locator, encode_native_replay_key
-from ._official_step_reader import OfficialStepReader
+from ._run_registration import RunRegistrationReference
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStore
 from ._step_contracts import AgentRunRecord
 from ._step_schema import build_step_sql_metadata
 from ._step_store import SqlStepStore, StepWriteReceipt
-from .codec import _encode_step_envelope, decode_envelope, encode_envelope
+from .codec import _encode_step_envelope
 from .state import RecordScanCursor, RecordQuery, SqlStateRecordReader, StateTransaction, StoredRecord
 
 if TYPE_CHECKING:
@@ -31,8 +29,7 @@ if TYPE_CHECKING:
 
 
 _RUN_ADAPTER = TypeAdapter(RunRecord)
-_TYPE = "native_agent_run_reference"
-_KEYS = frozenset({"run", "registration", "projection_sha256", "metadata", "removed", "started_at"})
+_TYPE = "run_reference"
 
 
 def is_native_run_reference(data: Mapping[str, object]) -> bool:
@@ -44,7 +41,7 @@ class NativeRunReferences:
     """Resolve a native source in the same SELECT as its Trace sidecar.
 
     Only source-confirmed registrations may create references. The physical
-    record keeps distinct Runtime evidence and a byte-integrity digest, never
+    record keeps distinct Runtime projection differences, never
     another copy of the native lineage, agent or shared metadata.
     """
 
@@ -91,71 +88,21 @@ class NativeRunReferences:
     def encode(self, run: AgentRunRecord, *, source_receipt: StepWriteReceipt | None = None) -> dict[str, object] | None:
         if self._native is None:
             return None
-        if source_receipt is None:
-            source = self._native.confirmed_run(run.agent_run_id)
-            if source is None or self._confirmed.get(run.agent_run_id) != source.registration_id:
-                return None
-        else:
-            # The caller just published this source in the enclosing transaction.
-            # Do not promote its provisional receipt to committed cache knowledge.
-            source = self._native.run_from_receipt(source_receipt)
-            if source is None or source.run_id != run.agent_run_id or not source.registration_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        projected = OfficialStepReader.project_run(source)
-        if (projected.agent_conversation_id, projected.parent_agent_run_id, projected.agent_id) != (
-                run.agent_conversation_id, run.parent_agent_run_id, run.agent_id):
+        source = (self._native.confirmed_run(run.agent_run_id) if source_receipt is None
+                  else self._native.run_from_receipt(source_receipt))
+        if source is None:
             return None
-        encoded_run = _encode_step_envelope(run)
-        reference = encode_envelope({"type": _TYPE, "payload": {
-            "run": source.run_id,
-            "registration": source.registration_id,
-            "projection_sha256": canonical_sha256(encoded_run),
-            "metadata": {key: value for key, value in run.metadata.items()
-                         if projected.metadata.get(key) != value},
-            "removed": sorted(projected.metadata.keys() - run.metadata.keys()),
-            "started_at": (None if run.started_at.isoformat() == projected.started_at.isoformat()
-                           else run.started_at.isoformat()),
-        }})
-        return reference if len(canonical_json_bytes(reference)) < len(canonical_json_bytes(encoded_run)) else None
+        return RunRegistrationReference.capture(source, run).to_data()
 
     @classmethod
     def decode_reference(cls, data: Mapping[str, object]) -> Mapping[str, object]:
-        envelope = decode_envelope(data)
-        value = envelope.value
-        payload = value.get("payload")
-        if (set(value) != {"type", "payload"} or value["type"] != _TYPE
-                or not isinstance(payload, Mapping) or set(payload) != _KEYS):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        digest = payload["projection_sha256"]
-        if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(payload["registration"], str) or not payload["registration"]:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            validate_resource_id(payload["run"])
-        except AIError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        metadata, removed = payload["metadata"], payload["removed"]
-        if (not isinstance(metadata, Mapping) or any(not isinstance(key, str) or not isinstance(value, str)
-                                                   for key, value in metadata.items())
-                or not isinstance(removed, (list, tuple)) or any(not isinstance(key, str) for key in removed)
-                or list(removed) != sorted(set(removed)) or set(removed).intersection(metadata)):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        started = payload["started_at"]
-        if started is not None:
-            try:
-                timestamp = datetime.fromisoformat(started)
-                if timestamp.tzinfo is None or timestamp.isoformat() != started:
-                    raise ValueError("invalid timestamp")
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return payload
+        reference = RunRegistrationReference.from_data(data)
+        return {"run": reference.run_id, "registration": reference.registration_id}
 
-    @classmethod
-    def matches(cls, data: Mapping[str, object], run: AgentRunRecord) -> bool:
-        reference = cls.decode_reference(data)
-        return (reference["run"] == run.agent_run_id
-                and reference["projection_sha256"] == canonical_sha256(_encode_step_envelope(run)))
+    def matches(self, data: Mapping[str, object], run: AgentRunRecord, *, transaction: StateTransaction) -> bool:
+        expected = _encode_step_envelope(run)
+        return any(physical == data and projection == expected
+                   for physical, projection in self._projections.get(transaction, {}).values())
 
     def project(self, data: Mapping[str, object], source: RunRecord, *, store_key: bytes) -> AgentRunRecord:
         return self.project_source(data, source, store_key=store_key, expected_store_key=self._store_key)
@@ -163,20 +110,10 @@ class NativeRunReferences:
     @classmethod
     def project_source(cls, data: Mapping[str, object], source: RunRecord, *,
                        store_key: bytes, expected_store_key: bytes) -> AgentRunRecord:
-        """Verify a detached native registration with the online projection contract."""
-        reference = cls.decode_reference(data)
-        if (store_key != expected_store_key or reference["run"] != source.run_id
-                or reference["registration"] != source.registration_id):
+        """Project an immutable registration without a second whole-run identity."""
+        if store_key != expected_store_key:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run = OfficialStepReader.project_run(source)
-        for key in reference["removed"]:
-            run.metadata.pop(key, None)
-        run.metadata.update(reference["metadata"])
-        if reference["started_at"] is not None:
-            run.started_at = datetime.fromisoformat(reference["started_at"])
-        if not cls.matches(data, run):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return run
+        return RunRegistrationReference.from_data(data).project(source)
 
     def remember_prepared(self, transaction: StateTransaction, record: StoredRecord, run: AgentRunRecord,
                           *, source_receipt: StepWriteReceipt | None = None) -> None:
@@ -207,11 +144,11 @@ class NativeRunReferences:
         encoded = type_coerce(records.c.payload_json, JSON)[()].as_string()
         payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
         reference = payload["value"]["payload"]
-        source_run = reference["run"].as_string()
+        source_run = reference["run_id"].as_string()
         run_join = and_(
             records.c.kind == "agent_run", runs.c.store_locator == self._store_locator, runs.c.store_key == self._store_key,
             runs.c.run_id == source_run,
-            runs.c.registration_id == reference["registration"].as_string(),
+            runs.c.registration_id.is_not_distinct_from(reference["registration_id"].as_string()),
         )
         source_columns = tuple(column.label("native_" + column.name) for column in runs.c)
         expected = expected_start if expected_start is not None else expected_terminal

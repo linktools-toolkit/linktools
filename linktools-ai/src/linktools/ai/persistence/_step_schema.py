@@ -188,7 +188,7 @@ def build_step_domain_sql_metadata(domains: "Iterable[PersistenceDomain]", *, me
     existing = set(metadata.tables)
     build_step_sql_metadata(metadata=metadata)
     if PersistenceDomain.CHECKPOINT not in selected:
-        keep = {"ai_step_messages", "ai_step_sequences", "ai_native_content_edges"}
+        keep = {"ai_step_runs", "ai_step_messages", "ai_step_sequences", "ai_native_content_edges"}
         if selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
             keep.update({"ai_step_runs", "ai_step_events"})
         for name in set(metadata.tables) - existing - keep:

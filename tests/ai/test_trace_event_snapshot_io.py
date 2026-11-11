@@ -24,11 +24,11 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
     transport = InMemoryObjectStore("portable")
     objects = InMemoryObjectStore("runtime")
 
-    def resources(store, *, read_only: bool) -> SnapshotResources:
+    def resources(store, *, read_only: bool, run_registrations) -> SnapshotResources:
         return SnapshotResources(
             namespace="archive-boundaries", tenant_id="tenant", durable_domains=frozenset({PersistenceDomain.TRACE}),
             stores={PersistenceDomain.TRACE: store}, object_stores={domain: objects for domain in PersistenceDomain},
-            read_only=read_only,
+            read_only=read_only, run_registrations=run_registrations,
         )
 
     async with _archive(tmp_path, backend) as (_state, archive, run):
@@ -38,7 +38,7 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
                                       "linktools.ai.message_seq": str(index)}) for index in range(1, 4)]
         for value in events:
             await archive.append_event(value, execution_id="execution")
-        source = resources(archive.state_store, read_only=True)
+        source = resources(archive.state_store, read_only=True, run_registrations=_state.run_store.run_registrations)
         operations = RuntimeSnapshotOperations(source, require_ready=lambda: None)
         with pytest.raises(AIError) as limited:
             await operations.export_snapshot(object_store=transport, limits=SnapshotLimits(2, 2**20))
@@ -52,7 +52,7 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
 
         @asynccontextmanager
         async def open_target(root, namespace, tenant_id):
-            yield resources(restored.state_store, read_only=False)
+            yield resources(restored.state_store, read_only=False, run_registrations=target.run_store.run_registrations)
 
         await restore_snapshot(reference, object_store=transport, root=tmp_path / "restored",
                                limits=limits, open_target=open_target)
@@ -65,7 +65,7 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
                 agent_run_id="run", message_seqs=(1, 2, 3),
                 tool_call_ids=(), event_high_water=3,
             ) == events
-        roundtrip = await RuntimeSnapshotOperations(resources(restored.state_store, read_only=True),
+        roundtrip = await RuntimeSnapshotOperations(resources(restored.state_store, read_only=True, run_registrations=target.run_store.run_registrations),
                                                     require_ready=lambda: None).export_snapshot(
             object_store=transport, limits=limits,
         )

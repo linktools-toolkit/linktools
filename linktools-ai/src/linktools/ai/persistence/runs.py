@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -48,6 +49,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._projection_payload import decode_projection_payload, encode_projection_payload
+from ._run_registration import RunRegistrationStore
 from ._plan import PersistenceDomain
 from ._archive import PreparedArchive
 from ._message_root import NativeMessageRoot
@@ -133,7 +135,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         execution_archive: AgentRunStore | None,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
+        run_registrations: "RunRegistrationStore | None" = None,
     ) -> None:
+        self.run_registrations = run_registrations
+        self._run_sources: dict[str, RunRecord] = {}
         self.capability_writes: RuntimeCapabilityWrites | None = None
         self.capability_revisions: dict[str, int] = {}
         self._staging = staging
@@ -291,6 +296,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                     self._staging.adopt_native_run_local(OfficialStepReader.project_run(source))
                     archive.confirm_native_run(source)
 
+    def stage_run_source(self, record: RunRecord) -> None:
+        """Retain admitted metadata without claiming a native boundary committed."""
+        previous = self._run_sources.get(record.run_id)
+        if previous is not None and previous != record:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._run_sources[record.run_id] = deepcopy(record)
+
     def confirm_step_run(self, record: RunRecord, *, receipt: StepWriteReceipt | None = None) -> None:
         """Reuse a successful official registration only for this Runtime's owned run."""
         if record.run_id in self._execution_producers:
@@ -302,6 +314,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             if source is None:
                 self.invalidate_step_run(record.run_id)
                 return
+            self.stage_run_source(source)
             self.checkpoint_persistence.reader.confirm_run(source)
             archive = self._archives.get(PersistenceDomain.TRACE)
             if self.execution_persistence(source.run_id)[1] and isinstance(archive, StateStepArchive):
@@ -506,6 +519,31 @@ class RuntimeAgentRunStore(AgentRunStore):
         self, record: AgentRunRecord, *, execution_id: str | None = None,
     ) -> None:
         await self._ensure_business()
+        if self.run_registrations is not None:
+            source = self._run_sources.get(record.agent_run_id)
+            if source is None:
+                source = await self.run_registrations.get(record.agent_run_id)
+            if source is None:
+                source = RunRecord(run_id=record.agent_run_id, conversation_id=record.agent_conversation_id,
+                                   parent_run_id=record.parent_agent_run_id, agent_name=record.agent_id,
+                                   metadata=dict(record.metadata), started_at=record.started_at)
+                await self.run_registrations.publish(source)
+            elif record.agent_run_id in self._run_sources:
+                native = self.run_registrations.native
+                # The built-in native boundary owns its transaction and receipt.
+                # Import only across owners; never replay an uncertain native write.
+                step = self.step_store
+                same_owner = (isinstance(step, SqlStepStore) and native is not None
+                              and step.storage_context.engine is native.storage_context.engine
+                              and step.store_key == native.store_key)
+                if not same_owner:
+                    # This admits metadata only. A custom or split native store
+                    # may still have a pending lifecycle boundary; its own receipt
+                    # remains the sole evidence that boundary committed.
+                    await self.run_registrations.publish(source)
+            for archive in self._archives.values():
+                if isinstance(archive, StateStepArchive):
+                    archive.remember_run_registration(source)
         observed_transcript: StagedTranscript | None = None
         events: Sequence[StepEvent] = ()
         offset: _ProjectionOffset | None = None

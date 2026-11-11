@@ -145,6 +145,13 @@ class AgentRunRecorder:
     def agent_run_id(self) -> str:
         return self._agent_run_id
 
+    def stage_run_source(self, record: NativeRunRecord) -> None:
+        """Pass admitted native metadata without treating it as a commit receipt."""
+        if record.run_id != self._agent_run_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if isinstance(self._store, RuntimeAgentRunStore):
+            self._store.stage_run_source(record)
+
     async def register_agent_run(self, record: AgentRunRecord) -> None:
         if record.agent_run_id != self._agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

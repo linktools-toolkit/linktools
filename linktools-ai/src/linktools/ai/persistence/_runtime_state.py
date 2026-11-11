@@ -294,6 +294,7 @@ class Persistence:
             history_repository=self.conversation.histories,
             execution_repository=self.execution.executions,
             namespace=self.namespace, tenant_id=self.tenant_id,
+            run_registrations=self.run_store.run_registrations,
         )
         if step_store is not None:
             store.bind_step_store(step_store)
@@ -617,6 +618,7 @@ class Persistence:
             read_only=self.read_only,
             portable_export=not self.durable_capability_ids,
             checkpoint_backup_source=self.checkpoint_backup_source,
+            run_registrations=self.run_store.run_registrations,
         )
 
     def snapshot_operations(self) -> RuntimeSnapshotOperations:

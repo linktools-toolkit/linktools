@@ -27,7 +27,9 @@ from ._native_backup_projection import NativeBackupProjections
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraphAdmission, TaskGraphSubmission
 from ._runtime_identity import task_graph_binding_capture_key
-from ._native_run_reference import NativeRunReferences
+from ._run_registration import RunRegistrationStore, RunRegistrationReference
+from pydantic import TypeAdapter
+from pydantic_ai_harness.step_persistence import RunRecord
 from ._native_event_reference import NativeEventReferences
 from ._sql import SqlStateStore
 from ._archive import archive_content_scope, ContentRecord
@@ -95,6 +97,7 @@ from .codec import (
     encode_fact,
     encode_operation,
     encode_record,
+    _encode_step_envelope,
     iter_runtime_object_refs,
 )
 
@@ -135,19 +138,17 @@ class _StateSnapshotReader:
         self._trace_scope = scope
         self._trace_events = (SqlTraceEventStore(store, namespace=scope[0], tenant_id=scope[1])
                               if scope is not None and isinstance(store, SqlStateStore) else None)
-        self._native_runs = (NativeRunReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
-                             if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
         self._native_events = (NativeEventReferences(store, namespace=native_run_scope[0], tenant_id=native_run_scope[1])
                                if native_run_scope is not None and isinstance(store, SqlStateStore) else None)
 
     async def validate_trace_prefix(self, records: Sequence[StoredRecord], facts: Sequence[StoredFact]) -> None:
         from ._step_contracts import AgentRunRecord
         from .state import stream_key
-        if self._trace_scope is None or self._native_runs is None and isinstance(self._store, SqlStateStore):
+        if self._trace_scope is None:
             return
         namespace, tenant_id = self._trace_scope
         streams = tuple(stream_key(namespace, tenant_id, "trace", "event", (
-            _decode_enveloped_domain(record.data, AgentRunRecord).agent_run_id,
+            RunRegistrationReference.from_data(record.data).run_id,
         )) for record in records if record.kind == "agent_run")
         counts = {}
         for fact in facts:
@@ -169,8 +170,6 @@ class _StateSnapshotReader:
     async def scan_records_page(
         self, *, after: RecordScanCursor | None, limit: int,
     ) -> tuple[StoredRecord, ...]:
-        if self._native_runs is not None:
-            return await self._store.read(lambda tx: self._native_runs.read(tx, scan=(after, limit)))
         return await self._store.read(lambda tx: tx.scan_records_page(after=after, limit=limit))
 
     async def scan_facts_page(
@@ -269,7 +268,7 @@ async def _capture_snapshot_reader(reader: _SnapshotReader, *, budget: _Snapshot
         limit = budget.page_size(page_size)
         page = await reader.scan_records_page(after=cursor, limit=limit)
         for value in page:
-            if value.kind == "history_association":
+            if value.kind in {"history_association", "step_run"}:
                 continue
             budget.accept(encode_record(value))
             records.append(value)
@@ -333,6 +332,7 @@ class _SnapshotExportSource:
     native_checkpoints: Mapping[str, NativeStepBackup] | None = None
     native_projections: Mapping[str, _CapturedSnapshotReader] | None = None
     native_payloads: Mapping[str, Mapping[tuple[bytes, str], bytes]] | None = None
+    run_registrations: Mapping[str, RunRecord] | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return self.archive_object_stores[domain]
@@ -353,6 +353,7 @@ class SnapshotResources:
     # Borrow the live mapping so cached maintenance sees later capability bindings.
     capability_stores: Mapping[str, StateStore] | None = None
     checkpoint_backup_source: Callable[[NativeStepSource], Awaitable["SqlStepStore"]] | None = None
+    run_registrations: RunRegistrationStore | None = None
 
     def archive_object_store(self, domain: PersistenceDomain) -> ObjectStore:
         return (self.archive_object_stores if self.archive_object_stores is not None else self.object_stores)[domain]
@@ -445,6 +446,7 @@ class RuntimeSnapshotOperations:
         native_rows = {}
         native_checkpoints = {}
         native_projections = {}
+        run_registrations = {}
         native_payloads = {}
         readers = {}
         groups = {}
@@ -518,6 +520,8 @@ class RuntimeSnapshotOperations:
                                 return await native.capture_backup(tx, accept=capture_budget.accept, validate_messages=False)
                             backup = await execution_store.read(capture_native)
                             native_checkpoints[source.group_id] = backup
+                            for row in backup.runs:
+                                _retain_run_registration(run_registrations, _run_from_native_row(row))
                             roots.extend(backup.message_roots(source.group_id))
                 if (opened is not None and opened[0] in native_checkpoints
                         and PersistenceDomain.TRACE in {domain for domain, _ in members}):
@@ -569,6 +573,28 @@ class RuntimeSnapshotOperations:
             # view. Independent groups cannot share a database transaction.
             await group.read_many(tuple(store for _, store in members), capture_group)
 
+        # Registrations are immutable and published before their references.
+        # Read the detached closure after group snapshots to avoid nested owner sessions.
+        references = [RunRegistrationReference.from_data(record.data)
+                      for captured in readers.values() for record in captured.records
+                      if record.kind == "agent_run"]
+        missing = tuple(dict.fromkeys(reference.run_id for reference in references
+                                      if reference.run_id not in run_registrations))
+        if missing:
+            owner = self._resources.run_registrations
+            if owner is None:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            for start in range(0, len(missing), 128):
+                registrations = await owner.get_many(missing[start:start + 128])
+                for identity in missing[start:start + 128]:
+                    registration = registrations.get(identity)
+                    if registration is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    _retain_run_registration(run_registrations, registration)
+                    capture_budget.accept(_run_json(registration))
+        for reference in references:
+            reference.project(run_registrations[reference.run_id])
+
         for scope, (domain, sequences, messages) in native_rows.items():
             native_payloads[scope] = await _capture_native_payloads(
                 scope, sequences, messages, budget=capture_budget,
@@ -583,6 +609,7 @@ class RuntimeSnapshotOperations:
             namespace=self._resources.namespace, tenant_id=self._resources.tenant_id,
             readers=readers, archives=archives(), object_stores=self._resources.object_stores,
             native_rows=native_rows, native_checkpoints=native_checkpoints, native_projections=native_projections, native_payloads=native_payloads,
+            run_registrations=run_registrations,
             archive_object_stores=(self._resources.archive_object_stores
                                   if self._resources.archive_object_stores is not None
                                   else self._resources.object_stores),
@@ -733,7 +760,8 @@ async def _export_snapshot(
             if not page:
                 break
             for value in page:
-                semantic_value = expand_snapshot_execution_content(value, binding_contents,
+                semantic_value = _expand_run_reference(value, source.run_registrations or {})
+                semantic_value = expand_snapshot_execution_content(semantic_value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
                 semantic_value = expand_snapshot_capture(semantic_value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
@@ -849,8 +877,8 @@ async def _export_snapshot(
     native_checkpoints = []
     for group_id, backup in (source.native_checkpoints or {}).items():
         native_roots.setdefault(group_id, []).extend(backup.message_roots(group_id))
-        raw = backup.to_json()
-        for name in ("runs", "events", "snapshots"):
+        raw = _encode_checkpoint_registration_refs(backup, source.run_registrations or {})
+        for name in ("run_ids", "events", "snapshots"):
             for row in raw[name]:
                 accept(row)
         native_checkpoints.append({"group_id": group_id, **raw})
@@ -885,6 +913,8 @@ async def _export_snapshot(
         "namespace": source.namespace,
         "tenant_id": source.tenant_id,
         "domains": domains,
+        "run_registrations": [accept(_run_json(run)) for run in sorted(
+            (source.run_registrations or {}).values(), key=lambda item: item.run_id)],
         "archives": archives,
         "native_messages": native_messages,
         "native_checkpoints": native_checkpoints,
@@ -957,6 +987,7 @@ async def restore_snapshot(
     if budget_entries > limits.max_entries or len(payload) + budget_bytes > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
+    run_registrations = _decode_run_registrations(manifest.get("run_registrations", []))
     raw_domains = manifest["domains"]
     raw_objects = manifest.get("objects", [])
     if not isinstance(raw_objects, list):
@@ -967,7 +998,7 @@ async def restore_snapshot(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     archive_closures: dict[str, ArchiveClosure] = {}
     archive_domains: dict[str, PersistenceDomain] = {}
-    entry_count = len(raw_objects)
+    entry_count = len(raw_objects) + len(run_registrations)
     for item in raw_archives:
         if not isinstance(item, dict) or set(item) != {"scope_id", "domain", "records"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1019,7 +1050,7 @@ async def restore_snapshot(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         from ._step_store import SqlStepStore
         try:
-            backup = NativeStepBackup.from_json({key: value for key, value in entry.items() if key != "group_id"})
+            backup = _decode_checkpoint_registration_refs(entry, run_registrations)
             SqlStepStore.validate_backup(backup)
         except (TypeError, ValueError, KeyError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -1094,7 +1125,8 @@ async def restore_snapshot(
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
         records = tuple(decode_record(value) for value in raw_records)
-        semantic_records = tuple(expand_snapshot_capture(expand_snapshot_execution_content(record, binding_contents,
+        semantic_records = tuple(expand_snapshot_capture(expand_snapshot_execution_content(
+            _expand_run_reference(record, run_registrations), binding_contents,
             namespace=namespace, tenant_id=tenant_id), binding_contents,
             namespace=namespace, tenant_id=tenant_id) for record in records)
         semantic_domains[domain] = semantic_records
@@ -1166,6 +1198,12 @@ async def restore_snapshot(
         namespace=namespace, tenant_id=tenant_id, require_bindings=True)
     if required_checkpoint_groups != set(native_checkpoints):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    referenced_runs = {RunRegistrationReference.from_data(record.data).run_id
+                       for values in decoded_domains.values() for record in values[0]
+                       if record.kind == "agent_run"}
+    referenced_runs.update(row["run_id"] for backup in native_checkpoints.values() for row in backup.runs)
+    if referenced_runs != set(run_registrations):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_projections = manifest.get("native_projections", [])
     if not isinstance(raw_projections, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1177,20 +1215,13 @@ async def restore_snapshot(
     for entry in raw_projections:
         if (not isinstance(entry, dict) or set(entry) != {"group_id", "records", "facts"}
                 or entry["group_id"] not in native_checkpoints or entry["group_id"] in seen_projection_groups
-                or not isinstance(entry["records"], list) or not isinstance(entry["facts"], list)):
+                or entry["records"] != [] or not isinstance(entry["facts"], list)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         seen_projection_groups.add(entry["group_id"])
         validator = NativeBackupProjections(native_checkpoints[entry["group_id"]], namespace=namespace, tenant_id=tenant_id)
         entry_count += len(entry["records"]) + len(entry["facts"])
         if entry_count > limits.max_entries:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        for encoded in entry["records"]:
-            raw = decode_record(encoded)
-            visible = trace_records.get(raw.key)
-            if (visible is None or raw.key in native_record_projections
-                    or validator.validate(visible, raw.data) != raw):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            native_record_projections[raw.key] = raw
         for encoded in entry["facts"]:
             raw = decode_fact(encoded)
             key = raw.stream_key, raw.sequence
@@ -1330,6 +1361,11 @@ async def restore_snapshot(
     if target.exists() and any(target.iterdir()):
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     async with open_target(target, namespace, tenant_id) as resources:
+        if run_registrations:
+            if resources.run_registrations is None:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            for registration in run_registrations.values():
+                await resources.run_registrations.publish(registration)
         for domain, source, content_ref in decoded_objects:
             if source.key.startswith("v1/archive/"):
                 continue
@@ -1522,7 +1558,8 @@ def snapshot_manifest_usage(
     objects = manifest.get("objects")
     if not isinstance(domains, Mapping) or not isinstance(objects, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    entries = len(objects)
+    registrations = _decode_run_registrations(manifest.get("run_registrations", []))
+    entries = len(objects) + len(registrations)
     object_bytes = 0
     for raw_domain in domains.values():
         if not isinstance(raw_domain, Mapping):
@@ -1533,7 +1570,7 @@ def snapshot_manifest_usage(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             entries += len(values)
     for name, fields in (("archives", ("records",)), ("native_messages", ("sequences", "messages")),
-                         ("native_checkpoints", ("runs", "events", "snapshots")),
+                         ("native_checkpoints", ("run_ids", "events", "snapshots")),
                          ("native_projections", ("records", "facts"))):
         groups = manifest.get(name, [])
         if not isinstance(groups, list):
@@ -1686,16 +1723,18 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         "records": [encode_record(map_capture_references(decode_record(row), normalize))
                     if row.get("kind") in CAPTURE_RECORD_KINDS else normalize(row) for row in values["records"]]}
         for name, values in domains.items()}
+    run_registrations = _decode_run_registrations(manifest.get("run_registrations", []))
     checkpoint_values = []
     for entry in manifest.get("native_checkpoints", []):
         if not isinstance(entry, Mapping) or entry.get("group_id") not in groups:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        backup = NativeStepBackup.from_json({key: value for key, value in entry.items() if key != "group_id"})
+        backup = _decode_checkpoint_registration_refs(entry, run_registrations)
         checkpoint_values.append(backup.to_json())
     return canonical_sha256({
         "kind": manifest.get("kind"), "format_version": manifest.get("format_version"),
         "namespace": manifest.get("namespace"), "tenant_id": manifest.get("tenant_id"),
         "domains": normalized_domains,
+        "run_registrations": ordered_unique([_run_json(run) for run in run_registrations.values()]),
         "archives": ordered_unique(archive_records),
         "native_checkpoints": ordered_unique(checkpoint_values),
         "native_projections": ordered_unique([
@@ -1705,6 +1744,85 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         "native_messages": ordered_unique(list(native_messages.values())),
         "objects": ordered_unique(normalized_objects),
     })
+
+
+
+_RUN_REGISTRATION_ADAPTER = TypeAdapter(RunRecord)
+
+
+def _run_json(run: RunRecord) -> dict[str, object]:
+    return json.loads(_RUN_REGISTRATION_ADAPTER.dump_json(run))
+
+
+def _retain_run_registration(values: dict[str, RunRecord], run: RunRecord) -> None:
+    previous = values.get(run.run_id)
+    if previous is not None and previous != run:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    values[run.run_id] = run
+
+
+def _decode_run_registrations(raw: object) -> dict[str, RunRecord]:
+    if not isinstance(raw, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result = {}
+    try:
+        for value in raw:
+            run = _RUN_REGISTRATION_ADAPTER.validate_python(value)
+            if run.run_id in result or _run_json(run) != value:
+                raise ValueError("duplicate or noncanonical run registration")
+            result[run.run_id] = run
+    except (ValueError, TypeError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return result
+
+
+def _run_from_native_row(row: Mapping[str, object]) -> RunRecord:
+    try:
+        return _RUN_REGISTRATION_ADAPTER.validate_python(dict(row, metadata=json.loads(row["metadata"])))
+    except (ValueError, TypeError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _expand_run_reference(record: StoredRecord, runs: Mapping[str, RunRecord]) -> StoredRecord:
+    if record.kind != "agent_run":
+        return record
+    reference = RunRegistrationReference.from_data(record.data)
+    source = runs.get(reference.run_id)
+    if source is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return replace(record, data=_encode_step_envelope(reference.project(source)))
+
+
+def _encode_checkpoint_registration_refs(backup: NativeStepBackup, runs: Mapping[str, RunRecord]) -> dict[str, object]:
+    result = backup.to_json()
+    for row in backup.runs:
+        if runs.get(row["run_id"]) != _run_from_native_row(row):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result["run_ids"] = [row["run_id"] for row in backup.runs]
+    del result["runs"]
+    return result
+
+
+def _decode_checkpoint_registration_refs(entry: Mapping[str, object], runs: Mapping[str, RunRecord]) -> NativeStepBackup:
+    from ..steps import decode_native_store_key
+    value = {key: item for key, item in entry.items() if key != "group_id"}
+    identifiers = value.pop("run_ids", None)
+    if ("runs" in value or not isinstance(identifiers, list)
+            or any(not isinstance(item, str) for item in identifiers)
+            or len(set(identifiers)) != len(identifiers)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        store_key = decode_native_store_key(value["store_key"])
+        rows = []
+        for identity in identifiers:
+            row = _run_json(runs[identity])
+            row.update(store_key=value["store_key"], store_locator=native_store_locator(store_key),
+                       started_at=runs[identity].started_at.isoformat(), metadata=json.dumps(row["metadata"]))
+            rows.append(row)
+        value["runs"] = rows
+        return NativeStepBackup.from_json(value)
+    except (ValueError, TypeError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _validate_native_partition(store_key: bytes, namespace: str, tenant_id: str) -> None:

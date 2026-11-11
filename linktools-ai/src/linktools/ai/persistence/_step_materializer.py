@@ -17,6 +17,7 @@ from ._step_archive import StagingAgentRunStore, StateStepArchive
 from ._step_contracts import AgentRunStore
 from ._sql import SqlStateStore
 from ._step_store import SqlStepStore
+from ._run_registration import RunRegistrationStore
 from .runs import RuntimeAgentRunStore
 from .state import StateStore
 
@@ -35,7 +36,16 @@ def build_runtime_agent_run_store(
     *,
     namespace: str,
     tenant_id: str,
+    run_registrations: RunRegistrationStore | None = None,
 ) -> RuntimeAgentRunStore:
+    if run_registrations is None:
+        candidates = (PersistenceDomain.EXECUTION, PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION)
+        domain = next((domain for domain in candidates
+                       if plan.route(domain).retention is StorageRetentionMode.DURABLE), PersistenceDomain.EXECUTION)
+        owner = stores[domain]
+        native = (SqlStepStore(owner.context, namespace=namespace, tenant_id=tenant_id)
+                  if isinstance(owner, SqlStateStore) else None)
+        run_registrations = RunRegistrationStore(owner, namespace=namespace, tenant_id=tenant_id, native=native)
     archives: dict[PersistenceDomain, AgentRunStore] = {}
     for domain in _STEP_DOMAINS:
         route = plan.route(domain)
@@ -60,6 +70,7 @@ def build_runtime_agent_run_store(
             namespace=namespace,
             tenant_id=tenant_id,
             runtime_domain=domain,
+            run_registrations=run_registrations,
             context_sources=context_sources,
             history_repository=(
                 history_repository if domain is PersistenceDomain.CONVERSATION else None
@@ -87,6 +98,7 @@ def build_runtime_agent_run_store(
         StagingAgentRunStore(),
         execution_repository=execution_repository,
         tenant_id=tenant_id,
+        run_registrations=run_registrations,
         conversation_archive=archives[PersistenceDomain.CONVERSATION],
         execution_archive=archives.get(PersistenceDomain.TRACE),
     )
