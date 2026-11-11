@@ -127,11 +127,17 @@ async def test_unknown_tool_failure_is_trace_only_until_determined(
     async with _archive(tmp_path, backend) as (archive, run_id):
         unknown = _event(run_id, "TOOL_CALL_FAILED", tool="call", unknown=True)
         known = _event(run_id, "TOOL_CALL_FAILED", tool="call", second=1)
-        await _append(archive, unknown, known)
+        await _append(archive, unknown, replace(unknown, timestamp=EPOCH + timedelta(microseconds=1)), known)
         arguments = dict(agent_run_id=run_id, message_seqs=(), tool_call_ids=("call",))
-        assert await archive.read_history_associations(**arguments, event_high_water=1) == []
-        assert await archive.read_history_associations(**arguments, event_high_water=2) == [known]
-        assert [event for _, event in await _trace(archive, run_id, 2)] == [unknown, known]
+        assert await archive.read_history_associations(**arguments, event_high_water=2) == []
+        assert await archive.read_history_associations(**arguments, event_high_water=3) == [known]
+        assert [event for _, event in await _trace(archive, run_id, 3)] == [
+            unknown, replace(unknown, timestamp=EPOCH + timedelta(microseconds=1)), known,
+        ]
+        if backend == "sqlite":
+            rows = await archive.state_store.read(lambda tx: archive._trace_events.read_rows(
+                tx, FactQuery(archive._stream(run_id, "event"))))
+            assert [row["history_identity"] for row in rows] == [None, None, b"call"]
 
 
 @pytest.mark.asyncio
@@ -197,19 +203,99 @@ async def test_concurrent_role_conflict_keeps_one_event_and_allows_retry(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("kind", ("MODEL_REQUEST_SUCCEEDED", "TOOL_CALL_STARTED"))
 async def test_promoted_and_residual_metadata_round_trip_together(
-    tmp_path: Path, backend: str,
+    tmp_path: Path, backend: str, kind: str,
 ) -> None:
     async with _archive(tmp_path, backend) as (archive, run_id):
-        event = _event(run_id, "MODEL_REQUEST_SUCCEEDED", request="01", message="2")
+        event = _event(run_id, kind, request="01", message="2", tool="call")
         event.metadata.update({"a": "first", "z": "last", "é": "unicode",
                                TOOL_ERROR_CODE_METADATA_KEY: "diagnostic"})
         await _append(archive, event)
         assert await archive.list_events(agent_run_id=run_id) == [event]
         assert await _trace(archive, run_id, 1, model_request_seq=1) == [(1, event)]
         assert await archive.read_history_associations(
-            agent_run_id=run_id, message_seqs=(2,), tool_call_ids=(), event_high_water=1,
+            agent_run_id=run_id, message_seqs=(2,), tool_call_ids=("call",), event_high_water=1,
         ) == [event]
+        if backend == "sqlite":
+            row, = await archive.state_store.read(lambda tx: archive._trace_events.read_rows(
+                tx, FactQuery(archive._stream(run_id, "event"))))
+            response = kind == "MODEL_REQUEST_SUCCEEDED"
+            assert row["message_identity"] == (b"2" if response else None)
+            assert row["history_identity"] == (b"01" if response else b"call")
+            metadata = row["payload_json"]["value"]["payload"]["fields"]["metadata"]["$mapping"]
+            assert ([MESSAGE, "2"] in metadata) is not response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_response_role_conflict_is_independent_of_request_identity(tmp_path: Path, backend: str) -> None:
+    async with _archive(tmp_path, backend) as (archive, run_id):
+        first = _event(run_id, "MODEL_REQUEST_SUCCEEDED", request="1", message="2")
+        await _append(archive, first)
+        with pytest.raises(AIError) as caught:
+            await _append(archive, _event(run_id, "MODEL_REQUEST_SUCCEEDED", request="2", message="2"))
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        following = _event(run_id, "MODEL_REQUEST_SUCCEEDED", request="2", message="3")
+        await _append(archive, following)
+        assert await _trace(archive, run_id, 2) == [(1, first), (2, following)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("populated", (False, True))
+async def test_inline_scalar_columns_preserve_values_without_json_duplicates(tmp_path: Path, populated: bool) -> None:
+    from linktools.ai.persistence.codec import _decode_step_envelope, _encode_step_envelope
+    from linktools.ai.persistence.state import StoredFact
+
+    values = dict(agent_conversation_id="é" * 64, parent_agent_run_id="父" * 42,
+                  agent_id="agent\x00" + "é" * 200, tool_name="", error="failure\x00" + "诊断" * 200,
+                  idempotency_key="0:1:TOOL_CALL_STARTED:" + "工具" * 128)
+    if not populated:
+        values = dict.fromkeys(values)
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        event = replace(_event(run_id, "MODEL_REQUEST_SUCCEEDED", message="2"), **values)
+        await _append(archive, event)
+        row, = await archive.state_store.read(lambda tx: archive._trace_events.read_rows(
+            tx, FactQuery(archive._stream(run_id, "event"))))
+        fields = row["payload_json"]["value"]["payload"]["fields"]
+        for name, value in values.items():
+            assert row[name] == (None if value is None else value.encode("utf-8"))
+            assert name not in fields
+        assert await archive.list_events(agent_run_id=run_id) == [event]
+        fact = StoredFact(archive._stream(run_id, "event"), 1, archive._agent_run_key(run_id),
+                          "step_event", None, event.event_type, _encode_step_envelope(event))
+        fact.data["value"]["payload"]["fields"]["future_note"] = "extension"
+        projected = archive._trace_events.row_values(fact, event)
+        restored = archive._trace_events.row_to_fact(projected)
+        assert restored.data["value"]["payload"]["fields"]["future_note"] == "extension"
+        assert _decode_step_envelope(restored.data) == event
+        projected["payload_json"]["value"]["payload"]["fields"]["agent_id"] = values["agent_id"]
+        with pytest.raises(AIError) as caught:
+            archive._trace_events.row_to_fact(projected)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_history_index_batches_merge_exact_roles_before_limit(tmp_path: Path) -> None:
+    async with _archive(tmp_path, "sqlite") as (archive, run_id):
+        events = [_event(run_id, "MODEL_REQUEST_SUCCEEDED", request=str(index), message=str(index))
+                  for index in range(1, 34)]
+        events.extend((_event(run_id, "TOOL_CALL_STARTED", tool="1", message="1"),
+                       _event(run_id, "TOOL_CALL_FAILED", tool="1", message="1", unknown=True)))
+        run = await archive.get_agent_run(agent_run_id=run_id)
+        assert run is not None
+        await archive.sync_projection(run, events=events, checkpoints=(), execution_id="execution")
+        requests = tuple(str(index) for index in range(1, 34))
+
+        async def selected(**kwargs):
+            return await archive.state_store.read(lambda tx: archive._trace_events.select(
+                tx, run_id, high_water=34, history=True, **kwargs))
+
+        both = dict(request_identities=requests, message_identities=tuple(reversed(requests)), tool_call_ids=("1",))
+        assert [fact.sequence for fact in await selected(**both)] == list(range(1, 35))
+        assert [fact.sequence for fact in await selected(**both, limit=2)] == [1, 2]
+        assert [fact.sequence for fact in await selected(request_identities=("1",))] == [1]
+        assert [fact.sequence for fact in await selected(tool_call_ids=("1",))] == [34]
 
 
 @pytest.mark.asyncio

@@ -26,17 +26,25 @@ if TYPE_CHECKING:
 
 _REQUEST = "linktools.ai.model_request_seq"
 _MESSAGE = "linktools.ai.message_seq"
-_PROMOTED = ("agent_run_id", "event_type", "step_index", "timestamp", "tool_call_id", "event_index")
+_INLINE_SCALARS = ("agent_conversation_id", "parent_agent_run_id", "agent_id", "tool_name", "error", "idempotency_key")
+_PROMOTED = ("agent_run_id", "event_type", "step_index", "timestamp", "tool_call_id", "event_index", *_INLINE_SCALARS)
 _REQUEST_KINDS = ("MODEL_REQUEST_STARTED", "MODEL_REQUEST_SUCCEEDED", "MODEL_REQUEST_FAILED", "MODEL_REQUEST_CANCELLED")
 _TOOL_KINDS = ("TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED")
 
 
-def _identity(value: str | None) -> bytes | None:
+def _utf8(value: str | None) -> bytes | None:
     if value is None:
         return None
-    if not isinstance(value, str) or len(value.encode("utf-8")) > 128:
+    if not isinstance(value, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value.encode("utf-8")
+
+
+def _identity(value: str | None) -> bytes | None:
+    result = _utf8(value)
+    if result is not None and len(result) > 128:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return result
 
 
 def _text(value: object) -> str | None:
@@ -76,6 +84,10 @@ def history_identities(event: StepEvent) -> tuple[tuple[str, str], ...]:
     return tuple(result)
 
 
+def _history_identity(event: StepEvent) -> bytes | None:
+    return next((_identity(identity) for role, identity in history_identities(event) if role != "response"), None)
+
+
 class SqlTraceEventStore:
     def __init__(self, state: SqlStateStore, *, namespace: str, tenant_id: str) -> None:
         self.state, self.namespace, self.tenant_id = state, namespace, tenant_id
@@ -97,23 +109,29 @@ class SqlTraceEventStore:
                 or fact.owner_key != record_key(self.namespace, self.tenant_id, "trace", "agent_run", (event.agent_run_id,))):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload = copy.deepcopy(dict(fact.data))
+        inline = payload["value"]["type"] == "step_event"
+        response = event.event_type == "MODEL_REQUEST_SUCCEEDED"
         if payload["value"]["type"] == "step_event":
             if _decode_step_envelope(fact.data) != event:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             fields = payload["value"]["payload"]["fields"]
             for name in _PROMOTED:
-                fields.pop(name)
+                fields.pop(name, None)
             fields["metadata"]["$mapping"] = [pair for pair in fields["metadata"]["$mapping"]
-                                                if pair[0] not in (_REQUEST, _MESSAGE, TOOL_ERROR_CODE_METADATA_KEY)]
+                                                if pair[0] not in (_REQUEST, TOOL_ERROR_CODE_METADATA_KEY)
+                                                and not (response and pair[0] == _MESSAGE)]
         elif payload["value"]["type"] != "native_event_reference":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        message_identity = _identity(event.metadata.get(_MESSAGE))
         return dict(store_key=self.state.store_key, run_id=_identity(event.agent_run_id), sequence=fact.sequence,
                     event_index=event.event_index, kind=event.event_type, step_index=event.step_index,
                     timestamp=event.timestamp.isoformat(), order_key=_order(event.timestamp, fact.sequence),
                     request_identity=_identity(event.metadata.get(_REQUEST)),
                     request_number=_request_number(event.metadata.get(_REQUEST)),
-                    message_identity=_identity(event.metadata.get(_MESSAGE)), tool_call_id=_identity(event.tool_call_id),
-                    error_code=_identity(event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY)), payload_json=payload)
+                    message_identity=message_identity if response else None, tool_call_id=_identity(event.tool_call_id),
+                    history_identity=_history_identity(event),
+                    error_code=_identity(event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY)), payload_json=payload,
+                    **{name: _utf8(getattr(event, name)) if inline else None for name in _INLINE_SCALARS})
 
     def row_to_fact(self, row: Mapping[str, object]) -> StoredFact:
         try:
@@ -123,9 +141,12 @@ class SqlTraceEventStore:
             sequence = row["sequence"]
             if type(sequence) is not int or sequence < 1:
                 raise ValueError("Trace sequence must be positive")
-            for name in ("run_id", "request_identity", "request_number", "message_identity", "tool_call_id", "error_code"):
+            for name in ("run_id", "request_identity", "request_number", "message_identity", "tool_call_id", "error_code", "history_identity"):
                 if _identity(_text(row[name])) != row[name]:
                     raise ValueError("Trace identity is not canonical binary")
+            scalars = {name: _text(row[name]) for name in _INLINE_SCALARS}
+            if any(_utf8(value) != row[name] for name, value in scalars.items()):
+                raise ValueError("Trace scalar is not canonical UTF-8")
             timestamp = datetime.fromisoformat(row["timestamp"])
             if timestamp.tzinfo is None or timestamp.isoformat() != row["timestamp"] or len(row["timestamp"]) > 64:
                 raise ValueError("Trace timestamp is not canonical")
@@ -142,7 +163,7 @@ class SqlTraceEventStore:
                     raise ValueError("Trace body duplicates promoted fields")
                 fields.update(agent_run_id=run_id, event_type=row["kind"], step_index=row["step_index"],
                               timestamp={"$datetime": row["timestamp"]}, tool_call_id=_text(row["tool_call_id"]),
-                              event_index=row["event_index"])
+                              event_index=row["event_index"], **scalars)
                 metadata = fields["metadata"]["$mapping"]
                 if not isinstance(metadata, list):
                     raise ValueError("Trace metadata must be a mapping sequence")
@@ -154,8 +175,12 @@ class SqlTraceEventStore:
                     if previous_key is not None and previous_key >= key:
                         raise ValueError("Trace residual metadata is not canonical")
                     previous_key = key
-                if any(pair[0] in (_REQUEST, _MESSAGE, TOOL_ERROR_CODE_METADATA_KEY) for pair in metadata):
+                response = row["kind"] == "MODEL_REQUEST_SUCCEEDED"
+                if any(pair[0] in (_REQUEST, TOOL_ERROR_CODE_METADATA_KEY)
+                       or response and pair[0] == _MESSAGE for pair in metadata):
                     raise ValueError("Trace metadata duplicates promoted fields")
+                if not response and row["message_identity"] is not None:
+                    raise ValueError("Trace message identity has no response role")
                 metadata.extend([key, value] for key, value in (
                     (_REQUEST, _text(row["request_identity"])), (_MESSAGE, _text(row["message_identity"])),
                     (TOOL_ERROR_CODE_METADATA_KEY, _text(row["error_code"]))) if value is not None)
@@ -165,9 +190,14 @@ class SqlTraceEventStore:
                     raise ValueError("Trace body is not an event")
                 if row["order_key"] != _order(event.timestamp, sequence) or row["request_number"] != _request_number(event.metadata.get(_REQUEST)):
                     raise ValueError("Trace query projection differs")
+                message_identity = _identity(event.metadata.get(_MESSAGE))
+                if (row["history_identity"] != _history_identity(event)
+                        or row["message_identity"] != (message_identity if response else None)):
+                    raise ValueError("Trace history projection differs")
             elif payload["value"]["type"] == "native_event_reference":
                 reference = payload["value"]["payload"]
-                if reference.get("run") != run_id or reference.get("index") != row["event_index"]:
+                if (reference.get("run") != run_id or reference.get("index") != row["event_index"]
+                        or any(value is not None for value in scalars.values()) or row["history_identity"] is not None):
                     raise ValueError("Trace native position differs")
             else:
                 raise ValueError("Unknown Trace payload")
@@ -215,41 +245,50 @@ class SqlTraceEventStore:
                      model_request_seq: int | None = None, step_index: int | None = None,
                      tool_call_id: str | None = None) -> tuple[StoredFact, ...]:
         from sqlalchemy import and_, or_, select
-        if history and max(map(len, (request_identities or (), message_identities or (), tool_call_ids or ()))) > 32:
-            result = {}
-            for offset in range(0, max(map(len, (request_identities or (), message_identities or (), tool_call_ids or ()))), 32):
-                found = await self.select(transaction, run_id, high_water=high_water, history=True,
-                    request_identities=(request_identities or ())[offset:offset + 32],
-                    message_identities=(message_identities or ())[offset:offset + 32],
-                    tool_call_ids=(tool_call_ids or ())[offset:offset + 32])
-                result.update((fact.sequence, fact) for fact in found)
-            return tuple(result[key] for key in sorted(result))
         t = self.table.c
         statement = select(self.table).where(t.store_key == self.state.store_key, t.run_id == _identity(run_id),
                                              t.sequence <= high_water)
         if history:
-            roles = []
-            if request_identities:
-                roles.append(and_(t.kind.in_(_REQUEST_KINDS), t.request_identity.in_(tuple(map(_identity, request_identities)))))
-            if message_identities:
-                roles.append(and_(t.kind == "MODEL_REQUEST_SUCCEEDED", t.message_identity.in_(tuple(map(_identity, message_identities)))))
-            if tool_call_ids:
-                roles.append(and_(t.kind.in_(_TOOL_KINDS), t.tool_call_id.in_(tuple(map(_identity, tool_call_ids))),
-                                  or_(t.kind != "TOOL_CALL_FAILED", t.error_code.is_(None), t.error_code != ErrorCode.TOOL_EFFECT_UNKNOWN.value.encode("utf-8"))))
-            if not roles:
-                return ()
-            statement = statement.where(or_(*roles)).order_by(t.sequence)
-        else:
-            statement = statement.where(t.kind.in_((*_REQUEST_KINDS, *_TOOL_KINDS)))
-            if after_timestamp is not None:
-                statement = statement.where(t.order_key > _order(after_timestamp, after_sequence))
-            if model_request_seq is not None:
-                statement = statement.where(t.request_number == _identity(str(model_request_seq)))
-            if step_index is not None:
-                statement = statement.where(t.step_index == step_index)
-            if tool_call_id is not None:
-                statement = statement.where(t.tool_call_id == _identity(tool_call_id))
-            statement = statement.order_by(t.order_key)
+            requests = frozenset(map(_identity, request_identities or ()))
+            tools = frozenset(map(_identity, tool_call_ids or ()))
+            identities = tuple(sorted(requests | tools))
+            messages = tuple(dict.fromkeys(map(_identity, message_identities or ())))
+            found: dict[int, StoredFact] = {}
+            # Each branch seeks one correlation index. Sorting their bounded
+            # union avoids a cross-index OR competing with the run sequence scan.
+            for offset in range(0, len(identities), 32):
+                batch = identities[offset:offset + 32]
+                request_batch = tuple(value for value in batch if value in requests)
+                tool_batch = tuple(value for value in batch if value in tools)
+                roles = []
+                if request_batch:
+                    roles.append(and_(t.kind.in_(_REQUEST_KINDS), t.history_identity.in_(request_batch)))
+                if tool_batch:
+                    roles.append(and_(t.kind.in_(_TOOL_KINDS), t.history_identity.in_(tool_batch),
+                        or_(t.kind != "TOOL_CALL_FAILED", t.error_code.is_(None),
+                            t.error_code != ErrorCode.TOOL_EFFECT_UNKNOWN.value.encode("utf-8"))))
+                query = statement.where(t.history_identity.in_(batch), or_(*roles))
+                for row in await self._rows(transaction, query):
+                    fact = self.row_to_fact(row)
+                    found[fact.sequence] = fact
+            for offset in range(0, len(messages), 32):
+                query = statement.where(t.kind == "MODEL_REQUEST_SUCCEEDED",
+                                        t.message_identity.in_(messages[offset:offset + 32]))
+                for row in await self._rows(transaction, query):
+                    fact = self.row_to_fact(row)
+                    found[fact.sequence] = fact
+            ordered = sorted(found)
+            return tuple(found[key] for key in (ordered if limit is None else ordered[:limit]))
+        statement = statement.where(t.kind.in_((*_REQUEST_KINDS, *_TOOL_KINDS)))
+        if after_timestamp is not None:
+            statement = statement.where(t.order_key > _order(after_timestamp, after_sequence))
+        if model_request_seq is not None:
+            statement = statement.where(t.request_number == _identity(str(model_request_seq)))
+        if step_index is not None:
+            statement = statement.where(t.step_index == step_index)
+        if tool_call_id is not None:
+            statement = statement.where(t.tool_call_id == _identity(tool_call_id))
+        statement = statement.order_by(t.order_key)
         if limit is not None:
             statement = statement.limit(limit)
         return tuple(self.row_to_fact(row) for row in await self._rows(transaction, statement))
@@ -270,9 +309,9 @@ class SqlTraceEventStore:
                 roles[role] = fact.sequence
         run_id = events[0].agent_run_id
         existing = await self.select(transaction, run_id, high_water=facts[0].sequence - 1, history=True,
-                                     request_identities=tuple(event.metadata[_REQUEST] for event in events if _REQUEST in event.metadata),
-                                     message_identities=tuple(event.metadata[_MESSAGE] for event in events if _MESSAGE in event.metadata),
-                                     tool_call_ids=tuple(event.tool_call_id for event in events if event.tool_call_id is not None))
+                                     request_identities=tuple(identity for role, identity in roles if role in _REQUEST_KINDS),
+                                     message_identities=tuple(identity for role, identity in roles if role == "response"),
+                                     tool_call_ids=tuple(identity for role, identity in roles if role in _TOOL_KINDS))
         for fact in existing:
             event = _decode_step_envelope(fact.data)
             if any(role in roles for role in history_identities(event)):

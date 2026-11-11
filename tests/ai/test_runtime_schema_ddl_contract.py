@@ -75,8 +75,9 @@ def test_trace_indexes_keep_history_association_and_chronological_paths(dialect_
     # rather than counting both dialect variants present in the metadata.
     indexes = [statement for statement in statements if re.match(r"CREATE (?:UNIQUE )?INDEX ", statement)]
     constraints = re.findall(r"\b(?:PRIMARY KEY|UNIQUE) \([^()]+\)", " ".join(statements))
-    assert len(table.c) == 17
-    assert len(indexes) + len(constraints) == 8
+    assert len(table.c) == 24
+    assert len(indexes) + len(constraints) == 7
+    assert 3 * (len(indexes) + len(constraints)) < len(table.c)
     assert "PRIMARY KEY (id)" in constraints
     unique_keys = [statement for statement in indexes if statement.startswith("CREATE UNIQUE INDEX ")]
     unique_keys.extend(constraint for constraint in constraints if constraint.startswith("UNIQUE "))
@@ -84,9 +85,17 @@ def test_trace_indexes_keep_history_association_and_chronological_paths(dialect_
     assert unique_keys[0].endswith("(store_key, run_id, sequence)")
     assert sorted(re.findall(r"\(([^()]+)\)$", statement)[0] for statement in indexes
                   if not statement.startswith("CREATE UNIQUE INDEX ")) == [
-        "created_at", "store_key, run_id, message_identity", "store_key, run_id, order_key",
-        "store_key, run_id, request_identity", "store_key, run_id, tool_call_id", "updated_at",
+        "created_at", "store_key, run_id, history_identity", "store_key, run_id, message_identity",
+        "store_key, run_id, order_key", "updated_at",
     ]
+    for name in ("agent_conversation_id", "parent_agent_run_id"):
+        assert table.c[name].nullable and table.c[name].type.length == 128
+    for name in ("agent_id", "tool_name", "error", "idempotency_key"):
+        assert table.c[name].nullable and table.c[name].type.length is None
+        assert table.c[name].type.compile(dialect=engine.dialect) == {
+            "mysql": "LONGBLOB", "postgresql": "BYTEA", "sqlite": "BLOB",
+        }[dialect_name]
+        assert all(name not in index.columns for index in table.indexes)
 
 
 def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:

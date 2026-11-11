@@ -386,7 +386,9 @@ class NativeEventReferences:
                     sequence=fact.sequence, event_index=event.event_index, kind=event.event_type,
                     step_index=event.step_index, timestamp=event.timestamp.isoformat(),
                     order_key=f"{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{fact.sequence:020d}".encode("ascii"),
-                    request_identity=None, request_number=None, message_identity=None, tool_call_id=None, error_code=None)
+                    request_identity=None, request_number=None, message_identity=None, tool_call_id=None, error_code=None,
+                    history_identity=None, agent_conversation_id=None, parent_agent_run_id=None,
+                    agent_id=None, tool_name=None, error=None, idempotency_key=None)
                 payload = json.loads(row["payload_json"]) if isinstance(row["payload_json"], str) else row["payload_json"]
                 if (any(row[name] != value for name, value in expected.items()) or payload != dict(fact.data)
                         or (reference["run"], reference["replay"]) != (source.run_id, source.idempotency_key)

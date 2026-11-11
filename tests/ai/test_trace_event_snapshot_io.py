@@ -34,6 +34,9 @@ async def test_trace_snapshot_restores_event_owner_and_sequence(tmp_path: Path, 
     async with _archive(tmp_path, backend) as (_state, archive, run):
         await archive.register_agent_run(run, execution_id="execution")
         events = [StepEvent("run", "MODEL_REQUEST_SUCCEEDED", index,
+                            agent_conversation_id=run.agent_conversation_id, parent_agent_run_id=run.parent_agent_run_id,
+                            agent_id="agent\x00name", tool_name="", error="diagnostic\x00text",
+                            idempotency_key=f"event-{index}:" + "key" * 100,
                             metadata={"linktools.ai.model_request_seq": str(index),
                                       "linktools.ai.message_seq": str(index)}) for index in range(1, 4)]
         for value in events:

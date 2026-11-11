@@ -690,6 +690,15 @@ async def test_large_metadata_is_not_returned_by_cold_trace_select(tmp_path: Pat
                 assert len(rows) == 1
                 assert rows[0]["kind"] == "AGENT_RUN_STARTED"
                 assert rows[0]["native_kind"] == "run_started"
+                source_fields = ("agent_conversation_id", "parent_agent_run_id", "agent_id", "tool_name", "error",
+                                 "idempotency_key", "history_identity")
+                assert all(rows[0][name] is None for name in source_fields)
+                fact = archive._trace_events.row_to_fact(rows[0])
+                for name in source_fields:
+                    poisoned = dict(rows[0], **{name: b"copied source"})
+                    with pytest.raises(AIError) as caught:
+                        archive._native_events.project_trace_facts((fact,), rows=(poisoned,))
+                    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
                 returned_bytes = sum(len(canonical_json_bytes(value)) if isinstance(value, dict)
                                      else _SqlTraffic._bytes(value) for row in rows for value in row.values())
                 returned_sizes.append(returned_bytes)
