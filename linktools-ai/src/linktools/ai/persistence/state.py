@@ -7,6 +7,7 @@ small physical contract shared by memory, filesystem, and SQL stores.
 """
 
 import asyncio
+import hashlib
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
@@ -1268,29 +1269,29 @@ def validate_parent_key(value: bytes) -> bytes:
 
 
 def state_store_key(namespace: str, tenant_id: str, partition: str) -> bytes:
-    """Address an ordinary domain or explicitly configured capability partition."""
+    """Compact the complete ordinary or configured capability partition once."""
     if not isinstance(partition, str) or not partition:
         raise ValueError("store partition must be a non-empty string")
-    return _encode_key_components(
+    return hashlib.sha256(_encode_key_components(
         ("state_store", validate_persistence_namespace(namespace), validate_tenant_id(tenant_id), partition),
         STORE_KEY_MAX_BYTES,
-    )
+    )).digest()
 
 
 def capability_store_key(namespace: str, tenant_id: str, capability_id: str) -> bytes:
-    """Address a dynamically opened capability independently of configured routes."""
-    return _encode_key_components(
+    """Compact the complete dynamic capability partition in its own family."""
+    return hashlib.sha256(_encode_key_components(
         ("capability-store", validate_persistence_namespace(namespace),
          validate_tenant_id(tenant_id), validate_capability_id(capability_id)),
         STORE_KEY_MAX_BYTES,
-    )
+    )).digest()
 
 
 def standalone_store_key(partition: str) -> bytes:
-    """Address one standalone SQL store's declared partition."""
+    """Compact one standalone SQL store's complete declared partition once."""
     if not isinstance(partition, str) or not partition:
         raise ValueError("store partition must be a non-empty string")
-    return _encode_key_components(("standalone", partition), STORE_KEY_MAX_BYTES)
+    return hashlib.sha256(_encode_key_components(("standalone", partition), STORE_KEY_MAX_BYTES)).digest()
 
 
 def validate_store_key(value: bytes) -> bytes:

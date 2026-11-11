@@ -119,22 +119,30 @@ cursor addresses are omitted from object representations.
 
 ## State store partitions
 
-Physical State stores use one exact `store_key` of 1..768 bytes. Built-in
-addresses use the same fixed two-byte big-endian UTF-8 component framing as
-record and stream keys, with distinct families:
+Physical State stores accept one opaque `store_key` of 1..768 bytes. The three
+built-in address producers first frame the complete validated tuple with fixed
+two-byte big-endian UTF-8 component lengths, then apply SHA-256 once and return
+32 raw bytes:
 
 - Ordinary and configured capability routes: `(state_store, namespace, tenant, partition)`.
   Configured capability partitions retain `capability:` followed by the validated capability ID.
 - Dynamic capability routes: `(capability-store, namespace, tenant, capability ID)`.
   They remain distinct from explicitly configured routes.
 - Standalone SQL stores: `(standalone, partition)`.
-- Group metadata and archive stores: `(state-group-metadata)` and `(state-group-archive)`.
 
-Namespace256, tenant128 and capability ID256 UTF-8 limits give a configured
-capability maximum of670 bytes and a dynamic maximum of664 bytes. Generic
-custom binary partitions need not parse as these tuples but must obey the
-complete768-byte bound. No normalization, hash, fallback, shadow lookup or
-schema version bump is used. All families reopen at the exact same bytes.
+The two short system tuples `(state-group-metadata)` and `(state-group-archive)`
+remain raw framed bytes. Constructors, readers and partition opens accept the
+already selected physical key without hashing it again. Aliases and reopened
+handles therefore use the same bytes. Custom opaque keys retain their complete
+1..768-byte API and are never normalized or implicitly hashed.
+
+The input tuple bounds are unchanged: maximum configured capability framing is
+670 bytes and dynamic capability framing is 664 bytes, before their single
+compression to raw32. Compact built-in partitions leave index space for complete
+Memory paths, including standalone stores later shared with Memory repositories.
+Old valid custom32 keys keep their original bytes and capacity. Newly supported
+custom33..768 keys remain accepted but do not gain the old compact-key capacity.
+No mapping, extra SQL, fallback reader or schema version change is introduced.
 Archive group UUIDs remain separate from the raw Archive scope (at most 403
 bytes) and raw Native Step store scope (at most 402 bytes).
 
@@ -152,9 +160,12 @@ budgets fit MySQL's 3072-byte limit and ordinary PostgreSQL approximately
 The MySQL store/kind/sort index declares 768 + 128 + 128 = 1024 field bytes
 using its nonunique sort prefix. PostgreSQL indexes the complete sort bytes,
 which have no application-level maximum, so that index has no fixed global
-field budget. All indexes have at most three physical columns. Direct tuples
-can exceed the former 64 SQL hex bytes, so this is not a claim of universal
-byte savings or measured latency improvement.
+field budget. Built-in partitions contribute only 32 actual bytes. For a
+2400-byte Memory path, store/kind/sort contributes 32 + 6 + 2400 = 2438 field
+bytes before PostgreSQL tuple overhead; its physical limits still apply.
+All indexes have at most three physical columns. Wide custom keys can exceed
+the former compact partition, so this is not a claim of universal byte savings
+or measured latency improvement.
 
 ## State operation addresses
 
@@ -275,9 +286,10 @@ physical query-scope tradeoff, not a second logical identity. It does not promis
 the same capacity for every historical PostgreSQL row, because the separate
 store/kind/sort index and PostgreSQL's real tuple limits still apply.
 Reused record parents are the full binary record references described above.
-ContentArchive scope, State store and Native Step store addresses are raw tuples
-bounded to 403, 768 and 402 bytes respectively. They are not content checksums;
-body integrity and anonymous-content hashes retain their separate contracts.
+ContentArchive and Native Step scopes remain raw tuples bounded to 403 and
+402 bytes. State built-in partitions use the single raw32 projection described
+above; custom State keys remain bounded to 768 bytes. These physical addresses
+are distinct from body-integrity and anonymous-content checksums.
 
 SQL binds raw bytes as MySQL `VARBINARY(1024)` for scopes and
 `VARBINARY(1152)` for parents, PostgreSQL `BYTEA` or SQLite `BLOB`.

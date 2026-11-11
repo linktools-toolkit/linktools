@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Exact State partition families preserve isolation, reopen and current readers."""
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -48,21 +49,21 @@ def _keys() -> tuple[bytes, ...]:
     )
 
 
-def test_store_families_use_exact_fixed_width_framing_and_utf8_bounds() -> None:
+def test_store_families_compact_complete_framed_tuples_once_and_keep_utf8_bounds() -> None:
     assert len(set(_keys())) == len(_keys())
-    assert state_store_key("a", "b", "c") == _tuple("state_store", "a", "b", "c")
-    assert capability_store_key("a", "b", "c") == _tuple("capability-store", "a", "b", "c")
-    assert standalone_store_key("c") == _tuple("standalone", "c")
+    assert state_store_key("a", "b", "c") == hashlib.sha256(_tuple("state_store", "a", "b", "c")).digest()
+    assert capability_store_key("a", "b", "c") == hashlib.sha256(_tuple("capability-store", "a", "b", "c")).digest()
+    assert standalone_store_key("c") == hashlib.sha256(_tuple("standalone", "c")).digest()
     assert STATE_GROUP_METADATA_KEY == _tuple("state-group-metadata")
     assert STATE_GROUP_ARCHIVE_KEY == _tuple("state-group-archive")
     assert state_store_key("a", "bc", "d") != state_store_key("ab", "c", "d")
     assert state_store_key("é", "b", "c") != state_store_key("e\u0301", "b", "c")
     namespace, tenant, capability = "界" * 85 + "a", "界" * 42 + "ab", "界" * 85 + "a"
-    assert len(state_store_key(namespace, tenant, "capability:" + capability)) == 670
-    assert len(capability_store_key(namespace, tenant, capability)) == 664
+    assert len(state_store_key(namespace, tenant, "capability:" + capability)) == 32
+    assert len(capability_store_key(namespace, tenant, capability)) == 32
     for raw in _keys():
         assert validate_store_key(raw) is raw
-    assert len(standalone_store_key("x" * 754)) == STORE_KEY_MAX_BYTES
+    assert len(standalone_store_key("x" * 754)) == 32
     with pytest.raises(ValueError):
         standalone_store_key("x" * 755)
     for parts in ((namespace + "x", tenant, "execution"), (namespace, tenant + "x", "execution")):
@@ -97,7 +98,7 @@ async def test_complete_partition_families_and_opaque_custom_keys_are_isolated(t
 @pytest.mark.asyncio
 async def test_raw_sql_store_keys_reopen_and_keep_system_archive_scope(tmp_path: Path) -> None:
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
-    keys = (b"\xff", b"\0" * 768, state_store_key("namespace", "tenant", "execution"))
+    keys = (b"\0" * 32, b"\0" * 768, state_store_key("namespace", "tenant", "execution"))
     scope = None
     for reopened in (False, True):
         async with Persistence.open("scope", storage=storage, read_only=reopened) as persistence:
@@ -111,13 +112,28 @@ async def test_raw_sql_store_keys_reopen_and_keep_system_archive_scope(tmp_path:
             for index, key in enumerate(keys):
                 store = await group.open_partition(key, create=not reopened)
                 assert store is not None and store.store_key == key
+                alias = SqlStateStore(group.context.engine, metadata=group.metadata, context=group.context,
+                                      group=group, store_key=store.store_key)
+                await alias.initialize()
+                assert alias.store_key == key
                 if not reopened:
                     await store.mutate(lambda tx, index=index: tx.insert_record(_record(str(index))))
                 assert await store.read_record(b"record") == _record(str(index))
+                assert await alias.read_record(b"record") == _record(str(index))
+                await alias.close()
             async with group.context.engine.connect() as connection:
                 rows = (await connection.execute(text("SELECT DISTINCT store_key, typeof(store_key) FROM ai_state_records"))).all()
                 assert all(type(key) is bytes and kind == "blob" for key, kind in rows)
                 assert set(keys) | {STATE_GROUP_METADATA_KEY} <= {key for key, _ in rows}
+
+
+def test_standalone_constructor_uses_compact_partition_without_rehashing_explicit_keys() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    store = SqlStateStore(engine)
+    assert store.store_key == standalone_store_key("conversation")
+    assert len(store.store_key) == 32
+    alias = SqlStateStore(engine, group=store.storage_group, store_key=store.store_key)
+    assert alias.store_key == store.store_key
 
 
 @pytest.mark.parametrize("invalid", (b"", b"x" * 769, "text", bytearray(b"raw")))

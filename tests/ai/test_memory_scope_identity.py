@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """Memory scope ownership survives full-length paths and durable round trips."""
 
+import getpass
 import hashlib
+import random
+import string
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -229,3 +232,36 @@ async def test_transient_memory_requires_an_execution_owner(execution_id: str | 
                 namespace=state.namespace, tenant_id=state.tenant_id,
                 execution_id=execution_id, memory_scope="scope", transient=True,
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("_server", ("postgresql",), indirect=True)
+async def test_memory_long_random_path_preserves_server_write_read_prefix_and_replay(
+    _server: tuple[str, list[str]],
+) -> None:
+    from sqlalchemy.engine import URL
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from linktools.ai.migrate import provision_database
+
+    _, command = _server
+    url = URL.create("postgresql+asyncpg", username=getpass.getuser(), database=command[-1],
+                     query={"host": command[command.index("-h") + 1]})
+    engine = create_async_engine(url)
+    rng = random.Random(90210)
+    alphabet = string.ascii_letters + string.digits
+    namespace = "".join(rng.choices(alphabet, k=256))
+    tenant = "".join(rng.choices(alphabet, k=128))
+    path = "/".join("".join(rng.choices(alphabet, k=size)) for size in (*([200] * 11), 189))
+    assert len(path) == 2400
+    operation = MemoryOperation("long-path", canonical_sha256({"content": "note"}))
+    try:
+        await provision_database(engine)
+        async with Persistence.open(namespace, tenant_id=tenant, storage=PersistenceStorage.sql(engine)) as state:
+            store = _store(state, "scope")
+            written = await store.write(path, "note", expected_version=None, operation=operation)
+            assert (await store.read(path, max_chars=100)).content == "note"
+            assert await store.list_paths(path, limit=1) == [path]
+            replay = await store.write(path, "note", expected_version=None, operation=operation)
+            assert replay.replayed and replay.version == written.version
+    finally:
+        await engine.dispose()
