@@ -14,6 +14,7 @@ from sqlalchemy import event, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.steps import encode_native_replay_key, native_store_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.persistence._step_message_content import NativeMessageContent
@@ -22,17 +23,46 @@ from linktools.ai.persistence._step_message_content import NativeMessageContent
 class _ReadTraffic:
     def __init__(self) -> None:
         self.count = 0
+        self.reads: list[tuple[str, tuple[object, ...]]] = []
 
     def capture(self, connection, cursor, statement, parameters, context, many) -> None:
         # A recursive expansion is one database read, even when SQL starts WITH.
         if statement.lstrip().upper().startswith(("SELECT", "WITH")):
             self.count += 1
+            self.reads.append((statement, tuple(parameters)))
+
+    def assert_publication_metadata(
+        self, start: int, *, store_key: bytes, node_bound: int, message_bound: int,
+    ) -> None:
+        reads = self.reads[start:]
+        assert len(reads) == 3
+        seen = set()
+        for statement, parameters in reads:
+            projection = " ".join(statement.split("FROM", 1)[0].split())
+            for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
+                if projection == f"SELECT {table}.sha256, {table}.id":
+                    assert table not in seen
+                    seen.add(table)
+                    assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
+                    assert parameters[0] == store_key
+                    assert 0 < len(parameters) - 1 <= bound
+                    break
+            else:
+                assert "collector" not in seen
+                seen.add("collector")
+                columns = projection.removeprefix("SELECT ").split(", ")
+                assert all(column.startswith("ai_native_content_edges.") for column in columns)
+                assert {column.split(".")[-1] for column in columns} <= {
+                    "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
+                }
+                assert "LIMIT" in statement and 0 < parameters[-2] <= 32
+        assert seen == {"ai_step_sequences", "ai_step_messages", "collector"}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [10])
+@pytest.mark.parametrize("size", [10, 140])
 async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_reads(
-    tmp_path: Path, size: int,
+    tmp_path: Path, size: int, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     url = f"sqlite+aiosqlite:///{tmp_path / 'growing.db'}"
     engine = create_async_engine(url)
@@ -45,8 +75,14 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
         for length in range(1, size + 1):
             latest = ContinuableSnapshot(run_id="run", step_index=length, idempotency_key=str(length),
                                          messages=messages[:length])
+            start = len(traffic.reads)
             await store.save_snapshot(latest)
-        assert traffic.count == 0
+            # One appended node references at most three existing frontier IDs.
+            # Crossing the SQL batch size must not turn this into a history scan.
+            traffic.assert_publication_metadata(
+                start, store_key=store.store_key, node_bound=4, message_bound=1,
+            )
+        assert traffic.count == 3 * size
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == size
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == size
@@ -65,10 +101,24 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
     traffic = _ReadTraffic()
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     try:
+        from linktools.ai.persistence import _step_store as step_module
+
+        decoded_occurrences = 0
+        decode_payloads = step_module.decode_model_message_payloads
+
+        def decode_once(payloads):
+            nonlocal decoded_occurrences
+            decoded_occurrences += len(payloads)
+            return decode_payloads(payloads)
+
+        monkeypatch.setattr(step_module, "decode_model_message_payloads", decode_once)
         assert await cold.latest_snapshot(run_id="run") == latest
         assert traffic.count == 2
+        assert decoded_occurrences == size
+        decoded_occurrences = 0
         history = await cold.list_snapshots(run_id="run")
         assert len(history) == size
+        assert decoded_occurrences == sum(range(1, size + 1))
         for length, snapshot in enumerate(history, 1):
             assert snapshot.messages == messages[:length]
             assert snapshot.step_index == length
@@ -98,9 +148,18 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
     event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
     try:
         for snapshot in cases:
+            start = len(traffic.reads)
             await store.save_snapshot(snapshot)
+            # This uncached writer receives each full branch as new input;
+            # ID reads stay bounded by that input, not unrelated stored history.
+            traffic.assert_publication_metadata(
+                start, store_key=store.store_key,
+                node_bound=4 * len(snapshot.messages), message_bound=len(snapshot.messages),
+            )
+            after = traffic.count
             await store.save_snapshot(snapshot)
-        assert traffic.count == 0
+            assert traffic.count == after  # Rejected duplicate owners publish no dependencies.
+        assert traffic.count == 3 * len(cases)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == len(cases)
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
@@ -183,8 +242,8 @@ def test_sequence_read_compiles_for_supported_dialects_without_unbounded_mysql_e
     store = object.__new__(SqlStepStore)
     store._context = SimpleNamespace(engine=SimpleNamespace(dialect=dialect))
     store._metadata = build_step_sql_metadata()
-    store._store_digest = "a" * 64
-    store._message_content = NativeMessageContent(store._context, store_digest=store._store_digest)
+    store._store_key = native_store_key("a", "tenant")
+    store._message_content = NativeMessageContent(store._context, store_key=store._store_key)
     query = store._sequence_query([{
         "id": 1, "sequence_root": "b" * 64,
         "messages": json.dumps({"stored_messages": count, "checkpoint": None}),
@@ -243,15 +302,121 @@ async def test_invalid_snapshot_descriptor_does_not_hide_other_valid_history(
     engine = create_async_engine(url)
     cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
     try:
+        table = build_step_sql_metadata().tables["ai_step_snapshots"]
+        damage = {"messages": descriptor}
+        if clear_root:
+            damage["sequence_root"] = None
         async with engine.begin() as connection:
-            await connection.execute(text(
-                "UPDATE ai_step_snapshots SET messages = :descriptor "
-                + (", sequence_root = NULL " if clear_root else "")
-                + "WHERE idempotency_key IN ('bad-middle', 'bad-terminal')"
-            ), {"descriptor": descriptor})
+            changed = await connection.execute(table.update().where(
+                table.c.store_key == cold.store_key,
+                table.c.idempotency_key.in_([
+                    encode_native_replay_key("bad-middle"), encode_native_replay_key("bad-terminal"),
+                ]),
+            ).values(**damage))
+            assert changed.rowcount == 2
         with pytest.raises(ValueError):
             await cold.latest_snapshot(run_id="run")
         assert await cold.list_snapshots(run_id="run") == [first, last]
     finally:
         await cold.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rollback", (False, True))
+async def test_publication_ids_are_reused_only_within_their_live_owner_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rollback: bool,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'publication-ids.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    await store.initialize(local=True)
+    snapshot = ContinuableSnapshot(run_id="run", step_index=1, idempotency_key="snapshot",
+                                    messages=[ModelRequest(parts=[UserPromptPart("body")])])
+    publish = NativeMessageContent.publish_in_session
+    receipts, sessions, projections = [], [], []
+    fail_once = rollback
+
+    async def observe(content, session, prepared, **kwargs):
+        nonlocal fail_once
+        roots = tuple(span.first for span in prepared.root.slices)
+        for previous in receipts:
+            with pytest.raises(ValueError, match="active transaction"):
+                previous.publication_targets(session, store_key=store.store_key, roots=roots)
+        receipt = await publish(content, session, prepared, **kwargs)
+        targets = receipt.publication_targets(session, store_key=store.store_key, roots=roots)
+        assert len(targets) == 1 and targets[0] > 0
+        for scope, selected in ((native_store_key("0", "tenant"), roots), (store.store_key, ("0" * 64,))):
+            with pytest.raises(ValueError, match="store, and roots"):
+                receipt.publication_targets(session, store_key=scope, roots=selected)
+        receipts.append(receipt)
+        sessions.append(session)
+        if fail_once:
+            fail_once = False
+            raise RuntimeError("rollback publication")
+        return receipt
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith("SELECT"):
+            projections.append(statement.split("FROM", 1)[0])
+
+    monkeypatch.setattr(NativeMessageContent, "publish_in_session", observe)
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        if rollback:
+            with pytest.raises(RuntimeError, match="rollback publication"):
+                await store.save_snapshot(snapshot)
+            projections.clear()
+        await store.save_snapshot(snapshot)
+        # Two bounded ID lookups index the node/message, then the collector
+        # checks durable candidates. Neither publication nor snapshot rereads the root.
+        assert len(projections) == 3
+        assert not any("ai_step_messages.message" in sql or "ai_step_messages.payload_json" in sql
+                       for sql in projections)
+        for receipt, session in zip(receipts, sessions):
+            with pytest.raises(ValueError, match="active transaction"):
+                receipt.publication_targets(
+                    session, store_key=store.store_key,
+                    roots=tuple(span.first for span in receipt.root.slices),
+                )
+        assert await store.latest_snapshot(run_id="run") == snapshot
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        await store.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rollback", (False, True))
+async def test_publication_ids_reject_a_completed_savepoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rollback: bool,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'savepoint-ids.db'}")
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    await store.initialize(local=True)
+    snapshot = ContinuableSnapshot(run_id="run", step_index=1, idempotency_key="snapshot",
+                                    messages=[ModelRequest(parts=[UserPromptPart("body")])])
+    publish = NativeMessageContent.publish_in_session
+
+    async def nested_publication(content, session, prepared, **kwargs):
+        roots = tuple(span.first for span in prepared.root.slices)
+        try:
+            async with session.begin_nested():
+                receipt = await publish(content, session, prepared, **kwargs)
+                assert receipt.publication_targets(session, store_key=store.store_key, roots=roots)
+                if rollback:
+                    raise RuntimeError("rollback savepoint")
+        except RuntimeError as error:
+            assert rollback and str(error) == "rollback savepoint"
+        assert session.in_transaction()
+        with pytest.raises(ValueError, match="active transaction"):
+            receipt.publication_targets(session, store_key=store.store_key, roots=roots)
+        return receipt
+
+    monkeypatch.setattr(NativeMessageContent, "publish_in_session", nested_publication)
+    try:
+        with pytest.raises(ValueError, match="active transaction"):
+            await store.save_snapshot(snapshot)
+        assert await store.latest_snapshot(run_id="run") is None
+    finally:
+        await store.close()
         await engine.dispose()

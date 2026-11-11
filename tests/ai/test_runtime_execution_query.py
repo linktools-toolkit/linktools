@@ -205,7 +205,8 @@ async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None
         assert {item.execution_id for item in tenant_page.items} == {
             record.execution_id for record in records
         }
-        assert tenant_page.items[2].session_id is None
+        by_id = {item.execution_id: item for item in tenant_page.items}
+        assert by_id["exec-003"].session_id is None
 
         session_page = await service.list(
             ListExecutionRequest(principal, session_id="session-1")
@@ -316,37 +317,52 @@ async def test_execution_list_skips_unauthorized_candidates() -> None:
         page = await service.list(
             ListExecutionRequest(Principal("caller", "tenant", "service"))
         )
-        assert [item.execution_id for item in page.items] == [
+        assert {item.execution_id for item in page.items} == {
             "exec-001",
             "exec-003",
-        ]
+        }
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
 async def test_execution_list_skips_new_records_before_cursor() -> None:
+    namespace = "execution-weak-consistency"
+    principal = Principal("caller", "tenant", "service")
+    records = {
+        execution_id: _record(execution_id, agent_id="agent")
+        for execution_id in ("exec-000", "exec-001", "exec-002", "exec-003")
+    }
+    # Learn the repository order without assuming logical IDs sort lexically.
+    async with Persistence.open(
+        namespace, storage=PersistenceStorage.in_memory(), tenant_id="tenant"
+    ) as reference:
+        for record in records.values():
+            await reference.execution.executions.create(record)
+        ordered = await _service(reference.execution.executions).list(
+            ListExecutionRequest(principal)
+        )
+        ordered_ids = [item.execution_id for item in ordered.items]
+
     state = Persistence(PersistenceStorage.in_memory())
-    await state.initialize(namespace="execution-weak-consistency", tenant_id="tenant")
+    await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
-        for execution_id in ("exec-001", "exec-002", "exec-003"):
-            await state.execution.executions.create(
-                _record(execution_id, agent_id="agent")
-            )
+        for execution_id in ordered_ids[1:]:
+            await state.execution.executions.create(records[execution_id])
         service = _service(state.execution.executions)
-        principal = Principal("caller", "tenant", "service")
         request = ListExecutionRequest(principal, limit=1)
 
         first = await service.list(request)
+        assert [item.execution_id for item in first.items] == ordered_ids[1:2]
         assert first.next_cursor is not None
-        await state.execution.executions.create(
-            _record("exec-000", agent_id="agent")
-        )
+        await state.execution.executions.create(records[ordered_ids[0]])
 
         second = await service.list(replace(request, cursor=first.next_cursor))
-        assert [item.execution_id for item in second.items] == [
-            "exec-002",
-        ]
+        assert [item.execution_id for item in second.items] == ordered_ids[2:3]
+        assert second.next_cursor is not None
+        third = await service.list(replace(request, cursor=second.next_cursor))
+        assert [item.execution_id for item in third.items] == ordered_ids[3:]
+        assert third.next_cursor is None
     finally:
         await state.close()
 

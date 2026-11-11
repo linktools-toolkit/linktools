@@ -10,7 +10,7 @@ from datetime import datetime
 
 from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ._codec import observation_digest, observation_envelope
+from ._codec import observation_envelope
 from ._model import (
     MetricAggregation,
     MetricDefinition,
@@ -111,7 +111,7 @@ class _Accumulator:
     count: int = 0
     value: int | float | None = None
     latest_at: datetime | None = None
-    latest_digest: str | None = None
+    latest_observation_id: str | None = None
     samples: list[int | float] | None = field(default=None)
 
     def __post_init__(self) -> None:
@@ -123,7 +123,7 @@ class _Accumulator:
         sample: int | float,
         *,
         occurred_at: datetime,
-        digest: str | None,
+        observation_id: str | None,
     ) -> None:
         self.count += 1
         if self.aggregation is MetricAggregation.COUNT:
@@ -142,14 +142,14 @@ class _Accumulator:
             self.value = sample if self.value is None else max(self.value, sample)
             return
         if self.aggregation is MetricAggregation.LATEST:
-            if digest is None:
-                raise RuntimeError("latest aggregation requires observation digest")
-            if self.latest_at is None or (occurred_at, digest) > (
+            if observation_id is None:
+                raise RuntimeError("latest aggregation requires observation ID")
+            if self.latest_at is None or (occurred_at, observation_id) > (
                 self.latest_at,
-                self.latest_digest or "",
+                self.latest_observation_id or "",
             ):
                 self.latest_at = occurred_at
-                self.latest_digest = digest
+                self.latest_observation_id = observation_id
                 self.value = sample
             return
         if self.samples is None:
@@ -293,8 +293,8 @@ async def execute_query(
                 if len(actual_groups) > _MAX_GROUPS:
                     raise AIError(ErrorCode.METRIC_QUERY_LIMIT_EXCEEDED)
 
-            digest = (
-                observation_digest(namespace, observation.observation_id)
+            observation_id = (
+                observation.observation_id
                 if aggregation is MetricAggregation.LATEST
                 else None
             )
@@ -306,7 +306,7 @@ async def execute_query(
                 accumulator.add(
                     sample,
                     occurred_at=observation.occurred_at,
-                    digest=digest,
+                    observation_id=observation_id,
                 )
             else:
                 index = int((observation.occurred_at - start) // query.bucket)
@@ -319,7 +319,7 @@ async def execute_query(
                     accumulator.add(
                         sample,
                         occurred_at=observation.occurred_at,
-                        digest=digest,
+                        observation_id=observation_id,
                     )
 
         next_cursor = page.next_cursor

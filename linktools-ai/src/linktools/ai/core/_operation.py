@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Generic durable operation ledger values."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from ._value import OperationKind, OperationStatus, ResourceKind
@@ -10,7 +10,7 @@ from ._value import OperationKind, OperationStatus, ResourceKind
 
 @dataclass(frozen=True, slots=True)
 class OperationLedgerRecord:
-    operation_id: str
+    operation_id: str = field(repr=False)
     tenant_id: str
     resource_kind: ResourceKind
     resource_id: str
@@ -30,7 +30,7 @@ class OperationLedgerRecord:
 
 @dataclass(frozen=True, slots=True)
 class OperationLedgerInput:
-    operation_id: str
+    operation_id: str = field(repr=False)
     tenant_id: str
     resource_kind: ResourceKind
     resource_id: str

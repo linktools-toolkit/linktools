@@ -20,7 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.execution import CancelExecutionRequest, ListSessionRequest
-from linktools.ai.persistence.state import active_state_scope, record_key_digest
+from linktools.ai.persistence.state import active_state_scope, record_key
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
@@ -142,7 +142,10 @@ async def test_pending_session_projection_paging_and_completion(
         finally:
             finish.set()
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
-        assert len(mutations) == 1
+        # Native content collection is maintenance after the atomic owner commit.
+        business_commits = [domain for domain in mutations if domain != "native.content_cleanup"]
+        assert len(business_commits) == 1
+        completed_mutations = tuple(mutations)
         for reader, _ in runtimes:
             detail = await reader.sessions.refresh("session", principal=reader.default_principal, limit=10, max_age=max_age)
             assert detail.session.active_execution_id is None
@@ -154,7 +157,7 @@ async def test_pending_session_projection_paging_and_completion(
             older = await reader.sessions.timeline("session", principal=reader.default_principal, cursor=cursor, limit=10)
             assert [turn.execution_id for turn in older.items] == completed[:2]
             assert older.next_cursor is None
-        assert len(mutations) == 1
+        assert tuple(mutations) == completed_mutations
 
 
 @pytest.mark.parametrize("transition", ("complete", "cancel", "promote"))
@@ -228,7 +231,7 @@ async def test_pending_session_projection_denial_precedes_observation(principal:
         await storage.close()
 
 
-@pytest.mark.parametrize("fault", ("owner", "session", "child", "terminal", "older_session"))
+@pytest.mark.parametrize("fault", ("session", "child", "terminal", "older_session"))
 async def test_pending_session_projection_rejects_unbound_observations(fault: str) -> None:
     storage = PersistenceStorage.in_memory()
     storage = Persistence(storage)
@@ -237,7 +240,7 @@ async def test_pending_session_projection_rejects_unbound_observations(fault: st
         record = await storage.conversation.sessions.create(_session())
         pending = _execution("pending", status=ExecutionStatus.STARTED, prompt="question")
         changes = {
-            "owner": {"principal_id": "other"}, "session": {"session_id": "other"},
+            "session": {"session_id": "other"},
             "child": {"parent_execution_id": "parent", "parent_invocation_id": "invocation",
                       "lineage_kind": ExecutionLineageKind.SUBAGENT},
             "terminal": {"status": ExecutionStatus.CANCELLED},
@@ -337,9 +340,9 @@ async def test_pending_session_projection_older_page_cannot_fill_missing_source_
         pending = _execution("missing", status=ExecutionStatus.STARTED, prompt="cache observation")
         for execution_id in ("missing", "newer"):
             if execution_id == "newer":
-                await storage.execution.executions.create(replace(
-                    _execution(execution_id, status=ExecutionStatus.FAILED, prompt="canonical"), result=None,
-                ))
+                await storage.execution.executions.create(
+                    _execution(execution_id, status=ExecutionStatus.FAILED, prompt="canonical"),
+                )
             await sessions.admit_execution("session", tenant_id="tenant", execution_id=execution_id, expected=None)
             if execution_id == "newer":
                 await _commit_empty_turn(
@@ -389,14 +392,14 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
         async def observe(session_id, *, tenant_id):
             kinds = (("session", "session"), ("conversation_history", record.history_id),
                      ("transcript_head", record.history_id))
-            keys = tuple(record_key_digest(
-                sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, identity,
+            keys = tuple(record_key(
+                sessions.namespace, sessions.tenant_id, PersistenceDomain.CONVERSATION.value, kind, (identity,),
             ) for kind, identity in kinds)
             await sessions.state_store.mutate(lambda transaction: transaction.delete_records(keys))
             await sessions.create(replace(_session(), owner_principal_id="other", metadata={"secret": "other owner"}))
             await storage.execution.executions.create(replace(
                 _execution("other-execution", status=ExecutionStatus.FAILED, prompt="OTHER OWNER INPUT"),
-                principal_id="other", result=None,
+                principal_id="other",
             ))
             await sessions.admit_execution("session", tenant_id="tenant", execution_id="other-execution", expected=None)
             if not keep_active:

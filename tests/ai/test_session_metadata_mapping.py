@@ -18,7 +18,6 @@ from linktools.ai.core import (
     ResourceRef,
     TenantAuthorizationPolicy,
     canonical_sha256,
-    idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
@@ -69,7 +68,7 @@ async def test_session_metadata_mappings_share_request_identity(
         assert updated.metadata == values
         assert updated.revision == 1
         receipt = await state.conversation.operations.get(
-            idempotency_key_digest("update"), tenant_id="tenant")
+            "update", tenant_id="tenant")
         assert receipt is not None
         assert receipt.request_digest == canonical_sha256({
             "action": "session.update", "tenant_id": "tenant", "principal_id": "owner",
@@ -97,7 +96,7 @@ async def test_session_metadata_mapping_keeps_request_rejections(
         updated = await manager.update("agent", "session", UpdateSessionRequest(
             _PRINCIPAL, 0, "update", values))
         receipt = await state.conversation.operations.get(
-            idempotency_key_digest("update"), tenant_id="tenant")
+            "update", tenant_id="tenant")
 
         changed, _ = _metadata(kind, {"label": "different"})
         with pytest.raises(AIError) as conflict:
@@ -118,10 +117,10 @@ async def test_session_metadata_mapping_keeps_request_rejections(
 
         assert await manager.get("session", principal=_PRINCIPAL) == updated
         assert await state.conversation.operations.get(
-            idempotency_key_digest("update"), tenant_id="tenant") == receipt
+            "update", tenant_id="tenant") == receipt
         for key in ("stale", "reserved"):
             assert await state.conversation.operations.get(
-                idempotency_key_digest(key), tenant_id="tenant") is None
+                key, tenant_id="tenant") is None
 
 
 @pytest.mark.parametrize("kind", ("dict", "mappingproxy", "userdict"))
@@ -201,7 +200,7 @@ async def test_session_create_snapshots_outer_metadata_before_validation_awaits(
         assert invalid.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert await state.conversation.sessions.get("invalid", tenant_id="tenant") is None
         assert await state.conversation.operations.get(
-            idempotency_key_digest("invalid-create"), tenant_id="tenant") is None
+            "invalid-create", tenant_id="tenant") is None
 
         metadata, mutable = _metadata(kind, {"label": "before"})
         cwd = "work" if boundary == "cwd" else None
@@ -216,7 +215,7 @@ async def test_session_create_snapshots_outer_metadata_before_validation_awaits(
             assert created.metadata == {"label": "before"}
             assert created.cwd == cwd
             receipt = await state.conversation.operations.get(
-                idempotency_key_digest("create"), tenant_id="tenant")
+                "create", tenant_id="tenant")
             assert receipt is not None
             assert receipt.request_digest == canonical_sha256({
                 "action": "session.create", "tenant_id": "tenant", "principal_id": "owner",

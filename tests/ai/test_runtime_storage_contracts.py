@@ -39,7 +39,7 @@ from linktools.ai.persistence.state import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.persistence import Persistence
-from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy
+from linktools.ai.storage import FilesystemObjectStore
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -88,7 +88,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
         None,
         None,
         "test",
-        "record",
+        b'record',
         None,
         0,
         None,
@@ -101,7 +101,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
         source["nested"]["value"] = "caller-mutated"
 
         async def fail_after_read(transaction: StateTransaction) -> None:
-            stored = await transaction.get_record(record.key_digest)
+            stored = await transaction.get_record(record.key)
             assert stored is not None
             nested = stored.data["nested"]
             assert isinstance(nested, dict)
@@ -113,7 +113,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
 
         await store.validate_integrity()
         stored = await store.read(
-            lambda transaction: transaction.get_record(record.key_digest)
+            lambda transaction: transaction.get_record(record.key)
         )
         assert stored is not None
         assert tuple(stored.data) == ("nested",)
@@ -270,14 +270,14 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
     event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
     owner = b"o" * 32
     stream = b"s" * 32
-    subject_a = b"a" * 32
-    subject_b = b"b" * 32
+    subject_a = "a"
+    subject_b = "b"
     record = StoredRecord(
         owner,
         None,
         None,
         "test",
-        "owner",
+        b'owner',
         None,
         0,
         None,
@@ -381,7 +381,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             binding_digest="a" * 64,
             owner="owner",
             background_tasks=background_tasks,
-            payload_policy=PayloadPolicy(),
+
             terminal_commands=_runtime_commands(
                 state, "parallel-tools", background_tasks
             ),
@@ -462,7 +462,7 @@ async def test_sql_kind_only_query_filters_other_record_kinds(
         None,
         None,
         "first",
-        "a",
+        b'a',
         None,
         0,
         None,
@@ -475,7 +475,7 @@ async def test_sql_kind_only_query_filters_other_record_kinds(
         None,
         None,
         "second",
-        "b",
+        b'b',
         None,
         0,
         None,
@@ -503,8 +503,8 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
     path = tmp_path / "scoped-runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    first = SqlStateStore(engine, store_digest=b"a" * 32)
-    second = SqlStateStore(engine, store_digest=b"b" * 32)
+    first = SqlStateStore(engine, store_key=b"a" * 32)
+    second = SqlStateStore(engine, store_key=b"b" * 32)
     await first.initialize()
     await second.initialize()
 
@@ -519,7 +519,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         None,
         None,
         "scope-test",
-        "record",
+        b'record',
         None,
         0,
         None,
@@ -596,7 +596,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         )
         assert await second.mutate(
             lambda transaction: transaction.delete_operations(
-                OperationQuery(stream_digest=operation_stream)
+                OperationQuery(stream_key=operation_stream)
             )
         ) == ()
 
@@ -620,8 +620,12 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         await engine.dispose()
 
 
-async def test_operation_compaction_keeps_one_stream_anchor() -> None:
-    state = Persistence(PersistenceStorage.in_memory())
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_operation_compaction_keeps_one_stream_anchor(tmp_path: Path, backend: str) -> None:
+    state = Persistence(
+        PersistenceStorage.in_memory() if backend == "memory"
+        else PersistenceStorage.sqlite(tmp_path / "operations.db")
+    )
     await state.initialize(namespace="operation-anchor", tenant_id="tenant")
     now = datetime.now(timezone.utc)
 
@@ -652,12 +656,22 @@ async def test_operation_compaction_keeps_one_stream_anchor() -> None:
         )
         assert tuple(value.sequence for value in values) == (1, 2, 3)
 
-        await state.conversation.operations.compact_terminal(
+        async def counter_matches_stream(transaction: StateTransaction) -> None:
+            stored = await transaction.scan_operations()
+            assert len({value.stream_key for value in stored}) == 1
+            stream = stored[0].stream_key
+            assert await transaction.get_sequence(stream) == 3
+
+        await state.conversation.operations.state_store.read(counter_matches_stream)
+        assert await state.conversation.operations.append(operation(3)) == values[2]
+        await state.conversation.operations.state_store.read(counter_matches_stream)
+
+        assert await state.conversation.operations.compact_terminal(
             ResourceKind.SESSION,
             "session",
             tenant_id="tenant",
             through_sequence=3,
-        )
+        ) is None
 
         assert await state.conversation.operations.get(
             values[0].operation_id,

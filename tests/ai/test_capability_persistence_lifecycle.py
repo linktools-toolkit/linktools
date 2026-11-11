@@ -76,7 +76,7 @@ class _ReplacementPersistence(AbstractCapability[AgentContext[None]]):
     async def persist_in_transaction(self, transaction: StateTransaction, payload: Mapping[str, JsonValue]) -> None:
         key = sha256(str(payload["key"]).encode()).digest()
         await transaction.insert_record(StoredRecord(
-            key, None, None, "probe", str(payload["key"]), None, 0, None, 0, None,
+            key, None, None, "probe", (str(payload["key"])).encode("ascii"), None, 0, None, 0, None,
             {**payload, "actual_owner": self.owner},
         ))
 

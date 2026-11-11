@@ -13,6 +13,7 @@ from pydantic_ai_harness.step_persistence import ContinuableSnapshot
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.steps import native_store_key
 from linktools.ai.persistence import SqlStepStore
 from linktools.ai.persistence._step_store import _snapshot_descriptor_json
 from linktools.ai.persistence.runs import NativeCheckpoint, OfficialStepReader
@@ -68,9 +69,15 @@ async def test_checkpoint_changes_share_message_bodies_and_restore_exact_state(a
         assert restored.messages == messages
         assert restored.output_retries_used == 2
         async with engine.connect() as connection:
-            bodies = (await connection.execute(text("SELECT message FROM ai_step_messages"))).scalars().all()
-            assert len(bodies) == len(messages)
-            assert all("\\u" not in body for body in bodies)
+            from linktools.ai.persistence._archive import ContentRecord
+            from linktools.ai.persistence._payload import decode_payload_bytes
+
+            rows = (await connection.execute(text("SELECT * FROM ai_step_messages"))).mappings().all()
+            assert len(rows) == len(messages)
+            for row in rows:
+                body = ContentRecord.from_native_row(row)
+                assert b"\\u" not in decode_payload_bytes(body.body, codec=body.compression,
+                    raw_digest=body.raw_digest, raw_size=body.raw_size)
         # Re-publishing an ordinary business message reuses the same body.
         if messages and not messages[-1].metadata.get("linktools.ai.checkpoint-state"):
             await cold.save_snapshot(replace(first, idempotency_key="ordinary"))
@@ -129,3 +136,26 @@ async def test_checkpoint_digest_roundtrips_canonical_media(tmp_path: Path, meta
     finally:
         await store.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", ("store_key", "run_id", "idempotency_key"))
+async def test_snapshot_lookup_keeps_scope_and_replay_identity(atomic_store, column) -> None:
+    store, engine = atomic_store
+    snapshot = ContinuableSnapshot(run_id="run", step_index=1,
+        messages=[ModelRequest(parts=[UserPromptPart("question")])], idempotency_key="first")
+    await store.save_snapshot(snapshot)
+    async with engine.begin() as connection:
+        await connection.execute(store._table("snapshots").update().values(
+            **{column: "different" if column == "run_id" else b"\xff" if column == "idempotency_key" else native_store_key("other", "tenant")},
+        ))
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    try:
+        assert await cold.list_snapshots(run_id="run", include_interrupted=True) == []
+        if column == "idempotency_key":
+            with pytest.raises(ValueError, match="native replay row"):
+                await cold.latest_snapshot(run_id="run")
+        else:
+            assert await cold.latest_snapshot(run_id="run") is None
+    finally:
+        await cold.close()

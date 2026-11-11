@@ -9,11 +9,12 @@ from dataclasses import dataclass, replace, field
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepStore
 
+from ..core import validate_resource_id
 from ..model.messages import native_checkpoint_messages
 from ..errors import AIError, ErrorCode
 from ._native_checkpoint import NativeCheckpoint
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, StepEventType
-from ..steps import NativeLifecycleEvent
+from ..steps import NativeLifecycleEvent, validate_native_step_ids
 from .contracts import LoadedContextMessage, LoadedModelContext
 
 
@@ -58,6 +59,8 @@ class OfficialStepReader:
 
     def confirm_run(self, record: RunRecord) -> None:
         """Retain only a run registration already acknowledged by its official owner."""
+        validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                 parent_run_id=record.parent_run_id)
         previous = self._confirmed.get(record.run_id)
         if previous is not None and previous.record != record:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -86,14 +89,20 @@ class OfficialStepReader:
         self._confirmed.clear()
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
+        validate_resource_id(run_id)
         confirmed = self._confirmed.get(run_id)
         if confirmed is not None:
             return deepcopy(confirmed.record)
-        return await self.step_store.get_run(run_id=run_id)
+        record = await self.step_store.get_run(run_id=run_id)
+        if record is not None:
+            validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                     parent_run_id=record.parent_run_id)
+        return record
 
     async def latest_snapshot(
         self, *, run_id: str, include_interrupted: bool = False,
     ) -> ContinuableSnapshot | None:
+        validate_resource_id(run_id)
         confirmed = self._confirmed.get(run_id)
         if confirmed is not None:
             return deepcopy(confirmed.latest if include_interrupted else confirmed.complete)
@@ -102,6 +111,8 @@ class OfficialStepReader:
 
     @classmethod
     def restore_snapshot(cls, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
+        validate_native_step_ids(run_id=snapshot.run_id, conversation_id=snapshot.conversation_id,
+                                 parent_run_id=snapshot.parent_run_id)
         restored = NativeCheckpoint.decode(snapshot)
         return replace(restored, messages=native_checkpoint_messages(restored.messages, restore=True))
 
@@ -113,6 +124,9 @@ class OfficialStepReader:
         self, *, parent_agent_run_id: str | None = None,
         agent_conversation_id: str | None = None,
     ) -> list[AgentRunRecord]:
+        for value in (parent_agent_run_id, agent_conversation_id):
+            if value is not None:
+                validate_resource_id(value)
         return [self.project_run(record) for record in await self.step_store.list_runs(
             parent_run_id=parent_agent_run_id, conversation_id=agent_conversation_id,
         )]
@@ -177,6 +191,7 @@ class OfficialStepReader:
         )
 
     async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:
+        validate_resource_id(agent_run_id)
         return [StepEvent(
             agent_run_id=event.run_id, event_type=event.event_type if isinstance(event, NativeLifecycleEvent) else _EVENT_TYPES[event.kind],
             step_index=event.step_index, timestamp=event.timestamp,

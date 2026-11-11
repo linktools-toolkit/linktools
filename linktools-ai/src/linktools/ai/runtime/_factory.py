@@ -55,7 +55,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
+from ..storage import CacheBackend, ObjectStore, StreamBackend, TurnCoordinationBackend
 from ..workspace import (
     WorkspaceInstructionResolver,
     LocalWorkspaceBackend,
@@ -383,13 +383,11 @@ async def compose_runtime_components(
             lifecycle.workspace_access = workspace_access
             execution_cwd = str(workspace.root)
         object_key_factory = ObjectKeyFactory(resolved_namespace)
-        payload_policy = PayloadPolicy()
         input_materializer = ExecutionInputMaterializer(
             workspace_access,
             selected_limits,
             object_store=selected_state.object_store(PersistenceDomain.EXECUTION),
             object_key_factory=object_key_factory,
-            payload_policy=payload_policy,
         )
         lifecycle.input_materializer = input_materializer
         runtime_token_seed = token_seed(resolved_namespace)
@@ -442,7 +440,6 @@ async def compose_runtime_components(
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
-            payload_policy=payload_policy,
             input_materializer=input_materializer,
             memory_scope=memory_scope,
             session_execution_ready=session_capability.enabled,
@@ -604,7 +601,6 @@ async def _build_local_components(
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: ObjectKeyFactory,
-    payload_policy: PayloadPolicy,
     input_materializer: ExecutionInputMaterializer,
     memory_scope: str | None,
     session_execution_ready: bool,
@@ -698,7 +694,6 @@ async def _build_local_components(
             retained_publication=state.retention.terminal_publication,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
-            payload_policy=payload_policy,
             input_materializer=input_materializer,
             object_reader=state.read_object,
             context_archive=ExecutionContextArchive(
@@ -801,7 +796,6 @@ async def _build_local_components(
             input_materializer=input_materializer,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
-            payload_policy=payload_policy,
             execution_objects_durable=(
                 state.plan.route(PersistenceDomain.EXECUTION).retention
                 is StorageRetentionMode.DURABLE
@@ -891,7 +885,6 @@ async def _build_local_components(
             authorization,
             objects=state.object_store(PersistenceDomain.CHECKPOINT),
             object_key_factory=object_key_factory,
-            payload_policy=payload_policy,
             continuation=backend,
         )
         event = DefaultEventService(

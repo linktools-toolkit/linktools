@@ -9,7 +9,7 @@ from typing import Generic, Literal, TypeAlias, TypeVar, cast
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 
-from ..core import ImmutableJsonMapping, JsonValue
+from ..core import ImmutableJsonMapping, JsonValue, validate_capability_id, validate_capability_revision
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
@@ -94,6 +94,10 @@ class CapabilityContribution(Generic[AppT]):
             if capability.id is None and capability.defer_loading:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             _validate_external_capability_id(self.id)
+            try:
+                validate_capability_revision(self.contract.get("revision", 1))
+            except AIError as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
             if self.scope == "runtime":
                 _validate_runtime_capability(capability)
                 capability.apply(_validate_runtime_capability)
@@ -356,6 +360,10 @@ def _contribution_contract(
 
 
 def _validate_external_capability_id(value: str) -> None:
+    try:
+        validate_capability_id(value)
+    except AIError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
     if value.startswith("linktools."):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 

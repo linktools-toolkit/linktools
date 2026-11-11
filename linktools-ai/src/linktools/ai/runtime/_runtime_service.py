@@ -393,10 +393,13 @@ class Runtime(Generic[AppT]):
         self._input_captures = input_captures
         self._memory_scope = memory_scope
         self._executions = RuntimeExecutions(
-            execution, self._get_execution, input_captures, ensure_open=self._ensure_open,
+            execution, self._get_execution, input_captures,
+            bind_execution=self._execution_handle, ensure_open=self._ensure_open,
         )
         self._session_service = session
-        self._sessions = RuntimeSessions(session, self._get_session, ensure_open=self._ensure_open)
+        self._sessions = RuntimeSessions(
+            session, self._get_session, bind_session=self._session_handle, ensure_open=self._ensure_open,
+        )
         self._approvals = approval
         self._external_calls = external
         self._events = event
@@ -580,11 +583,10 @@ class Runtime(Generic[AppT]):
         validate_resource_id(execution_id)
         resolved_principal = self._resolve_principal(principal)
         await self.executions.inspect(execution_id, principal=resolved_principal)
-        return Execution(self._execution_binding,
-            execution_id,
-            resolved_principal,
-            self._watch_execution_tree,
-        )
+        return self._execution_handle(execution_id, resolved_principal)
+
+    def _execution_handle(self, execution_id: str, principal: Principal) -> Execution[AppT]:
+        return Execution(self._execution_binding, execution_id, principal, self._watch_execution_tree)
 
     async def _get_session(
         self,
@@ -598,13 +600,10 @@ class Runtime(Generic[AppT]):
             session_id,
             principal=resolved_principal,
         )
-        return Session(
-            self,
-            view.agent_id,
-            None,
-            view.session_id,
-            resolved_principal,
-        )
+        return self._session_handle(view, resolved_principal)
+
+    def _session_handle(self, view: SessionView, principal: Principal) -> Session[AppT]:
+        return Session(self, view.agent_id, None, view.session_id, principal)
 
     def _derive_agent(
         self,
@@ -726,12 +725,7 @@ class Runtime(Generic[AppT]):
             correlation=_request_correlation(correlation),
             files=normalize_input_files(files),
         )
-        handle = await self.executions.retry(execution_id, request)
-        return Execution(self._execution_binding,
-            handle.execution_id,
-            principal,
-            self._watch_execution_tree,
-        )
+        return await self.executions.retry(execution_id, request)
 
     async def _fork_execution(
         self,
@@ -753,12 +747,7 @@ class Runtime(Generic[AppT]):
             files=normalize_input_files(files),
             budget=budget,
         )
-        handle = await self.executions.fork(execution_id, request)
-        return Execution(self._execution_binding,
-            handle.execution_id,
-            principal,
-            self._watch_execution_tree,
-        )
+        return await self.executions.fork(execution_id, request)
 
     async def _create_session_for_agent(
         self,
@@ -769,7 +758,7 @@ class Runtime(Generic[AppT]):
         cwd: "str | None",
         metadata: "Mapping[str, JsonValue] | None",
         idempotency_key: "str | None",
-    ) -> SessionView:
+    ) -> Session[AppT]:
         resolved_principal = self._resolve_principal(principal)
         validate_agent_id(agent_id)
         values = dict(metadata or {})

@@ -30,10 +30,10 @@ class _Authorization(TenantAuthorizationPolicy):
 
 async def _seed(state: Persistence) -> None:
     await state.conversation.sessions.create(_session())
-    await state.execution.executions.create(replace(_execution(
+    await state.execution.executions.create(_execution(
         "failed", status=ExecutionStatus.FAILED, prompt="original prompt",
         error_code="MODEL_UNAVAILABLE",
-    ), result=None))
+    ))
     await state.conversation.sessions.admit_execution(
         "session", tenant_id="tenant", execution_id="failed", expected=None,
     )

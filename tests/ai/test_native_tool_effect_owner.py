@@ -26,7 +26,7 @@ from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime._step_store import RuntimeStepStore
 from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore
 
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 from .test_history_projection_conformance import _record
@@ -50,7 +50,7 @@ def _bridge(state: Persistence, *, run_id: str = "run", source_run_id: str | Non
         state.checkpoint.tools, InMemoryObjectStore(), namespace="native-effects",
         tenant_id="tenant", execution_id="execution", agent_run_id=run_id,
         binding_digest=binding_digest, owner="worker", background_tasks=set(),
-        payload_policy=PayloadPolicy(), recovery_agent_run_id=source_run_id,
+         recovery_agent_run_id=source_run_id,
     )
 
 

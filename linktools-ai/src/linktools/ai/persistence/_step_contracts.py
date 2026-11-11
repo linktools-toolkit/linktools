@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic_ai.messages import ModelMessage, ModelRequest
 
+from ..steps import validate_native_step_ids
+
 if TYPE_CHECKING:
     from .contracts import RuntimePayloadRef, TranscriptChunk
 
@@ -39,6 +41,10 @@ class AgentRunRecord:
     metadata: dict[str, str] = field(default_factory=dict)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    def __post_init__(self) -> None:
+        validate_native_step_ids(run_id=self.agent_run_id, conversation_id=self.agent_conversation_id,
+                                 parent_run_id=self.parent_agent_run_id)
+
 
 @dataclass(slots=True)
 class StepEvent:
@@ -55,6 +61,10 @@ class StepEvent:
     metadata: dict[str, str] = field(default_factory=dict)
     idempotency_key: str | None = None
     event_index: int = 0
+
+    def __post_init__(self) -> None:
+        validate_native_step_ids(run_id=self.agent_run_id, conversation_id=self.agent_conversation_id,
+                                 parent_run_id=self.parent_agent_run_id)
 
 
 @dataclass(slots=True)
@@ -75,6 +85,8 @@ class AgentRunCheckpoint:
     """Consumed execution budget; None denotes history without a recovery fact."""
 
     def __post_init__(self) -> None:
+        validate_native_step_ids(run_id=self.agent_run_id, conversation_id=self.agent_conversation_id,
+                                 parent_run_id=self.parent_agent_run_id)
         if self.output_retries_used is not None and (
             type(self.output_retries_used) is not int or self.output_retries_used < 0
         ):

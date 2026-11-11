@@ -273,7 +273,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
             elif post_commit_change == "seal":
 
                 async def remove_seal(transaction):
-                    key = repository._key("execution_history_seal", "execution")
+                    key = repository._key("execution_history_seal", ("execution",))
                     stored = await transaction.get_record(key)
                     assert stored is not None
                     await transaction.delete_record(
@@ -310,12 +310,34 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                         event_seq=value.execution.event_seq + 1,
                     )
                 )
-                await repository.compare_and_swap(
-                    "execution",
-                    tenant_id="tenant",
-                    expected_revision=value.execution.revision,
-                    next_record=replace(changed, revision=value.execution.revision + 1),
-                )
+                changed = replace(changed, revision=value.execution.revision + 1)
+                if post_commit_change in {"result", "status"}:
+                    with pytest.raises(AIError) as rejected:
+                        await repository.compare_and_swap(
+                            "execution", tenant_id="tenant",
+                            expected_revision=value.execution.revision, next_record=changed,
+                        )
+                    assert rejected.value.code is ErrorCode.EXECUTION_RESULT_CONFLICT
+                    assert await repository.get("execution", tenant_id="tenant") == value.execution
+
+                    # Bypass the terminal owner only to simulate physical corruption.
+                    # A regular CAS must never rewrite an established terminal fact.
+                    from linktools.ai.persistence._repository_common import _RepositoryBase
+
+                    async def corrupt(transaction):
+                        stored = await transaction.get_record(repository._key("execution", ("execution",)))
+                        assert stored is not None
+                        replacement = await _RepositoryBase._projected_content(repository, stored, changed)
+                        assert await transaction.replace_record(
+                            replacement, expected_storage_revision=stored.storage_revision,
+                        )
+
+                    await repository.state_store.mutate(corrupt)
+                else:
+                    await repository.compare_and_swap(
+                        "execution", tenant_id="tenant",
+                        expected_revision=value.execution.revision, next_record=changed,
+                    )
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         return value
 

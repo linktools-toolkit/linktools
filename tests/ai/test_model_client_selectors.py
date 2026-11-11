@@ -12,7 +12,7 @@ from time import time
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.core import (
     ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Page, Principal,
@@ -29,7 +29,8 @@ from linktools.ai.history._service import DefaultExecutionHistoryService
 from linktools.ai.persistence._model_interaction import build_context_projection
 from linktools.ai.execution import UsageReadCutoff
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence._archive import PreparedArchive
+from linktools.ai.persistence._archive import ArchiveRoot, ContentArchive, PreparedArchive
+from linktools.ai.persistence.state import active_state_scope
 from linktools.ai.persistence._archive_closure import iter_archive_roots, iter_native_message_roots
 from linktools.ai.persistence.codec import _encode_persisted_domain, iter_runtime_object_refs
 from linktools.ai.persistence._step_contracts import AgentRunRecord
@@ -56,7 +57,7 @@ async def _object_keys(value, archive):
     if roots:
         contents = await archive.transcript_repository.content_archive()
         records = await _message_content_records(contents, roots)
-        keys.update(content.payload.ref.key for content in records if content.payload.ref is not None)
+        keys.update(ref.key for content in records for ref in content.object_refs())
     return keys
 
 
@@ -74,7 +75,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         for record in (root, child):
             await storage.execution.executions.create_execution(record)
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
-        records, bodies, sdk_keys, raw_keys = {}, {}, {}, {}
+        records, bodies, sdk_keys, raw_roots = {}, {}, {}, {}
         payloads = {}
 
         def intern(raw):
@@ -108,7 +109,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 staged.append(replace(
                     _staged(bodies[identity]), agent_run_id=run.agent_run_id, model_request_seq=sequence,
                     request_context=build_context_projection(
-                        (), (ModelRequest(parts=[UserPromptPart(marker + " SDK input " * 6000)]),), intern,
+                        (), (ModelRequest(parts=[UserPromptPart([marker + " SDK input " * 6000, BinaryContent(marker.encode(), media_type="image/png")])]),), intern,
                     ),
                     request_envelope_digest=intern(('{"identity":"' + marker + '"}').encode())[0],
                     response_context=build_context_projection(
@@ -122,22 +123,38 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 identity = (execution_id, run_sequence, record.model_request_seq)
                 records[identity] = record
                 sdk_keys[identity] = await _object_keys(replace(record, client_requests=None), archive)
-                raw_keys[identity] = await _object_keys(record, archive) - sdk_keys[identity]
+                raw_roots[identity] = {body.content for request in record.client_requests
+                    for body in (request.body, None if request.response is None else request.response.body)
+                    if body is not None}
+                assert raw_roots[identity] and all(isinstance(root, ArchiveRoot) for root in raw_roots[identity])
+                assert not await _object_keys(record, archive) - sdk_keys[identity]
         reader = _reader(storage)
         signer = HmacCursorSigner("client-selectors", b"client-selectors-key")
         service = DefaultExecutionHistoryService(
             storage.execution.executions, TenantAuthorizationPolicy("tenant"), reader, signer,
         )
         objects = storage.object_store(PersistenceDomain.TRACE)
-        original_resolve = archive.resolve_model_interactions
+        original_capture_interactions = archive.capture_model_interactions
         original_list_children = storage.execution.executions.list_children
         opened, resolved, children_reads = [], [], []
+        raw_captured, raw_hydrated = [], []
+        original_capture = ContentArchive.capture_ranges
 
+        async def track_client_bodies(owner, roots, *, codec, **kwargs):
+            load = await original_capture(owner, roots, codec=codec, **kwargs)
+            if codec != "model-client-body":
+                return load
+            raw_captured.extend(roots)
+            async def hydrate():
+                assert active_state_scope() is None
+                values = await load()
+                raw_hydrated.extend(roots)
+                return values
+            return hydrate
 
-
-        async def track_resolve(interactions, **kwargs):
+        async def track_capture_interactions(interactions, **kwargs):
             resolved.extend((value.agent_run_id, value.model_request_seq) for value in interactions)
-            return await original_resolve(interactions, **kwargs)
+            return await original_capture_interactions(interactions, **kwargs)
 
         async def track_children(execution_id, *, tenant_id):
             children_reads.append(execution_id)
@@ -153,11 +170,13 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 async for chunk in original_open(key):
                     yield chunk
             monkeypatch.setattr(object_store, "open", track_open)
-        monkeypatch.setattr(archive, "resolve_model_interactions", track_resolve)
+        monkeypatch.setattr(archive, "capture_model_interactions", track_capture_interactions)
+        monkeypatch.setattr(ContentArchive, "capture_ranges", track_client_bodies)
         yield SimpleNamespace(
             storage=storage, reader=reader, service=service, signer=signer,
             history=History(service, tenant_id="tenant"), principal=Principal("reader", "tenant"),
-            records=records, bodies=bodies, sdk_keys=sdk_keys, raw_keys=raw_keys,
+            records=records, bodies=bodies, sdk_keys=sdk_keys, raw_roots=raw_roots,
+            raw_captured=raw_captured, raw_hydrated=raw_hydrated,
             opened=opened, resolved=resolved, children_reads=children_reads,
         )
     finally:
@@ -181,6 +200,7 @@ async def test_model_client_selectors_resolve_only_exact_identity_bodies(
         assert metadata.next_cursor is None
         assert metadata.items[0].client_requests is None and metadata.items[0].request == {}
         assert data.opened == [] and data.resolved == []
+        assert data.raw_captured == data.raw_hydrated == []
 
         raw = await data.history.model_interactions("execution", include_client_requests=True, **options)
         assert [_identity(item) for item in raw.items] == [identity]
@@ -188,15 +208,17 @@ async def test_model_client_selectors_resolve_only_exact_identity_bodies(
         assert raw.items[0].client_requests_included and not raw.items[0].content_included
         assert raw.items[0].request == {} and raw.items[0].response is None
         assert data.resolved == [(data.records[identity].agent_run_id, 2)]
-        assert not set(data.opened) - data.raw_keys[identity]
-        if backend == "sqlite":
-            assert data.raw_keys[identity] and set(data.opened) == data.raw_keys[identity]
+        assert data.opened == []
+        assert set(data.raw_captured) == set(data.raw_hydrated) == data.raw_roots[identity]
 
         data.opened.clear()
         data.resolved.clear()
+        data.raw_captured.clear()
+        data.raw_hydrated.clear()
         sdk = await data.history.model_interactions("execution", include_content=True, **options)
         assert sdk.items[0].request and sdk.items[0].response
         assert sdk.items[0].client_requests is None and not sdk.items[0].client_requests_included
+        assert data.raw_captured == data.raw_hydrated == []
         assert data.resolved == [(data.records[identity].agent_run_id, 2)]
         assert not set(data.opened) - data.sdk_keys[identity]
         if backend == "sqlite":
@@ -204,6 +226,8 @@ async def test_model_client_selectors_resolve_only_exact_identity_bodies(
 
         data.opened.clear()
         data.resolved.clear()
+        data.raw_captured.clear()
+        data.raw_hydrated.clear()
         child = await data.history.model_interactions(
             "child", principal=data.principal, agent_run_seq=1, model_request_seq=2, include_client_requests=True,
         )
@@ -211,11 +235,14 @@ async def test_model_client_selectors_resolve_only_exact_identity_bodies(
         assert [_identity(item) for item in child.items] == [child_identity]
         assert child.items[0].client_requests == data.bodies[child_identity]
         assert data.resolved == [(data.records[child_identity].agent_run_id, 2)]
-        assert not set(data.opened) - data.raw_keys[child_identity]
+        assert data.opened == []
+        assert set(data.raw_captured) == set(data.raw_hydrated) == data.raw_roots[child_identity]
         assert data.children_reads == []
 
         data.opened.clear()
         data.resolved.clear()
+        data.raw_captured.clear()
+        data.raw_hydrated.clear()
         for selectors in ({"agent_run_seq": 99}, {"model_request_seq": 99},
                           {"agent_run_seq": 1, "model_request_seq": 2,
                            "cutoffs": (UsageReadCutoff("execution", 1, 1),)}):
@@ -224,6 +251,46 @@ async def test_model_client_selectors_resolve_only_exact_identity_bodies(
             )
             assert empty.items == () and empty.next_cursor is None
         assert data.opened == [] and data.resolved == []
+        assert data.raw_captured == data.raw_hydrated == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_client_body_failure_is_confined_to_the_selected_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    async with _seed(backend, tmp_path, monkeypatch) as data:
+        damaged = ("execution", 1, 2)
+        original_capture = ContentArchive.capture_ranges
+        async def corrupt_selected_body(owner, roots, *, codec, **kwargs):
+            load = await original_capture(owner, roots, codec=codec, **kwargs)
+            if codec != "model-client-body" or not data.raw_roots[damaged].intersection(roots):
+                return load
+            async def fail():
+                assert active_state_scope() is None
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return fail
+        monkeypatch.setattr(ContentArchive, "capture_ranges", corrupt_selected_body)
+        options = dict(principal=data.principal, agent_run_seq=1)
+        metadata = await data.history.model_interactions("execution", model_request_seq=2, **options)
+        assert [_identity(item) for item in metadata.items] == [damaged]
+        sdk = await data.history.model_interactions("execution", model_request_seq=2, include_content=True, **options)
+        assert sdk.items[0].request and sdk.items[0].response
+        assert data.raw_captured == data.raw_hydrated == []
+        unaffected = await data.history.model_interactions(
+            "execution", model_request_seq=3, include_client_requests=True, **options,
+        )
+        assert unaffected.items[0].client_requests == data.bodies[("execution", 1, 3)]
+        assert set(data.raw_captured) == set(data.raw_hydrated) == data.raw_roots[("execution", 1, 3)]
+        data.raw_captured.clear()
+        data.raw_hydrated.clear()
+        with pytest.raises(AIError) as failure:
+            await data.history.model_interactions(
+                "execution", model_request_seq=2, include_client_requests=True, **options,
+            )
+        assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert set(data.raw_captured) == data.raw_roots[damaged]
+        assert data.raw_hydrated == []
 
 
 @pytest.mark.asyncio
@@ -291,6 +358,7 @@ async def test_model_client_selectors_paging_and_cursor_binding(
                 await read("execution", cursor=unfiltered.next_cursor, limit=1, agent_run_seq=1, **options)
             assert caught.value.code is ErrorCode.CURSOR_INVALID
         assert data.opened == [] and data.resolved == []
+        assert data.raw_captured == data.raw_hydrated == []
 
 
 @pytest.mark.asyncio
@@ -322,6 +390,7 @@ async def test_model_client_selectors_require_real_execution_and_tenant_authoriz
             assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
         assert authorized == ["execution", "child"]
         assert data.opened == [] and data.resolved == []
+        assert data.raw_captured == data.raw_hydrated == []
 
         for read, options in (
             (data.history.model_interactions, {"principal": data.principal}),
@@ -333,6 +402,7 @@ async def test_model_client_selectors_require_real_execution_and_tenant_authoriz
                         await read("execution", include_client_requests=True, **options, **{field: invalid})
                     assert caught.value.code is ErrorCode.REQUEST_FIELD_INVALID
         assert data.opened == [] and data.resolved == []
+        assert data.raw_captured == data.raw_hydrated == []
 
 
 @pytest.mark.asyncio
@@ -353,7 +423,7 @@ async def test_model_client_selectors_keep_default_custom_reader_and_service_cal
         raise AssertionError("content reads do not construct an execution")
 
     principal = Principal("reader", "tenant")
-    executions = RuntimeExecutions(ExistingService(), unused_get)
+    executions = RuntimeExecutions(ExistingService(), unused_get, bind_execution=None)
     readers = (
         History(DefaultExecutionHistoryService(
             _Executions(), TenantAuthorizationPolicy("tenant"), ExistingReader(),
@@ -393,7 +463,7 @@ async def test_model_client_selectors_propagate_through_execution_facades() -> N
     principal = Principal("reader", "tenant")
     history = DefaultExecutionHistoryService(_Executions(), TenantAuthorizationPolicy("tenant"), Reader())
     service = _execution_service(history)
-    executions = RuntimeExecutions(service, None)
+    executions = RuntimeExecutions(service, None, bind_execution=None)
     for target in (service, executions, History(history, tenant_id="tenant")):
         await target.model_interactions(
             "execution", principal=principal, agent_run_seq=2, model_request_seq=3,

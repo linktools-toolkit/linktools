@@ -310,7 +310,7 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
                 original.result, output=StoredPayload.inline_json({"source": "fresh"}),
             ))
         elif source == "nonterminal":
-            fresh = replace(original, status=ExecutionStatus.STARTED, result=None)
+            fresh = replace(original, status=ExecutionStatus.STARTED, result=None, completed_at=None)
         elif source == "different_owner":
             fresh = replace(original, principal_id="other")
         else:

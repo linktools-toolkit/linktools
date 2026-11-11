@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.core import ExecutionStatus, canonical_json_bytes
+from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.coordination import PendingTurnCoordination
 from linktools.ai.persistence.codec import encode_domain
@@ -234,7 +235,7 @@ async def test_failed_authority_recheck_after_byte_read_is_not_a_cache_miss(
     pending = asyncio.create_task(helper.read_execution("execution", tenant_id="tenant"))
     await cache.read_started.wait()
 
-    async def fail(scope: str, execution_id: str) -> TurnCoordination | None:
+    async def fail(scope: TurnScopeIdentity, execution_id: str) -> TurnCoordination | None:
         raise OSError("authority unavailable")
 
     monkeypatch.setattr(cache, "read_turn", fail)
@@ -439,7 +440,7 @@ async def test_promotion_authority_recheck_failure_cannot_confirm_the_hint(
     )
     await cache.read_started.wait()
 
-    async def fail(scope: str, execution_id: str) -> TurnCoordination | None:
+    async def fail(scope: TurnScopeIdentity, execution_id: str) -> TurnCoordination | None:
         raise OSError("authority unavailable")
 
     monkeypatch.setattr(cache, "read_turn", fail)

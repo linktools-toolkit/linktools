@@ -15,10 +15,10 @@ from linktools.ai.capability import CapabilityLoadContext, CapabilityLoadEntry
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay, read_object
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, ObjectRef, StorageChange, StorageOperation, StorageOverlay, read_object
 
 
-@pytest_asyncio.fixture(params=("memory", "sqlite-inline", "sqlite-object", "sqlite-filesystem"))
+@pytest_asyncio.fixture(params=("memory", "sqlite-object", "sqlite-filesystem"))
 async def asset_store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[AssetStore]:
     engine = None
     if request.param == "memory":
@@ -31,7 +31,6 @@ async def asset_store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIt
         backend = SqlAssetBackend(
             engine, namespace="conformance",
             object_store=FilesystemObjectStore(tmp_path / "objects") if request.param == "sqlite-filesystem" else None,
-            payload_policy=None if request.param == "sqlite-inline" else PayloadPolicy(0),
         )
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -286,3 +285,21 @@ async def test_asset_snapshot_preserves_known_field_types_and_open_metadata(corr
             assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_opaque_asset_keys_keep_independent_history_after_recreation(asset_store: AssetStore) -> None:
+    keys = (AssetKey("resource", "name"), AssetKey("resource", "name "),
+            AssetKey("other", "name"), AssetKey("resource", "🪷" * 128))
+    for index, key in enumerate(keys):
+        await asset_store.put(key, str(index).encode())
+    refs = await asset_store.resolve_versions(keys)
+    target = keys[0]
+    await asset_store.delete(target)
+    await asset_store.reset(target)
+    await asset_store.put(target, b"recreated")
+    assert await asset_store.read_versions(refs) == tuple(str(index).encode() for index in range(len(keys)))
+    assert await asset_store.get(target) == b"recreated"
+    assert await asset_store.get(keys[1]) == b"1"
+    assert len(await asset_store._storage.primary.list_versions(target)) == 4
+    await asset_store._storage.primary.validate_integrity()

@@ -116,7 +116,7 @@ async def test_terminal_summary_scheduler_retries_mixed_generation(monkeypatch: 
                 return getattr(self.transaction, name)
 
             async def get_record(self, key):
-                if key == old.key_digest:
+                if key == old.key:
                     self.header_reads += 1
                     if cached_header or self.header_reads == 1:
                         return old
@@ -177,8 +177,8 @@ async def test_terminal_summary_delta_retries_old_header_new_target(monkeypatch:
 
             async def get_records(self, keys):
                 records = dict(await self.transaction.get_records(keys))
-                if old.key_digest in records:
-                    records[old.key_digest] = old
+                if old.key in records:
+                    records[old.key] = old
                 return records
 
         async def mutate(current, fn):

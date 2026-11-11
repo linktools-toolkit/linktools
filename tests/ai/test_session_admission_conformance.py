@@ -255,13 +255,13 @@ class _RejectingBackend:
         if update is not None and idempotency is not None:
             current = await idempotency.get(
                 update.scope,
-                update.idempotency_key_digest,
+                update.idempotency_key,
                 tenant_id="tenant",
             )
             assert current is not None
             await idempotency.compare_and_swap(
                 update.scope,
-                update.idempotency_key_digest,
+                update.idempotency_key,
                 tenant_id="tenant",
                 expected_status=update.expected_status,
                 next_record=replace(

@@ -22,9 +22,9 @@ async def _assert_caught_failure(
     engine: AsyncEngine, failure: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await provision_database(engine)
-    store = SqlStateStore(engine, store_digest=_digest(f"delete-failure:{failure}"))
+    store = SqlStateStore(engine, store_key=_digest(f"delete-failure:{failure}"))
     other = SqlStateStore(engine, group=store._storage_group,
-                          store_digest=_digest(f"delete-other:{failure}"))
+                          store_key=_digest(f"delete-other:{failure}"))
     await store.initialize()
     await other.initialize()
     records = tuple(_record(index) for index in range(260 if failure == "conflict" else 2))
@@ -35,7 +35,7 @@ async def _assert_caught_failure(
     execute = _SqlTransaction._execute
 
     async def interrupt(transaction, statement, parameters=None):
-        if (transaction._store_digest == store.store_digest
+        if (transaction._store_key == store.store_key
                 and getattr(statement, "is_delete", False)
                 and statement.table.name == "ai_state_aliases"):
             if failure == "cancel":
@@ -46,14 +46,14 @@ async def _assert_caught_failure(
         return await execute(transaction, statement, parameters)
 
     async def remove(transaction):
-        keys = tuple(record.key_digest for record in records)
+        keys = tuple(record.key for record in records)
         if failure == "conflict":
             await transaction.get_records(keys)
             table = transaction._table("ai_state_records")
             # The stale cached version models losing a CAS after an earlier batch.
             await transaction._execute(update(table).where(
-                table.c.store_digest == store.store_digest.hex(),
-                table.c.key_digest == records[-1].key_digest.hex(),
+                table.c.store_key == store.store_key,
+                table.c.key == records[-1].key,
             ).values(storage_revision=1))
         await transaction.delete_records((*keys, keys[0], _digest("missing")))
 
@@ -91,8 +91,8 @@ async def _assert_caught_failure(
             finally:
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
-        assert await store.read(lambda tx: tx.get_records(tuple(record.key_digest for record in records))) == {
-            record.key_digest: record for record in records
+        assert await store.read(lambda tx: tx.get_records(tuple(record.key for record in records))) == {
+            record.key: record for record in records
         }
         assert len(await store.read(lambda tx: tx.scan_aliases())) == len(records)
         assert len(await store.read(lambda tx: tx.scan_facts())) == len(records)
@@ -102,9 +102,9 @@ async def _assert_caught_failure(
         async with engine.connect() as connection:
             assert await connection.scalar(select(1)) == 1
         # Failure ownership ends with the transaction; a fresh delete still succeeds.
-        await store.mutate(lambda tx: tx.delete_records((records[0].key_digest,
-                            _digest("missing"), records[0].key_digest)))
-        assert await store.read(lambda tx: tx.get_record(records[0].key_digest)) is None
+        await store.mutate(lambda tx: tx.delete_records((records[0].key,
+                            _digest("missing"), records[0].key)))
+        assert await store.read(lambda tx: tx.get_record(records[0].key)) is None
         await store.validate_integrity()
     finally:
         await other.close()
@@ -164,7 +164,7 @@ async def test_caught_delete_failures_retain_first_error(tmp_path: Path, monkeyp
     async def callback(transaction):
         for record in records:
             try:
-                await transaction.delete_records((record.key_digest,))
+                await transaction.delete_records((record.key,))
             except AIError:
                 pass
 
@@ -203,7 +203,7 @@ async def test_caught_scalar_delete_cancel_preserves_owner_and_children(
 
     async def callback(transaction):
         try:
-            await transaction.delete_record(record.key_digest)
+            await transaction.delete_record(record.key)
         except asyncio.CancelledError:
             await transaction.insert_record(_record(2))
 

@@ -14,7 +14,7 @@ from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
-from linktools.ai.storage import InMemoryCacheBackend, Lease, TurnCoordination, TurnScope, RenewingTurnScope
+from linktools.ai.storage import TurnScopeIdentity, InMemoryCacheBackend, Lease, TurnCoordination, TurnScope, RenewingTurnScope
 from tests.ai._runtime_test_helpers import _Models, _UsageFunctionModel, model_features
 
 
@@ -25,7 +25,7 @@ class _ObservedCache(InMemoryCacheBackend):
         self.released = asyncio.Event()
         self.renewed = asyncio.Event()
 
-    def enter(self, scope: str, *, session_key: str, request_key: str, request_digest: str,
+    def enter(self, scope: TurnScopeIdentity, *, session_key: str, request_key: str, request_digest: str,
               execution_id: str, owner_id: str) -> TurnScope:
         return RenewingTurnScope(self, scope, session_key=session_key, request_key=request_key,
                                  request_digest=request_digest, execution_id=execution_id,

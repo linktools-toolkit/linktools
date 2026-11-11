@@ -351,7 +351,7 @@ async def test_scheduler_definitions_publish_only_confirmed_reads(
 
         async def decode(record, target):
             if target is TaskNode:
-                definition_reads.append(record.key_digest)
+                definition_reads.append(record.key)
             return await original_decode(record, target)
 
         async def interrupt(operation):

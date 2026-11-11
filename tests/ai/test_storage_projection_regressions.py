@@ -47,9 +47,11 @@ async def test_promotion_archives_accepted_context(
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
+        cleanups = []
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
-            commits.append(kwargs.get('domain'))
+            domain = kwargs.get("domain")
+            (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
         execution = await session.start('question')
@@ -59,9 +61,11 @@ async def test_promotion_archives_accepted_context(
         if effect_policy != 'non_replay_safe':
             assert calls == [None]
             assert len(commits) == 1
+            assert len(cleanups) <= 1
         else:
             assert calls[0] is not None and calls[0].status is ExecutionStatus.STARTED
             assert len(commits) > 1
+            assert len(cleanups) <= len(commits)
 
 
 @pytest.mark.asyncio

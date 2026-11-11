@@ -14,7 +14,7 @@ from pydantic_ai_harness.step_persistence import StepPersistence
 from tests.ai._runtime_test_helpers import native_checkpoint
 from linktools.ai.core import (
     ExecutionStatus, OperationKind, OperationLedgerInput, OperationStatus, ResourceKind,
-    canonical_sha256, idempotency_key_digest, principal_identity_payload,
+    canonical_sha256, principal_identity_payload,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import CancelExecutionRequest
@@ -141,7 +141,7 @@ async def test_terminal_child_cleanup_preserves_prior_failed_cancel_receipt(tmp_
         request = CancelExecutionRequest(runtime.default_principal, key, force=True)
         now = datetime.now(timezone.utc)
         failed = await persistence.execution.operations.append(OperationLedgerInput(
-            idempotency_key_digest(key), persistence.tenant_id, ResourceKind.EXECUTION,
+            key, persistence.tenant_id, ResourceKind.EXECUTION,
             child_id, child_id, OperationKind.EXECUTION_CANCEL, OperationStatus.FAILED,
             canonical_sha256({"action": "execution.cancel", "principal": principal_identity_payload(request.principal),
                               "execution_id": child_id, "force": True}),

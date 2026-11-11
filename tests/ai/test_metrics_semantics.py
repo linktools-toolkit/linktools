@@ -19,7 +19,6 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.observe._codec import observation_digest
 from linktools.ai.observe._memory import InMemoryMetricStore
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -138,8 +137,8 @@ async def test_window_rate_latest_and_custom_accuracy_semantics() -> None:
     )
     expected_latest = max(
         (
-            (observation_digest(metrics.namespace, "latest-a"), 11),
-            (observation_digest(metrics.namespace, "latest-b"), 22),
+            ("latest-a", 11),
+            ("latest-b", 22),
         )
     )[1]
     assert latest_result.points[0].value == expected_latest

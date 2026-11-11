@@ -241,10 +241,10 @@ await restored.seed_capture(captured)
 
 The caller chooses an isolated destination scope for imported input. With
 `transient=True`, the adapter additionally isolates scope identity by execution;
-the host must supply the corresponding working object store. The optional
-`payload_policy` controls ordinary write inlining. Capture preserves source
-versions, while subsequent writes derive destination versions. A changed
-capture for an already-seeded path conflicts rather than overwriting the prior
+the host must supply the corresponding working object store for referenced
+content. Ordinary memory text stays with the Memory state owner regardless of
+size. Capture preserves source versions, while subsequent writes derive
+destination versions. A changed capture for an already-seeded path conflicts rather than overwriting the prior
 receipt. Malformed records or receipts fail integrity checks; storage errors
 and cancellation propagate. A caller retrying an uncertain mutation must retain
 its original operation identity. This adapter does not add automatic rollback

@@ -26,55 +26,55 @@ async def test_record_storage_revision_is_independent_of_domain_revision(
         await store.mutate(lambda tx: tx.insert_record(record))
 
         guarded = await store.mutate(lambda tx: tx.guard_record(
-            record.key_digest, expected_storage_revision=0,
+            record.key, expected_storage_revision=0,
         ))
         assert guarded == replace(record, storage_revision=1)
         assert await store.mutate(lambda tx: tx.update_record_lease(
-            record.key_digest, expected_storage_revision=1,
+            record.key, expected_storage_revision=1,
             lease_owner="worker", lease_fence=1, lease_expires_at=expires_at,
         ))
         leased = replace(
             record, storage_revision=2, lease_owner="worker", lease_fence=1,
             lease_expires_at=expires_at,
         )
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == leased
+        assert await store.read(lambda tx: tx.get_record(record.key)) == leased
 
         async def stale_mutations(transaction: StateTransaction) -> None:
             assert await transaction.guard_record(
-                record.key_digest, expected_storage_revision=1,
+                record.key, expected_storage_revision=1,
             ) is None
             assert not await transaction.update_record_lease(
-                record.key_digest, expected_storage_revision=1,
+                record.key, expected_storage_revision=1,
                 lease_owner="stale", lease_fence=2, lease_expires_at=expires_at,
             )
             assert not await transaction.replace_record(
                 replace(leased, data={"revision": 8}), expected_storage_revision=1,
             )
             assert not await transaction.delete_record(
-                record.key_digest, expected_storage_revision=1,
+                record.key, expected_storage_revision=1,
             )
 
         await store.mutate(stale_mutations)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == leased
+        assert await store.read(lambda tx: tx.get_record(record.key)) == leased
         updated = replace(leased, storage_revision=3, data={"revision": 8})
         assert await store.mutate(lambda tx: tx.replace_record(
             updated, expected_storage_revision=2,
         ))
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == updated
+        assert await store.read(lambda tx: tx.get_record(record.key)) == updated
         assert not await store.mutate(lambda tx: tx.delete_record(
-            record.key_digest, expected_storage_revision=2,
+            record.key, expected_storage_revision=2,
         ))
         assert await store.mutate(lambda tx: tx.delete_record(
-            record.key_digest, expected_storage_revision=3,
+            record.key, expected_storage_revision=3,
         ))
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) is None
+        assert await store.read(lambda tx: tx.get_record(record.key)) is None
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_caught_insert_conflict_preserves_batch_atomicity(
     backend: str, tmp_path: Path,
 ) -> None:
-    first, existing = sorted((_record(1), _record(2)), key=lambda r: r.key_digest)
+    first, existing = sorted((_record(1), _record(2)), key=lambda r: r.key)
     other = _record(3)
     async with _open_store(backend, tmp_path / backend) as store:
         await store.mutate(lambda tx: tx.insert_record(existing))
@@ -85,16 +85,16 @@ async def test_caught_insert_conflict_preserves_batch_atomicity(
             await transaction.insert_record(other)
 
         await store.mutate(callback)
-        assert await store.read(lambda tx: tx.get_record(first.key_digest)) is None
-        assert await store.read(lambda tx: tx.get_record(existing.key_digest)) == existing
-        assert await store.read(lambda tx: tx.get_record(other.key_digest)) == other
+        assert await store.read(lambda tx: tx.get_record(first.key)) is None
+        assert await store.read(lambda tx: tx.get_record(existing.key)) == existing
+        assert await store.read(lambda tx: tx.get_record(other.key)) == other
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_caught_replace_conflict_aborts_unrelated_write(
     backend: str, tmp_path: Path,
 ) -> None:
-    records = tuple(sorted((_record(1), _record(2)), key=lambda r: r.key_digest))
+    records = tuple(sorted((_record(1), _record(2)), key=lambda r: r.key))
     other = _record(3)
     async with _open_store(backend, tmp_path / backend) as store:
         await store.mutate(lambda tx: tx.insert_records(records))
@@ -113,7 +113,7 @@ async def test_caught_replace_conflict_aborts_unrelated_write(
 
         with pytest.raises(AIError):
             await store.mutate(callback)
-        assert await store.read(lambda tx: tx.get_records(tuple(r.key_digest for r in records))) == {
-            record.key_digest: record for record in records
+        assert await store.read(lambda tx: tx.get_records(tuple(r.key for r in records))) == {
+            record.key: record for record in records
         }
-        assert await store.read(lambda tx: tx.get_record(other.key_digest)) is None
+        assert await store.read(lambda tx: tx.get_record(other.key)) is None

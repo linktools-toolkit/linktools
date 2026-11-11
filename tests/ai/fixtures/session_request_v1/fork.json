@@ -10,7 +10,7 @@
         },
         "error_code": null,
         "execution_id": null,
-        "operation_id": "1f58b9145b24d108d7ac38887338b3ea3229833b9c1e418250343f907bfd1047",
+        "operation_id": "request",
         "operation_kind": {
           "$enum": "operation_kind",
           "value": "SESSION_FORK"

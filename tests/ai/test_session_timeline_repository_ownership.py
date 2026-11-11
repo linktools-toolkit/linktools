@@ -43,7 +43,7 @@ class ParallelExecutions:
         self.get_header = repository.get_header
         self.get_result = repository.get_result
 
-    async def get_many(
+    async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionRecord]:
         records = await asyncio.gather(*(
@@ -53,7 +53,7 @@ class ParallelExecutions:
 
 
 class ParallelExecutionSubclass(ExecutionRepositoryImpl):
-    async def get_many(
+    async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionRecord]:
         records = await asyncio.gather(*(
@@ -119,9 +119,9 @@ def _history(
 async def _populate(state: Persistence) -> None:
     await state.initialize(namespace="timeline-owner", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
-    await state.execution.executions.create(replace(
-        _execution("failed", status=ExecutionStatus.FAILED, prompt="original"), result=None,
-    ))
+    await state.execution.executions.create(
+        _execution("failed", status=ExecutionStatus.FAILED, prompt="original"),
+    )
     await state.conversation.sessions.admit_execution(
         "session", tenant_id="tenant", execution_id="failed", expected=None,
     )
@@ -173,11 +173,21 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
         await state.close()
 
 
-async def test_builtin_public_timeline_keeps_one_metadata_transaction(tmp_path: Path) -> None:
+async def test_builtin_public_timeline_keeps_one_metadata_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     state = PersistenceStorage.sqlite(tmp_path / "builtin.db")
     try:
         state = Persistence(state)
         await _populate(state)
+        from linktools.ai.persistence._step_message_content import NativeMessageContent
+        from linktools.ai.storage import SqlObjectStore
+
+        def forbid_body_read(*args, **kwargs):
+            pytest.fail("timeline metadata must not hydrate message or object bodies")
+
+        monkeypatch.setattr(NativeMessageContent, "hydrate_ranges", forbid_body_read)
+        monkeypatch.setattr(SqlObjectStore, "open", forbid_body_read)
         engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
         statements, begins = [], []
 
@@ -196,6 +206,10 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(tmp_path: 
             event.remove(engine, "begin", begin)
         assert [turn.execution_id for turn in result.items] == ["failed", "active"]
         assert len(begins) == 2  # Fresh authorization header, then one metadata snapshot.
-        assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) == 6
+        assert [turn.conversation_committed for turn in result.items] == [True, False]
+        selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+        # Execution and conversation records may share one metadata batch.
+        assert len(selects) <= 6
+        assert not any("ai_step_messages" in sql or "ai_object_chunks" in sql for sql in selects)
     finally:
         await state.close()

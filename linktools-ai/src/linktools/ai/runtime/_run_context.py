@@ -100,7 +100,7 @@ class RunContextCapture:
             AgentRunCheckpoint(
                 agent_run_id=self.agent_run_id,
                 step_index=ctx.run_step,
-                messages=list(raw),
+                messages=raw,
                 agent_conversation_id=ctx.conversation_id,
                 parent_agent_run_id=self.parent_agent_run_id,
                 agent_id=self.agent_id,

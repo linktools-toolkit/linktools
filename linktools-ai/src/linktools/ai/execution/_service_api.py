@@ -103,7 +103,7 @@ def _is_digest(value: object) -> bool:
 class ExecutionRequest:
     user_prompt: "UserPromptInput"
     principal: Principal
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     memory_scope: "str | None"
     mode: ExecutionMode
     planning: bool
@@ -150,7 +150,7 @@ class ExecutionRequest:
 class RetryExecutionRequest:
     user_prompt: "UserPromptInput"
     principal: Principal
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
 
@@ -166,7 +166,7 @@ class RetryExecutionRequest:
 class ForkExecutionRequest:
     user_prompt: "UserPromptInput"
     principal: Principal
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
     budget: RunBudget | None = None
@@ -680,7 +680,7 @@ class ApprovalView:
 class ApprovalDecisionRequest:
     principal: Principal
     approval_id: str
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     decision: ApprovalDecision
     message: "str | None" = None
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
@@ -699,7 +699,7 @@ class ApprovalDecisionRequest:
 @dataclass(frozen=True, slots=True)
 class ApprovalDecisionResult:
     approval_id: str
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     decision: ApprovalDecision
 
 
@@ -734,7 +734,7 @@ class ExternalCallView:
 class ExternalSupplyRequest:
     principal: Principal
     call_id: str
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     resolution: ExternalResolution
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
@@ -760,7 +760,7 @@ class ExternalSupplyRequest:
 @dataclass(frozen=True, slots=True)
 class ExternalSupplyResult:
     call_id: str
-    idempotency_key: str
+    idempotency_key: str = field(repr=False)
     accepted: bool
 
 
@@ -769,7 +769,7 @@ class ExecutionEvent:
     execution_id: str
     event_seq: int
     event_type: str
-    payload: JsonValue
+    payload: JsonValue = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_type, str) or not self.event_type:
@@ -781,7 +781,7 @@ class ExecutionStreamEvent:
     execution_id: str
     durable_seq: int | None
     event_type: str
-    payload: JsonValue
+    payload: JsonValue = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_type, str) or not self.event_type:

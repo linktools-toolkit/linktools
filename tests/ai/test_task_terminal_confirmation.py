@@ -2,46 +2,19 @@
 # -*- coding: utf-8 -*-
 """Terminal producer facts survive temporarily unavailable confirmation reads."""
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import ExecutionStatus, OperationStatus, Principal, TaskStatus, idempotency_key_digest
+from linktools.ai.core import ExecutionStatus, OperationStatus, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.storage import FilesystemObjectStore, ObjectStat
+from linktools.ai.storage import FilesystemObjectStore
 from linktools.ai.task import (
     Task, TaskBindingContract, TaskEffectResolution, TaskGraph, TaskInputSupplyRequest, TaskNode,
 )
 from linktools.ai.task._runner import TaskNodeRunError
 from linktools.ai.task.engine import TaskEngine
-
-
-class _OutputReadFault(FilesystemObjectStore):
-    armed = False
-    failing_key: str | None = None
-
-    async def put(
-        self, key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str,
-    ) -> ObjectStat:
-        result = await super().put(
-            key, chunks, expected_size=expected_size, expected_digest=expected_digest,
-        )
-        if self.armed and expected_size >= 80000:
-            self.armed = False
-            self.failing_key = key
-        return result
-
-    def open(self, key: str) -> AsyncIterator[bytes]:
-        return self._read(key)
-
-    async def _read(self, key: str) -> AsyncIterator[bytes]:
-        if key == self.failing_key:
-            self.failing_key = None
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE, safe_details={"reader": "output"})
-        async for chunk in super().open(key):
-            yield chunk
 
 
 def _assert_confirmation(error: AIError, cause: AIError, phase: str) -> None:
@@ -58,10 +31,11 @@ def _assert_confirmation(error: AIError, cause: AIError, phase: str) -> None:
 async def test_control_confirmation_retries_same_receipt_immediately(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, control: str, fault_owner: str,
 ) -> None:
-    store = _OutputReadFault(tmp_path / "objects")
+    store = FilesystemObjectStore(tmp_path / "objects")
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite", object_store=store)
     principal = Principal("actor", "tenant")
     calls = 0
+    operation_id = "控" * 85 + "r"
 
     async def body(ctx):
         nonlocal calls
@@ -84,25 +58,23 @@ async def test_control_confirmation_retries_same_receipt_immediately(
         async def apply(value):
             if control == "effect":
                 return await run.resolve_effect(
-                    "node", bound.fence, TaskEffectResolution("applied", value), idempotency_key="control",
+                    "node", bound.fence, TaskEffectResolution("applied", value), idempotency_key=operation_id,
                 )
-            return await run.resume("node", TaskInputSupplyRequest(principal, bound.execution_id, value, "control"))
+            return await run.resume("node", TaskInputSupplyRequest(principal, bound.execution_id, value, operation_id))
 
-        if fault_owner == "service":
-            store.armed = True
-        else:
-            read = engine._execution_reads.result
-            fault = AIError(ErrorCode.STORAGE_UNAVAILABLE, safe_details={"reader": "task", "nested": {"attempt": 1}})
-            pending = True
+        owner = engine._execution_service if fault_owner == "service" else engine._execution_reads
+        read = owner.result
+        fault = AIError(ErrorCode.STORAGE_UNAVAILABLE, safe_details={"reader": fault_owner, "nested": {"attempt": 1}})
+        pending = True
 
-            async def read_once(*args, **kwargs):
-                nonlocal pending
-                if pending:
-                    pending = False
-                    raise fault
-                return await read(*args, **kwargs)
+        async def read_once(*args, **kwargs):
+            nonlocal pending
+            if pending:
+                pending = False
+                raise fault
+            return await read(*args, **kwargs)
 
-            monkeypatch.setattr(engine._execution_reads, "result", read_once)
+        monkeypatch.setattr(owner, "result", read_once)
         with pytest.raises(AIError) as raised:
             await apply(value)
         error = raised.value
@@ -110,7 +82,8 @@ async def test_control_confirmation_retries_same_receipt_immediately(
         cause = error.__cause__
         assert isinstance(cause, AIError)
         _assert_confirmation(error, cause, "task_terminal_confirmation" if fault_owner == "service" else "task_result_confirmation")
-        receipt = await state.task.operations.get(idempotency_key_digest("control"), tenant_id="tenant")
+        receipt = await state.task.operations.get(operation_id, tenant_id="tenant")
+        assert receipt.operation_id == operation_id
         assert receipt.status is OperationStatus.RUNNING
         graph = await run.state()
         assert graph.status is expected_graph
@@ -122,7 +95,7 @@ async def test_control_confirmation_retries_same_receipt_immediately(
         original_result = producer.result
 
         assert (await apply(value)).status is TaskStatus.SUCCEEDED
-        receipt = await state.task.operations.get(idempotency_key_digest("control"), tenant_id="tenant")
+        receipt = await state.task.operations.get(operation_id, tenant_id="tenant")
         assert receipt.status is OperationStatus.SUCCEEDED
         assert await run.result("node") == value
         producer = await state.execution.executions.get(bound.execution_id, tenant_id="tenant")
@@ -209,7 +182,7 @@ async def test_supply_final_projection_is_confirmation_but_initial_load_and_publ
         assert initial.value is fault
         assert (await service.inspect(started.execution_id, principal=principal)).status is ExecutionStatus.WAITING_DEFERRED
         with monkeypatch.context() as patch:
-            patch.setattr(store, "put", unavailable)
+            patch.setattr(service, "_store_task_output", unavailable)
             with pytest.raises(AIError) as precommit:
                 await service.supply_task_input(started.execution_id, principal=principal, value="x" * 80000)
         assert precommit.value is fault

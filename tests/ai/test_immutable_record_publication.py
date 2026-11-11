@@ -39,7 +39,7 @@ async def _assert_exact_publication(store: StateStore) -> None:
     value = replace(_record("exact"), data={"text": "\\\\unicode 測🙂 ", "number": -0.0})
     await store.mutate(lambda tx: tx.insert_immutable_records((value,)))
     await asyncio.gather(*(store.mutate(lambda tx: tx.insert_immutable_records((value,))) for _ in range(2)))
-    found = await store.read_record(value.key_digest)
+    found = await store.read_record(value.key)
     assert found is not None
     assert canonical_json_bytes(dict(found.data)) == canonical_json_bytes(dict(value.data))
     assert found.storage_revision == 0
@@ -56,7 +56,7 @@ async def _assert_rejected_batch(store: StateStore, *, difference: str) -> None:
         winner = replace(winner, data={"number": True})
         candidate = replace(winner, data={"number": 1})
     elif difference == "trailing-space":
-        candidate = replace(winner, sort_key=winner.sort_key + " ")
+        candidate = replace(winner, sort_key=winner.sort_key + b" ")
     else:
         candidate = replace(winner, sort_key=winner.sort_key.upper())
     await store.mutate(lambda tx: tx.insert_immutable_records((winner,)))
@@ -128,8 +128,8 @@ async def test_complete_archive_publication_adds_no_select_and_retains_missing_d
         assert await archive.read_ranges((root,), codec="bytes") == ((b"body",),)
         content = next(record for record in prepared.records.values() if record.kind == "archive_content")
         partial = PreparedArchive(owner=prepared.owner, nodes=dict(prepared.nodes),
-                                  records={key: value for key, value in prepared.records.items() if key != content.key_digest})
-        await store.mutate(lambda tx: tx.delete_record(content.key_digest))
+                                  records={key: value for key, value in prepared.records.items() if key != content.key})
+        await store.mutate(lambda tx: tx.delete_record(content.key))
         with pytest.raises(AIError) as caught:
             await store.mutate(lambda tx: archive.publish(tx, partial))
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

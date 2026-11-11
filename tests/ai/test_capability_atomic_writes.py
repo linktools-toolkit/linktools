@@ -200,7 +200,7 @@ class _Capability(AbstractCapability[AgentContext[None]]):
         owner = await tx.get_record(stream)
         if owner is None:
             await tx.insert_record(StoredRecord(
-                stream, stream, None, self.id, str(payload["run"]), None, 0, None, 0, None, {},
+                stream, stream, None, self.id, (str(payload["run"])).encode("ascii"), None, 0, None, 0, None, {},
             ))
         else:
             assert await tx.guard_record(stream, expected_storage_revision=owner.storage_revision) is not None
@@ -677,7 +677,7 @@ async def test_unknown_buffer_admission_cannot_publish_missing_payload(tmp_path:
         assert opened.probe.writes == []
         scope = audit.writer.scope
         write, = scope.pending
-        await _Buffer.append(buffer, scope.id, write.id, write.receipt_key.hex(), write.content, wait=False)
+        await _Buffer.append(buffer, scope.id, write.id, write.receipt_key, write.content, wait=False)
         await audit.flush()
         assert len(await opened.probe.facts("audit")) == 1
 

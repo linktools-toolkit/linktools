@@ -231,22 +231,12 @@ async def test_source_terminal_confirmation_and_remote_cancel_preserve_buffer_tr
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.execution import CancelExecutionRequest
     from linktools.ai.storage import StoredPayload
-    from .test_execution_payload_materialization import _Objects
 
     buffer = _PayloadBuffer()
     entered, release = asyncio.Event(), asyncio.Event()
     answer = "gated-result" * 10000
     digest = StoredPayload.inline_json({"text": answer}).digest
     calls = source_calls = 0
-
-    class Objects(_Objects):
-        async def put(self, key, chunks, *, expected_size, expected_digest):
-            if expected_digest == digest:
-                assert any(c.terminal is not None and c.terminal.result.output.digest == digest
-                    for c in buffer.captures)
-                entered.set()
-                await release.wait()
-            return await super().put(key, chunks, expected_size=expected_size, expected_digest=expected_digest)
 
     async def model(messages, info):
         nonlocal calls
@@ -258,7 +248,7 @@ async def test_source_terminal_confirmation_and_remote_cancel_preserve_buffer_tr
         commit=CommitPolicy.terminal(buffer=buffer)), scope="runtime")
     features.agent("default", model="default", allow_tools=())
     async with Persistence.open("source-terminal-race",
-        storage=PersistenceStorage.sqlite(tmp_path / "state.db", object_store=Objects())) as persistence:
+        storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
         async with Runtime.attach(persistence=persistence,
             features=model_features(_Models(_UsageFunctionModel(model)), features), metrics=None) as runtime, \
             Runtime.attach(persistence=persistence,
@@ -269,6 +259,10 @@ async def test_source_terminal_confirmation_and_remote_cancel_preserve_buffer_tr
             async def source(*args, **kwargs):
                 nonlocal source_calls
                 source_calls += 1
+                assert any(c.terminal is not None and c.terminal.result.output.digest == digest
+                           for c in buffer.captures)
+                entered.set()
+                await release.wait()
                 value = await command(*args, **kwargs)
                 if interference == "source_unknown":
                     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)

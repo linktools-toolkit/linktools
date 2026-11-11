@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from linktools.ai.storage import InsertResult, PostgreSQLDialect, SQLiteDialect
+from linktools.ai.storage import InsertResult, PostgreSQLDialect, SQLiteDialect, SqlValue
 from sqlalchemy import (
     Column, DateTime, Integer, MetaData, String, Table, UniqueConstraint,
     event, func, select,
@@ -80,7 +80,7 @@ async def _execute(
     table: Table,
     operation: str,
     rows: list[dict[str, str | int | datetime]],
-) -> InsertResult | int | dict[str, int] | None:
+) -> InsertResult | int | dict[SqlValue, int] | None:
     indexes = ("namespace", "key")
     if operation == "insert_ignore_conflict":
         return await dialect.insert_ignore_conflict(
@@ -162,7 +162,7 @@ async def test_conflict_statements_preserve_vendor_sql_and_one_roundtrip(
             if dialect.name == "postgresql" else '"key", revision'
         )
         assert sql.endswith(f"RETURNING {returning}")
-        assert result == {"123": 17, "beta": 11}
+        assert result == {123: 17, "beta": 11}
     else:
         assert result is None
     if operation.endswith("_many"):
@@ -365,3 +365,26 @@ async def test_mysql_batch_insert_budget_and_duplicate_fallback(duplicate: bool)
     assert "ON DUPLICATE KEY" not in statements[0]
     if duplicate:
         assert "ON DUPLICATE KEY UPDATE" in statements[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialect_name", ("sqlite", "postgresql", "mysql"))
+async def test_counter_batch_returns_binary_identity_without_text_conversion(dialect_name: str) -> None:
+    from linktools.ai.storage import MySQLDialect
+    from sqlalchemy import LargeBinary
+    dialect = {"sqlite": SQLiteDialect, "postgresql": PostgreSQLDialect, "mysql": MySQLDialect}[dialect_name]()
+    key = b"\x00\xffraw-counter".ljust(1280, b"x")
+    table = Table("ai_binary_counters", MetaData(), Column("key", LargeBinary(1280), primary_key=True),
+                  Column("value", Integer, nullable=False))
+
+    class Result:
+        def all(self) -> list[tuple[bytes, int]]:
+            return [(key, 3)]
+
+    class Session:
+        async def execute(self, statement: ClauseElement, parameters: object = None) -> Result:
+            return Result()
+
+    result = await dialect.upsert_increment_many(Session(), table=table, rows=[{"key": key, "value": 3}],
+        column="value", index_elements=("key",), returning_key="key")
+    assert result == {key: 3}

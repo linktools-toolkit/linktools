@@ -21,7 +21,8 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.inputs import AgentTaskInput, CaptureInputRequest
 from linktools.ai.runtime import Runtime, RuntimeFeatures
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.inputs import _input_capture as capture_module
+from linktools.ai.persistence.state import StateStore, StoredRecord
 from linktools.ai.task import TaskGraph, TaskGraphState, TaskNode, TaskNodeView
 from ._runtime_test_helpers import _RuntimeUsageModelBinding, _UsageFunctionModel
 
@@ -64,16 +65,16 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-ownership', storage=storage) as persistence_60, Runtime.attach(persistence=persistence_60, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_60, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
 
-        async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
-            if key.startswith("v1/input-capture/invocation/"):
+        async def fail_invocation(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/"):
                 await models.entered.wait()
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
-        monkeypatch.setattr(objects, "put", fail_invocation)
+        monkeypatch.setattr(capture_module, "publish_capture_record", fail_invocation)
         task = Task.from_agent("capture.agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
@@ -123,8 +124,8 @@ async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_rele
                                     features=model_features(models, _agents())) as runtime:
                 source_group = runtime._state.execution.executions.state_store.storage_group
                 engine = await runtime.tasks.bind(Task.from_agent("capture.agent", runtime.agents.get()))
-                objects = engine.persistence.object_store(PersistenceDomain.TASK)
-                original_put = objects.put
+                capture_state = engine.persistence.task.tasks.state_store
+                original_publish = capture_module.publish_capture_record
                 release_entered, release_allowed = asyncio.Event(), asyncio.Event()
                 quiesce_entered, quiesce_allowed = asyncio.Event(), asyncio.Event()
                 cancel_requested, quiesced = asyncio.Event(), asyncio.Event()
@@ -132,11 +133,11 @@ async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_rele
                 original_release = runtime._execution_service.release_dependency_hold
                 original_quiesce = launcher._quiesce_node_owned
 
-                async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
-                    if key.startswith("v1/input-capture/invocation/"):
+                async def fail_invocation(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+                    if store is capture_state and key.startswith("v1/input-capture/invocation/"):
                         await models.entered.wait()
                         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-                    return await original_put(key, *args, **kwargs)
+                    return await original_publish(store, key=key, **kwargs)
 
                 async def pause_release(*args: object, **kwargs: object) -> None:
                     release_entered.set()
@@ -163,7 +164,7 @@ async def test_terminal_capture_failure_quiescence_finishes_dependency_hold_rele
                     finally:
                         quiesced.set()
 
-                monkeypatch.setattr(objects, "put", fail_invocation)
+                monkeypatch.setattr(capture_module, "publish_capture_record", fail_invocation)
                 # Fault the shared retention owner, including terminal-graph
                 # compensation, not just the launcher's first release attempt.
                 monkeypatch.setattr(runtime._execution_service, "release_dependency_hold", pause_release)
@@ -279,20 +280,20 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-recovery', storage=storage) as persistence_110, Runtime.attach(persistence=persistence_110, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_110, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         original_cancel = runtime._execution_service.cancel
 
-        async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
-            if key.startswith("v1/input-capture/invocation/"):
+        async def fail_invocation(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/"):
                 await models.entered.wait()
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
         async def fail_cancel(*args: object, **kwargs: object) -> object:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
-        monkeypatch.setattr(objects, "put", fail_invocation)
+        monkeypatch.setattr(capture_module, "publish_capture_record", fail_invocation)
         monkeypatch.setattr(runtime._execution_service, "cancel", fail_cancel)
         task = Task.from_agent("capture.agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
@@ -313,7 +314,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
                 await runtime_engine.inputs.capture_input(execution.execution_id,
                     CaptureInputRequest(principal, "recovered-input"))
             assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
-            monkeypatch.setattr(objects, "put", original_put)
+            monkeypatch.setattr(capture_module, "publish_capture_record", original_publish)
             monkeypatch.setattr(runtime._execution_service, "cancel", original_cancel)
             with pytest.raises(AIError) as active:
                 await runtime.executions.recover(execution.execution_id, principal=principal)
@@ -351,17 +352,17 @@ async def test_graph_cancel_during_invocation_capture_cancels_the_owned_model(
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-cancel', storage=storage) as persistence_182, Runtime.attach(persistence=persistence_182, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_182, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         capture_started = asyncio.Event()
 
-        async def pause_invocation(key: str, *args: object, **kwargs: object) -> object:
-            if key.startswith("v1/input-capture/invocation/") and not capture_started.is_set():
+        async def pause_invocation(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/") and not capture_started.is_set():
                 capture_started.set()
                 await asyncio.Event().wait()
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
-        monkeypatch.setattr(objects, "put", pause_invocation)
+        monkeypatch.setattr(capture_module, "publish_capture_record", pause_invocation)
         task = Task.from_agent("capture.agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
@@ -413,8 +414,8 @@ async def test_graph_cancel_waits_for_capture_failure_cleanup(
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-cleanup', storage=storage) as persistence_245, Runtime.attach(persistence=persistence_245, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_245, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         original_cancel = runtime._execution_service.cancel
         cleanup_entered = asyncio.Event()
         cleanup_release = asyncio.Event()
@@ -422,21 +423,21 @@ async def test_graph_cancel_waits_for_capture_failure_cleanup(
         capture_owner: asyncio.Task[object] | None = None
         failed = False
 
-        async def fail_invocation_once(key: str, *args: object, **kwargs: object) -> object:
+        async def fail_invocation_once(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
             nonlocal failed, capture_owner
-            if key.startswith("v1/input-capture/invocation/") and not failed:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/") and not failed:
                 failed = True
                 capture_owner = asyncio.current_task()
                 await models.entered.wait()
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
         async def pause_cancel(*args: object, **kwargs: object) -> object:
             cleanup_entered.set()
             await cleanup_release.wait()
             return await original_cancel(*args, **kwargs)
 
-        monkeypatch.setattr(objects, "put", fail_invocation_once)
+        monkeypatch.setattr(capture_module, "publish_capture_record", fail_invocation_once)
         monkeypatch.setattr(runtime._execution_service, "cancel", pause_cancel)
         task = Task.from_agent("capture.agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
@@ -478,18 +479,18 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     principal = service_principal("default", "owner")
     async with Persistence.open('capture-hold', storage=storage) as persistence_310, Runtime.attach(persistence=persistence_310, features=model_features(models, _agents())) as runtime, TaskEngine.open(persistence=persistence_310, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         capture_started = asyncio.Event()
         capture_release = asyncio.Event()
 
-        async def pause_invocation(key: str, *args: object, **kwargs: object) -> object:
-            if key.startswith("v1/input-capture/invocation/"):
+        async def pause_invocation(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/"):
                 capture_started.set()
                 await capture_release.wait()
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
-        monkeypatch.setattr(objects, "put", pause_invocation)
+        monkeypatch.setattr(capture_module, "publish_capture_record", pause_invocation)
         task = Task.from_agent("capture.agent", runtime.agents.get())
         run = await runtime_engine.with_definitions(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
@@ -541,20 +542,21 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
     async with Persistence.open('capture-ready', storage=storage) as persistence_371, Runtime.attach(persistence=persistence_371, features=model_features(models, features)) as runtime, TaskEngine.open(persistence=persistence_371, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get(), build_input=project)
         engine = runtime_engine.with_definitions(producer, task)
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         entered, release = asyncio.Event(), asyncio.Event()
 
-        async def pause_invocation(key: str, *args: object, **kwargs: object) -> object:
-            if key.startswith("v1/input-capture/invocation/") and producer_ran.is_set():
-                result = await original_put(key, *args, **kwargs) if invocation_written else None
+        async def pause_invocation(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/") and producer_ran.is_set():
+                result = await original_publish(store, key=key, **kwargs) if invocation_written else None
                 entered.set()
                 await release.wait()
                 if invocation_written:
+                    assert result is not None
                     return result
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
-        monkeypatch.setattr(objects, "put", pause_invocation)
+        monkeypatch.setattr(capture_module, "publish_capture_record", pause_invocation)
         run = await engine.start(TaskGraph("source", (
             TaskNode("greeting", task=producer),
             TaskNode("agent", ("greeting",), task=task,
@@ -576,7 +578,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
         finally:
             release.set()
         assert (await run.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
-        monkeypatch.setattr(objects, "put", original_put)
+        monkeypatch.setattr(capture_module, "publish_capture_record", original_publish)
         capture = await runtime_engine.inputs.capture_input(execution.execution_id, request)
         assert await runtime_engine.inputs.capture_input(execution.execution_id, request) == capture
         if invocation_written:

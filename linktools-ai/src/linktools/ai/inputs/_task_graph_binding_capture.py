@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Immutable Task and expander declarations admitted with a TaskGraph."""
 
-import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -11,16 +10,17 @@ from ..agent import AgentBindingContract
 from ..core import (
     ImmutableJsonMapping,
     JsonValue,
-    canonical_json_bytes,
-    canonical_sha256,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, read_object
+from ..persistence.state import StateStore
+from ..persistence.captures import (
+    capture_record_value, read_capture_record, publish_capture_record,
+    prepare_task_binding_value, read_task_binding_value, validate_task_binding_payload,
+)
 from ..task import Task, TaskExpander, TaskGraph, TaskGraphAdmission, TaskNode, TaskRef
 from ..persistence.captures import task_graph_binding_capture_key
 from ..persistence.captures import (
     TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
-    TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS,
     read_task_graph_binding_capture_declarations,
     task_declaration_identity,
     task_expander_declaration_identity,
@@ -68,11 +68,11 @@ class TaskGraphBindingCapture:
 
 
 class TaskGraphBindingCaptureStore:
-    def __init__(self, namespace: str, object_store: ObjectStore) -> None:
+    def __init__(self, namespace: str, state_store: StateStore) -> None:
         if not isinstance(namespace, str) or not namespace:
             raise ValueError("namespace is required")
         self._namespace = namespace
-        self._objects = object_store
+        self._state_store = state_store
 
     async def capture(
         self,
@@ -108,23 +108,11 @@ class TaskGraphBindingCaptureStore:
             expander_declarations,
         )
 
-        existing = await self._objects.stat(key)
+        existing = await read_capture_record(self._state_store, namespace=self._namespace,
+                                             tenant_id=admission.principal.tenant_id, key=key)
         if existing is not None:
-            capture = await self._read(
-                ObjectRef(
-                    self._objects.store_id,
-                    key,
-                    existing.digest,
-                    existing.size,
-                ),
-                admission,
-            )
-            _validate_required_declarations(
-                capture,
-                graph,
-                task_declarations,
-                expander_declarations,
-            )
+            capture = await self._read(capture_record_value(existing), admission)
+            _validate_required_declarations(capture, graph, task_declarations, expander_declarations)
             return capture
 
         manifest: dict[str, JsonValue] = {
@@ -143,44 +131,19 @@ class TaskGraphBindingCaptureStore:
                 for _identity, value in sorted(captured_expanders.items())
             ],
         }
-        payload = canonical_json_bytes(manifest)
-        digest = canonical_sha256(manifest)
-
-        async def chunks():
-            yield payload
-
+        value = await prepare_task_binding_value(self._state_store, manifest,
+                    namespace=self._namespace, tenant_id=admission.principal.tenant_id)
         try:
-            stat = await self._objects.put(
-                key,
-                chunks(),
-                expected_size=len(payload),
-                expected_digest=digest,
-            )
+            stored = await publish_capture_record(self._state_store, namespace=self._namespace,
+                tenant_id=admission.principal.tenant_id, key=key, value=value)
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
                 raise
-            current = await self._objects.stat(key)
-            if current is None:
+            stored = await read_capture_record(self._state_store, namespace=self._namespace,
+                tenant_id=admission.principal.tenant_id, key=key)
+            if stored is None:
                 raise
-            capture = await self._read(
-                ObjectRef(
-                    self._objects.store_id,
-                    key,
-                    current.digest,
-                    current.size,
-                ),
-                admission,
-            )
-        else:
-            capture = await self._read(
-                ObjectRef(
-                    self._objects.store_id,
-                    stat.key,
-                    stat.digest,
-                    stat.size,
-                ),
-                admission,
-            )
+        capture = await self._read(capture_record_value(stored), admission)
         _validate_required_declarations(
             capture,
             graph,
@@ -194,66 +157,18 @@ class TaskGraphBindingCaptureStore:
         admission: TaskGraphAdmission,
     ) -> TaskGraphBindingCapture:
         key = self._key(admission)
-        stat = await self._objects.stat(key)
-        if stat is None:
-            raise AIError(
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
-                safe_details={"graph_id": admission.graph_id},
-            )
-        return await self._read(
-            ObjectRef(
-                self._objects.store_id,
-                key,
-                stat.digest,
-                stat.size,
-            ),
-            admission,
-        )
+        record = await read_capture_record(self._state_store, namespace=self._namespace,
+            tenant_id=admission.principal.tenant_id, key=key)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details={"graph_id": admission.graph_id})
+        return await self._read(capture_record_value(record), admission)
 
-    async def _read(
-        self,
-        ref: ObjectRef,
-        admission: TaskGraphAdmission,
-    ) -> TaskGraphBindingCapture:
-        payload = await read_object(
-            self._objects,
-            ref.key,
-            expected_digest=ref.digest,
-            expected_size=ref.size,
-        )
-        try:
-            manifest = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if not isinstance(manifest, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        format_version = manifest.get("format_version")
-        if (
-            isinstance(format_version, bool)
-            or not isinstance(format_version, int)
-            or format_version < 1
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if format_version != _VERSION:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if (
-            set(manifest) != TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS
-            or manifest.get("kind") != _KIND
-            or manifest.get("namespace") != self._namespace
-            or manifest.get("tenant_id") != admission.principal.tenant_id
-            or manifest.get("graph_id") != admission.graph_id
-            or manifest.get("request_digest")
-            != admission.initial_request_digest
-            or not isinstance(manifest.get("tasks"), list)
-            or not isinstance(manifest.get("expanders"), list)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if canonical_json_bytes(manifest) != payload:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        tasks, expanders = read_task_graph_binding_capture_declarations(
-            manifest["tasks"],
-            manifest["expanders"],
-        )
+    async def _read(self, value: JsonValue, admission: TaskGraphAdmission) -> TaskGraphBindingCapture:
+        manifest = await read_task_binding_value(self._state_store, value,
+            namespace=self._namespace, tenant_id=admission.principal.tenant_id)
+        validate_task_binding_payload(self._key(admission), manifest,
+            namespace=self._namespace, tenant_id=admission.principal.tenant_id)
+        tasks, expanders = read_task_graph_binding_capture_declarations(manifest["tasks"], manifest["expanders"])
         return TaskGraphBindingCapture(tasks, expanders)
 
     def _key(self, admission: TaskGraphAdmission) -> str:

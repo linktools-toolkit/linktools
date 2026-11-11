@@ -7,6 +7,7 @@ from linktools.ai.task.engine import TaskEngine
 from linktools.ai.evaluation.engine import Evaluations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,7 +15,7 @@ import pytest
 
 from linktools.ai.core import (
     AuthorizationAction, JsonValue, Principal, ResourceRef, TenantAuthorizationPolicy,
-    idempotency_key_digest, service_principal,
+    service_principal,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
@@ -116,12 +117,15 @@ async def test_admission_cancellation_fences_both_start_orderings(
 
 @pytest.mark.asyncio
 async def test_admission_cancellation_preserves_authorization_and_request_identity(tmp_path: Path) -> None:
+    authorized_resources: list[ResourceRef] = []
+
     class Authorization(TenantAuthorizationPolicy):
         denied: AuthorizationAction | None = None
 
         async def authorize(
             self, principal: Principal, action: AuthorizationAction, resource: ResourceRef,
         ) -> None:
+            authorized_resources.append(resource)
             if action is self.denied:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             await super().authorize(principal, action, resource)
@@ -142,14 +146,16 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
             )), principal=PRINCIPAL, idempotency_key="dataset")
             request = StartEvaluationRequest(EvaluationSpec(
                 dataset, (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),),
-            ), PRINCIPAL, "cancelled-admission")
+            ), PRINCIPAL, "界" * 85 + "x")
+            assert request.idempotency_key not in repr(request)
             for action in (AuthorizationAction.EVALUATION_RUN, AuthorizationAction.EVALUATION_CANCEL):
                 authorization.denied = action
                 with pytest.raises(AIError) as denied:
                     await evaluations.cancel_admission(request)
                 assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+                assert authorized_resources[-1].id == hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest()
                 assert await persistence_130.evaluation.idempotency.get(
-                    "evaluation.run", idempotency_key_digest(request.idempotency_key), tenant_id=PRINCIPAL.tenant_id,
+                    "evaluation.run", request.idempotency_key, tenant_id=PRINCIPAL.tenant_id,
                 ) is None
             authorization.denied = None
             run = await evaluations.cancel_admission(request)
@@ -157,15 +163,20 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
                 service_principal(PRINCIPAL.tenant_id, "other-owner"),
                 service_principal("foreign", PRINCIPAL.principal_id),
             ):
-                with pytest.raises(AIError) as denied:
-                    await evaluations.cancel_admission(replace(request, principal=principal))
-                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+                for operation in (evaluations.start, evaluations.cancel_admission):
+                    with pytest.raises(AIError) as denied:
+                        await operation(replace(request, principal=principal))
+                    assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
             changed = replace(request, spec=replace(request.spec, repetitions=2))
             for operation in (evaluations.start, evaluations.cancel_admission):
                 with pytest.raises(AIError) as conflict:
                     await operation(changed)
                 assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             assert (await run.inspect()).completion == "cancelled"
+            assert all(request.idempotency_key not in repr(resource) for resource in authorized_resources)
+            assert any(resource.id == run.experiment_id and
+                       resource.owner_principal_id == PRINCIPAL.principal_id
+                       for resource in authorized_resources)
 
             completed_request = replace(request, idempotency_key="completed-admission")
             completed = await evaluations.start(completed_request)

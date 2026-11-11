@@ -26,7 +26,6 @@ from ..core import (
     ResourceRef,
     TaskStatus,
     canonical_sha256,
-    idempotency_key_digest,
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
@@ -568,7 +567,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 submission.principal.principal_id,
             ),
         )
-        operation_id = idempotency_key_digest(idempotency_key)
+        operation_id = idempotency_key
         request_digest = canonical_sha256({
             "action": "task.cancel",
             "principal": principal_identity_payload(principal),
@@ -787,7 +786,7 @@ class DefaultTaskGraphService(TaskGraphService):
         )
         if initial is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        operation_id = idempotency_key_digest(request.idempotency_key)
+        operation_id = request.idempotency_key
         existing = await self._persistence.operations.get(
             operation_id,
             tenant_id=tenant_id,
@@ -1160,7 +1159,7 @@ class DefaultTaskGraphService(TaskGraphService):
             self._preflight.validate_input(node, request.value)
 
         value_digest = canonical_sha256(request.value)
-        operation_id = idempotency_key_digest(request.idempotency_key)
+        operation_id = request.idempotency_key
         request_digest = canonical_sha256(
             {
                 "action": "task.resume",
@@ -1382,7 +1381,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 request.resolution,
             )
 
-        operation_id = idempotency_key_digest(request.idempotency_key)
+        operation_id = request.idempotency_key
         request_digest = canonical_sha256(
             {
                 "action": "task.resolve_effect",
@@ -2001,7 +2000,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 "force": request.force,
             }
         )
-        operation_id = idempotency_key_digest(request.idempotency_key)
+        operation_id = request.idempotency_key
         claimed, operation = await self._claim_cancel_operation(
             operation_id,
             tenant_id,
@@ -2146,7 +2145,7 @@ class DefaultTaskGraphService(TaskGraphService):
             self._cancel_finalizer(
                 graph_id,
                 request,
-                idempotency_key_digest(request.idempotency_key),
+                request.idempotency_key,
                 request_digest,
             ),
             name=f"task-cancel-finalizer-{tenant_id}-{graph_id}",

@@ -51,12 +51,12 @@ async def test_confirmed_singleton_fill_skips_source_but_batch_and_control_do_no
             return await read(fn)
 
         monkeypatch.setattr(store, "read", source)
-        assert await store.read_record(record.key_digest) == record
+        assert await store.read_record(record.key) == record
         assert reads == 0
         other = _record(1, "head")
-        assert await store.read_records((record.key_digest, other.key_digest)) == {record.key_digest: record}
+        assert await store.read_records((record.key, other.key)) == {record.key: record}
         assert reads == 1
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == record
+        assert await store.read(lambda tx: tx.get_record(record.key)) == record
         assert reads == 2
 
 
@@ -79,7 +79,7 @@ async def test_unknown_commit_never_publishes_even_if_source_contains_record(
         assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         await asyncio.sleep(0)
         assert cache.puts == 0 and store._reads._publisher is None
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == record
+        assert await store.read(lambda tx: tx.get_record(record.key)) == record
 
 
 @pytest.mark.parametrize("failure", ("error", "cancel"))
@@ -100,7 +100,7 @@ async def test_disposable_publish_failure_cannot_change_confirmed_source_result(
         assert await store.mutate(lambda tx: tx.insert_record(record)) is None
         await asyncio.wait_for(entered.wait(), 1)
         await asyncio.sleep(0)
-        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == record
+        assert await store.read(lambda tx: tx.get_record(record.key)) == record
 
 
 async def test_slow_publisher_is_single_flight_and_late_old_fill_is_locally_invalidated(
@@ -132,7 +132,7 @@ async def test_slow_publisher_is_single_flight_and_late_old_fill_is_locally_inva
         assert not publisher.done() and not release.is_set()
         release.set()
         await asyncio.wait_for(publisher, 5)
-        assert await store.read_record(first.key_digest) == second
+        assert await store.read_record(first.key) == second
 
 
 async def test_close_cancels_owned_publication_and_releases_its_payload(tmp_path: Path) -> None:
@@ -178,9 +178,9 @@ async def test_transaction_capture_deadline_is_not_renewed_by_commit_or_publicat
             reads += 1
             return await read(fn)
         monkeypatch.setattr(store, "read", source)
-        assert await store.read_record(record.key_digest) == record and reads == 0
+        assert await store.read_record(record.key) == record and reads == 0
         clock[0] = 1003.01
-        assert await store.read_record(record.key_digest) == record and reads == 1
+        assert await store.read_record(record.key) == record and reads == 1
 
 
 async def test_cross_owner_late_old_publish_keeps_original_expiry(
@@ -283,7 +283,7 @@ async def test_delayed_confirmed_mutation_cannot_republish_older_capture(
         monkeypatch.setattr(context_type, "run_mutation", delayed)
         callback = (
             (lambda tx: tx.replace_record(older, expected_storage_revision=0))
-            if writes else (lambda tx: tx.get_record(initial.key_digest))
+            if writes else (lambda tx: tx.get_record(initial.key))
         )
         early = asyncio.create_task(store.mutate(callback), name="delayed-confirmed")
         await captured.wait()
@@ -291,7 +291,7 @@ async def test_delayed_confirmed_mutation_cannot_republish_older_capture(
         publisher = store._reads._publisher
         if publisher is not None:
             await publisher
-        assert await store.read_record(initial.key_digest) == newer
+        assert await store.read_record(initial.key) == newer
         puts = cache.puts
         release.set()
         await early
@@ -299,7 +299,7 @@ async def test_delayed_confirmed_mutation_cannot_republish_older_capture(
         if publisher is not None:
             await publisher
         assert cache.puts == puts
-        assert await store.read_record(initial.key_digest) == newer
+        assert await store.read_record(initial.key) == newer
 
 
 async def test_confirmed_noop_preserves_cache_and_deletion_invalidates(tmp_path: Path) -> None:
@@ -309,9 +309,9 @@ async def test_confirmed_noop_preserves_cache_and_deletion_invalidates(tmp_path:
         await store.mutate(lambda tx: tx.insert_record(record))
         await cache.published.wait()
         epoch = store._reads._epoch
-        await store.mutate(lambda tx: tx.get_record(record.key_digest))
+        await store.mutate(lambda tx: tx.get_record(record.key))
         assert store._reads._epoch is epoch
         assert cache.puts == 1
-        await store.mutate(lambda tx: tx.delete_record(record.key_digest))
+        await store.mutate(lambda tx: tx.delete_record(record.key))
         assert store._reads._epoch is not epoch
-        assert await store.read_record(record.key_digest) is None
+        assert await store.read_record(record.key) is None

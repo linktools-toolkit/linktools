@@ -230,7 +230,7 @@ async def test_uncertain_promotion_late_result_cannot_overwrite_successor_fence(
                 request = ToolOperationAdmission(
                     execution_id=execution_id, tool_operation_id=pending.tool_operation_id,
                     agent_run_id=pending.agent_run_id, recovery_agent_run_id=None,
-                    tool_call_id=pending.tool_call_id, idempotency_key_digest=pending.idempotency_key_digest,
+                    tool_call_id=pending.tool_call_id,
                     tool_name=pending.tool_name, arguments_digest=pending.arguments_digest,
                     binding_digest=pending.binding_digest, replay_safe=True,
                     owner=successor.producer_claim_id, producer_generation=successor.producer_generation,

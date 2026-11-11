@@ -10,12 +10,13 @@ from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 
 from ..errors import AIError, ErrorCode
+from ..steps import encode_native_replay_key
 from ._native_run_reference import NativeRunReferences, is_native_run_reference
 from ._native_event_reference import NativeEventReferences
 from ._step_backup import NativeStepBackup
 from ._step_store import SqlStepStore
 from .codec import _encode_step_envelope
-from .state import StoredRecord, StoredFact, record_key_digest
+from .state import StoredRecord, StoredFact, record_key
 
 
 _RUN_ADAPTER = TypeAdapter(RunRecord)
@@ -26,15 +27,16 @@ class NativeBackupProjections:
 
     def __init__(self, backup: NativeStepBackup, *, namespace: str, tenant_id: str) -> None:
         self._namespace, self._tenant_id = namespace, tenant_id
-        self._store_digest = SqlStepStore.scope_digest(namespace=namespace, tenant_id=tenant_id)
+        self._store_key = SqlStepStore.scope_key(namespace=namespace, tenant_id=tenant_id)
         try:
-            if backup.store_digest != self._store_digest:
+            if backup.store_key != self._store_key:
                 raise ValueError("native backup scope differs from its Trace partition")
             SqlStepStore.validate_backup(backup)
         except (TypeError, ValueError, KeyError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         self._runs = {row["run_id"]: row for row in backup.runs}
-        self._events = {row["key_digest"]: row for row in backup.events}
+        self._events = {(row["run_id"], row["idempotency_key"]): row for row in backup.events
+                        if row["idempotency_key"] is not None}
 
     def validate(self, projected: StoredRecord | StoredFact,
                  physical_data: Mapping[str, object]) -> StoredRecord | StoredFact:
@@ -48,14 +50,14 @@ class NativeBackupProjections:
                 row = self._runs[reference["run"]]
                 source = _RUN_ADAPTER.validate_python(dict(row, metadata=json.loads(row["metadata"])))
                 run = NativeRunReferences.project_source(physical_data, source,
-                    store_digest=row["store_digest"], expected_store_digest=self._store_digest)
-                if projected.key_digest != record_key_digest(
-                        self._namespace, self._tenant_id, "trace", "agent_run", source.run_id):
+                    store_key=row["store_key"], expected_store_key=self._store_key)
+                if projected.key != record_key(
+                        self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,)):
                     raise ValueError("portable run projection belongs to another Trace record")
                 restored = replace(physical, data=_encode_step_envelope(run))
             elif isinstance(projected, StoredFact):
                 reference = NativeEventReferences.decode_reference(physical_data)
-                row = self._events[reference["key"]]
+                row = self._events[(reference["run"], encode_native_replay_key(reference["replay"]))]
                 restored = NativeEventReferences.project_source(physical, row,
                     run=self._runs.get(row["run_id"]), namespace=self._namespace, tenant_id=self._tenant_id)
             else:

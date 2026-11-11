@@ -16,7 +16,7 @@ from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.task import (
     DefaultTaskGraphService, Task, TaskGraph, TaskGraphHandle, TaskGraphLaunch,
-    TaskGraphRequest, TaskGraphView, TaskNode, TaskNodeContext,
+    TaskGraphRequest, TaskGraphSubmission, TaskGraphView, TaskNode, TaskNodeContext,
 )
 from linktools.ai.task.engine import TaskEngine
 
@@ -381,9 +381,13 @@ async def test_preparation_unknown_survives_activation_readback_failure(
 
         async def lose_response(operation):
             nonlocal unavailable
-            await mutate(operation)
-            unavailable = True
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            result = await mutate(operation)
+            # Capturing task bindings may write before the submission owner.
+            # Lose the acknowledgment only after durable preparation itself.
+            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], TaskGraphSubmission):
+                unavailable = True
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            return result
 
         async def read_unavailable(operation):
             if unavailable:

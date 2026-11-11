@@ -36,7 +36,7 @@ async def test_trace_progress_and_exact_fact_position_survive_replay(tmp_path: P
         assert not await archive.verify_checkpoint_range(agent_run_id="run", after_sequence=1, checkpoints=(prepared,))
         changed = replace(prepared, stored=replace(prepared.stored, step_index=2))
         assert not await archive.verify_checkpoint_range(agent_run_id="run", after_sequence=0, checkpoints=(changed,))
-        await archive._mutate(lambda tx: tx.reserve_sequence(archive._sequence("run", "interaction"), 3))
+        await archive._mutate(lambda tx: tx.reserve_sequence(archive._stream("run", "interaction"), 3))
         assert await archive.model_interaction_count(agent_run_id="run") == 3
         await archive._mutate(lambda tx: tx.delete_fact_streams(archive._agent_run_key("run")))
         assert await archive.checkpoint_count(agent_run_id="run") == 1

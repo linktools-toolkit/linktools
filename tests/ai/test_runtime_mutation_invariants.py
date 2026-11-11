@@ -47,7 +47,6 @@ def _tool_record() -> ToolOperationRecord:
         execution_id="execution",
         agent_run_id="run",
         tool_call_id="call",
-        idempotency_key_digest="a" * 64,
         tool_name="tool",
         arguments_digest="b" * 64,
         binding_digest="c" * 64,
@@ -88,7 +87,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
         request = ToolOperationAdmission(
             execution_id=record.execution_id, tool_operation_id=record.tool_operation_id,
             agent_run_id=record.agent_run_id, recovery_agent_run_id=None, tool_call_id=record.tool_call_id,
-            idempotency_key_digest=record.idempotency_key_digest, tool_name=record.tool_name,
+             tool_name=record.tool_name,
             arguments_digest=record.arguments_digest, binding_digest=record.binding_digest,
             replay_safe=False, owner="worker", producer_generation=1,
         )

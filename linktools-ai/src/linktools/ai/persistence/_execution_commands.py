@@ -27,6 +27,7 @@ from ._step_archive import (
     StateStepArchive,
 )
 from .state import StateStore, StateTransaction
+from ._execution_repositories import ExecutionRepositoryImpl
 
 
 class ExecutionStateCommands:
@@ -56,6 +57,8 @@ class ExecutionStateCommands:
     ) -> ExecutionTerminalCommitResult:
         if not commit.execution.durable_trace and (agent_run is not None or step_events or checkpoints):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(self._executions, ExecutionRepositoryImpl):
+            await self._executions.prepare_content(replace(commit.execution, result=commit.result))
         prepared_checkpoints = ()
         if self._steps is not None and agent_run is not None and checkpoints:
             prepared_checkpoints = await self._steps.prepare_checkpoints(

@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import IdempotencyStatus, ResourceKind, TaskStatus, service_principal
+from linktools.ai.core import JsonValue, IdempotencyStatus, ResourceKind, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateContract, CaseContract, CaseRef, DatasetContract, DatasetRef,
     DimensionContract, EvaluationManifest, EvaluationPolicy, ScorerContract,
-    ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan, TrialView,
+    ScoreAttemptView, ScoreBundle, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan, TrialView,
     evaluation_completion,
 )
 from linktools.ai.evaluation.engine._service import Evaluations
@@ -23,11 +23,11 @@ from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence.contracts import IdempotencyRecord
 from linktools.ai.persistence.codec import (
-    _decode_enveloped_domain, _encode_persisted_domain, decode_domain, encode_domain,
+    _decode_enveloped_domain, _encode_persisted_domain, decode_domain, encode_domain, encode_envelope,
 )
 from linktools.ai.persistence._evaluation_records import (
     EvaluationCleanupRecord, EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
-    EvaluationTombstone,
+    EvaluationTombstone, EvaluationContentTombstone, EvaluationHumanDecision,
 )
 from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphState, TaskGraphSubmission, TaskNode, TaskNodeView, TaskRef
 
@@ -59,7 +59,7 @@ def experiment() -> EvaluationRecord:
         (TrialPlan("trial", CaseRef("dataset", "case", 1), "target", 1),), (),
         EvaluationPolicy(), "fixed_input", PRINCIPAL,
     )
-    return EvaluationRecord(manifest, manifest.digest, "a" * 64, "b" * 64, "open", 0, NOW, NOW)
+    return EvaluationRecord(manifest, manifest.digest, "a" * 64, "evaluation-start-原始键", "open", 0, NOW, NOW)
 
 
 def intent() -> EvaluationLaunchIntent:
@@ -110,14 +110,14 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
     assert restored.experiment_id == record.manifest.experiment_id
 
     tombstone = EvaluationTombstone(record.experiment_id, "owner", record.request_digest,
-        record.idempotency_key_digest, record.manifest_digest, NOW)
-    cleanup = EvaluationCleanupRecord(record.experiment_id, "owner", (), NOW)
+        record.idempotency_key, record.manifest_digest, NOW)
+    cleanup = EvaluationCleanupRecord(record.experiment_id, "owner", (), NOW, ("v1/input-capture/task/owned",))
     for value, wire_id, fields in (
         (tombstone, "evaluation_tombstone", {
             "evaluation_id": record.experiment_id,
             "owner_principal_id": "owner",
             "request_digest": record.request_digest,
-            "idempotency_key_digest": record.idempotency_key_digest,
+            "idempotency_key": record.idempotency_key,
             "manifest_digest": record.manifest_digest,
             "deleted_at": {"$datetime": NOW.isoformat()},
         }),
@@ -126,11 +126,37 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
             "owner_principal_id": "owner",
             "objects": {"$tuple": []},
             "created_at": {"$datetime": NOW.isoformat()},
+            "capture_keys": {"$tuple": ["v1/input-capture/task/owned"]},
         }),
     ):
         wire = {"$dataclass": wire_id, "fields": fields}
         assert encode_domain(value) == wire
         assert decode_domain(wire, type(value)) == value
+
+
+@pytest.mark.parametrize("kind", ("record", "tombstone", "human_decision"))
+def test_evaluation_replay_keys_preserve_bytes_and_stay_out_of_repr(kind: str) -> None:
+    key = "界" * 85 + "x"
+    record = replace(experiment(), idempotency_key=key)
+    values = {
+        "record": record,
+        "tombstone": EvaluationTombstone(record.experiment_id, "owner", record.request_digest,
+            key, record.manifest_digest, NOW),
+        "human_decision": EvaluationHumanDecision("score:trial", "decision", PRINCIPAL, NOW,
+            record.request_digest, key, ScoreBundle(dimensions={"quality": 1.0})),
+    }
+    value = values[kind]
+    assert key not in repr(value)
+    assert encode_domain(value)["fields"]["idempotency_key"] == key
+    assert decode_domain(encode_domain(value), type(value)).idempotency_key == key
+    with pytest.raises(ValueError, match="evaluation idempotency key is invalid"):
+        replace(value, idempotency_key=key + "x")
+    payload = _encode_persisted_domain(value)
+    payload["fields"]["idempotency_key"] = key + "x"
+    envelope = encode_envelope({"type": payload["$dataclass"], "payload": payload})
+    with pytest.raises(AIError) as invalid:
+        _decode_enveloped_domain(envelope, type(value))
+    assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
@@ -149,7 +175,7 @@ async def test_dataset_publication_and_slot_arbitration_are_backend_atomic(backe
         assert await repository.dataset_owner(dataset.ref) == "owner"
         with pytest.raises(AIError) as conflict:
             await repository.publish_dataset(dataset, (replace(case, input=TaskCaseInput(input={"value": 2})),),
-                idempotency=replace(receipt, idempotency_key_digest="e" * 64), owner_principal_id="owner")
+                idempotency=replace(receipt, idempotency_key="e" * 64), owner_principal_id="owner")
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert await repository.get_case(case.ref) == case
         assert await storage.evaluation.idempotency.get(receipt.scope, "e" * 64, tenant_id="tenant") is None
@@ -312,3 +338,39 @@ async def test_content_purge_persists_terminal_disposition_projections(backend: 
         ) for item in record.dispositions)
     finally:
         await storage.close()
+
+
+@pytest.mark.parametrize("kind,identity,record_identity", (
+    ("evaluation_dataset", ["数" * 42 + "ab", (1 << 63) - 1],
+     ("数" * 42 + "ab", str((1 << 63) - 1))),
+    ("evaluation_case", ["d" * 128, "c" * 128, 1], ("d" * 128, "c" * 128, "1")),
+    ("evaluation_evidence", "e" * 128, ("e" * 128,)),
+    ("evaluation_report", "r" * 128, ("r" * 128,)),
+    ("evaluation_comparison", "c" * 128, ("c" * 128,)),
+))
+def test_content_tombstone_owner_boundaries_round_trip(
+    kind: str, identity: JsonValue, record_identity: tuple[str, ...],
+) -> None:
+    value = EvaluationContentTombstone(kind, identity, "owner", "a" * 64, NOW)
+    restored = decode_domain(encode_domain(value), EvaluationContentTombstone)
+    assert restored == value
+    assert restored.identity == identity
+    assert restored.record_identity == record_identity
+
+
+@pytest.mark.parametrize("kind,identity", (
+    ("unknown", "id"),
+    ("evaluation_dataset", ["dataset"]),
+    ("evaluation_dataset", ["dataset", True]),
+    ("evaluation_dataset", ["dataset", 0]),
+    ("evaluation_case", ["dataset", "case", 1 << 63]),
+    ("evaluation_case", ["dataset", "数" * 43, 1]),
+    ("evaluation_report", ["report"]),
+))
+def test_content_tombstone_reader_rejects_invalid_owner_identity(kind: str, identity: JsonValue) -> None:
+    value = EvaluationContentTombstone("evaluation_dataset", ["dataset", 1], "owner", "a" * 64, NOW)
+    encoded = encode_domain(value)
+    encoded["fields"]["kind"] = kind
+    encoded["fields"]["identity"] = identity
+    with pytest.raises(AIError):
+        decode_domain(encoded, EvaluationContentTombstone)

@@ -87,6 +87,15 @@ class AtomicStepStore(Protocol):
 
 
 @runtime_checkable
+class CapturingStepStore(Protocol):
+    """Freeze an SDK checkpoint before any asynchronous publication can mutate it."""
+
+    def capture_snapshot(self, snapshot: ContinuableSnapshot) -> ContinuableSnapshot:
+        """Return a snapshot whose messages remain immutable through commit."""
+        ...
+
+
+@runtime_checkable
 class RuntimeStepBoundaryStore(Protocol):
     """Native records bound to Runtime's leaf-owned effects and control fence."""
 
@@ -295,7 +304,7 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
     _atomic_start_published: bool = field(default=False, init=False, repr=False)
     _atomic_event_sequence: int = field(default=0, init=False, repr=False)
     _atomic_snapshot_sequence: int = field(default=0, init=False, repr=False)
-    _atomic_last_snapshot_messages: list[ModelMessage] | None = field(
+    _atomic_last_snapshot_messages: Sequence[ModelMessage] | None = field(
         default=None, init=False, repr=False
     )
     _atomic_last_snapshot_step: int | None = field(default=None, init=False, repr=False)
@@ -395,10 +404,10 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
     ) -> ContinuableSnapshot:
         snapshot_index = self._atomic_snapshot_sequence
         self._atomic_snapshot_sequence += 1
-        return ContinuableSnapshot(
+        snapshot = ContinuableSnapshot(
             run_id=self._atomic_effective_run_id(ctx),
             step_index=step_index,
-            messages=deepcopy(messages),
+            messages=messages,
             conversation_id=ctx.conversation_id,
             parent_run_id=self.parent_run_id,
             agent_name=self.agent_name,
@@ -406,6 +415,9 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
             state=state,
             idempotency_key=f"{snapshot_index}:{step_index}:{state}",
         )
+        if isinstance(self.store, CapturingStepStore):
+            return self.store.capture_snapshot(snapshot)
+        return replace(snapshot, messages=deepcopy(messages))
 
     async def _atomic_commit(
         self,
@@ -442,7 +454,8 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
         self, ctx: RunContext[AgentDepsT], snapshot: ContinuableSnapshot
     ) -> None:
         # Rebuild on durable replay, but never advance before commit confirmation.
-        self._atomic_last_snapshot_messages = deepcopy(snapshot.messages)
+        self._atomic_last_snapshot_messages = (snapshot.messages if isinstance(self.store, CapturingStepStore)
+                                               else deepcopy(snapshot.messages))
         self._atomic_last_snapshot_step = snapshot.step_index
         await ctx.emit(
             SnapshotSaved(
@@ -657,4 +670,4 @@ class StepBoundaryCapabilities(CombinedCapability[AgentDepsT]):
         return rebound
 
 
-__all__ = ["AtomicStepPersistence", "AtomicStepStore", "RuntimeStepBoundaryStore", "StepBoundaryCapabilities", "StepRunRegistration"]
+__all__ = ["CapturingStepStore", "AtomicStepPersistence", "AtomicStepStore", "RuntimeStepBoundaryStore", "StepBoundaryCapabilities", "StepRunRegistration"]

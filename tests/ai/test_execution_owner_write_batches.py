@@ -183,8 +183,8 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
                 target = next(item for item in replacements if item.record.kind == member)
                 table = transaction._table("ai_state_records")
                 await transaction._execute(update(table).where(
-                    table.c.store_digest == transaction._store_hex,
-                    table.c.key_digest == target.record.key_digest.hex(),
+                    table.c.store_key == transaction._store_key,
+                    table.c.key == target.record.key,
                 ).values(storage_revision=target.expected_storage_revision + 1))
                 conflicts.append(member)
             return await original(transaction, replacements)
@@ -241,7 +241,7 @@ async def test_terminal_updates_single_control_and_idempotency_without_extra_gua
     try:
         await _seed(state, current)
         repository = state.execution.executions
-        execution_key = repository._key("execution", current.execution_id)
+        execution_key = repository._key("execution", (current.execution_id,))
         commands = StateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
         guard = _SqlTransaction.guard_record
         execute = _SqlTransaction._execute
@@ -254,7 +254,7 @@ async def test_terminal_updates_single_control_and_idempotency_without_extra_gua
 
         async def record_execute(transaction, statement, parameters=None):
             if getattr(statement, "is_update", False) and isinstance(parameters, list):
-                writes.extend(("member", bytes.fromhex(value["_replacement_key"])) for value in parameters)
+                writes.extend(("member", value["_replacement_key"]) for value in parameters)
             return await execute(transaction, statement, parameters)
 
         with monkeypatch.context() as patch:
@@ -348,13 +348,13 @@ async def test_read_committed_terminal_and_tool_guard_contend_on_single_executio
     try:
         await _seed(state, current)
         repository = state.execution.executions
-        execution_key = repository._key("execution", current.execution_id)
+        execution_key = repository._key("execution", (current.execution_id,))
         commands = StateCommands(repository, namespace="owner-lock-order", events=state.execution.events, background_tasks=set())
         original = _SqlTransaction.guard_record
         original_replace = _SqlTransaction.replace_records
 
         async def replace_terminal(transaction, replacements):
-            if any(item.record.key_digest == execution_key for item in replacements):
+            if any(item.record.key == execution_key for item in replacements):
                 terminal_guard_started.set()
             return await original_replace(transaction, replacements)
 

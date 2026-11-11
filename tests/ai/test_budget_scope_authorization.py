@@ -123,7 +123,7 @@ async def test_graph_scope_missing_or_changed_limits_rejects_without_writes(budg
         for record in records:
             value = _decode_enveloped_domain(record.data, type(usage))
             if value.scope_id == "graph:owned":
-                assert await transaction.delete_record(record.key_digest)
+                assert await transaction.delete_record(record.key)
                 if corruption == "limits":
                     payload = encode_domain(replace(value, limits=RunBudget(model_requests=21)))
                     await transaction.insert_record(replace(record, data=encode_envelope(payload)))
@@ -171,7 +171,7 @@ async def test_retry_authorizes_retained_source_after_budget_root_is_retired(bud
         for record in await transaction.list_records(RecordQuery(kind="execution")):
             execution = _decode_enveloped_domain(record.data, ExecutionRecord)
             if execution.execution_id == root.execution_id:
-                assert await transaction.delete_record(record.key_digest)
+                assert await transaction.delete_record(record.key)
                 return
         raise AssertionError("root execution missing from fixture")
 

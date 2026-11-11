@@ -19,7 +19,7 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.persistence import Persistence
 from linktools.ai.core import (
     ExecutionStatus, OperationKind, OperationLedgerInput, OperationStatus,
-    ResourceKind, SessionStatus, agent_conversation_id, idempotency_key_digest,
+    ResourceKind, SessionStatus, agent_conversation_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
@@ -90,7 +90,7 @@ async def _flush_started_model(
 
 
 async def _receipt(state: Persistence, key: str):
-    return await state.execution.operations.get(idempotency_key_digest(key), tenant_id="default")
+    return await state.execution.operations.get(key, tenant_id="default")
 
 
 async def _recover(runtime: Runtime, execution_id: str, key: str):

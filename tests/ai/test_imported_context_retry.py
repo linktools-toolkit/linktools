@@ -27,7 +27,7 @@ from .test_captured_execution_context import _NoToolsModels
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("metadata_size", [16, 80_000], ids=["inline", "object"])
+@pytest.mark.parametrize("metadata_size", [16, 80_000], ids=["small", "large"])
 @pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
 async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, metadata_size: int, trace: bool) -> None:
     group = RuntimeFeatures("retry-context")
@@ -57,7 +57,11 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
             object_store=runtime._state.archive_object_store(PersistenceDomain.EXECUTION),
         )
         note, = await archive.content_records((manifest["session_metadata"]["note"]["content_id"],))
-        assert note.payload.kind == ("inline" if metadata_size == 16 else "object")
+        assert note.payload is None and isinstance(note.body, bytes)
+        assert note.object_refs() == ()
+        raw_note, = await archive.read_contents((note.identity,), codec="json")
+        from linktools.ai.core import canonical_json_bytes
+        assert raw_note == canonical_json_bytes("x" * metadata_size)
         source_id = source.execution_id
     async with Persistence.open('retry-context', storage=storage) as persistence_57, Runtime.attach(persistence=persistence_57, features=model_features(_NoToolsModels(), group)) as runtime:
         source = await runtime.executions.get(source_id, principal=principal)

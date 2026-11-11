@@ -25,7 +25,7 @@
                 },
                 "schema": 1
               },
-              "operation_id": "75490bd7b93e6fa7d18cfdea90cc6bcb983d5f3ea326249d2709ca6c94bc07ba",
+              "operation_id": "submit",
               "principal": {
                 "$dataclass": "principal",
                 "fields": {
@@ -249,7 +249,7 @@
         "fields": {
           "graph_id": "structured",
           "namespace": "structured-identity",
-          "operation_id": "75490bd7b93e6fa7d18cfdea90cc6bcb983d5f3ea326249d2709ca6c94bc07ba",
+          "operation_id": "submit",
           "principal": {
             "$dataclass": "principal",
             "fields": {
@@ -267,7 +267,6 @@
       "type": "task_submission_ref"
     }
   },
-  "source_commit": "f9a475d6823b7c355bd3f61ec17494cd1e523a1a",
   "submission": {
     "$dataclass": "task_graph_submission",
     "fields": {
@@ -290,7 +289,7 @@
               "max_nodes": 128
             }
           },
-          "operation_id": "75490bd7b93e6fa7d18cfdea90cc6bcb983d5f3ea326249d2709ca6c94bc07ba",
+          "operation_id": "submit",
           "principal": {
             "$dataclass": "principal",
             "fields": {

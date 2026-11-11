@@ -9,7 +9,6 @@ import pytest
 from linktools.ai.errors import AIError
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import ContentArchive, PreparedArchive
-from linktools.ai.storage import StoredPayload
 from .test_incremental_projection_boundaries import _storage
 from .test_shared_content_archive import _archive, _publish
 
@@ -62,7 +61,7 @@ async def test_observation_still_checks_corrupt_body_and_does_not_propagate(tmp_
         keys = archive.content_record_keys(values)
         records = await archive.store.read_records(keys)
         original = records[keys[0]]
-        corrupt = replace(original, data={**original.data, "payload": StoredPayload.inline_bytes(b"bad").to_json()})
+        corrupt = replace(original, payload_bytes=b"bad")
         prepared = PreparedArchive()
         archive.observe_content(prepared, keys, {keys[0]: corrupt})
         with pytest.raises(AIError):

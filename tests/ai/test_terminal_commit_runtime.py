@@ -18,7 +18,7 @@ from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Runtime
-from linktools.ai.persistence import PersistenceStorage
+from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
@@ -47,15 +47,17 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
+        cleanups = []
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
-            commits.append(kwargs.get('domain'))
+            domain = kwargs.get("domain")
+            (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
         execution = await session.start('first', idempotency_key='first')
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            assert commits == []
+            assert commits == cleanups == []
             assert await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
             assert (await runtime.executions.inspect(execution.execution_id, principal=runtime.default_principal)).status is ExecutionStatus.STARTED
             same = await session.start('first', idempotency_key='first')
@@ -79,18 +81,30 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {'text': 'answer'}
         assert len(commits) == 1
-        assert set(commits[0].removeprefix('runtime.state.group[').removesuffix(']').split(',')) == {'execution', 'conversation', 'group_internal'}
+        assert len(cleanups) <= 1
         stored = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert stored is not None and stored.retention_closed and stored.conversation
+        committed_session = await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)
+        assert committed_session is not None and committed_session.active_execution_id is None
+        assert committed_session.continuation is not None and committed_session.history_id is not None
+        archive = persistence_43.run_store.read_store(PersistenceDomain.CONVERSATION)
+        messages = [message async for message in archive.iter_session_messages(
+            committed_session.history_id, tenant_id=runtime.tenant_id,
+        )]
+        assert [part.content for message in messages for part in message.parts
+                if isinstance(part, (UserPromptPart, TextPart))] == ['first', 'answer']
+        total = (len(commits), len(cleanups))
         replay = await session.start('first', idempotency_key='first')
         assert replay.execution_id == execution.execution_id
         assert (await replay.wait()).result.output == result.output
+        assert (len(commits), len(cleanups)) == total
         assert len(calls) == 1
         second = await session.start('second', idempotency_key='second')
         assert (await second.wait()).result.status is ExecutionStatus.SUCCEEDED
         assert len(calls) == 2
         assert [part.content for message in calls[-1] for part in message.parts if isinstance(part, UserPromptPart)] == ['first', 'second']
         assert len(commits) == 2
+        assert len(cleanups) <= 2
         assert commits[0] == commits[1]
     async with Persistence.open('pending', storage=PersistenceStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))) as persistence_92, Runtime.attach(persistence=persistence_92, features=model_features(_Models(_UsageFunctionModel(model)), group)) as reopened:
         replay = await reopened.agents.get().session('session').start('first', idempotency_key='first')
@@ -124,9 +138,11 @@ async def test_strict_effect_promotes_but_idempotent_tool_stays_pending(
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
+        cleanups = []
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
-            commits.append(kwargs.get('domain'))
+            domain = kwargs.get("domain")
+            (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
         execution = await session.start('question')
@@ -136,9 +152,11 @@ async def test_strict_effect_promotes_but_idempotent_tool_stays_pending(
         if effect_policy != 'non_replay_safe':
             assert calls == [None]
             assert len(commits) == 1
+            assert len(cleanups) <= 1
         else:
             assert calls[0] is not None and calls[0].status is ExecutionStatus.STARTED
             assert len(commits) > 1
+            assert len(cleanups) <= len(commits)
 
 
 @pytest.mark.asyncio
@@ -241,23 +259,29 @@ async def test_pending_sessionless_agent_commits_once(tmp_path: Path, monkeypatc
     group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     commits = []
+    cleanups = []
     async def model(messages, info):
-        assert commits == []
+        assert commits == cleanups == []
         return ModelResponse(parts=[TextPart('answer')])
     state = PersistenceStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024), coordination=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Persistence.open('standalone-pending', storage=state) as persistence_245, Runtime.attach(persistence=persistence_245, features=model_features(_Models(_UsageFunctionModel(model)), group)) as runtime:
         original = SqlStorageContext.run_mutation
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
-            commits.append(kwargs.get('domain'))
+            domain = kwargs.get("domain")
+            (cleanups if domain == "native.content_cleanup" else commits).append(domain)
             return result
         monkeypatch.setattr(SqlStorageContext, 'run_mutation', count)
         execution = await runtime.agents.get().start('question', idempotency_key='request')
         assert (await execution.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
         assert len(commits) == 1
+        assert len(cleanups) <= 1
+        total = (len(commits), len(cleanups))
         replay = await runtime.agents.get().start('question', idempotency_key='request')
         assert replay.execution_id == execution.execution_id
+        assert (len(commits), len(cleanups)) == total
         assert len(commits) == 1
+        assert len(cleanups) <= 1
 
 
 @pytest.mark.asyncio

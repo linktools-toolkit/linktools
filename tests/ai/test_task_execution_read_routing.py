@@ -56,7 +56,7 @@ async def test_task_inspect_uses_one_authorized_storage_read(
     try:
         record = await _seed(state)
         repository = state.execution.executions
-        get = repository.get_fresh
+        get = repository.get_view_fresh
         reads = []
         statements = []
         transactions = {"begin": 0, "commit": 0}
@@ -65,7 +65,7 @@ async def test_task_inspect_uses_one_authorized_storage_read(
             reads.append((args, kwargs))
             return await get(*args, **kwargs)
 
-        monkeypatch.setattr(repository, "get_fresh", tracked_get)
+        monkeypatch.setattr(repository, "get_view_fresh", tracked_get)
         engine = repository.state_store.storage_group.context.engine.sync_engine if backend == "sqlite" else None
 
         def capture(connection, cursor, statement, parameters, context, many):
@@ -94,7 +94,7 @@ async def test_task_inspect_uses_one_authorized_storage_read(
         assert view.status is ExecutionStatus.STARTED
         assert view.root_execution_id == record.root_execution_id
         selects = sum(sql.lstrip().upper().startswith("SELECT") for sql in statements)
-        print({"backend": backend, "registered": registered, "get_fresh": len(reads),
+        print({"backend": backend, "registered": registered, "get_view_fresh": len(reads),
                "select": selects, **transactions})
         assert len(reads) == 1
         assert selects <= 1
@@ -189,7 +189,7 @@ async def test_agent_inspect_requires_both_authorities_and_returns_producer_view
                 return producer_view
 
         key = "execution" if route == "direct" else "root"
-        ports = {key: SimpleNamespace(service=Producer())} if denial != "missing" else {"unrelated": object()}
+        ports = {key: Producer()} if denial != "missing" else {"unrelated": object()}
         reads = TaskExecutionReads(_service(state, authorization=Authorization()), ports)
         if denial == "none":
             assert await reads.inspect("execution", principal=_PRINCIPAL) is producer_view
@@ -270,7 +270,7 @@ async def test_noninspect_reads_call_selected_service_operation(
             return marker
 
         monkeypatch.setattr(selected, method, operation, raising=False)
-        ports = {"execution": SimpleNamespace(service=selected)}
+        ports = {"execution": selected}
         reads = TaskExecutionReads(service, ports)
         kwargs = {"timeout_seconds": 0.25} if method == "wait" else {}
         assert await getattr(reads, method)("execution", principal=_PRINCIPAL, **kwargs) is marker

@@ -17,7 +17,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import CaptureInputRequest
 from linktools.ai.runtime import Runtime
 from linktools.ai.persistence import PersistenceStorage
-from linktools.ai.persistence import PersistenceDomain
+from linktools.ai.inputs import _input_capture as capture_module
+from linktools.ai.persistence.state import StateStore, StoredRecord
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskRef
 from .test_task_mixed_node_reliability import _TaskTestModels
 
@@ -41,19 +42,19 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
     async with Persistence.open('capture', storage=storage) as persistence_38, Runtime.attach(persistence=persistence_38, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_38, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         entered = asyncio.Event()
 
-        async def interrupted_put(key, *args, **kwargs):
-            if key.startswith("v1/input-capture/invocation/"):
+        async def interrupted_publish(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/"):
                 entered.set()
                 if cancel_write:
                     await asyncio.Event().wait()
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
-        monkeypatch.setattr(objects, "put", interrupted_put)
+        monkeypatch.setattr(capture_module, "publish_capture_record", interrupted_publish)
         engine = runtime_engine.with_definitions(task)
         graph = TaskGraph("capture", (TaskNode("work", task=TaskRef.deferred_input() if deferred else task),))
         run = await engine.start(graph, principal=principal, idempotency_key="capture")
@@ -77,7 +78,7 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
             await runtime_engine.inputs.capture_input(state.execution_id,
                 CaptureInputRequest(principal, "failed-input"))
         assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
-        monkeypatch.setattr(objects, "put", original_put)
+        monkeypatch.setattr(capture_module, "publish_capture_record", original_publish)
         await run.cancel(idempotency_key="cancel-again")
         same = await engine.start(graph, principal=principal, idempotency_key="capture")
         assert (await same.state()).node_states[0].execution_id == state.execution_id
@@ -106,21 +107,21 @@ async def test_invocation_capture_failed_cleanup_retains_recoverable_execution(
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
     async with Persistence.open('capture', storage=storage) as persistence_103, Runtime.attach(persistence=persistence_103, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_103, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         original_cancel = runtime_engine._execution_service.cancel_task
         cleanup_failed = asyncio.Event()
 
-        async def failed_put(key, *args, **kwargs):
-            if key.startswith("v1/input-capture/invocation/"):
+        async def failed_publish(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/"):
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
         async def failed_cancel(*args, **kwargs):
             cleanup_failed.set()
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
-        monkeypatch.setattr(objects, "put", failed_put)
+        monkeypatch.setattr(capture_module, "publish_capture_record", failed_publish)
         monkeypatch.setattr(runtime_engine._execution_service, "cancel_task", failed_cancel)
         run = await runtime_engine.with_definitions(task).start(
             TaskGraph("capture", (TaskNode("work", task=task),)),
@@ -142,7 +143,7 @@ async def test_invocation_capture_failed_cleanup_retains_recoverable_execution(
             await runtime_engine.inputs.capture_input(state.execution_id,
                 CaptureInputRequest(principal, "capture-recovered", "clean"))
         assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
-        monkeypatch.setattr(objects, "put", original_put)
+        monkeypatch.setattr(capture_module, "publish_capture_record", original_publish)
         monkeypatch.setattr(runtime_engine._execution_service, "cancel_task", original_cancel)
         assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.RECOVERY_REQUIRED
         if cancel_recovery:
@@ -183,28 +184,28 @@ async def test_invocation_capture_repeated_cancellation_waits_for_cleanup(
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
     async with Persistence.open('capture', storage=storage) as persistence_180, Runtime.attach(persistence=persistence_180, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_180, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         original_cancel = runtime_engine._execution_service.cancel_task
         entered = asyncio.Event()
         cleanup_entered = asyncio.Event()
         release_cleanup = asyncio.Event()
         capture_owner = None
 
-        async def pending_put(key, *args, **kwargs):
+        async def pending_publish(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
             nonlocal capture_owner
-            if key.startswith("v1/input-capture/invocation/"):
+            if store is capture_state and key.startswith("v1/input-capture/invocation/"):
                 capture_owner = asyncio.current_task()
                 entered.set()
                 await asyncio.Event().wait()
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
         async def pending_cancel(*args, **kwargs):
             cleanup_entered.set()
             await release_cleanup.wait()
             return await original_cancel(*args, **kwargs)
 
-        monkeypatch.setattr(objects, "put", pending_put)
+        monkeypatch.setattr(capture_module, "publish_capture_record", pending_publish)
         monkeypatch.setattr(runtime_engine._execution_service, "cancel_task", pending_cancel)
         run = await runtime_engine.with_definitions(task).start(
             TaskGraph("capture", (TaskNode("work", task=task),)),
@@ -259,20 +260,21 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
     consumer = Task("capture.consumer", consume, normalize=normalize, effect_policy="none")
     candidate = Task("capture.candidate", consume, normalize=reproject, effect_policy="none")
     async with Persistence.open('callable-ready', storage=storage) as persistence_256, Runtime.attach(persistence=persistence_256, features=model_features(_TaskTestModels())) as runtime, TaskEngine.open(persistence=persistence_256, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
-        objects = runtime._state.object_store(PersistenceDomain.TASK)
-        original_put = objects.put
+        capture_state = runtime._state.task.tasks.state_store
+        original_publish = capture_module.publish_capture_record
         entered, release = asyncio.Event(), asyncio.Event()
 
-        async def pause_invocation(key: str, *args: object, **kwargs: object) -> object:
-            if key.startswith("v1/input-capture/invocation/") and producer_ran.is_set():
-                result = await original_put(key, *args, **kwargs) if invocation_written else None
+        async def pause_invocation(store: StateStore, *, key: str, **kwargs: object) -> StoredRecord:
+            if store is capture_state and key.startswith("v1/input-capture/invocation/") and producer_ran.is_set():
+                result = await original_publish(store, key=key, **kwargs) if invocation_written else None
                 entered.set()
                 await release.wait()
                 if invocation_written:
+                    assert result is not None
                     return result
-            return await original_put(key, *args, **kwargs)
+            return await original_publish(store, key=key, **kwargs)
 
-        monkeypatch.setattr(objects, "put", pause_invocation)
+        monkeypatch.setattr(capture_module, "publish_capture_record", pause_invocation)
         engine = runtime_engine.with_definitions(producer, consumer, candidate)
         run = await engine.start(TaskGraph("source", (
             TaskNode("source", task=producer),
@@ -293,7 +295,7 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
         finally:
             release.set()
         assert (await run.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
-        monkeypatch.setattr(objects, "put", original_put)
+        monkeypatch.setattr(capture_module, "publish_capture_record", original_publish)
         capture = await runtime_engine.inputs.capture_input(execution.execution_id, request)
         assert await runtime_engine.inputs.capture_input(execution.execution_id, request) == capture
         if invocation_written:

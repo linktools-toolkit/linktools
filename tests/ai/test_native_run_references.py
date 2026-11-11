@@ -125,7 +125,7 @@ async def test_later_confirmation_removes_inline_duplicate_without_reordering_ev
         await _flush(state, step=1)
         after = await _raw_run(archive)
         assert is_native_run_reference(after.data)
-        assert after.key_digest == before.key_digest
+        assert after.key == before.key
         assert await archive.get_agent_run(agent_run_id="run") == run
         assert [item.step_index for item in await archive.list_events(agent_run_id="run")] == [0, 1]
         assert (await archive.capture_history(("run",)))["run"].event_count == 2
@@ -179,7 +179,7 @@ async def test_native_run_reference_fails_closed_when_source_is_missing_or_chang
         table = build_step_sql_metadata().tables["ai_step_runs"]
         async with native.storage_context.engine.begin() as connection:
             statement = delete(table) if missing else update(table).values(metadata='{"changed":"source"}')
-            await connection.execute(statement.where(table.c.store_digest == native.store_digest))
+            await connection.execute(statement.where(table.c.store_key == native.store_key))
         with pytest.raises(AIError) as caught:
             await archive.get_agent_run(agent_run_id="run")
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -305,7 +305,7 @@ async def test_native_reference_cannot_redirect_trace_to_another_tenant(tmp_path
             await foreign.register_run(source)
             table = build_step_sql_metadata().tables["ai_step_runs"]
             async with native.storage_context.engine.begin() as connection:
-                await connection.execute(delete(table).where(table.c.store_digest == native.store_digest))
+                await connection.execute(delete(table).where(table.c.store_key == native.store_key))
             with pytest.raises(AIError) as caught:
                 await archive.get_agent_run(agent_run_id="run")
             assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -322,7 +322,7 @@ async def test_native_projection_checks_reused_fields_but_retains_runtime_overri
         table = build_step_sql_metadata().tables["ai_step_runs"]
         metadata = {**source.metadata, key: "changed"}
         async with native.storage_context.engine.begin() as connection:
-            await connection.execute(update(table).where(table.c.store_digest == native.store_digest)
+            await connection.execute(update(table).where(table.c.store_key == native.store_key)
                                      .values(metadata=json.dumps(metadata)))
         if key == "shared":
             with pytest.raises(AIError) as caught:
@@ -497,7 +497,7 @@ def test_native_join_preserves_full_record_key_bind_budget(dialect_name: str) ->
     from linktools.ai.persistence._native_run_reference import NativeRunReferences
 
     dialect = {"sqlite": sqlite, "postgresql": postgresql, "mysql": mysql}[dialect_name].dialect()
-    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect), store_digest=b"a" * 32)
+    state = SimpleNamespace(context=SimpleNamespace(dialect=dialect), store_key=b"state-partition")
     reader = NativeRunReferences(state, namespace="native-run-facts", tenant_id="tenant")
     keys = tuple(index.to_bytes(32, "big") for index in range(998))
     compiled = reader.statement(keys=keys).compile(dialect=dialect, compile_kwargs={"render_postcompile": True})

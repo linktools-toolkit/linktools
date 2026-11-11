@@ -9,11 +9,10 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy, deepcopy
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from itertools import groupby
 from typing import TYPE_CHECKING
-from uuid import uuid4
-from weakref import WeakKeyDictionary, WeakSet
+from weakref import WeakKeyDictionary, WeakSet, ref
 
 from pydantic import TypeAdapter
 from pydantic_ai.messages import ModelMessage
@@ -27,9 +26,11 @@ from pydantic_ai_harness.step_persistence import (
 
 from linktools.core import environ
 
+from ..core import validate_resource_id
 from ..errors import AIError, ErrorCode
-from ..storage import SqlStorageContext, create_sql_storage_context, namespace_digest
+from ..storage import SqlStorageContext, create_sql_storage_context
 from ._archive import ContentArchive, ContentRecord, PreparedArchive
+from ..model.attachments import read_attachment_payload
 from ._archive_closure import NativeMessageClosure, validate_native_message_content
 from ._message_root import NativeMessageRoot, NativeMessageSequence, NativeMessageSlice
 from ._step_message_content import (
@@ -39,13 +40,16 @@ from ._step_message_content import (
 from ._transcript_staging import MessageArchive, MessageSnapshot
 from ._payload import encode_payload_bytes, decode_payload_bytes
 from ..model.messages import combine_model_message_payloads, decode_model_message_payloads, encode_model_messages
-from ..storage import StoredPayload
 from ._native_checkpoint import NativeCheckpoint
 from ._step_backup import NativeStepBackup
 from ._step_maintenance import StepContentCleanupResult, purge_step_content
 from ._step_schema import build_step_sql_metadata
 from .state import SqlStateTransaction, SqlMutationObserver, StateStore, StateTransaction, SqlStateRowReader
-from ..steps import NativeLifecycleEvent, NativeStepSource
+from ..steps import (
+    NativeLifecycleEvent, NativeStepSource, validate_native_step_ids, native_store_key,
+    validate_native_store_key, validate_native_replay_key, encode_native_replay_key,
+    decode_native_replay_key, encode_native_store_key,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
@@ -68,7 +72,7 @@ _RUN_CACHE_SIZE = 128
 _RUN_CACHE_BYTES = 1024 * 1024
 _EVENT_RUN_FIELDS = ("conversation_id", "parent_run_id", "agent_name", "metadata")
 _EVENT_SOURCE_COLUMNS = tuple(field.name for field in fields(StepEvent)) + (
-    "outcome", "store_digest", "run_digest", "key_digest", "run_fields", "body_sha256", "fields_sha256",
+    "outcome", "store_key", "run_fields", "body_sha256", "fields_sha256",
 )
 
 
@@ -77,7 +81,7 @@ class _RunFields:
     """Detached native fields from a successful insert or an existing run read."""
 
     engine: "AsyncEngine"
-    store_digest: str
+    store_key: bytes = field(repr=False)
     run_id: str
     registration_id: str | None
     started_at: str
@@ -90,9 +94,9 @@ class _RunFields:
     def from_row(cls, row: "Mapping[str, SqlValue]", *, engine: "AsyncEngine") -> "_RunFields":
         values = tuple(row[name] for name in _EVENT_RUN_FIELDS)
         byte_size = sum(len(value.encode("utf-8")) for value in (
-            row["store_digest"], row["run_id"], row["registration_id"], row["started_at"], *values,
-        ) if isinstance(value, str))
-        return cls(engine, row["store_digest"], row["run_id"], row["registration_id"], row["started_at"], values, byte_size)
+            row["store_key"], row["run_id"], row["registration_id"], row["started_at"], *values,
+        ) if isinstance(value, str)) + len(row["store_key"])
+        return cls(engine, row["store_key"], row["run_id"], row["registration_id"], row["started_at"], values, byte_size)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +150,7 @@ class SqlStepStore:
         max_snapshots_per_run: int | None = None,
         max_cached_messages: int = 4096,
     ) -> None:
-        store_digest = self.scope_digest(namespace=namespace, tenant_id=tenant_id)
+        store_key = self.scope_key(namespace=namespace, tenant_id=tenant_id)
         if max_snapshots_per_run is not None and (
             not isinstance(max_snapshots_per_run, int) or max_snapshots_per_run < 1
         ):
@@ -156,19 +160,20 @@ class SqlStepStore:
         self._context = engine if isinstance(engine, SqlStorageContext) else create_sql_storage_context(engine)
         self._owns_context = not isinstance(engine, SqlStorageContext)
         self._metadata = build_step_sql_metadata()
-        self._store_digest = store_digest
+        self._store_key = store_key
         self._tool_effect_store = tool_effect_store
         self._max_snapshots_per_run = max_snapshots_per_run
         self._initialized = False
         self._max_cached_messages = max_cached_messages
         self._confirmed_messages: OrderedDict[str, None] = OrderedDict()
         self._confirmed_sequences: OrderedDict[str, None] = OrderedDict()
-        self._message_content = NativeMessageContent(self._context, store_digest=store_digest,
+        self._message_content = NativeMessageContent(self._context, store_key=store_key,
             max_cached_messages=max_cached_messages, max_cached_nodes=max_cached_messages)
         self._message_archive: ContentArchive | None = None
         self._message_proofs: OrderedDict[NativeMessageSequence, CommittedNativeMessages] = OrderedDict()
         self._message_integrity: OrderedDict[NativeMessageSequence, tuple[str, int]] = OrderedDict()
-        self._prepared_integrity: WeakKeyDictionary[PreparedNativeMessages, tuple[str, int]] = WeakKeyDictionary()
+        self._message_snapshots: dict[NativeMessageSequence, MessageSnapshot] = {}
+        self._prepared_messages: WeakKeyDictionary[PreparedNativeMessages, MessageSnapshot] = WeakKeyDictionary()
         self._message_inputs: OrderedDict[str, tuple[str, int, int, NativeMessageSequence]] = OrderedDict()
         self._frozen_messages = MessageArchive()
         self._confirmed_runs: OrderedDict[str, _RunFields] = OrderedDict()
@@ -176,13 +181,9 @@ class SqlStepStore:
         self._receipt_sink: ContextVar[list[StepWriteReceipt] | None] = ContextVar("step_write_receipts", default=None)
 
     @classmethod
-    def scope_digest(cls, *, namespace: str, tenant_id: str) -> str:
+    def scope_key(cls, *, namespace: str, tenant_id: str) -> bytes:
         """Derive the native partition identity from its logical scope."""
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("namespace must be a non-empty string")
-        if not isinstance(tenant_id, str) or not tenant_id:
-            raise ValueError("tenant_id must be a non-empty string")
-        return namespace_digest(json.dumps([namespace, tenant_id], separators=(",", ":")))
+        return native_store_key(namespace, tenant_id)
 
     async def initialize(self, *, local: bool = False) -> None:
         """Configure the borrowed backend, optionally creating local SQLite tables."""
@@ -225,7 +226,7 @@ class SqlStepStore:
             self._confirmed_messages.clear()
             self._confirmed_sequences.clear()
             try:
-                result = await purge_step_content(self._context, self._metadata, self._store_digest,
+                result = await purge_step_content(self._context, self._metadata, self._store_key,
                     group=None if self._message_archive is None else self._message_archive.store.storage_group,
                     read_object=None if self._message_archive is None else self._message_archive.read_payload_object)
             finally:
@@ -283,11 +284,9 @@ class SqlStepStore:
         started: StepEvent | None = None,
     ) -> _RunFields:
         values = self._run_values(record.run_id) | self._record_values(record)
-        values["conversation_digest"] = _optional_digest(record.conversation_id)
-        values["parent_digest"] = _optional_digest(record.parent_run_id)
         result = await self._context.dialect.insert_ignore_conflict(
             session, table=self._table("runs"), values=values,
-            index_elements=("store_digest", "run_digest"),
+            index_elements=("store_key", "run_id"),
         )
         if not result.inserted:
             if replay and record.registration_id is not None:
@@ -302,7 +301,7 @@ class SqlStepStore:
                         )
                         source = self._with_started(source, event)
                         self._validate_started_replay(record, started, source)
-                        if row["terminal_key_digest"] is not None:
+                        if row["terminal_idempotency_key"] is not None:
                             terminal = self.decode_started_source(
                                 {name: row["terminal_" + name] for name in terminal_names}, run=row,
                             )
@@ -319,21 +318,19 @@ class SqlStepStore:
         from sqlalchemy import and_, select
 
         table, events = self._table("runs"), self._table("events")
-        query = select(table.c.store_digest, table.c.run_id, table.c.registration_id, table.c.started_at,
+        query = select(table.c.store_key, table.c.run_id, table.c.registration_id, table.c.started_at,
                        *(table.c[name] for name in _EVENT_RUN_FIELDS))
         if started is not None:
-            query = query.add_columns(table.c.run_digest,
-                *(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS))
+            query = query.add_columns(*(events.c[name].label("start_" + name) for name in _EVENT_SOURCE_COLUMNS))
             joined = table.outerjoin(events, and_(
-                events.c.key_digest == self.event_key_digest(started),
-                events.c.store_digest == table.c.store_digest, events.c.run_digest == table.c.run_digest,
+                events.c.idempotency_key == encode_native_replay_key(started.idempotency_key),
+                events.c.store_key == table.c.store_key,
                 events.c.run_id == table.c.run_id,
             ))
             terminal = events.alias("terminal")
-            key = _replay_digest(self._store_digest, _digest(record.run_id), NativeLifecycleEvent.source_key())
-            joined = joined.outerjoin(terminal, and_(terminal.c.key_digest == key,
-                terminal.c.store_digest == table.c.store_digest,
-                terminal.c.run_digest == table.c.run_digest, terminal.c.run_id == table.c.run_id))
+            joined = joined.outerjoin(terminal, and_(terminal.c.idempotency_key == encode_native_replay_key(NativeLifecycleEvent.source_key()),
+                terminal.c.store_key == table.c.store_key,
+                terminal.c.run_id == table.c.run_id))
             query = query.add_columns(*(terminal.c[name].label("terminal_" + name) for name in _EVENT_SOURCE_COLUMNS))
             query = query.select_from(joined)
         return query.where(*self._run_predicates(table, record.run_id))
@@ -360,11 +357,13 @@ class SqlStepStore:
 
         await self.initialize()
         table = self._table("runs")
-        query = select(table).where(table.c.store_digest == self._store_digest)
+        query = select(table).where(table.c.store_key == self._store_key)
         if parent_run_id is not None:
-            query = query.where(table.c.parent_digest == _digest(parent_run_id), table.c.parent_run_id == parent_run_id)
+            validate_resource_id(parent_run_id)
+            query = query.where(table.c.parent_run_id == parent_run_id)
         if conversation_id is not None:
-            query = query.where(table.c.conversation_digest == _digest(conversation_id), table.c.conversation_id == conversation_id)
+            validate_resource_id(conversation_id)
+            query = query.where(table.c.conversation_id == conversation_id)
         async with self._context.sessions() as session:
             rows = (await self._context.run_statement(session.execute(query.order_by(table.c.id)))).mappings().all()
         records = [_RUN_ADAPTER.validate_python(self._record_data(row)) for row in rows]
@@ -407,10 +406,10 @@ class SqlStepStore:
                         if candidate is not None and candidate == value:
                             row[name] = None
                             row["run_fields"] |= 1 << bit
-                row["key_digest"] = _replay_digest(self._store_digest, row["run_digest"], row["idempotency_key"])
+                row["idempotency_key"] = encode_native_replay_key(event.idempotency_key)
                 rows.append(row)
-            # An unkeyed append must fail rather than silently suppress a
-            # colliding physical occurrence identity.
+            # NULL replay keys retain insertion occurrences; managed sources
+            # must fail on conflict until their exact body is proven.
             batch_size = _BATCH_SIZE if keyed and not managed else 1
             for offset in range(0, len(rows), batch_size):
                 if not keyed or managed:
@@ -418,7 +417,7 @@ class SqlStepStore:
                     continue
                 await self._context.dialect.insert_ignore_conflict_many(
                     session, table=self._table("events"), rows=rows[offset:offset + batch_size],
-                    index_elements=("key_digest",),
+                    index_elements=("store_key", "run_id", "idempotency_key"),
                 )
 
     async def _write_lifecycle_event(
@@ -464,11 +463,11 @@ class SqlStepStore:
             columns[name] = case((referenced, runs.c[name]), else_=columns[name]).label(name)
             invalid.append(and_(referenced, or_(table.c[name].is_not(None), runs.c[name].is_(None))))
         source_columns = () if not expected else (
-            table.c.store_digest, table.c.run_digest, table.c.key_digest,
+            table.c.store_key,
         )
         registration_columns = ()
         if expected:
-            proof_key = table.c.key_digest == self.event_key_digest(expected[0])
+            proof_key = table.c.idempotency_key == encode_native_replay_key(expected[0].idempotency_key)
             registration_columns = tuple(case((proof_key, runs.c[field.name]), else_=None).label("proof_run_" + field.name)
                                          for field in fields(RunRecord))
         query = select(
@@ -476,8 +475,7 @@ class SqlStepStore:
             *source_columns, *registration_columns,
         ).select_from(table.outerjoin(runs, and_(
             *(() if expected else (table.c.run_fields != 0,)),
-            runs.c.store_digest == table.c.store_digest,
-            runs.c.run_digest == table.c.run_digest,
+            runs.c.store_key == table.c.store_key,
             runs.c.run_id == table.c.run_id,
         ))).where(*self._run_predicates(table, run_id)).order_by(table.c.id)
         async with self._context.sessions() as session:
@@ -509,6 +507,7 @@ class SqlStepStore:
 
     def confirmed_run(self, run_id: str) -> RunRecord | None:
         """Return detached committed run proof when retained, without reading SQL."""
+        validate_resource_id(run_id)
         source = self._confirmed_runs.get(run_id)
         if source is None or self._context.closed:
             return None
@@ -523,7 +522,7 @@ class SqlStepStore:
         source = receipt.run_fields
         if source is None:
             return None
-        if source.engine is not self._context.engine or source.store_digest != self._store_digest:
+        if source.engine is not self._context.engine or source.store_key != self._store_key:
             raise ValueError("run receipt belongs to another native store")
         data = dict(zip(_EVENT_RUN_FIELDS, source.values))
         data.update(run_id=source.run_id, registration_id=source.registration_id, started_at=source.started_at)
@@ -542,6 +541,7 @@ class SqlStepStore:
     def _started_fields_body(cls, event: StepEvent) -> str:
         if (event.kind != "run_started" and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
             raise ValueError("managed source requires a keyed lifecycle event")
+        validate_native_replay_key(event.idempotency_key)
         values = {field.name: getattr(event, field.name) for field in fields(event) if field.name != "metadata"}
         values["timestamp"] = event.timestamp.isoformat()
         return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -579,23 +579,18 @@ class SqlStepStore:
             if started.metadata != run.metadata or actual_start.metadata != actual_run.metadata:
                 raise ValueError("run_started replay body differs from its linked metadata source")
 
-    def event_key_digest(self, event: StepEvent) -> str:
-        """Exact native locator for a keyed event in this store's partition."""
-        if event.idempotency_key is None:
-            raise ValueError("an event locator requires an idempotency key")
-        return _replay_digest(self._store_digest, _digest(event.run_id), event.idempotency_key)
-
     def started_from_receipt(self, receipt: StepWriteReceipt) -> StepEvent | None:
         """Detach the immutable start source; outer-transaction receipts are provisional."""
         self.run_from_receipt(receipt)
         source = receipt.run_fields
         if source is None or source.started_body is None:
             return None
-        return _EVENT_ADAPTER.validate_python(json.loads(source.started_body))
+        return self.decode_event(json.loads(source.started_body))
 
     @classmethod
     def decode_event(cls, data: Mapping[str, object]) -> StepEvent:
         """Restore explicit lifecycle fields without changing ordinary upstream inputs."""
+        cls._validate_record_ids(data)
         return (_LIFECYCLE_ADAPTER if data.get("outcome") is not None else _EVENT_ADAPTER).validate_python(data)
 
     def events_from_receipt(self, receipt: StepWriteReceipt) -> tuple[StepEvent, ...]:
@@ -613,6 +608,7 @@ class SqlStepStore:
 
     def confirmed_started(self, run_id: str) -> StepEvent | None:
         """Return a retained committed start source without a SQL read."""
+        validate_resource_id(run_id)
         source = self._confirmed_runs.get(run_id)
         if source is None or self._context.closed:
             return None
@@ -626,27 +622,25 @@ class SqlStepStore:
         The caller supplies native SQL columns unchanged, including locator and
         body_sha256. This performs no query and never confirms a provisional row.
         """
-        return self.decode_started_row(event, expected_store_digest=self._store_digest, run=run)
+        return self.decode_started_row(event, expected_store_key=self._store_key, run=run)
 
     @classmethod
     def decode_started_row(
-        cls, event: Mapping[str, object], *, expected_store_digest: str,
+        cls, event: Mapping[str, object], *, expected_store_key: bytes,
         run: Mapping[str, object] | None = None,
     ) -> StepEvent:
         """Validate joined source columns without constructing or opening a store."""
         data = dict(event)
+        data["idempotency_key"] = decode_native_replay_key(data.get("idempotency_key"))
         if "outcome" not in data:
             raise ValueError("native lifecycle source outcome is missing")
-        if data.get("store_digest") != expected_store_digest:
+        if data.get("store_key") != expected_store_key:
             raise ValueError("native start source is missing or belongs to another store")
-        run_id = data.get("run_id")
-        if not isinstance(run_id, str) or data.get("run_digest") != _digest(run_id):
-            raise ValueError("native start source run identity is corrupt")
         mask = data.get("run_fields")
         if type(mask) is not int or not 0 <= mask < (1 << len(_EVENT_RUN_FIELDS)):
             raise ValueError("native start source run fields are corrupt")
         if mask:
-            if run is None or any(run.get(name) != data.get(name) for name in ("store_digest", "run_digest", "run_id")):
+            if run is None or any(run.get(name) != data.get(name) for name in ("store_key", "run_id")):
                 raise ValueError("native start source run reference is missing or corrupt")
         for bit, name in enumerate(_EVENT_RUN_FIELDS):
             if mask & (1 << bit):
@@ -664,20 +658,19 @@ class SqlStepStore:
         body = cls._started_body(result)
         if raw_body != body:
             raise ValueError("native start source body has noncanonical field types")
-        locator = _replay_digest(expected_store_digest, _digest(result.run_id), result.idempotency_key)
-        if (data.get("key_digest") != locator or data.get("body_sha256") != _digest(body)
+        if (result.idempotency_key is None or data.get("body_sha256") != _digest(body)
                 or data.get("fields_sha256") != _digest(cls._started_fields_body(result))):
             raise ValueError("native start source body or locator is corrupt")
         return result
 
     @classmethod
     def decode_started_fields(
-        cls, event: Mapping[str, object], *, expected_store_digest: str,
+        cls, event: Mapping[str, object], *, expected_store_key: bytes,
     ) -> StepEvent:
         """Verify a metadata-free Trace projection, never a complete source proof.
 
         Supply SQL-resolved event fields except metadata, plus native scope,
-        run/key digests and fields_sha256. Metadata is intentionally not read or
+        original run/replay key and fields_sha256. Metadata is intentionally not read or
         authenticated here; full source readback uses decode_started_row instead.
         """
         if "outcome" not in event:
@@ -688,23 +681,22 @@ class SqlStepStore:
         if any(name not in event for name in names):
             raise ValueError("native start projected fields are incomplete")
         data = {name: event[name] for name in names}
+        data["idempotency_key"] = decode_native_replay_key(data["idempotency_key"])
         data["metadata"] = {}
         result = cls.decode_event(data)
-        raw_body = json.dumps({name: event[name] for name in names}, ensure_ascii=False,
+        raw_body = json.dumps({name: data[name] for name in names}, ensure_ascii=False,
                               sort_keys=True, separators=(",", ":"))
         body = cls._started_fields_body(result)
-        locator = _replay_digest(expected_store_digest, _digest(result.run_id), result.idempotency_key)
-        if (event.get("store_digest") != expected_store_digest
-                or event.get("run_digest") != _digest(result.run_id)
-                or event.get("key_digest") != locator
+        if (event.get("store_key") != expected_store_key
+                or result.idempotency_key is None
                 or event.get("fields_sha256") != _digest(body) or raw_body != body):
             raise ValueError("native start projected fields or locator are corrupt")
         return result
 
     @property
-    def store_digest(self) -> str:
+    def store_key(self) -> bytes:
         """Physical namespace and tenant partition of these native records."""
-        return self._store_digest
+        return self._store_key
 
     @property
     def storage_context(self) -> SqlStorageContext:
@@ -721,7 +713,7 @@ class SqlStepStore:
         """Actual bound message group, never inferred from table presence."""
         if not self.backup_supported or self._message_archive is None:
             return None
-        return NativeStepSource(group_id=self._message_archive.scope_id, store_digest=self._store_digest)
+        return NativeStepSource(group_id=self._message_archive.scope_id, store_key=self._store_key)
 
     @classmethod
     def validate_backup(cls, backup: NativeStepBackup) -> None:
@@ -733,31 +725,24 @@ class SqlStepStore:
             columns = {column.name for column in table.columns} - {"id", "updated_at", "created_at"}
             seen = set()
             for row in getattr(backup, name):
-                if set(row) != columns or row["store_digest"] != backup.store_digest:
+                if set(row) != columns or row["store_key"] != backup.store_key:
                     raise ValueError("native backup row fields or scope are invalid")
                 run_id = row["run_id"]
-                if not isinstance(run_id, str) or row["run_digest"] != _digest(run_id):
-                    raise ValueError("native backup run identity is corrupt")
-                key = row["run_digest"] if name == "runs" else row["key_digest"]
-                NativeMessageRoot("validation", key)
-                if key in seen:
-                    raise ValueError("native backup contains duplicate owner identities")
-                seen.add(key)
+                cls._validate_record_ids(row)
+                replay = None if name == "runs" else decode_native_replay_key(row["idempotency_key"])
+                key = run_id if name == "runs" else (run_id, replay)
+                if name == "runs" or replay is not None:
+                    if key in seen:
+                        raise ValueError("native backup contains duplicate owner identities")
+                    seen.add(key)
                 if name == "runs":
-                    record = _RUN_ADAPTER.validate_python(cls._record_data(row))
-                    if (row["conversation_digest"] != _optional_digest(record.conversation_id)
-                            or row["parent_digest"] != _optional_digest(record.parent_run_id)):
-                        raise ValueError("native backup lineage identity is corrupt")
+                    _RUN_ADAPTER.validate_python(cls._record_data(row))
                     runs[run_id] = row
                     continue
-                replay = row["idempotency_key"]
-                if replay is not None and (not isinstance(replay, str) or key !=
-                        _replay_digest(backup.store_digest, row["run_digest"], replay)):
-                    raise ValueError("native backup replay identity is corrupt")
                 if name == "snapshots":
                     if type(row["pruned"]) is not bool:
                         raise ValueError("native backup tombstone flag is invalid")
-                    data = dict(row, messages=[])
+                    data = cls._record_data(dict(row, messages=[]))
                     _SNAPSHOT_ADAPTER.validate_python(data)
                     if row["pruned"]:
                         if row["messages"] != "{}" or row["sequence_root"] is not None:
@@ -770,6 +755,7 @@ class SqlStepStore:
                 if type(mask) is not int or not 0 <= mask < (1 << len(_EVENT_RUN_FIELDS)):
                     raise ValueError("native backup event run reference is invalid")
                 data = dict(row)
+                data["idempotency_key"] = decode_native_replay_key(row["idempotency_key"])
                 run = runs.get(run_id)
                 for bit, field in enumerate(_EVENT_RUN_FIELDS):
                     if mask & (1 << bit):
@@ -779,7 +765,7 @@ class SqlStepStore:
                 event = cls.decode_event(data)
                 if (isinstance(event, NativeLifecycleEvent) or row["body_sha256"] is not None
                         or row["fields_sha256"] is not None):
-                    cls.decode_started_row(row, expected_store_digest=backup.store_digest, run=run)
+                    cls.decode_started_row(row, expected_store_key=backup.store_key, run=run)
 
     async def capture_backup(
         self, reader: SqlStateRowReader, *, accept: Callable[[object], None] | None = None,
@@ -809,18 +795,21 @@ class SqlStepStore:
             cursor = 0
             while True:
                 page = await reader.read_sql_rows(self._context, select(table.c.id, *columns).where(
-                    table.c.store_digest == self._store_digest, table.c.id > cursor,
+                    table.c.store_key == self._store_key, table.c.id > cursor,
                 ).order_by(table.c.id).limit(_BATCH_SIZE))
                 for row in page:
                     value = {column.name: row[column.name] for column in columns}
                     if accept is not None:
-                        accept(value)
+                        encoded = dict(value, store_key=encode_native_store_key(value["store_key"]))
+                        if "idempotency_key" in encoded:
+                            encoded["idempotency_key"] = decode_native_replay_key(encoded["idempotency_key"])
+                        accept(encoded)
                     rows.append(value)
                 if len(page) < _BATCH_SIZE:
                     break
                 cursor = page[-1]["id"]
             batches.append(tuple(rows))
-        backup = NativeStepBackup(self._store_digest, *batches)
+        backup = NativeStepBackup(self._store_key, *batches)
         self.validate_backup(backup)
         if validate_messages:
             await self.validate_backup_messages(reader, backup)
@@ -835,15 +824,14 @@ class SqlStepStore:
     async def _validate_backup_messages(
         self, read: Callable[["Select"], Awaitable[Sequence[Mapping[str, object]]]], backup: NativeStepBackup,
     ) -> None:
-        if not self.backup_supported or backup.store_digest != self._store_digest:
+        if not self.backup_supported or backup.store_key != self._store_key:
             raise ValueError("native backup belongs to another owner or has external effects")
         self.validate_backup(backup)
         from sqlalchemy import select
-        from ..core import canonical_json_bytes
 
         sequences = tuple(self.snapshot_message_sequence(row) for row in backup.snapshots if not row["pruned"])
         table = self._table("sequences")
-        columns = ("store_digest", "sha256", "message_sha256", "tree_count",
+        columns = ("store_key", "sha256", "message_sha256", "tree_count",
                    "left_sha256", "right_sha256", "next_sha256")
         nodes: dict[str, Mapping[str, object]] = {}
         pending = {(span.first, True) for sequence in sequences for span in sequence.slices}
@@ -856,7 +844,7 @@ class SqlStepStore:
             for offset in range(0, len(missing), _BATCH_SIZE):
                 batch = missing[offset:offset + _BATCH_SIZE]
                 rows = await read(select(*(table.c[name] for name in columns)).where(
-                    table.c.store_digest == self._store_digest, table.c.sha256.in_(batch)))
+                    table.c.store_key == self._store_key, table.c.sha256.in_(batch)))
                 if len(rows) != len(batch) or {row["sha256"] for row in rows} != set(batch):
                     raise ValueError("native backup sequence closure is incomplete")
                 nodes.update((row["sha256"], row) for row in rows)
@@ -870,43 +858,40 @@ class SqlStepStore:
             visited.update(frontier)
         closure = NativeMessageClosure(tuple(nodes.values()))
         for sequence in sequences:
-            closure.mark(self._store_digest, sequence.slices)
+            closure.mark(self._store_key, sequence.slices)
         table = self._table("messages")
         identities = sorted(identity for scope, identity in closure.retained_messages)
         payloads = {}
         for offset in range(0, len(identities), _BATCH_SIZE):
             batch = identities[offset:offset + _BATCH_SIZE]
-            rows = await read(select(table.c.store_digest, table.c.sha256, table.c.message).where(
-                table.c.store_digest == self._store_digest, table.c.sha256.in_(batch)))
+            rows = await read(select(table.c.store_key, table.c.sha256, table.c.message,
+                                    table.c.compression, table.c.raw_size, table.c.payload_json).where(
+                table.c.store_key == self._store_key, table.c.sha256.in_(batch)))
             if len(rows) != len(batch) or {row["sha256"] for row in rows} != set(batch):
                 raise ValueError("native backup message closure is incomplete")
             for row in rows:
                 content = validate_native_message_content(row,
                     group_id=None if self._message_archive is None else self._message_archive.scope_id,
                     verify_inline=False)
-                if content.payload.ref is not None:
+                if content.payload is None:
+                    encoded = content.body
+                elif content.payload.encoding == "json-attachments":
                     if self._message_archive is None:
                         raise ValueError("native message ObjectStore resolver is required")
-                    encoded = await self._message_archive.read_payload_object(content.payload.ref)
+                    encoded = await read_attachment_payload(content.payload,
+                                                            read_object=self._message_archive.read_payload_object)
                 else:
-                    encoded = content.payload.decode()
-                    if content.payload.encoding == "json":
-                        encoded = canonical_json_bytes(encoded)
-                    elif isinstance(encoded, str):
-                        encoded = encoded.encode("utf-8")
-                if (not isinstance(encoded, bytes) or len(encoded) != content.payload.size
-                        or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
-                    raise ValueError("native stored message payload is corrupt")
+                    raise ValueError("native message payload is not an attachment manifest")
                 raw = decode_payload_bytes(encoded, codec=content.compression,
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
                 decode_model_message_payloads((raw,))
-                payloads[(self._store_digest, row["sha256"])] = raw
+                payloads[(self._store_key, row["sha256"])] = raw
         self.validate_backup_payloads(backup, closure, payloads)
 
     @classmethod
     def validate_backup_payloads(
         cls, backup: NativeStepBackup, closure: NativeMessageClosure,
-        payloads: Mapping[tuple[str, str], bytes],
+        payloads: Mapping[tuple[bytes, str], bytes],
     ) -> None:
         """Bind checkpoint headers to an authenticated complete message closure.
 
@@ -918,13 +903,13 @@ class SqlStepStore:
             if row["pruned"]:
                 continue
             sequence = cls.snapshot_message_sequence(row)
-            closure.mark(backup.store_digest, sequence.slices)
+            closure.mark(backup.store_key, sequence.slices)
             tail = None
             if sequence.count:
                 span = sequence.slices[-1]
-                identities = closure.message_identities(backup.store_digest,
+                identities = closure.message_identities(backup.store_key,
                     (NativeMessageSlice(span.first, span.count, span.end - 1, span.end),))
-                tail = payloads[(backup.store_digest, identities[0])]
+                tail = payloads[(backup.store_key, identities[0])]
             cls.validate_backup_snapshot_tail(row, tail)
         if not closure.retained_messages.issubset(payloads):
             raise ValueError("native backup message closure is incomplete")
@@ -939,14 +924,21 @@ class SqlStepStore:
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
             if (await session.execute(select(table.c.id).where(
-                    table.c.store_digest == self._store_digest).limit(1))).first() is not None:
+                    table.c.store_key == self._store_key).limit(1))).first() is not None:
                 raise ValueError("native backup restore requires an empty owner")
         for name in ("runs", "events", "snapshots"):
             table = self._table(name)
             # Individual inserts preserve ordering even on dialects that do not
             # guarantee the generated ID order of executemany operations.
             for row in getattr(backup, name):
-                await session.execute(table.insert().values(**dict(row)))
+                inserted = await session.execute(table.insert().values(**dict(row)))
+                if name == "snapshots" and not row["pruned"]:
+                    from ._native_content_index import replace_edges, resolve_targets
+                    root = self.snapshot_message_sequence(row)
+                    targets = await resolve_targets(session, "sequence", self._store_key,
+                                                    tuple(span.first for span in root.slices))
+                    await replace_edges(self._context, session, "snapshot",
+                                        inserted.inserted_primary_key[0], tuple(targets.values()))
         self.invalidate_context(self._context)
 
     @classmethod
@@ -990,6 +982,7 @@ class SqlStepStore:
         group = archive.store.storage_group
         if not isinstance(group, SqlStateStorageGroup) or group.context.engine is not self._context.engine:
             raise ValueError("native message archive belongs to another SQL group")
+        group.bind_native_partition(self._store_key)
         self._message_content.bind_group(archive.scope_id)
         self._message_archive = archive
         archive.bind_message_publisher(self.publish_archived_messages)
@@ -1048,15 +1041,16 @@ class SqlStepStore:
         self._message_content.invalidate()
         self._message_proofs.clear()
         self._message_integrity.clear()
-        self._prepared_integrity.clear()
+        self._message_snapshots.clear()
+        self._prepared_messages.clear()
         self._message_inputs.clear()
 
     async def _prepare_message_payload(
         self, raw: bytes, existing: ContentRecord | None = None,
     ) -> PreparedMessagePayload:
         if self._message_archive is None:
-            compression, _digest, _size, encoded = encode_payload_bytes(raw)
-            payload = StoredPayload.inline_bytes(encoded)
+            compression, encoded = encode_payload_bytes(raw)
+            payload = None
         else:
             compression, payload, encoded = (
                 await self._message_archive.prepare_payload(raw) if existing is None
@@ -1081,16 +1075,32 @@ class SqlStepStore:
             complete = (not sequence.slices or len(sequence.slices) == 1
                         and sequence.slices[0].start == 0
                         and sequence.slices[0].end == sequence.slices[0].count)
-            if proof is not None and (not single_sequence or complete) and sequence.count <= len(messages):
-                prefix = messages[:sequence.count]
-                if prefix.encoded_digest() == (digest, size):
+            if proof is not None and complete and sequence.count <= len(messages):
+                known = self._message_snapshots.get(sequence)
+                shared = (known is not None and self._message_integrity.get(sequence) == (digest, size)
+                          and messages.shared_prefix_length(known) == sequence.count)
+                if shared or messages[:sequence.count].encoded_digest() == (digest, size):
                     base, start = proof, sequence.count
         prepared = await self._message_content.prepare_append(
             messages[start:], prepare_payload=self._prepare_message_payload, base=base,
             archive=archive,
             reuse_payload=self._prepare_message_payload,
         )
-        self._prepared_integrity[prepared] = messages.encoded_digest()
+        messages.encoded_digest()
+        self._prepared_messages[prepared] = messages
+        candidate = ref(prepared)
+
+        async def rebuild() -> None:
+            previous = candidate()
+            if previous is None:
+                return
+            cold = await self._message_content.prepare_append(
+                messages, prepare_payload=self._prepare_message_payload, use_cache=False,
+            )
+            self._message_content.replace_prepared(previous, cold)
+            self._prepared_messages[cold] = messages
+
+        self._message_content.bind_recovery(prepared, rebuild)
         return prepared
 
     async def publish_message_content(
@@ -1106,10 +1116,13 @@ class SqlStepStore:
                 continue
             proof = self._message_content.confirm_current(receipt)
             if proof is not None:
-                self._remember_message_proof(proof, integrity=self._prepared_integrity.get(receipt.prepared))
+                messages = self._prepared_messages.get(receipt.prepared)
+                self._remember_message_proof(proof, messages=messages,
+                    integrity=None if messages is None else messages.encoded_digest())
 
     def _remember_message_proof(
         self, proof: CommittedNativeMessages, *, integrity: tuple[str, int] | None = None,
+        messages: MessageSnapshot | None = None,
     ) -> None:
         if not self._max_cached_messages:
             return
@@ -1117,9 +1130,12 @@ class SqlStepStore:
         self._message_proofs.move_to_end(proof.root)
         if integrity is not None:
             self._message_integrity[proof.root] = integrity
+        if messages is not None:
+            self._message_snapshots[proof.root] = messages
         while len(self._message_proofs) > _RUN_CACHE_SIZE:
             root, _proof = self._message_proofs.popitem(last=False)
             self._message_integrity.pop(root, None)
+            self._message_snapshots.pop(root, None)
 
     def can_reuse_message_root(self, root: NativeMessageRoot, *, raw_digest: str, raw_size: int) -> bool:
         """Reuse only an actual same-group committed/readback integrity proof."""
@@ -1129,7 +1145,7 @@ class SqlStepStore:
             return False
         for source in tuple(self._instances):
             if (source.storage_context.engine is not self.storage_context.engine
-                    or source.store_digest != self.store_digest):
+                    or source.store_key != self.store_key):
                 continue
             try:
                 source._message_content.validate_root(root)
@@ -1143,30 +1159,47 @@ class SqlStepStore:
     async def read_message_roots(
         self, roots: Sequence[NativeMessageRoot],
     ) -> tuple[tuple[bytes, ...], ...]:
-        """Read all selected native bodies in one query, resolving objects after SQL."""
-        if not roots:
-            return ()
+        return await (await self.capture_message_roots(roots))()
+
+    async def capture_message_roots(
+        self, roots: Sequence[NativeMessageRoot], *, transaction: SqlStateRowReader | None = None,
+    ) -> Callable[[], Awaitable[tuple[tuple[bytes, ...], ...]]]:
+        """Capture SQL rows with their owners; decode objects after the read scope."""
+        from .state import active_state_transaction
+
+        roots = tuple(roots)
         query = self._message_content.range_query(roots)
-        async def read(session: "AsyncSession") -> list[Mapping[str, object]]:
-            return list((await session.execute(query)).mappings().all())
-        rows = []
+        if transaction is None and self._message_archive is not None:
+            active = active_state_transaction(self._message_archive.store)
+            if active is not None:
+                if not isinstance(active, SqlStateRowReader):
+                    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+                transaction = active
+        rows = ()
         if query is not None:
-            query = query.statement
-            async with self._context.sessions() as session, session.begin():
-                await self._context.run_statement(self._context.dialect.begin_consistent_read(session))
-                rows = await self._context.run_statement(read(session))
-        try:
-            readbacks = await self._message_content.read_hydrated_ranges(
-                roots, rows, read_object=(None if self._message_archive is None
-                                         else self._message_archive.read_payload_object),
-            )
-        except ValueError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        for result in readbacks:
-            raw = combine_model_message_payloads(result.payloads)
-            self._remember_message_proof(self._message_content.adopt_read(result),
-                                         integrity=(hashlib.sha256(raw).hexdigest(), len(raw)))
-        return tuple(result.payloads for result in readbacks)
+            if transaction is not None:
+                rows = await transaction.read_sql_rows(self._context, query.statement)
+            else:
+                async with self._context.sessions() as session, session.begin():
+                    await self._context.run_statement(self._context.dialect.begin_consistent_read(session))
+                    rows = tuple(dict(row) for row in (await self._context.run_statement(
+                        session.execute(query.statement),
+                    )).mappings())
+
+        async def hydrate() -> tuple[tuple[bytes, ...], ...]:
+            try:
+                readbacks = await self._message_content.read_hydrated_ranges(
+                    roots, rows, read_object=(None if self._message_archive is None
+                                             else self._message_archive.read_payload_object),
+                )
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            for result in readbacks:
+                raw = combine_model_message_payloads(result.payloads)
+                self._remember_message_proof(self._message_content.adopt_read(result),
+                                             integrity=(hashlib.sha256(raw).hexdigest(), len(raw)))
+            return tuple(result.payloads for result in readbacks)
+        return hydrate
 
     async def prepare_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
@@ -1180,6 +1213,9 @@ class SqlStepStore:
             if (run is None or len(starts) != 1 or starts[0].idempotency_key is None
                     or starts[0].run_id != run.run_id):
                 raise ValueError("managed start requires one keyed run_started and its registration")
+        for record in (() if run is None else (run,)) + tuple(events) + (() if snapshot is None else (snapshot,)):
+            validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                     parent_run_id=record.parent_run_id)
         await self.initialize()
         run, events = deepcopy((run, tuple(events)))
         if snapshot is not None:
@@ -1271,7 +1307,7 @@ class SqlStepStore:
             self.confirm_message_content((receipt.native_messages,))
 
     def _confirm_run(self, source: _RunFields) -> None:
-        if source.engine is not self._context.engine or source.store_digest != self._store_digest:
+        if source.engine is not self._context.engine or source.store_key != self._store_key:
             raise ValueError("run receipt belongs to another native store")
         known = self._confirmed_runs.get(source.run_id)
         if known is not None:
@@ -1304,11 +1340,14 @@ class SqlStepStore:
         if run is None and not events and snapshot is None:
             return
         prepared = await self.prepare_step(run=run, events=events, snapshot=snapshot)
-        receipt = await self._context.run_mutation(
+        from ._native_content_index import maintain_native_content, run_native_mutation
+        receipt, maintenance = await run_native_mutation(self._context,
             lambda session: self._write_prepared_step(session, prepared), domain="steps.boundary",
         )
         self.confirm_prepared_step(receipt)
         self._publish_receipt(receipt)
+        if maintenance:
+            await maintain_native_content(self._context, store_keys=(self._store_key,))
 
     async def commit_step_receipt(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
@@ -1328,16 +1367,22 @@ class SqlStepStore:
         async def write(session: "AsyncSession") -> StepWriteReceipt:
             return await self._write_snapshot(session, *prepared)
 
-        receipt = await self._context.run_mutation(write, domain="steps.snapshot")
+        from ._native_content_index import maintain_native_content, run_native_mutation
+        receipt, maintenance = await run_native_mutation(self._context, write, domain="steps.snapshot")
         self.confirm_prepared_step(receipt)
+        if maintenance:
+            await maintain_native_content(self._context, store_keys=(self._store_key,))
 
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
     ) -> "tuple[dict[str, SqlValue], PreparedNativeMessages]":
-        if isinstance(snapshot, NativeCheckpoint):
-            snapshot = NativeCheckpoint.encode(snapshot, output_retries_used=snapshot.output_retries_used)
-        values = self._record_values(snapshot)
         decoded = NativeCheckpoint.decode(snapshot)
+        if isinstance(snapshot, NativeCheckpoint):
+            # Only the tail carries the retry envelope; the captured history is
+            # already independent and must retain its structural prefix proof.
+            snapshot = NativeCheckpoint.encode(replace(snapshot, messages=snapshot.messages[-1:]),
+                                               output_retries_used=snapshot.output_retries_used)
+        values = self._record_values(snapshot)
         checkpoint = None
         if isinstance(decoded, NativeCheckpoint):
             checkpoint = {
@@ -1363,14 +1408,13 @@ class SqlStepStore:
         self, session: "AsyncSession", values: "dict[str, SqlValue]", prepared: PreparedNativeMessages,
     ) -> StepWriteReceipt:
         values = values | self._run_values(values["run_id"])
-        values["key_digest"] = _replay_digest(self._store_digest, values["run_digest"], values["idempotency_key"])
         if values["idempotency_key"] is None:
             result = await session.execute(self._table("snapshots").insert().values(values))
             snapshot_id = result.inserted_primary_key[0]
         else:
             result = await self._context.dialect.insert_ignore_conflict(
                 session, table=self._table("snapshots"), values=values,
-                index_elements=("key_digest",),
+                index_elements=("store_key", "run_id", "idempotency_key"),
             )
             if not result.inserted:
                 # A conflicting owner key proves no candidate content, even if
@@ -1380,6 +1424,11 @@ class SqlStepStore:
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
         content = await self._message_content.publish_in_session(session, prepared, owner_inserted=True)
+        from ._native_content_index import replace_edges
+        targets = content.publication_targets(
+            session, store_key=self._store_key, roots=tuple(span.first for span in prepared.root.slices),
+        )
+        await replace_edges(self._context, session, "snapshot", snapshot_id, targets)
         await self._prune_snapshots(session, values["run_id"])
         return StepWriteReceipt((), (), native_messages=content)
 
@@ -1395,20 +1444,13 @@ class SqlStepStore:
         self, *, run_id: str, include_interrupted: bool = False,
     ) -> ContinuableSnapshot | None:
         snapshots = await self._load_snapshots(run_id, include_interrupted=include_interrupted, latest=True)
-        return None if not snapshots else await self._snapshot_from_data(*snapshots[0])
+        return None if not snapshots else snapshots[0]
 
     async def list_snapshots(
         self, *, run_id: str, include_interrupted: bool = False,
     ) -> list[ContinuableSnapshot]:
         """Return retained upstream snapshots in insertion order."""
-        snapshots = await self._load_snapshots(run_id, include_interrupted=include_interrupted, latest=False)
-        result = []
-        for snapshot in snapshots:
-            try:
-                result.append(await self._snapshot_from_data(*snapshot))
-            except Exception:
-                _logger.warning("Skipping unparsable snapshot for run %s", run_id, exc_info=True)
-        return result
+        return await self._load_snapshots(run_id, include_interrupted=include_interrupted, latest=False)
 
     def with_tool_effect_store(self, store: StepStore) -> "SqlStepStore":
         """Borrow this SQL partition with an attempt's existing effect owner."""
@@ -1419,12 +1461,15 @@ class SqlStepStore:
         return bound
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
+        validate_resource_id(record.run_id)
         await self._require_tool_effect_store().record_tool_effect(record)
 
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
+        validate_resource_id(run_id)
         return await self._require_tool_effect_store().get_tool_effect(run_id=run_id, tool_call_id=tool_call_id)
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
+        validate_resource_id(run_id)
         return await self._require_tool_effect_store().list_unresolved_tool_effects(run_id=run_id)
 
     def _require_tool_effect_store(self) -> StepStore:
@@ -1433,24 +1478,49 @@ class SqlStepStore:
         return self._tool_effect_store
 
     async def _prune_snapshots(self, session: "AsyncSession", run_id: str) -> None:
-        from sqlalchemy import select
+        from sqlalchemy import false, or_, select
 
         if self._max_snapshots_per_run is None:
             return
         table = self._table("snapshots")
-        rows = (await session.execute(select(table.c.id, table.c.state).where(
-            *self._run_predicates(table, run_id), table.c.pruned.is_(False),
-        ).order_by(table.c.id))).all()
-        retained = {row.id for row in rows[-self._max_snapshots_per_run:]}
-        complete = [row.id for row in rows if row.state == "complete"]
-        if complete:
-            retained.add(complete[-1])
-        removed = [row.id for row in rows if row.id not in retained]
-        for offset in range(0, len(removed), _BATCH_SIZE):
-            ids = removed[offset:offset + _BATCH_SIZE]
+        active = (*self._run_predicates(table, run_id), table.c.pruned == false())
+        # Return only the retention boundary and the complete recovery point,
+        # even when a new adapter reduces an existing run's retention limit.
+        boundary = select(table.c.id).where(*active).order_by(table.c.id.desc()).offset(
+            self._max_snapshots_per_run,
+        ).limit(1).scalar_subquery()
+        complete = select(table.c.id).where(*active, table.c.state == "complete").order_by(
+            table.c.id.desc(),
+        ).limit(1).scalar_subquery()
+        cutoff, last_complete = (await session.execute(select(boundary, complete))).one()
+        if cutoff is None:
+            return
+        conditions = (*active, table.c.id <= cutoff)
+        # A current-read UPDATE can see a lower-ID complete row that committed
+        # after the retention read. Only retire complete points older than the
+        # one actually observed; a concurrent new recovery point stays retained.
+        complete_safe = table.c.state != "complete"
+        if last_complete is not None:
+            complete_safe = or_(complete_safe, table.c.id < last_complete)
+        conditions += (complete_safe,)
+        from ._native_content_index import replace_edges
+        after = 0
+        while True:
+            retired = (await session.execute(select(table.c.id).where(
+                *conditions, table.c.id > after,
+            ).order_by(table.c.id).limit(128))).all()
+            if not retired:
+                break
+            ids = tuple(row.id for row in retired)
             await session.execute(table.update().where(
-                table.c.store_digest == self._store_digest, table.c.id.in_(ids),
+                *self._run_predicates(table, run_id), table.c.id.in_(ids),
             ).values(pruned=True, messages="{}", sequence_root=None))
+            for row in retired:
+                await replace_edges(self._context, session, "snapshot",
+                                    row.id, ())
+            after = retired[-1].id
+            if len(retired) < 128:
+                break
 
     @classmethod
     def snapshot_message_sequence(cls, snapshot: Mapping[str, object]) -> NativeMessageSequence:
@@ -1468,12 +1538,12 @@ class SqlStepStore:
 
     async def _load_snapshots(
         self, run_id: str, *, include_interrupted: bool, latest: bool,
-    ) -> list[tuple[dict[str, object], tuple[bytes, ...]]]:
-        from sqlalchemy import select
+    ) -> list[ContinuableSnapshot]:
+        from sqlalchemy import false, select
 
         await self.initialize()
         table = self._table("snapshots")
-        query = select(table).where(*self._run_predicates(table, run_id), table.c.pruned.is_(False))
+        query = select(table).where(*self._run_predicates(table, run_id), table.c.pruned == false())
         if not include_interrupted:
             query = query.where(table.c.state == "complete")
         query = query.order_by(table.c.id.desc() if latest else table.c.id)
@@ -1526,23 +1596,19 @@ class SqlStepStore:
                     _logger.warning("Skipping corrupt snapshot for run %s", run_id)
                     continue
                 try:
-                    if (row["store_digest"] != self._store_digest or row["run_id"] != run_id
-                            or row["run_digest"] != _digest(run_id)
-                            or row["idempotency_key"] is not None and row["key_digest"] !=
-                               _replay_digest(self._store_digest, _digest(run_id), row["idempotency_key"])):
+                    # Verify the returned owner and replay key before restoring content.
+                    if row["run_id"] != run_id or row["store_key"] != self._store_key:
                         raise ValueError("snapshot owner identity is invalid")
-                    data = self._record_data(row)
-                    await self._snapshot_from_data(dict(data), readback.payloads)
+                    snapshot, raw = self._decode_snapshot(row, readback.payloads)
+                    integrity = hashlib.sha256(raw).hexdigest(), len(raw)
                 except (ValueError, AIError):
                     if latest:
                         raise
                     _logger.warning("Skipping corrupt snapshot for run %s", run_id)
                     continue
-                verified.append(readback)
-                results.append((data, readback.payloads))
-        for readback in verified:
-            raw = combine_model_message_payloads(readback.payloads)
-            integrity = hashlib.sha256(raw).hexdigest(), len(raw)
+                verified.append((readback, integrity))
+                results.append(snapshot)
+        for readback, integrity in verified:
             self._remember_message_proof(self._message_content.adopt_read(readback),
                                          integrity=integrity)
             self._seed_snapshot_baseline(run_id, readback.root, integrity)
@@ -1553,11 +1619,6 @@ class SqlStepStore:
         if not any(sequence.count for sequence in sequences):
             return None
         return self._message_content.range_query(sequences).statement
-
-    async def _snapshot_from_data(
-        self, data: dict[str, object], payloads: tuple[bytes, ...],
-    ) -> ContinuableSnapshot:
-        return self.decode_backup_snapshot(data, payloads)
 
     @classmethod
     def validate_backup_snapshot_tail(
@@ -1578,7 +1639,7 @@ class SqlStepStore:
             raise ValueError("snapshot terminal message is invalid")
         header = dict(data, messages=[])
         header.pop("sequence_root")
-        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(header), messages=list(messages))
+        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(cls._record_data(header)), messages=list(messages))
         NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"])
 
     @classmethod
@@ -1591,9 +1652,15 @@ class SqlStepStore:
         authenticated against the shared native message closure by the caller.
         This operation does not open a store or modify the supplied row.
         """
+        return cls._decode_snapshot(data, payloads)[0]
+
+    @classmethod
+    def _decode_snapshot(
+        cls, data: Mapping[str, object], payloads: tuple[bytes, ...],
+    ) -> tuple[ContinuableSnapshot, bytes]:
         sequence = cls.snapshot_message_sequence(data)
         descriptor = json.loads(data["messages"])
-        _raw, messages = decode_model_message_payloads(payloads)
+        raw, messages = decode_model_message_payloads(payloads)
         if len(messages) != sequence.count:
             raise ValueError("snapshot message references are incomplete")
         data = dict(data)
@@ -1601,20 +1668,25 @@ class SqlStepStore:
         # Validate native control fields without sending canonical host/model
         # values back through the SDK's narrower message union.
         data["messages"] = []
-        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(data), messages=list(messages))
-        return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"])
+        snapshot = replace(_SNAPSHOT_ADAPTER.validate_python(cls._record_data(data)), messages=list(messages))
+        return NativeCheckpoint.restore_descriptor(snapshot, descriptor["checkpoint"]), raw
 
     def _table(self, name: str) -> "Table":
         return self._metadata.tables[f"ai_step_{name}"]
 
     def _run_values(self, run_id: str) -> "dict[str, SqlValue]":
-        return {"store_digest": self._store_digest, "run_digest": _digest(run_id), "run_id": run_id}
+        validate_resource_id(run_id)
+        return {"store_key": self._store_key, "run_id": run_id}
 
     def _run_predicates(self, table: "Table", run_id: str) -> "tuple[ColumnElement[bool], ...]":
-        return (table.c.store_digest == self._store_digest, table.c.run_digest == _digest(run_id), table.c.run_id == run_id)
+        validate_resource_id(run_id)
+        return (table.c.store_key == self._store_key, table.c.run_id == run_id)
 
     @classmethod
     def _event_values(cls, event: StepEvent) -> dict[str, object]:
+        validate_native_step_ids(run_id=event.run_id, conversation_id=event.conversation_id,
+                                 parent_run_id=event.parent_run_id)
+        validate_native_replay_key(event.idempotency_key)
         values = {field.name: getattr(event, field.name) for field in fields(event)}
         values["timestamp"] = event.timestamp.isoformat()
         values["metadata"] = dict(event.metadata)
@@ -1622,17 +1694,40 @@ class SqlStepStore:
 
     @classmethod
     def _record_values(cls, record: RunRecord | StepEvent | ContinuableSnapshot) -> "dict[str, SqlValue]":
+        validate_native_step_ids(run_id=record.run_id, conversation_id=record.conversation_id,
+                                 parent_run_id=record.parent_run_id)
+        if isinstance(record, (StepEvent, ContinuableSnapshot)):
+            validate_native_replay_key(record.idempotency_key)
         values = {field.name: getattr(record, field.name) for field in fields(record) if field.name != "messages"}
         for name in ("timestamp", "started_at"):
             if name in values:
                 values[name] = values[name].isoformat()
         if "metadata" in values:
             values["metadata"] = json.dumps(values["metadata"])
+        if "idempotency_key" in values:
+            values["idempotency_key"] = encode_native_replay_key(record.idempotency_key)
         return values
+
+    @classmethod
+    def _validate_record_ids(cls, row: Mapping[str, object]) -> None:
+        try:
+            validate_native_step_ids(run_id=row.get("run_id"), conversation_id=row.get("conversation_id"),
+                                     parent_run_id=row.get("parent_run_id"))
+            if "idempotency_key" in row:
+                value = row["idempotency_key"]
+                validate_native_replay_key(decode_native_replay_key(value) if isinstance(value, bytes) else value)
+            if "store_key" in row:
+                validate_native_store_key(row["store_key"])
+        except (AIError, TypeError, ValueError) as error:
+            # Persisted identities are integrity evidence, not caller input.
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     @classmethod
     def _record_data(cls, row: "Mapping[str, object] | RowMapping") -> dict[str, object]:
         data = dict(row)
+        if "idempotency_key" in data:
+            data["idempotency_key"] = decode_native_replay_key(data["idempotency_key"])
+        cls._validate_record_ids(data)
         if "metadata" in data:
             data["metadata"] = json.loads(data["metadata"])
         return data
@@ -1653,14 +1748,6 @@ def _snapshot_descriptor_json(value: Mapping[str, object]) -> str:
         raise ValueError("snapshot message descriptor exceeds 1024 UTF-8 bytes")
     return encoded
 
-
-def _optional_digest(value: str | None) -> str | None:
-    return None if value is None else _digest(value)
-
-
-def _replay_digest(store_digest: str, run_digest: str, value: str | None) -> str:
-    identity = [store_digest, run_digest, "occurrence", uuid4().hex] if value is None else [store_digest, run_digest, "key", value]
-    return _digest(json.dumps(identity))
 
 
 __all__ = ["PreparedStep", "SqlStepStore", "StepWriteReceipt", "StepContentCleanupResult"]

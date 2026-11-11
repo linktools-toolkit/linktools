@@ -66,7 +66,7 @@ class DefaultExecutionHistoryService:
         self, execution_id: str, *, principal: Principal, identities: tuple[tuple[int, int], ...],
         include_content: bool = False, include_client_requests: bool = False,
     ) -> tuple[ModelInteractionItem, ...]:
-        await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         return await self._reader.read_model_interactions(
             execution_id, tenant_id=principal.tenant_id, identities=identities,
             include_content=include_content, include_client_requests=include_client_requests,
@@ -75,7 +75,7 @@ class DefaultExecutionHistoryService:
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView:
-        return project_execution_view(await self._authorize(execution_id, principal))
+        return await self._authorize_view(execution_id, principal)
 
     async def list(self, request: ListExecutionRequest) -> Page[ExecutionView]:
         signer = self._cursor_signer
@@ -167,7 +167,7 @@ class DefaultExecutionHistoryService:
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> Page[ExecutionTraceItem]:
-        record = await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         filters = {
             "agent_run_seq": agent_run_seq,
             "model_request_seq": model_request_seq,
@@ -217,7 +217,7 @@ class DefaultExecutionHistoryService:
         include_content: bool = False,
         limit: int = 100,
     ) -> Page[TranscriptItem]:
-        record = await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         filter_digest = self._content_filter_digest(
             execution_id, "transcript", include_content,
         )
@@ -271,7 +271,7 @@ class DefaultExecutionHistoryService:
         message_seq: int | None = None,
         part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
-        record = await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         filters = {
             "agent_run_seq": agent_run_seq,
             "model_request_seq": model_request_seq,
@@ -362,7 +362,7 @@ class DefaultExecutionHistoryService:
                 execution_id, tenant_id=principal.tenant_id,
                 executions=self._executions,
             )
-        await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         return await self._reader.capture_model_interaction_cutoffs(
             execution_id, tenant_id=principal.tenant_id,
         )
@@ -378,7 +378,7 @@ class DefaultExecutionHistoryService:
                 agent_run_seq=agent_run_seq, after_model_request_seq=after_model_request_seq,
                 through_model_request_seq=through_model_request_seq, limit=limit,
             )
-        await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         return await self._reader.read_model_interaction_metadata(
             execution_id, tenant_id=principal.tenant_id, agent_run_seq=agent_run_seq,
             after_model_request_seq=after_model_request_seq,
@@ -394,7 +394,7 @@ class DefaultExecutionHistoryService:
                 execution_id, tenant_id=principal.tenant_id,
                 executions=self._executions,
             )
-        await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         return await self._reader.subscribe_model_interactions(execution_id, tenant_id=principal.tenant_id)
 
     async def model_interactions(
@@ -410,7 +410,7 @@ class DefaultExecutionHistoryService:
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> Page[ModelInteractionItem]:
-        await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         if not isinstance(include_client_requests, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         selectors = {
@@ -459,7 +459,7 @@ class DefaultExecutionHistoryService:
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> Page[AttachmentFact]:
-        record = await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         return await self._reader.attachment_facts(
             execution_id,
             tenant_id=self._executions.tenant_id,
@@ -474,7 +474,7 @@ class DefaultExecutionHistoryService:
         principal: Principal,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
-        await self._authorize(execution_id, principal)
+        await self._authorize_metadata(execution_id, principal)
         return await self._reader.usage(
             execution_id,
             tenant_id=self._executions.tenant_id,
@@ -565,23 +565,36 @@ class DefaultExecutionHistoryService:
             header,
         )
 
-    async def _authorize(
+    async def _authorize_metadata(
         self,
         execution_id: str,
         principal: Principal,
-    ) -> ExecutionRecord:
+    ) -> None:
         await self._authorize_header(execution_id, principal)
         if self._pending_execution is not None:
             pending = await self._pending_execution(execution_id, tenant_id=principal.tenant_id)
             if pending is not None:
-                return pending
-        record = await self._executions.get(
+                return
+        if await self._executions.get_header(execution_id, tenant_id=principal.tenant_id) is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    async def _authorize_view(
+        self,
+        execution_id: str,
+        principal: Principal,
+    ) -> ExecutionView:
+        await self._authorize_header(execution_id, principal)
+        if self._pending_execution is not None:
+            pending = await self._pending_execution(execution_id, tenant_id=principal.tenant_id)
+            if pending is not None:
+                return project_execution_view(pending)
+        record = await self._executions.get_view(
             execution_id,
             tenant_id=principal.tenant_id,
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        return record
+        return record[1]
 
 
 async def _read_model_interaction_updates(

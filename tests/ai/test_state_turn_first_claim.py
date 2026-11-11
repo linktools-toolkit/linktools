@@ -6,11 +6,14 @@ from dataclasses import replace
 import pytest
 from .test_state_turn_authority import _backend, _claim
 from .test_state_batch_delete_backends import _open_store
+from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.turns import validate_turn_records
 from linktools.ai.persistence._sql import SqlStateStore, _SqlTransaction
 
 pytestmark = pytest.mark.asyncio
+
+_SCOPE = TurnScopeIdentity("turn-authority", "tenant", "scope")
 
 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
@@ -51,7 +54,7 @@ async def test_initial_claim_never_commits_incomplete_session(tmp_path, monkeypa
         assert claimed is not None and claimed.lease is not None
         records = await store.read(lambda tx: tx.scan_records())
         validate_turn_records(records, namespace="turn-authority", tenant_id="tenant")
-        assert await authority.read_turn("scope", "e") == replace(claimed, lease=None)
+        assert await authority.read_turn(_SCOPE, "e") == replace(claimed, lease=None)
 
 
 async def test_initial_claim_two_sql_connections_admit_exactly_one(tmp_path, monkeypatch):
@@ -81,7 +84,7 @@ async def test_initial_claim_two_sql_connections_admit_exactly_one(tmp_path, mon
             assert len(rows) == 3
             validate_turn_records(rows, namespace="turn-authority", tenant_id="tenant")
             winner = next(result for result in results if result is not None)
-            assert await _backend(other).read_turn_by_session("scope", "s") == replace(winner, lease=None)
+            assert await _backend(other).read_turn_by_session(_SCOPE, "s") == replace(winner, lease=None)
         finally:
             await other.close()
 

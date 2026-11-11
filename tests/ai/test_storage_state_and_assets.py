@@ -25,7 +25,7 @@ def _record(value: str) -> StoredRecord:
         None,
         None,
         "session",
-        value,
+        (value).encode("ascii"),
         "ACTIVE",
         0,
         None,
@@ -47,16 +47,16 @@ async def test_sql_deleted_record_does_not_resurface_from_cache(
         await store.mutate(lambda transaction: transaction.insert_record(record))
         assert (
             await store.read(
-                lambda transaction: transaction.get_record(record.key_digest)
+                lambda transaction: transaction.get_record(record.key)
             )
             == record
         )
         assert await store.mutate(
-            lambda transaction: transaction.delete_record(record.key_digest)
+            lambda transaction: transaction.delete_record(record.key)
         )
         assert (
             await store.read(
-                lambda transaction: transaction.get_record(record.key_digest)
+                lambda transaction: transaction.get_record(record.key)
             )
             is None
         )

@@ -32,8 +32,8 @@ DATA = {"numbers": [1.0, 1, True, -0.0, 0.0, 1.5, 1e20, 2**53 + 1,
                     float.fromhex("0x1.fffffffffffffp+1023")],
         "nested": {"$float": "ordinary user data", "values": [0, 0.0, -0.0]},
         "large_text": "数" * 25000}
-RECORD = StoredRecord(b"r" * 32, None, None, "numeric", "one", None, 0, None, 0, None, DATA)
-FACT = StoredFact(b"s" * 32, 1, RECORD.key_digest, "numeric", b"u" * 32, None, DATA)
+RECORD = StoredRecord(b"r" * 32, None, None, "numeric", b'one', None, 0, None, 0, None, DATA)
+FACT = StoredFact(b"s" * 32, 1, RECORD.key, "numeric", "subject", None, DATA)
 OPERATION = StoredOperation(b"o" * 32, b"s" * 32, 1, "pending", False, DATA)
 
 
@@ -43,7 +43,7 @@ OPERATION = StoredOperation(b"o" * 32, b"s" * 32, 1, "pending", False, DATA)
     (OPERATION, _operation_values, _operation_from_row),
 ))
 def test_sql_payload_text_preserves_original_json_and_rejects_invalid_roots(value, encode, decode) -> None:
-    row = encode(value)
+    row = {**encode(value), "store_key": b"store"}
     assert isinstance(row["payload_json"], str)
     assert row["payload_json"].encode("utf-8") == canonical_json_bytes(DATA)
     restored = decode(row)
@@ -90,17 +90,17 @@ async def test_sql_payloads_keep_numeric_identity_across_read_queries_and_reopen
                     assert len(raw.encode("utf-8")) > 65535
                     assert json.loads(raw).encode("utf-8") == canonical_json_bytes(DATA)
             reads = (
-                lambda tx: tx.get_record(RECORD.key_digest),
-                lambda tx: tx.get_records((RECORD.key_digest,)),
+                lambda tx: tx.get_record(RECORD.key),
+                lambda tx: tx.get_records((RECORD.key,)),
                 lambda tx: tx.list_records(RecordQuery(kind="numeric")),
                 lambda tx: tx.scan_records(),
                 lambda tx: tx.scan_records_page(after=None, limit=2),
-                lambda tx: tx.list_facts(FactQuery(FACT.stream_digest)),
-                lambda tx: tx.list_facts(FactQuery(FACT.stream_digest, latest=True)),
-                lambda tx: tx.list_facts(FactQuery(FACT.stream_digest, latest_per_subject=True)),
+                lambda tx: tx.list_facts(FactQuery(FACT.stream_key)),
+                lambda tx: tx.list_facts(FactQuery(FACT.stream_key, latest=True)),
+                lambda tx: tx.list_facts(FactQuery(FACT.stream_key, latest_per_subject=True)),
                 lambda tx: tx.scan_facts(),
                 lambda tx: tx.scan_facts_page(after=None, limit=2),
-                lambda tx: tx.get_operation(OPERATION.key_digest),
+                lambda tx: tx.get_operation(OPERATION.key),
                 lambda tx: tx.list_operations(OperationQuery()),
                 lambda tx: tx.scan_operations(),
                 lambda tx: tx.scan_operations_page(after=None, limit=2),
@@ -111,8 +111,8 @@ async def test_sql_payloads_keep_numeric_identity_across_read_queries_and_reopen
                 assert len(values) == 1
                 assert canonical_json_bytes(dict(values[0].data)) == canonical_json_bytes(DATA)
             async def grouped(tx):
-                result = await tx.get_records({store: (RECORD.key_digest,)})
-                assert canonical_json_bytes(dict(result[store][RECORD.key_digest].data)) == canonical_json_bytes(DATA)
+                result = await tx.get_records({store: (RECORD.key,)})
+                assert canonical_json_bytes(dict(result[store][RECORD.key].data)) == canonical_json_bytes(DATA)
             await store.storage_group.read_many((store,), grouped)
             if not reopened:
                 assert await store.mutate(lambda tx: tx.replace_record(

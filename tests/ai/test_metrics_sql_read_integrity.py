@@ -170,9 +170,9 @@ async def test_validation_is_once_per_record_and_one_observation_statement(
     statements = []
     original = sql_module._decode_observation_record
 
-    def decode(namespace: str, key: str, row: object) -> Observation:
+    def decode(namespace: str, row: object) -> Observation:
         calls.append(row)
-        return original(namespace, key, row)
+        return original(namespace, row)
 
     def before_execute(conn: object, cursor: object, statement: str,
                        parameters: object, context: object, many: bool) -> None:

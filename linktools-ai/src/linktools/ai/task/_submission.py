@@ -3,9 +3,9 @@
 """TaskGraph submission identity and cancellation outcome."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from ..core import Principal, TaskStatus
+from ..core import Principal, TaskStatus, validate_idempotency_key
 from ..errors import AIError, ErrorCode
 from ._graph import TaskGraph, TaskGraphAdmission, TaskGraphResult
 
@@ -16,7 +16,7 @@ class TaskSubmissionRef:
     tenant_id: str
     graph_id: str
     request_digest: str
-    operation_id: str
+    operation_id: str = field(repr=False)
     principal: Principal
     request_identity_version: int = 1
 
@@ -30,9 +30,12 @@ class TaskSubmissionRef:
             or not self.graph_id
             or self.tenant_id != self.principal.tenant_id
             or re.fullmatch(r"[0-9a-f]{64}", self.request_digest) is None
-            or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
         ):
             raise ValueError("task submission identity is invalid")
+        try:
+            validate_idempotency_key(self.operation_id)
+        except AIError as error:
+            raise ValueError("task submission operation id is invalid") from error
 
     @classmethod
     def from_admission(cls, namespace: str, admission: TaskGraphAdmission) -> "TaskSubmissionRef":

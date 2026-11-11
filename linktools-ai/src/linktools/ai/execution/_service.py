@@ -17,10 +17,10 @@ from ..agent import restore_output
 from ..core import (AuthorizationAction, AuthorizationPolicy, BudgetUsage, CorrelationData,
     ExecutionEventType, ExecutionLineageKind, ExecutionStatus, HandoffGate, HandoffState,
     IdempotencyStatus, JsonValue, Principal, ResourceKind, ResourceRef, StopReason, UsageMetrics,
-    canonical_json_bytes, canonical_sha256, normalize_json_value, overlay_correlation,
-    principal_identity_payload, idempotency_key_digest as compute_idempotency_key_digest)
+    canonical_sha256, normalize_json_value, overlay_correlation,
+    principal_identity_payload, validate_idempotency_key)
 from ..errors import AIError, ErrorCode
-from ..storage import PayloadPolicy, StoredPayload, payload_fits_inline
+from ..storage import StoredPayload
 from ..task import TaskBindingContract, TaskEffectResolution
 from ._api import CancelExecutionResult, ExecutionHandle, ExecutionResult, ExecutionView, project_execution_view
 from ._management import (
@@ -155,7 +155,6 @@ class TaskExecutionService:
         task_admissions: TaskAdmissionRepository | None = None,
         operation_ids: Callable[[], str] | None = None,
         release_terminal: ExecutionReleaseCallback | None = None,
-        payload_policy: PayloadPolicy | None = None,
         retained_turn_confirmed: Callable[[ExecutionRecord], bool] | None = None,
     ) -> None:
         self._repositories = state
@@ -164,7 +163,6 @@ class TaskExecutionService:
         self._admissions = task_admissions
         self._new_operation_id = operation_ids or (lambda: uuid.uuid4().hex)
         self._release_terminal = release_terminal or _no_release_terminal
-        self._output_policy = payload_policy
         self._retained_turn_confirmed = retained_turn_confirmed
         self._handoff = HandoffGate[tuple[str, str], bool]()
         self._port = port
@@ -191,14 +189,14 @@ class TaskExecutionService:
 
     @observed_query
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
-        execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
-        return project_execution_view(execution)
+        return await self._manager.load_view_authorized(
+            execution_id, principal, AuthorizationAction.EXECUTION_READ,
+        )
 
     @observed_query
     async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:
-        await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
-        children = await self._repositories.executions.list_children(execution_id, tenant_id=principal.tenant_id)
-        return tuple(project_execution_view(child) for child in children)
+        await self._manager.load_view_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+        return await self._repositories.executions.list_child_views(execution_id, tenant_id=principal.tenant_id)
 
     @consumed_terminal_query
     async def wait(
@@ -210,11 +208,18 @@ class TaskExecutionService:
         async def wait_once() -> ExecutionResult:
             backoff = 1.0
             while True:
-                execution = await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
-                if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
-                    raise _execution_recovery_error(execution)
-                if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                    return await self.consume_result_from_execution(execution, tenant_id=principal.tenant_id)
+                view = await self._manager.load_view_authorized(
+                    execution_id, principal, AuthorizationAction.EXECUTION_READ,
+                )
+                if view.status in {ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.SUCCEEDED,
+                                   ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                    execution = await self.load_authorized(
+                        execution_id, principal, AuthorizationAction.EXECUTION_READ,
+                    )
+                    if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+                        raise _execution_recovery_error(execution)
+                    if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                        return await self.consume_result_from_execution(execution, tenant_id=principal.tenant_id)
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 2)
 
@@ -385,7 +390,7 @@ class TaskExecutionService:
             },
         )
         scope = "execution.task"
-        key_digest = compute_idempotency_key_digest(idempotency_key)
+        idempotency_key = validate_idempotency_key(idempotency_key)
         request_digest = canonical_sha256(
             {
                 "contract": "task-execution-request-v1",
@@ -432,7 +437,7 @@ class TaskExecutionService:
                 execution,
                 IdempotencyRecord(
                     scope=scope,
-                    idempotency_key_digest=key_digest,
+                    idempotency_key=idempotency_key,
                     request_digest=request_digest,
                     resource_kind=ResourceKind.EXECUTION,
                     resource_id=execution_id,
@@ -464,7 +469,7 @@ class TaskExecutionService:
                     current.revision,
                     current.event_seq,
                     scope,
-                    key_digest,
+                    idempotency_key,
                     request_digest,
                     now,
                 )
@@ -1227,11 +1232,7 @@ class TaskExecutionService:
         *,
         tenant_id: str,
     ) -> StoredPayload:
-        inline = StoredPayload.inline_json(output)
-        if self._output_policy is None or payload_fits_inline(inline, self._output_policy):
-            return inline
-        reference = await self._port.write_output(canonical_json_bytes(output), tenant_id=tenant_id)
-        return StoredPayload.object(reference)
+        return StoredPayload.inline_json(output)
 
     async def _task_terminal_idempotency(
         self,
@@ -1253,7 +1254,7 @@ class TaskExecutionService:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return IdempotencyTerminalUpdate(
             record.scope,
-            record.idempotency_key_digest,
+            record.idempotency_key,
             IdempotencyStatus.STARTED,
             next_status,
             record.request_digest,

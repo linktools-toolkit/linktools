@@ -132,7 +132,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
             stored = await transaction.get_record(sessions._timeline_commit_key("s", 1))
             assert stored is not None
             assert await transaction.replace_record(
-                replace(stored, data=dict(stored.data, status="invalid"),
+                replace(stored, data=dict(stored.data, execution_id="missing-execution"),
                         storage_revision=stored.storage_revision + 1),
                 expected_storage_revision=stored.storage_revision,
             )

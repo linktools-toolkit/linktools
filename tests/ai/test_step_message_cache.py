@@ -29,13 +29,22 @@ class _SqlTraffic:
         verb = statement.split()[0].upper()
         # Recursive sequence reads start WITH but still consume one SELECT.
         self.statements["SELECT" if verb == "WITH" else verb] += 1
+        if verb in {"SELECT", "WITH"} and "ai_step_messages.message" in statement:
+            self.statements["message_body_select"] += 1
         self.bound_bytes += self._bytes(parameters)
         if statement.startswith("INSERT INTO ai_step_messages "):
             self.statements["message_insert"] += 1
+            # Codec, size, and manifest columns are bound alongside message
+            # bodies; only the body column contributes to message_bytes.
+            insert_columns = statement.split("(", 1)[1].split(")", 1)[0]
+            columns = [column.strip().strip('"`') for column in insert_columns.split(",")]
+            width = len(columns)
+            body_index = columns.index("message")
             batches = parameters if many else (parameters,)
             for batch in batches:
-                self.message_rows += len(batch) // 3
-                self.message_bytes += sum(len(value.encode()) for value in batch[2::3])
+                assert len(batch) % width == 0
+                self.message_rows += len(batch) // width
+                self.message_bytes += sum(self._bytes(value) for value in batch[body_index::width])
         elif statement.startswith("INSERT INTO ai_step_snapshots "):
             self.statements["snapshot_insert"] += 1
         elif statement.startswith("INSERT INTO ai_step_sequences "):
@@ -45,11 +54,39 @@ class _SqlTraffic:
     def _bytes(cls, value: object) -> int:
         if isinstance(value, str):
             return len(value.encode())
-        if isinstance(value, bytes):
+        if isinstance(value, memoryview):
+            return value.nbytes
+        if isinstance(value, (bytes, bytearray)):
             return len(value)
         if isinstance(value, (tuple, list)):
             return sum(cls._bytes(item) for item in value)
         return 0
+
+
+@pytest.mark.parametrize("many", [False, True])
+def test_sql_traffic_counts_binary_message_rows_and_bound_bytes(many: bool) -> None:
+    traffic = _SqlTraffic()
+    # Include an attachment manifest with no inline body, and non-ASCII text.
+    rows = (("store", "one", memoryview(b"compressed"), "zlib", 1000, None),
+            ("store", "two", None, "raw", 20, '{"name":"文"}'))
+    statement = (
+        "INSERT INTO ai_step_messages "
+        "(store_key, sha256, message, compression, raw_size, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    if not many:
+        statement += ", (?, ?, ?, ?, ?, ?)"
+    parameters = rows if many else tuple(value for row in rows for value in row)
+    traffic.capture(None, None, statement, parameters, None, many)
+    assert traffic.message_rows == 2
+    assert traffic.message_bytes == len(b"compressed")
+    assert traffic.bound_bytes == (
+        2 * len(b"store") + len(b"one") + len(b"two") + len(b"compressed")
+        + len(b"zlib") + len(b"raw") + len('{"name":"文"}'.encode())
+    )
+    assert traffic.statements["message_insert"] == 1
+    assert traffic._bytes(memoryview(b"12345678").cast("I")) == 8
+    assert traffic._bytes(bytearray(b"body")) == 4
 
 
 def _snapshot(key: str, *messages: str) -> ContinuableSnapshot:
@@ -75,8 +112,8 @@ async def test_repeated_snapshots_skip_only_confirmed_message_body_submissions(
         await store.save_snapshot(second)
         assert traffic.message_rows == submitted
         assert traffic.statements["snapshot_insert"] == 2
-        # Retention reads belong to the existing pruning contract, not the cache.
-        assert traffic.statements["SELECT"] == 2
+        # Native owner guards may read bounded identities, never cached bodies.
+        assert traffic.statements["message_body_select"] == 0
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
         assert await store.latest_snapshot(run_id="run") == second
@@ -237,7 +274,7 @@ async def test_cache_is_bounded_and_misses_resubmit_without_source_reads(tmp_pat
         assert traffic.message_rows == 4
         await store.save_snapshot(replace(snapshots[2], idempotency_key="retained"))
         assert traffic.message_rows == 4
-        assert traffic.statements["SELECT"] == 0
+        assert traffic.statements["message_body_select"] == 0
         assert await store.latest_snapshot(run_id="run") == replace(snapshots[2], idempotency_key="retained")
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
@@ -310,7 +347,7 @@ async def test_ignored_snapshot_retry_does_not_confirm_its_unpublished_message_b
         published = replace(ignored, idempotency_key="new-key")
         await store.save_snapshot(published)
         assert traffic.message_rows == 2
-        assert traffic.statements["SELECT"] == 0
+        assert traffic.statements["message_body_select"] == 0
         assert await store.latest_snapshot(run_id="run") == published
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)

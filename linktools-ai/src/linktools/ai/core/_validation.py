@@ -9,6 +9,9 @@ from ..errors import AIError, ErrorCode
 from ._json import JsonValue, canonical_json_bytes, normalize_json_value
 
 
+RESOURCE_ID_MAX_BYTES = 128
+
+
 def validate_tenant_id(value: str) -> str:
     return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
 
@@ -27,6 +30,37 @@ def validate_memory_scope(value: str) -> str:
 
 def validate_asset_kind(value: str) -> str:
     return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_capability_id(value: str) -> str:
+    """Validate a nonblank capability identity of at most 256 UTF-8 bytes."""
+    if not isinstance(value, str) or not value.strip():
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    try:
+        if len(value.encode("utf-8")) > 256:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    except UnicodeEncodeError as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+    return value
+
+
+def validate_capability_revision(value: int) -> int:
+    """Validate a capability's positive signed-64-bit behavior revision."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9223372036854775807:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return value
+
+
+def validate_capability_write_key(value: str) -> str:
+    """Keep an exact nonempty write key of at most 256 UTF-8 bytes."""
+    if not isinstance(value, str) or not value:
+        raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+    try:
+        if len(value.encode("utf-8")) > 256:
+            raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+    except UnicodeEncodeError as error:
+        raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID) from error
+    return value
 
 
 def validate_capability_provider(value: str) -> str:
@@ -52,7 +86,8 @@ def validate_principal_id(value: str) -> str:
 
 
 def validate_resource_id(value: str) -> str:
-    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+    """Validate an exact resource identity of at most 128 UTF-8 bytes."""
+    return _text(value, RESOURCE_ID_MAX_BYTES, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_idempotency_key(value: str) -> str:
@@ -152,10 +187,14 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 
 __all__ = [
+    "RESOURCE_ID_MAX_BYTES",
     "validate_agent_id",
     "validate_logical_id",
     "validate_asset_kind",
     "validate_asset_namespace",
+    "validate_capability_id",
+    "validate_capability_revision",
+    "validate_capability_write_key",
     "validate_capability_provider",
     "validate_enum",
     "validate_external_payload",

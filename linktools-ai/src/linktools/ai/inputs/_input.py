@@ -21,8 +21,9 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
+from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..workspace import normalize_workspace_input_path
+from ..model.attachments import read_attachment_payload, store_attachment_payload
 from ..model.messages import binary_attachment_text, input_attachment_views, is_binary_attachment_text
 from ..persistence import PersistenceDomain
 from ..model import (
@@ -188,7 +189,6 @@ class ExecutionInputMaterializer:
         *,
         object_store: ObjectStore | None = None,
         object_key_factory: "ObjectKeyFactory | None" = None,
-        payload_policy: PayloadPolicy | None = None,
         object_domain: PersistenceDomain = PersistenceDomain.EXECUTION,
     ) -> None:
         if not isinstance(limits, PromptLimits):
@@ -197,7 +197,6 @@ class ExecutionInputMaterializer:
         self._limits = limits
         self._object_store = object_store
         self._object_key_factory = object_key_factory
-        self._payload_policy = payload_policy or PayloadPolicy()
         self._object_domain = object_domain
         self._mime = mimetypes.MimeTypes(filenames=())
 
@@ -476,23 +475,22 @@ class ExecutionInputMaterializer:
         if not isinstance(value, StoredUserInput):
             raise TypeError("value must be StoredUserInput")
         payload = value.payload
-        if payload.kind == "object" or payload_fits_inline(payload, self._payload_policy):
+        if (value.codec != _USER_CONTENT_CODEC or payload.kind != "inline"
+                or payload.encoding != "json" or self._object_store is None):
             return value
-        if not ((value.codec == _USER_CONTENT_CODEC and payload.encoding == "json")
-                or (value.codec == _TEXT_CODEC and payload.encoding == "utf-8")):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if self._object_store is None or self._object_key_factory is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         from ..persistence.objects import ObjectKeyFactory, put_runtime_object
 
-        if not isinstance(self._object_key_factory, ObjectKeyFactory):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        reference = await put_runtime_object(
-            self._object_store, self._object_key_factory, self._object_domain,
-            tenant_id, (payload.decode().encode("utf-8") if value.codec == _TEXT_CODEC
-                        else canonical_json_bytes(payload.value)),
+        async def write(data: bytes) -> ObjectRef:
+            if not isinstance(self._object_key_factory, ObjectKeyFactory):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return await put_runtime_object(
+                self._object_store, self._object_key_factory, self._object_domain, tenant_id, data,
+            )
+
+        placed = await store_attachment_payload(
+            canonical_json_bytes(payload.value), format="user-content", write_object=write,
         )
-        return replace(value, payload=StoredPayload.object(reference))
+        return value if placed is None else replace(value, payload=placed)
 
     async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
         from ..execution import StoredUserInput
@@ -500,7 +498,16 @@ class ExecutionInputMaterializer:
         if not isinstance(value, StoredUserInput):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload = value.payload
-        if payload.kind == "object":
+        if payload.encoding == "json-attachments":
+            if self._object_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            from ..persistence.objects import read_runtime_object
+
+            raw = await read_attachment_payload(
+                payload, read_object=lambda ref: read_runtime_object(self._object_store, ref),
+            )
+            decoded = json.loads(raw)
+        elif payload.kind == "object":
             if self._object_store is None or payload.ref is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             from ..persistence.objects import read_runtime_object
@@ -795,7 +802,7 @@ def stored_user_input_view(value: "StoredUserInput") -> dict[str, JsonValue]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value.view is not None:
         return dict(value.view)
-    if value.payload.kind != "inline":
+    if value.payload.kind != "inline" or value.payload.encoding == "json-attachments":
         raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
     decoded = value.payload.decode()
     if value.codec == _TEXT_CODEC:

@@ -20,7 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import decode_model_messages, encode_model_messages
 from linktools.ai.persistence._model_interaction import project_public_messages
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore
 
 def _message(content: object) -> tuple[ModelRequest, ...]:
     return (
@@ -59,7 +59,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),
-        payload_policy=PayloadPolicy(),
+
     )
 
 

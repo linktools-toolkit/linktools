@@ -23,7 +23,7 @@ from .test_model_interaction_records import _prepared, _running, _terminal
 
 def _record(data: Mapping[str, JsonValue]) -> StoredRecord:
     return StoredRecord(
-        b"k" * 32, None, None, "record", "r:1", "ACTIVE", 0, None, 0, None, data,
+        b"k" * 32, None, None, "record", b'r:1', "ACTIVE", 0, None, 0, None, data,
     )
 
 
@@ -38,7 +38,7 @@ def test_record_identity_reuses_canonical_immutable_data(
     elif source == "filesystem":
         record = decode_record(encode_record(record))
     elif source == "sql":
-        record = _record_from_row(_record_values(record))
+        record = _record_from_row({**_record_values(record), "store_key": b"store"})
     expected = encode_record(record)
     data["value"][0]["nested"].append("source mutation")
     record.data["value"][0]["nested"].append("read mutation")
@@ -87,7 +87,7 @@ def test_record_construction_rejects_malformed_data(
         if source == "filesystem":
             decode_record({**encode_record(record), "data": data})
         else:
-            _record_from_row({**_record_values(record), "payload_json": data})
+            _record_from_row({**_record_values(record), "store_key": b"store", "payload_json": data})
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -99,6 +99,30 @@ def test_record_identity_still_validates_custom_mapping_behavior() -> None:
     record = _record(CustomMapping({"value": None}))
     with pytest.raises(ValueError, match="record data is not canonical JSON"):
         validate_record_identity(record)
+
+
+@pytest.mark.parametrize("source", ("filesystem", "sql"))
+@pytest.mark.parametrize("field,value", (
+    ("key", ""),
+    ("scope_key", "not-a-digest"),
+    ("parent_key", "AB" * 32),
+    ("subject_id", 1),
+    ("sort_key", "non-ascii-\N{LATIN SMALL LETTER E WITH ACUTE}"),
+))
+def test_record_readers_reject_malformed_physical_identity(
+    source: str, field: str, value: object,
+) -> None:
+    record = _record({"value": None})
+    with pytest.raises(AIError) as raised:
+        if source == "filesystem":
+            wire_field = {
+                "key": "key", "scope_key": "scope", "parent_key": "parent",
+                "subject_id": "subject", "sort_key": "sort",
+            }[field]
+            decode_record({**encode_record(record), wire_field: value})
+        else:
+            _record_from_row({**_record_values(record), "store_key": b"store", field: value})
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.fixture
@@ -128,11 +152,11 @@ def test_interaction_read_does_not_encode_a_second_body(
 
 
 @pytest.mark.parametrize("field,value", (
-    ("key_digest", b"x" * 32),
-    ("scope_digest", b"x" * 32),
-    ("parent_digest", b"x" * 32),
+    ("key", b"x" * 32),
+    ("scope_key", b"x" * 32),
+    ("parent_key", b"x" * 32),
     ("kind", "other"),
-    ("sort_key", "m:2"),
+    ("sort_key", b"m:2"),
     ("state", "FAILED"),
     ("lease_owner", "worker"),
     ("lease_fence", 1),
