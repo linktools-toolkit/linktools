@@ -9,22 +9,22 @@ Runtime and independent History borrow the same configured resource through
 Persistence; there is no second Runtime coordinator argument or required base class.
 
 ```python
-from linktools.ai.storage import Lease, TurnCoordination, TurnCoordinationBackend, TurnScope
+from linktools.ai.storage import Lease, TurnCoordination, TurnCoordinationBackend, TurnScope, TurnScopeIdentity
 
 def enter(
-    scope: str, *, session_key: str, request_key: str, request_digest: str,
+    scope: TurnScopeIdentity, *, session_key: str, request_key: str, request_digest: str,
     execution_id: str, owner_id: str,
 ) -> TurnScope: ...
 
 async def claim_turn(
-    scope: str, *, session_key: str, request_key: str, request_digest: str,
+    scope: TurnScopeIdentity, *, session_key: str, request_key: str, request_digest: str,
     execution_id: str, owner_id: str, lease_seconds: float,
 ) -> TurnCoordination | None: ...
 
-async def read_turn(scope: str, execution_id: str) -> TurnCoordination | None: ...
+async def read_turn(scope: TurnScopeIdentity, execution_id: str) -> TurnCoordination | None: ...
 async def renew_turn(lease: Lease, *, lease_seconds: float) -> TurnCoordination | None: ...
 async def release_turn(lease: Lease) -> bool: ...
-async def cancel_turn(scope: str, execution_id: str) -> bool: ...
+async def cancel_turn(scope: TurnScopeIdentity, execution_id: str) -> bool: ...
 ```
 
 `TurnCoordination` is frozen and contains `execution_id`, `owner_id`,
@@ -89,8 +89,13 @@ whole turn, but has no pending-view optimization.
 
 ## Identity and atomicity
 
-The caller supplies one opaque scope containing both tenant identity and the
-Runtime namespace. Participants must use the existing same-source namespace
+The caller supplies a frozen `TurnScopeIdentity(namespace, tenant_id, scope)`.
+Namespace and tenant use the existing persistence identity bounds; the local
+scope contains 1–256 exact UTF-8 bytes. No component is normalized or truncated.
+Runtime uses `runtime-pending-turn` as its local scope. A shared generic backend
+isolates all three components. `StateTurnCoordination` checks the namespace and
+tenant against its binding and stores only the local scope in that partition.
+Participants must use the existing same-source namespace
 contract: shared coordination is meaningful only when they share the same
 authoritative storage. Separate sources must not accidentally share a scope.
 
@@ -194,7 +199,7 @@ A coordination backend may also implement the independent `TurnAdmissionReader`
 capability for indexed request lookup:
 
 ```python
-async def read_turn_by_request(scope: str, request_key: str) -> TurnCoordination | None: ...
+async def read_turn_by_request(scope: TurnScopeIdentity, request_key: str) -> TurnCoordination | None: ...
 ```
 
 This reads the request index already maintained by `claim_turn`. It returns the

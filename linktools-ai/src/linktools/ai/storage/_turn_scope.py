@@ -12,7 +12,7 @@ from typing import Literal
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
-from ._turn import TurnCoordination, TurnCoordinationBackend
+from ._turn import TurnCoordination, TurnCoordinationBackend, TurnScopeIdentity
 
 _logger = environ.get_logger("ai.storage.turn")
 
@@ -29,7 +29,7 @@ class RenewingTurnScope:
     """
 
     def __init__(
-        self, backend: TurnCoordinationBackend, scope: str, *, session_key: str,
+        self, backend: TurnCoordinationBackend, scope: TurnScopeIdentity, *, session_key: str,
         request_key: str, request_digest: str, execution_id: str, owner_id: str,
         lease_seconds: float = 30.0, renew_seconds: float = 5.0,
     ) -> None:
@@ -37,6 +37,8 @@ class RenewingTurnScope:
                 or not math.isfinite(lease_seconds) or not math.isfinite(renew_seconds)
                 or not 0 < renew_seconds < lease_seconds):
             raise ValueError("renewal period must be positive and shorter than the finite lease")
+        if not isinstance(scope, TurnScopeIdentity):
+            raise TypeError("turn scope must be a TurnScopeIdentity")
         self._backend = backend
         self._scope = scope
         self._identity = dict(session_key=session_key, request_key=request_key,

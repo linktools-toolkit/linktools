@@ -13,6 +13,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain
+from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._snapshot_validation import validate_snapshot_domain
@@ -30,6 +31,8 @@ from .test_runtime_snapshot_operations import Offline
 
 pytestmark = pytest.mark.asyncio
 _LIMITS = SnapshotLimits(max_entries=1000, max_bytes=1_000_000)
+
+_SCOPE = TurnScopeIdentity("source-turns", "tenant", "scope")
 
 
 class _BorrowedCache(InMemoryCacheBackend):
@@ -85,7 +88,7 @@ class _HostCoordination:
         await self.cache.delete(key)
 
     def enter(
-        self, scope: str, *, session_key: str, request_key: str,
+        self, scope: TurnScopeIdentity, *, session_key: str, request_key: str,
         request_digest: str, execution_id: str, owner_id: str,
     ) -> TurnScope:
         return self._bound().enter(
@@ -132,9 +135,9 @@ async def _opened(backend, path, cache, *, namespace="source-turns", read_only=F
         yield state
 
 
-async def _claim(backend: _HostCoordination, *, execution: str = "execution"):
+async def _claim(backend: _HostCoordination, *, execution: str = "execution", namespace: str = "source-turns"):
     return await backend.claim_turn(
-        "scope", session_key="session", request_key="request",
+        TurnScopeIdentity(namespace, "tenant", "scope"), session_key="session", request_key="request",
         request_digest="request-digest", execution_id=execution,
         owner_id="owner-" + execution, lease_seconds=600,
     )
@@ -151,11 +154,11 @@ async def test_host_binds_source_once_and_borrows_cache(
     bound = state.coordination_backend
     try:
         for observe in (
-            lambda: _claim(bound), lambda: bound.read_turn("scope", "execution"),
-            lambda: bound.read_turn_by_request("scope", "request"),
-            lambda: bound.read_turn_by_session("scope", "session"),
+            lambda: _claim(bound), lambda: bound.read_turn(_SCOPE, "execution"),
+            lambda: bound.read_turn_by_request(_SCOPE, "request"),
+            lambda: bound.read_turn_by_session(_SCOPE, "session"),
             lambda: bound.renew_turn(None, lease_seconds=600),
-            lambda: bound.cancel_turn("scope", "execution"), lambda: bound.release_turn(None),
+            lambda: bound.cancel_turn(_SCOPE, "execution"), lambda: bound.release_turn(None),
         ):
             with pytest.raises(AIError) as unbound:
                 await observe()
@@ -177,13 +180,13 @@ async def test_host_binds_source_once_and_borrows_cache(
         rows = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
         assert {row.kind for row in rows} == {"turn_session", "turn_request", "turn_execution"}
         assert not state.capability_stores and not state.durable_capability_ids
-        assert await bound.read_turn_by_session("scope", "session") == replace(claimed, lease=None)
+        assert await bound.read_turn_by_session(_SCOPE, "session") == replace(claimed, lease=None)
         assert await bound.release_turn(claimed.lease)
     finally:
         await state.close()
     assert not cache.closed
     with pytest.raises(AIError) as closed:
-        await bound.read_turn_by_session("scope", "session")
+        await bound.read_turn_by_session(_SCOPE, "session")
     assert closed.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     with pytest.raises(AIError) as closed:
         await _claim(bound, execution="after-close")
@@ -194,13 +197,13 @@ async def test_separate_host_bindings_do_not_rebind_existing_owner(tmp_path: Pat
     cache = _BorrowedCache()
     async with _opened("sqlite", tmp_path, cache, namespace="first") as first:
         original = first.coordination_backend
-        claimed = await _claim(original)
+        claimed = await _claim(original, namespace="first")
         async with _opened("sqlite", tmp_path, cache, namespace="second") as second:
             assert second.coordination_backend is not original
             assert first.coordination_backend is original
-            assert await second.coordination_backend.read_turn_by_session("scope", "session") is None
-            assert await original.read_turn_by_session("scope", "session") == replace(claimed, lease=None)
-            other = await _claim(second.coordination_backend)
+            assert await second.coordination_backend.read_turn_by_session(TurnScopeIdentity("second", "tenant", "scope"), "session") is None
+            assert await original.read_turn_by_session(TurnScopeIdentity("first", "tenant", "scope"), "session") == replace(claimed, lease=None)
+            other = await _claim(second.coordination_backend, namespace="second")
             assert other.lease != claimed.lease
             assert await second.coordination_backend.release_turn(other.lease)
         assert await original.release_turn(claimed.lease)
@@ -215,13 +218,13 @@ async def test_readonly_source_turn_binding_never_mutates(tmp_path: Path, backen
         original = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
     async with _opened(backend, tmp_path / backend, cache, read_only=True) as state:
         reader = state.coordination_backend
-        assert await reader.read_turn("scope", "execution") == replace(claimed, lease=None)
-        assert await reader.read_turn_by_request("scope", "request") == replace(claimed, lease=None)
-        assert await reader.read_turn_by_session("scope", "session") == replace(claimed, lease=None)
+        assert await reader.read_turn(_SCOPE, "execution") == replace(claimed, lease=None)
+        assert await reader.read_turn_by_request(_SCOPE, "request") == replace(claimed, lease=None)
+        assert await reader.read_turn_by_session(_SCOPE, "session") == replace(claimed, lease=None)
         actions = (
             lambda: _claim(reader, execution="other"),
             lambda: reader.renew_turn(claimed.lease, lease_seconds=600),
-            lambda: reader.cancel_turn("scope", "execution"),
+            lambda: reader.cancel_turn(_SCOPE, "execution"),
             lambda: reader.release_turn(claimed.lease),
         )
         for action in actions:
@@ -242,7 +245,7 @@ async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
     async with _opened(backend, tmp_path / "source", cache) as state:
         authority = state.coordination_backend
         first = await _claim(authority)
-        assert await authority.cancel_turn("scope", "execution")
+        assert await authority.cancel_turn(_SCOPE, "execution")
         assert await authority.release_turn(first.lease)
         current = await _claim(authority, execution="next")
         current = await authority.renew_turn(current.lease, lease_seconds=600)
@@ -280,7 +283,7 @@ async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
         if backend == "sqlite":
             assert roundtrip == reference
         assert await restored.export_snapshot(object_store=archive, limits=_LIMITS) == roundtrip
-        assert await restored.coordination_backend.read_turn_by_session("scope", "session") == (
+        assert await restored.coordination_backend.read_turn_by_session(_SCOPE, "session") == (
             replace(current, lease=None) if active else None
         )
     writable_configuration = PersistenceStorage.from_root(
@@ -297,7 +300,7 @@ async def test_source_turn_snapshot_roundtrips_complete_graph_and_receipts(
                 assert rejected.value.code is ErrorCode.STORAGE_CONFLICT
             finally:
                 await contender.close()
-        assert await restored.coordination_backend.read_turn_by_request("scope", "request") == (
+        assert await restored.coordination_backend.read_turn_by_request(_SCOPE, "request") == (
             replace(current, lease=None) if active else None
         )
         if active:
@@ -436,5 +439,5 @@ async def test_failed_host_binding_does_not_admit_runtime_or_close_borrowed_cach
     assert configuration.coordination.authority is None
     assert not cache.closed
     with pytest.raises(AIError) as unbound:
-        await configuration.coordination.read_turn_by_session("scope", "session")
+        await configuration.coordination.read_turn_by_session(_SCOPE, "session")
     assert unbound.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY

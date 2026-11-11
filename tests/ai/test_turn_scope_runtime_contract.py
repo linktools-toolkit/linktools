@@ -13,6 +13,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus
+from linktools.ai.storage import TurnScopeIdentity
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -95,7 +96,7 @@ class _TurnAuthority:
         self.claimed: list[TurnCoordination] = []
 
     def enter(
-        self, scope: str, *, session_key: str, request_key: str, request_digest: str,
+        self, scope: TurnScopeIdentity, *, session_key: str, request_key: str, request_digest: str,
         execution_id: str, owner_id: str,
     ) -> TurnScope:
         result = _ContextScope(RenewingTurnScope(
@@ -106,7 +107,7 @@ class _TurnAuthority:
         return result
 
     async def claim_turn(
-        self, scope: str, *, session_key: str, request_key: str, request_digest: str,
+        self, scope: TurnScopeIdentity, *, session_key: str, request_key: str, request_digest: str,
         execution_id: str, owner_id: str, lease_seconds: float,
     ) -> TurnCoordination | None:
         result = await self.backend.claim_turn(
@@ -117,7 +118,7 @@ class _TurnAuthority:
             self.claimed.append(result)
         return result
 
-    async def read_turn(self, scope: str, execution_id: str) -> TurnCoordination | None:
+    async def read_turn(self, scope: TurnScopeIdentity, execution_id: str) -> TurnCoordination | None:
         return await self.backend.read_turn(scope, execution_id)
 
     async def renew_turn(self, lease: Lease, *, lease_seconds: float) -> TurnCoordination | None:
@@ -126,7 +127,7 @@ class _TurnAuthority:
     async def release_turn(self, lease: Lease) -> bool:
         return await self.backend.release_turn(lease)
 
-    async def cancel_turn(self, scope: str, execution_id: str) -> bool:
+    async def cancel_turn(self, scope: TurnScopeIdentity, execution_id: str) -> bool:
         return await self.backend.cancel_turn(scope, execution_id)
 
 
