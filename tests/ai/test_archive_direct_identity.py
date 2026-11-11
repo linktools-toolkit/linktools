@@ -169,7 +169,7 @@ async def test_archive_object_paths_keep_maximum_scope_and_hide_reversible_value
         with pytest.raises(AIError) as error:
             validate_native_message_content(row, group_id=group, content_scope=archive_content_scope("other", tenant))
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        for invalid in ("", "😀" * 33, "\ud800"):
+        for invalid in ("", "😀" * 33, "\ud800", "group\0id"):
             with pytest.raises(AIError) as error:
                 ContentArchive(store, invalid, namespace=namespace, tenant_id=tenant, object_store=objects)
             assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

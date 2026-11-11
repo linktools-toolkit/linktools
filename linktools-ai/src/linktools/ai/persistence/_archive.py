@@ -42,9 +42,9 @@ def _digest(value: object) -> str:
 
 
 def validate_archive_group_id(value: str) -> str:
-    """Keep an exact nonempty storage-group identity of at most 128 UTF-8 bytes."""
+    """Keep an exact, NUL-free storage-group identity of at most 128 UTF-8 bytes."""
     try:
-        if not isinstance(value, str) or not 1 <= len(value.encode("utf-8")) <= 128:
+        if not isinstance(value, str) or "\0" in value or not 1 <= len(value.encode("utf-8")) <= 128:
             raise _integrity()
     except UnicodeError as error:
         raise _integrity() from error

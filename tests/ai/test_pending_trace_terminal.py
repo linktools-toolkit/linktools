@@ -164,7 +164,7 @@ async def test_pending_trace_does_not_adopt_existing_source_heads(tmp_path: Path
         archive = state.storage.run_store.read_store(PersistenceDomain.TRACE)
         if existing == "execution":
             store = repository.state_store
-            record = repository._stored("execution", "execution", turn.reservation.execution,
+            record = repository._stored("execution", ("execution",), turn.reservation.execution,
                                         state=turn.reservation.execution.status.value)
         else:
             store = archive.state_store

@@ -1082,7 +1082,7 @@ async def test_task_admission_readback_rejects_corrupt_graph_identity() -> None:
         tampered = replace(admission, graph_id="other-graph")
         encoded = repository._stored(
             "task_admission",
-            request.graph.graph_id,
+            (request.graph.graph_id,),
             tampered,
             scope=repository._recovery_scope(),
             state=record.state,

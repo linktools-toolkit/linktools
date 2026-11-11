@@ -187,7 +187,7 @@ async def test_deferred_readback_rejects_inconsistent_target(tmp_path: Path, mon
                 value = await repository.get_in_transaction(tx, approvals[0].approval_id, tenant_id="tenant")
                 changed = replace(
                     current,
-                    data=repository._stored("approval", value.approval_id, replace(value, execution_id="other"),
+                    data=repository._stored("approval", (value.approval_id,), replace(value, execution_id="other"),
                                             state=value.status.value).data,
                     storage_revision=current.storage_revision + 1,
                 )

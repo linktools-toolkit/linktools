@@ -268,7 +268,7 @@ async def test_missing_or_corrupt_execution_fails_closed(tmp_path: Path, backend
             else:
                 value = await repository.get_in_transaction(tx, "execution", tenant_id="tenant")
                 value = replace(value, execution_id="foreign", root_execution_id="foreign")
-                changed = replace(repository._stored("execution", "execution", value),
+                changed = replace(repository._stored("execution", ("execution",), value),
                                   storage_revision=stored.storage_revision + 1)
                 assert await tx.replace_record(changed, expected_storage_revision=stored.storage_revision)
 
