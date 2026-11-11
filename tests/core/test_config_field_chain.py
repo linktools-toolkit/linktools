@@ -1,17 +1,12 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for the ConfigField ergonomics simplification:
-
-1. ``name`` is optional -- omitted when a field is defined through a
-   ``configs`` dict consumed by ``Config.update_defaults`` (the dict key
-   supplies the name).
-2. ``ConfigField.chain(*providers, **kwargs)`` is shorthand for
-   ``ConfigField(provider=ChainProvider(*providers), **kwargs)``, collapsing
-   to a bare provider (no ChainProvider wrapper) when only one is given.
-"""
+"""ConfigField.chain preserves provider order, fallback, and field options."""
 import os
 
+import pytest
+
 from linktools.core import (
-    AliasProvider, Config, ConfigField, ConfigSchema, ChainProvider,
+    AliasProvider, Config, ConfigField, ConfigSchema,
     DefaultSource, EnvironmentSource, PersistentSource, RuntimeOverrideSource,
 )
 from linktools.core._config_store import ConfigStore
@@ -29,32 +24,20 @@ def _make_config(tmp_path):
     ])
 
 
-def test_chain_with_one_provider_still_wraps_in_chain_provider():
-    # Not a no-op: ChainProvider lets a failing sub-provider fall through to
-    # _first_present/field.default, which a bare provider would not do.
-    provider = AliasProvider("OTHER")
-    field = ConfigField.chain(provider)
-    assert isinstance(field.provider, ChainProvider)
-    assert field.provider.providers == [provider]
-
-
-def test_chain_with_multiple_providers_wraps_in_chain_provider():
-    a, b = AliasProvider("A"), AliasProvider("B")
-    field = ConfigField.chain(a, b)
-    assert isinstance(field.provider, ChainProvider)
-    assert field.provider.providers == [a, b]
-
-
-def test_chain_passes_through_other_kwargs():
-    field = ConfigField.chain(AliasProvider("A"), default="d", cast=str)
-    assert field.default == "d"
-    assert field.cast is str
-
-
-def test_name_omitted_is_filled_from_update_defaults_key(tmp_path):
+def test_chain_with_one_missing_alias_uses_field_default_and_cast(tmp_path):
     config = _make_config(tmp_path)
-    config.update_defaults(FOO=ConfigField.chain(AliasProvider("BAR"), default="d"))
-    assert config.schema.get("FOO").name == "FOO"
+    config.update_defaults(FOO=ConfigField.chain(AliasProvider("MISSING"), default=7, cast=str))
+    assert config.get("FOO") == "7"
+
+
+@pytest.mark.parametrize("first,expected", (("A", "first"), ("MISSING", "second")))
+def test_chain_uses_first_available_provider(tmp_path, first, expected):
+    config = _make_config(tmp_path)
+    config.update_defaults(
+        A="first", B="second",
+        FOO=ConfigField.chain(AliasProvider(first), AliasProvider("B")),
+    )
+    assert config.get("FOO") == expected
 
 
 def test_name_omitted_field_resolves_correctly(tmp_path):

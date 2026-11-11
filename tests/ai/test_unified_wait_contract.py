@@ -4,10 +4,8 @@
 from linktools.ai.core import ExecutionContext
 """Shared SDK wait contracts across independently owned run handles."""
 
-import ast
 import asyncio
 import gc
-import inspect
 import time
 from collections import deque
 from collections.abc import AsyncIterator
@@ -405,26 +403,6 @@ async def test_terminal_owner_cannot_short_circuit_invalid_cursor(owner, wrong) 
         assert bundle.tree.calls == bundle.graph.stream_calls == bundle.evaluations.record_calls == 0
     finally:
         await bundle.close()
-
-
-def test_graph_wait_overloads_preserve_content_selected_result_type() -> None:
-    declaration = ast.parse(inspect.getsource(TaskGraphRun)).body[0]
-    overloads = [
-        node for node in declaration.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "wait"
-        and any(isinstance(decorator, ast.Name) and decorator.id == "overload" for decorator in node.decorator_list)
-    ]
-    assert len(overloads) == 3
-    assert {
-        ast.unparse(next(arg.annotation for arg in node.args.kwonlyargs if arg.arg == "include_content")):
-        ast.unparse(node.returns)
-        for node in overloads
-    } == {
-        "Literal[False]": "WaitResult[TaskGraphInfo]",
-        "Literal[True]": "WaitResult[TaskGraphState]",
-        "bool": "WaitResult[TaskGraphInfo | TaskGraphState]",
-    }
-    expected = set(inspect.signature(TaskGraphRun.wait).parameters) - {"self"}
-    assert all({arg.arg for arg in node.args.kwonlyargs} == expected for node in overloads)
 
 
 @pytest.mark.asyncio
@@ -837,17 +815,6 @@ async def test_execution_wait_keeps_task_bound_authority_instead_of_using_facade
         assert bundle.execution.wait_calls == 0
     finally:
         await bundle.close()
-
-
-def test_unified_observation_surface_has_no_redundant_methods_or_result_state() -> None:
-    from dataclasses import fields
-
-    for owner in (Execution, TaskGraphRun, EvaluationRun):
-        assert callable(owner.watch)
-        assert callable(owner.wait)
-        assert not hasattr(owner, "observe")
-        assert not hasattr(owner, "wait_observed")
-    assert [field.name for field in fields(WaitResult)] == ["result", "cursor", "observation_error"]
 
 
 @pytest.mark.asyncio

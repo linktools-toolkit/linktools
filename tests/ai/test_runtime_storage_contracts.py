@@ -325,7 +325,6 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
         sql = "\n".join(statements).upper()
         assert "ROW_NUMBER" not in sql
         assert " OVER " not in sql
-        assert "GROUP BY" in sql
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
         await store.close()

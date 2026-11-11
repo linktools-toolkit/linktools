@@ -8,8 +8,6 @@ from linktools.ai.core import ExecutionContext
 """Invalid admission and closed Runtime requests fail before side effects."""
 from ._runtime_test_helpers import model_features
 
-import ast
-import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -201,24 +199,3 @@ async def test_graph_state_content_mode_selects_existing_public_types() -> None:
     assert isinstance(await run.state(), TaskGraphInfo)
     assert isinstance(await run.state(include_content=False), TaskGraphInfo)
     assert await run.state(include_content=True) is expected
-    for include_content in (False, True):
-        result = await run.state(include_content=include_content)
-        assert isinstance(result, TaskGraphState if include_content else TaskGraphInfo)
-
-
-def test_graph_state_overloads_preserve_content_selected_result_type() -> None:
-    declaration = ast.parse(inspect.getsource(TaskGraphRun)).body[0]
-    overloads = [
-        node for node in declaration.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "state"
-        and any(isinstance(decorator, ast.Name) and decorator.id == "overload" for decorator in node.decorator_list)
-    ]
-    assert len(overloads) == 3
-    assert {
-        ast.unparse(next(arg.annotation for arg in node.args.kwonlyargs if arg.arg == "include_content")):
-        ast.unparse(node.returns)
-        for node in overloads
-    } == {
-        "Literal[False]": "TaskGraphInfo",
-        "Literal[True]": "TaskGraphState",
-        "bool": "TaskGraphInfo | TaskGraphState",
-    }

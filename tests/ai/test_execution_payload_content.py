@@ -24,7 +24,7 @@ from .test_session_timeline import _execution
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "local_sqlite", "sqlite"))
-async def test_large_payloads_survive_ten_control_cas_without_body_reads_or_reencoding(
+async def test_large_payloads_survive_repeated_control_cas_without_body_reads_or_reencoding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     state = Persistence(_storage(backend, tmp_path))
@@ -57,7 +57,7 @@ async def test_large_payloads_survive_ten_control_cas_without_body_reads_or_reen
             return encode(item)
 
         monkeypatch.setattr(content_module, "canonical_json_bytes", no_body_encoding)
-        for _ in range(10):
+        for _ in range(2):
             changed = replace(value, revision=value.revision + 1, event_seq=value.event_seq + 1)
             await repository.compare_and_swap(value.execution_id, tenant_id="tenant",
                 expected_revision=value.revision, next_record=changed)

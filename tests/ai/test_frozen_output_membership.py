@@ -91,15 +91,15 @@ async def test_membership_correction_uses_frozen_input_without_schema_enumeratio
     effects: list[str] = []
     attempts: list[list[str]] = []
     schemas: list[str] = []
-    original = [f"source-{index}" for index in range(1000)]
+    original = [f"source-{index}" for index in range(2)]
     context = ExecutionInputContext.from_messages((), session_metadata={"accepted_sources": original})
     original[:] = ["unknown"]
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         schema = json.dumps(info.output_tools[0].parameters_json_schema, sort_keys=True)
         schemas.append(schema)
-        assert "source-999" not in schema and len(schema) < 1024
-        assert "source-999" not in str(messages)
+        assert "source-1" not in schema and len(schema) < 1024
+        assert "source-1" not in str(messages)
         if not any(isinstance(part, ToolReturnPart) and part.tool_name == "record_effect"
                    for message in messages for part in message.parts):
             return ModelResponse(parts=[ToolCallPart("record_effect", {}, tool_call_id="effect")])

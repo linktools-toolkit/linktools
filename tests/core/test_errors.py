@@ -1,11 +1,6 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for the linktools exception hierarchy.
-
-The hierarchy has a single root ``Error`` with one direct child per
-domain. ``Error`` is retained as an alias of ``Error`` for the
-migration cycle, so every historical name keeps working while ``isinstance``
-checks against the new root succeed.
-"""
+"""Public exception names, catch hierarchy, and error details."""
 import pytest
 
 import linktools.errors as errs
@@ -24,10 +19,6 @@ LEGACY_NAMES = [
     "ConfigError", "ToolError", "ToolNotFound", "ToolNotSupport",
     "ToolExecError", "NoFreePortFoundError", "GitError", "GitDivergedError",
 ]
-
-
-def test_error_is_alias_of_linktools_root():
-    assert errs.Error is errs.Error
 
 
 def test_every_domain_root_is_a_linktools_error():
@@ -62,13 +53,6 @@ def test_root_catches_everything_domain_isolates_specifics():
     assert not isinstance(errs.GitError("x"), errs.ToolError)
     assert not isinstance(errs.ToolError("x"), errs.GitError)
     assert not isinstance(errs.ConfigError("x"), errs.CacheError)
-
-
-def test_error_alias_catches_legacy_subclasses():
-    # Code that does `except Error` (e.g. cntr ContainerError(Error)) must still
-    # catch every linktools error after Error became the root alias.
-    for cls in [errs.GitDivergedError, errs.ToolExecError, errs.DownloadError]:
-        assert isinstance(cls("x"), errs.Error)
 
 
 def test_download_http_error_carries_code():

@@ -52,9 +52,13 @@ class _AdmittedMembership(AbstractCapability[AgentContext[None]]):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selected", (("source-0",), ("foreign",), ("source-0", "source-0")))
-async def test_semantic_membership_uses_original_admitted_file_set(selected: tuple[str, ...]) -> None:
-    count = 1000 if selected == ("foreign",) else 3
+@pytest.mark.parametrize("selected,count", (
+    (("source-0",), 3),
+    (("foreign",), 3),
+    (("source-0", "source-0"), 3),
+    pytest.param(("foreign",), 1000, marks=pytest.mark.manual, id="stress-1000"),
+))
+async def test_semantic_membership_uses_original_admitted_file_set(selected: tuple[str, ...], count: int) -> None:
     original = [ReferencedContent(AssetVersionRef(
         AssetKey("document", f"source-{index}"), "admitted", StorageEntryRevision(1),
         hashlib.sha256(_BODY).hexdigest(), len(_BODY),
@@ -87,8 +91,8 @@ async def test_semantic_membership_uses_original_admitted_file_set(selected: tup
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         schema = json.dumps(info.output_tools[0].parameters_json_schema, sort_keys=True)
         schemas.append(schema)
-        assert "source-999" not in schema and len(schema) < 1024
-        assert "source-999" not in str(messages)
+        assert f"source-{count - 1}" not in schema and len(schema) < 1024
+        assert f"source-{count - 1}" not in str(messages)
         if not effects:
             original[:] = []
             return ModelResponse(parts=[ToolCallPart("record_effect", {}, tool_call_id="effect")])
@@ -100,7 +104,7 @@ async def test_semantic_membership_uses_original_admitted_file_set(selected: tup
         attempts.append(output)
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"sources": output})])
 
-    features = RuntimeFeatures("admitted-membership", limits=PromptLimits(max_binary_input_parts=1000))
+    features = RuntimeFeatures("admitted-membership", limits=PromptLimits(max_binary_input_parts=count))
     features.capability(_AdmittedMembership(), revision=1, scope="agent")
     features.capability(ReferencedInputsCapability(authorized_load_many=authorized_load_many),
                         id=_SOURCE.id, revision=1, scope="agent")

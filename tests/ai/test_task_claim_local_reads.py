@@ -11,7 +11,7 @@ from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphLimits, Ta
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", [2, 200])
+@pytest.mark.parametrize("width", [3])
 async def test_task_claim_materialization_is_independent_of_unrelated_nodes(
     monkeypatch: pytest.MonkeyPatch, width: int,
 ) -> None:

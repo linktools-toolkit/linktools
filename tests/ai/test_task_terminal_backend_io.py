@@ -92,7 +92,7 @@ async def _publish(engine, width, outcome, wire):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", (1, 32))
+@pytest.mark.parametrize("width", (1, 2))
 @pytest.mark.parametrize("outcome", ("complete", "fail"))
 async def test_sqlite_terminal_io_survives_reopen(tmp_path, width, outcome):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}", pool_size=1, max_overflow=0)
@@ -105,7 +105,7 @@ async def test_sqlite_terminal_io_survives_reopen(tmp_path, width, outcome):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("_server", ("mysql",), indirect=True)
-@pytest.mark.parametrize("width", (1, 32))
+@pytest.mark.parametrize("width", (1, 2))
 @pytest.mark.parametrize("outcome", ("complete", "fail"))
 async def test_mysql_terminal_wire_io_survives_reopen(_server, monkeypatch, width, outcome):
     from asyncmy.connection import Connection

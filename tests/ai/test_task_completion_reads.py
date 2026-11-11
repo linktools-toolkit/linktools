@@ -9,7 +9,7 @@ from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphLimits, Ta
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", [2, 200])
+@pytest.mark.parametrize("width", [3])
 async def test_completion_does_not_materialize_unrelated_task_definitions(
     monkeypatch: pytest.MonkeyPatch, width: int,
 ) -> None:

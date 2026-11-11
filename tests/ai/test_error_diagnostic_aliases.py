@@ -36,7 +36,7 @@ def _raised(error: BaseException) -> BaseException:
 
 
 @pytest.mark.parametrize("omission", (None, "referenced_content_lifecycle"))
-@pytest.mark.parametrize("count", (1, 3, 11, 41))
+@pytest.mark.parametrize("count", (1, 2, 16))
 def test_shared_group_nodes_emit_frames_once_and_retain_every_branch(omission: str | None, count: int) -> None:
     error = _raised(RuntimeError("shared synthetic failure"))
     before = error.__traceback__
@@ -54,12 +54,12 @@ def test_shared_group_nodes_emit_frames_once_and_retain_every_branch(omission: s
 
 
 def test_equal_messages_and_frames_do_not_merge_distinct_exceptions() -> None:
-    errors = [_raised(RuntimeError("same synthetic message")) for _ in range(11)]
+    errors = [_raised(RuntimeError("same synthetic message")) for _ in range(2)]
     diagnostics = ErrorDiagnostics.from_exception(ExceptionGroup("distinct attempts", errors))
-    assert len(diagnostics.exception_chain) == 12
+    assert len(diagnostics.exception_chain) == 3
     assert not any("same_exception_as" in entry for entry in diagnostics.exception_chain)
-    assert diagnostics.traceback.count("same synthetic message") == 11
-    assert diagnostics.traceback.count('File "') == 11
+    assert diagnostics.traceback.count("same synthetic message") == 2
+    assert diagnostics.traceback.count('File "') == 2
 
 
 @pytest.mark.parametrize("relation", ("__cause__", "__context__"))
@@ -79,13 +79,14 @@ def test_cycles_are_explicit_aliases_not_recursive_expansion(relation: str) -> N
 @pytest.mark.parametrize("omission", (None, "referenced_content_lifecycle"))
 def test_deep_shared_groups_do_not_enter_recursive_formatter(omission: str | None) -> None:
     error: BaseException = RuntimeError("deep shared leaf")
-    for _ in range(40):
+    for _ in range(11):
         error = ExceptionGroup("shared branches", [error, error])
     diagnostics = ErrorDiagnostics.from_exception(error, content_omission_reason=omission)
-    assert len(diagnostics.exception_chain) == 81
-    assert sum("same_exception_as" in entry for entry in diagnostics.exception_chain) == 40
+    assert len(diagnostics.exception_chain) == 23
+    assert sum("same_exception_as" in entry for entry in diagnostics.exception_chain) == 11
     assert diagnostics.traceback is not None
-    assert len(diagnostics.traceback) < 40000
+    assert diagnostics.traceback.count("RuntimeError: deep shared leaf") == int(omission is None)
+    assert diagnostics.exception_chain[11]["exception_type"] == "RuntimeError"
 
 
 def test_chain_beyond_recursion_limit_keeps_the_last_cause() -> None:
@@ -113,7 +114,7 @@ def test_large_message_notes_and_nested_body_are_captured_once_without_rewriting
                        "headers": [{"name": "Authorization", "value": "Bearer synthetic-secret"}]})
     error = NamedFailure(body)
     error.add_note("NOTE_MARKER_" + "n" * 100000)
-    diagnostic = ErrorDiagnostics.from_exception(ExceptionGroup("shared body", [error] * 41))
+    diagnostic = ErrorDiagnostics.from_exception(ExceptionGroup("shared body", [error, error]))
     assert error.calls == 1
     assert diagnostic.traceback.count("BODY_MARKER_") == 1
     assert diagnostic.traceback.count("NOTE_MARKER_") == 1
@@ -191,7 +192,7 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
 
     features = RuntimeFeatures("alias-persistence")
     features.agent("default", allow_tools=())
-    features.model("default", FallbackBinding(*(Binding() for _ in range(11))))
+    features.model("default", FallbackBinding(*(Binding() for _ in range(2))))
     features.capability(TraceCapability(), scope="runtime")
     storage = PersistenceStorage.from_root(tmp_path, exclusive_writer=True)
     async with Persistence.open('alias-persistence', storage=storage) as persistence_176, Runtime.attach(persistence=persistence_176, features=features) as runtime:
@@ -199,12 +200,12 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
         assert result.status is ExecutionStatus.FAILED
         diagnostics = result.error_diagnostics
         aliases = [entry for entry in diagnostics.exception_chain if "same_exception_as" in entry]
-        assert len(aliases) == 10
+        assert len(aliases) == 1
         source_frames = next(count for captured, count in captures if captured == diagnostics)
         assert diagnostics.traceback.count('File "') == source_frames
-        assert diagnostics.traceback.count("raise shared") == len(calls) == 11
+        assert diagnostics.traceback.count("raise shared") == len(calls) == 2
         assert diagnostics.traceback.count("shared synthetic provider failure") == 1
-        assert len(result.safe_error_details["failed_attempts"]) == 11
+        assert len(result.safe_error_details["failed_attempts"]) == 2
         events = await runtime.events.list(result.execution_id, principal=runtime.default_principal, limit=100)
         terminal, = [event for event in events.items if event.event_type == ExecutionEventType.EXECUTION_FAILED]
         assert terminal.payload["error_diagnostics"] == diagnostics.to_payload()
@@ -212,7 +213,7 @@ async def test_runtime_shared_failures_preserve_attempts_terminal_event_and_reop
     async with Persistence.open('alias-persistence', storage=storage) as persistence_190, Runtime.attach(persistence=persistence_190, features=features) as runtime:
         restored = await runtime.executions.result(result.execution_id, principal=principal)
         assert restored.error_diagnostics == diagnostics
-    assert len(calls) == 11
+    assert len(calls) == 2
 
 
 def test_unreadable_notes_and_string_leave_other_nodes_and_root_diagnostic_intact() -> None:

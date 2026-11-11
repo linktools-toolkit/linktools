@@ -70,7 +70,11 @@ async def test_confirmed_run_identity_cannot_change_within_one_owner() -> None:
     assert await reader.get_run(run_id="run") == original
 
 
-@pytest.mark.parametrize("prefix_count", (1024, 4096))
+@pytest.mark.parametrize("prefix_count", (
+    8,
+    pytest.param(1024, marks=pytest.mark.manual, id="stress-1024"),
+    pytest.param(4096, marks=pytest.mark.manual, id="stress-4096"),
+))
 async def test_archive_publication_dependency_work_tracks_delta_not_confirmed_prefix(
     tmp_path, monkeypatch, prefix_count,
 ):

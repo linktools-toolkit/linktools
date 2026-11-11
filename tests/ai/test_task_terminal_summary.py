@@ -28,7 +28,7 @@ def storage(tmp_path: Path, request: pytest.FixtureRequest) -> PersistenceStorag
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("width", (2, 8, 200))
+@pytest.mark.parametrize("width", (3, pytest.param(200, marks=pytest.mark.manual, id="stress-200")))
 async def test_terminal_summary_completion_rows_are_linear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, width: int) -> None:
     async with Persistence.open("summary-budget", storage=PersistenceStorage.sqlite(tmp_path / "state.db"), tenant_id="tenant") as state:
         await _admit(state, tuple(TaskNode(f"node-{index}") for index in range(width)))
@@ -38,6 +38,10 @@ async def test_terminal_summary_completion_rows_are_linear(tmp_path: Path, monke
             lease = await repository.claim("graph", f"node-{index}", tenant_id="tenant", owner="worker", lease_seconds=300)
             with _measure(monkeypatch) as counts:
                 await repository.complete(lease, tenant_id="tenant", execution_id=f"execution-{index}", result_digest="a" * 64)
+            assert counts["record_rows"] <= 4
+            assert counts["write_commits"] == 1
+            expected = TaskStatus.SUCCEEDED if index == width - 1 else TaskStatus.PENDING
+            assert (await repository.graph_state("graph", tenant_id="tenant")).status is expected
             totals.update(counts)
         assert totals["record_rows"] <= 4 * width
         assert totals["write_commits"] == width

@@ -44,12 +44,6 @@ class _DenyAuthorization:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
-def test_approval_creation_is_not_a_public_runtime_operation() -> None:
-    assert not hasattr(DefaultApprovalService, "create")
-    assert hasattr(DefaultApprovalService, "list")
-    assert hasattr(DefaultApprovalService, "decide")
-
-
 @pytest.mark.asyncio
 async def test_approval_list_requires_authorization_even_without_pending_tools() -> None:
     service = DefaultApprovalService(

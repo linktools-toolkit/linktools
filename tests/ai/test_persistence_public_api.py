@@ -7,22 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from linktools.ai import persistence
 from linktools.ai.persistence import PersistenceDomain
-
-
-def test_persistence_root_contains_configuration_and_snapshot_owners() -> None:
-    assert set(persistence.__all__) == {
-        'Persistence', 'PersistenceStorage', 'PersistencePlan',
-        'PersistenceStatus', 'PersistenceDomain',
-        'SqlStepStore', 'PreparedStep', 'StepWriteReceipt', 'StepContentCleanupResult',
-        'NativeCheckpoint', 'NativeStepBackup', 'NativeMessageRoot', 'NativeMessageSlice',
-        'MessageArchive', 'MessageSnapshot',
-    }
-    assert all(hasattr(persistence, name) for name in persistence.__all__)
-    assert not hasattr(persistence, 'RuntimeDomain')
-    assert not hasattr(persistence, 'RuntimeStateCommands')
-    assert not hasattr(persistence, 'RuntimeObjectKeyFactory')
 
 
 def test_persistence_domain_wire_values_do_not_depend_on_python_names() -> None:

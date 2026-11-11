@@ -33,37 +33,39 @@ class _ReadTraffic:
 
     def assert_publication_metadata(
         self, start: int, *, store_key: bytes, node_bound: int, message_bound: int,
-    ) -> None:
-        reads = self.reads[start:]
-        assert len(reads) == 3
-        seen = set()
-        for statement, parameters in reads:
+    ) -> dict[str, list[tuple[object, ...]]]:
+        batches = {"ai_step_sequences": [], "ai_step_messages": []}
+        collector_reads = 0
+        for statement, parameters in self.reads[start:]:
             projection = " ".join(statement.split("FROM", 1)[0].split())
-            for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
-                if projection == f"SELECT {table}.sha256, {table}.id":
-                    assert table not in seen
-                    seen.add(table)
+            columns = set(projection.removeprefix("SELECT ").split(", "))
+            for table in batches:
+                if columns == {f"{table}.sha256", f"{table}.id"}:
                     assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
                     assert parameters[:2] == (native_store_locator(store_key), store_key)
-                    assert 0 < len(parameters) - 2 <= bound
+                    assert 0 < len(parameters) - 2 <= 128
+                    batches[table].append(parameters[2:])
                     break
             else:
-                assert "collector" not in seen
-                seen.add("collector")
-                columns = projection.removeprefix("SELECT ").split(", ")
+                collector_reads += 1
                 assert all(column.startswith("ai_native_content_edges.") for column in columns)
                 assert {column.split(".")[-1] for column in columns} <= {
                     "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
                 }
                 assert "LIMIT" in statement and 0 < parameters[-2] <= 32
-        assert seen == {"ai_step_sequences", "ai_step_messages", "collector"}
+        assert collector_reads == 1
+        for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
+            identities = [identity for batch in batches[table] for identity in batch]
+            assert 0 < len(identities) <= bound
+            assert len(identities) == len(set(identities))
+        return batches
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [10, 140])
 async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_reads(
-    tmp_path: Path, size: int, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    size = 3
     url = f"sqlite+aiosqlite:///{tmp_path / 'growing.db'}"
     engine = create_async_engine(url)
     store = SqlStepStore(engine, namespace="steps", tenant_id="one")
@@ -78,7 +80,6 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
             start = len(traffic.reads)
             await store.save_snapshot(latest)
             # One appended node references at most three existing frontier IDs.
-            # Crossing the SQL batch size must not turn this into a history scan.
             traffic.assert_publication_metadata(
                 start, store_key=store.store_key, node_bound=4, message_bound=1,
             )
@@ -125,6 +126,40 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
             assert snapshot.idempotency_key == str(length)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
+        await cold.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_publication_resolves_metadata_across_batch_boundary(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'metadata-batches.db'}"
+    engine = create_async_engine(url)
+    store = SqlStepStore(engine, namespace="steps", tenant_id="one")
+    await store.initialize(local=True)
+    # One publication crosses the real 128-ID lookup limit without growing history repeatedly.
+    snapshot = ContinuableSnapshot(
+        run_id="run", step_index=0, idempotency_key="batch",
+        messages=[ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(129)],
+    )
+    traffic = _ReadTraffic()
+    event.listen(engine.sync_engine, "before_cursor_execute", traffic.capture)
+    try:
+        await store.save_snapshot(snapshot)
+        batches = traffic.assert_publication_metadata(
+            0, store_key=store.store_key, node_bound=129, message_bound=129,
+        )
+        for lookups in batches.values():
+            assert sorted(map(len, lookups)) == [1, 128]
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
+        await store.close()
+        await engine.dispose()
+
+    engine = create_async_engine(url)
+    cold = SqlStepStore(engine, namespace="steps", tenant_id="one", max_cached_messages=0)
+    try:
+        assert await cold.latest_snapshot(run_id="run") == snapshot
+    finally:
         await cold.close()
         await engine.dispose()
 

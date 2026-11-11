@@ -90,3 +90,6 @@ checks:
         - test_idempotent_checkpoint_replacement.py
         - test_idempotent_partial_frontier.py
       runtime: []
+    shards:
+      evaluation-recovery: 3
+      runtime: 5

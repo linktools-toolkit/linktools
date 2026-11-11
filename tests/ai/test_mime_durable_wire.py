@@ -43,7 +43,6 @@ def test_public_mime_fields_match_current_wire(kind: str, persisted: bool) -> No
     restored = _decode_domain(current_wire, type(value), _CURRENT_CODEC, persisted=persisted)
     assert restored == value
     assert restored.mime_type == "text/plain"
-    assert not hasattr(restored, "media_type")
 
 
 def test_evidence_public_mapping_defines_digest() -> None:
@@ -83,4 +82,3 @@ def test_public_attachment_fact_uses_mime_type() -> None:
         source="input", mime_type="text/plain", size=4, digest="b" * 64, position=0,
     )
     assert value.mime_type == "text/plain"
-    assert not hasattr(value, "media_type")

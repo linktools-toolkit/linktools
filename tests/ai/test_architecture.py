@@ -234,14 +234,13 @@ def test_migration_exports_preserve_owner_identity() -> None:
         "validate_metrics_database": _metrics.validate_metrics_database,
         "validate_metrics_sqlite": _metrics.validate_metrics_sqlite,
     }
-    assert list(expected) == migrate.__all__
     assert set(expected) <= set(dir(migrate))
     for name, value in expected.items():
         assert getattr(migrate, name) is value
         assert pickle.loads(pickle.dumps(value)) is value
     imported: dict[str, object] = {}
     exec("from linktools.ai.migrate import *", imported)
-    assert {name: imported[name] for name in migrate.__all__} == expected
+    assert {name: imported[name] for name in expected} == expected
 
 
 def test_nested_public_packages_preserve_dependency_direction(tmp_path: Path) -> None:

@@ -158,7 +158,7 @@ async def test_pushdown_rejects_corrupt_records_before_filters(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sample_count", (
-    pytest.param(100, id="representative"),
+    pytest.param(3, id="representative"),
     pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
 ))
 async def test_validation_is_once_per_record_and_one_observation_statement(
@@ -171,8 +171,12 @@ async def test_validation_is_once_per_record_and_one_observation_statement(
     original = sql_module._decode_observation_record
 
     def decode(namespace: str, row: object) -> Observation:
-        calls.append(row)
-        return original(namespace, row)
+        observation = original(namespace, row)
+        calls.append(observation.observation_id)
+        return observation
+
+    async def reject_client_scan(*args: object, **kwargs: object) -> None:
+        raise AssertionError("SQL aggregation must not materialize raw observation pages")
 
     def before_execute(conn: object, cursor: object, statement: str,
                        parameters: object, context: object, many: bool) -> None:
@@ -183,13 +187,15 @@ async def test_validation_is_once_per_record_and_one_observation_statement(
         await provision_metrics_database(engine)
         await _seed(metrics, sample_count)
         monkeypatch.setattr(sql_module, "_decode_observation_record", decode)
+        monkeypatch.setattr(metrics._store, "scan_observations", reject_client_scan)
         event.listen(engine.sync_engine, "before_cursor_execute", before_execute)
         for name in ("business.integrity.count", "business.integrity.value"):
             for filters in ({}, {"status": "FAILED"}):
                 calls.clear()
                 statements.clear()
-                await metrics.query(MetricQuery(name, _WINDOW, filters=filters))
-                assert len(calls) == sample_count
+                result = await metrics.query(MetricQuery(name, _WINDOW, filters=filters))
+                assert result.points[0].sample_count == (0 if filters else sample_count)
+                assert sorted(calls) == sorted(str(index) for index in range(sample_count))
                 assert len(statements) == 1
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", before_execute):

@@ -176,7 +176,8 @@ async def test_comparison_keeps_candidate_dataset_authorization(tmp_path: Path) 
 async def test_comparison_case_io_measurements(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property, frozen: bool,
 ) -> None:
-    dataset = DatasetSpec(DatasetRef("dataset", 1), tuple(_case("dataset", str(index)) for index in range(100)))
+    # Cross the 64-case content read boundary once for both cutoff modes.
+    dataset = DatasetSpec(DatasetRef("dataset", 1), tuple(_case("dataset", str(index)) for index in range(65)))
     async with _comparison(tmp_path, "sqlite", dataset, dataset) as (evaluations, persistence, spec, _policy):
         if not frozen:
             spec = replace(spec, cutoff=None)
@@ -211,6 +212,6 @@ async def test_comparison_case_io_measurements(
             event.remove(engine, "before_cursor_execute", capture)
             event.remove(engine, "commit", commit)
         record_property("comparison_case_io", dict(counts))
-        assert len(report.pairs) == 100
+        assert len(report.pairs) == 65
         assert counts["case_selects"] <= (2 if frozen else 6)
-        assert counts["case_records"] <= (100 if frozen else 300)
+        assert counts["case_records"] <= (65 if frozen else 195)

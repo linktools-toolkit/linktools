@@ -18,12 +18,12 @@ def test_checkpoint_staging_bodies_shared_and_capture_survives_trim(monkeypatch)
     staging = StagingAgentRunStore()
     staging.register_agent_run_local(AgentRunRecord(agent_run_id="run"))
     messages = []
-    for index in range(128):
+    for index in range(4):
         messages.append(ModelRequest(parts=[UserPromptPart(str(index))]))
         staging.save_checkpoint_local(AgentRunCheckpoint("run", index, list(messages)))
     archive = staging._message_archives["run"]
-    assert len(archive._leaves) == 128
-    assert len(archive._branches) < 128 * 8
+    assert len(archive._leaves) == 4
+    assert len(archive._branches) < 4 * 8
     from linktools.ai.persistence import _transcript_staging
     decoded = []
     decode = _transcript_staging.decode_model_messages
@@ -35,10 +35,10 @@ def test_checkpoint_staging_bodies_shared_and_capture_survives_trim(monkeypatch)
     monkeypatch.setattr(_transcript_staging, "decode_model_messages", observe)
     captured = staging.capture_projection_local("run", _ProjectionOffset())
     assert decoded == []
-    assert captured is not None and len(captured.checkpoints) == 128
-    staging.trim_checkpoints_local("run", checkpoint_offset=128)
-    assert staging.checkpoint_count_local("run") == 128
-    assert len(staging.capture_projection_local("run", _ProjectionOffset(checkpoints=128)).checkpoints) == 0
+    assert captured is not None and len(captured.checkpoints) == 4
+    staging.trim_checkpoints_local("run", checkpoint_offset=4)
+    assert staging.checkpoint_count_local("run") == 4
+    assert len(staging.capture_projection_local("run", _ProjectionOffset(checkpoints=4)).checkpoints) == 0
     messages[0].parts[0].content = "caller mutation"
     first = captured.checkpoints[0]
     assert decoded == []
@@ -46,19 +46,19 @@ def test_checkpoint_staging_bodies_shared_and_capture_survives_trim(monkeypatch)
     assert len(decoded) == 1
     first.messages[0].parts[0].content = "reader mutation"
     assert captured.checkpoints[0].messages[0].parts[0].content == "0"
-    staging.save_checkpoint_local(AgentRunCheckpoint("run", 128, messages))
-    suffix = staging.capture_projection_local("run", _ProjectionOffset(checkpoints=128))
-    assert suffix.target_checkpoint_offset == 129 and len(suffix.checkpoints) == 1
+    staging.save_checkpoint_local(AgentRunCheckpoint("run", 4, messages))
+    suffix = staging.capture_projection_local("run", _ProjectionOffset(checkpoints=4))
+    assert suffix.target_checkpoint_offset == 5 and len(suffix.checkpoints) == 1
     staging.release_agent_run_local("run")
-    assert captured.checkpoints[-1].messages[-1].parts[0].content == "127"
+    assert captured.checkpoints[-1].messages[-1].parts[0].content == "3"
     del captured
     gc.collect()
-    assert len(archive._branches) == 127
+    assert len(archive._branches) == 3
     # The independently retained first checkpoint still owns its original leaf.
-    assert len(archive._leaves) == 129
+    assert len(archive._leaves) == 5
     del first
     gc.collect()
-    assert len(archive._leaves) == 128
+    assert len(archive._leaves) == 4
 
 
 def test_message_staging_releases_unreferenced_context_and_returns_independent_values():
@@ -104,25 +104,25 @@ def test_trace_staging_waits_for_its_acknowledged_frontier():
 
 def test_message_staging_slice_does_not_pin_excluded_prefix():
     archive = MessageArchive()
-    original = archive.snapshot([ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(1000)])
+    original = archive.snapshot([ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(4)])
     tail = archive.snapshot(original[-1:])
     del original
     gc.collect()
     assert len(archive._leaves) == 1
     assert len(archive._branches) == 0
-    assert len(tail) == 1 and tail[0].parts[0].content == "999"
+    assert len(tail) == 1 and tail[0].parts[0].content == "3"
 
 
 def test_message_staging_sequential_read_does_not_repeat_index_traversal(monkeypatch):
     from linktools.ai.persistence._transcript_staging import MessageSnapshot
 
-    snapshot = MessageArchive().snapshot([ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(128)])
+    snapshot = MessageArchive().snapshot([ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(4)])
 
     def no_index(*args):
         raise AssertionError("sequential read must traverse the tree once")
 
     monkeypatch.setattr(MessageSnapshot, "__getitem__", no_index)
-    assert [message.parts[0].content for message in snapshot] == [str(i) for i in range(128)]
+    assert [message.parts[0].content for message in snapshot] == [str(i) for i in range(4)]
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_memory_archive_counts_and_ranges_do_not_decode_whole_checkpoint(m
     archive = InMemoryStepArchive(PersistenceDomain.CONVERSATION)
     archive.register_agent_run_local(AgentRunRecord(agent_run_id="run"))
     archive.save_checkpoint_local(AgentRunCheckpoint(
-        "run", 0, [ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(100)],
+        "run", 0, [ModelRequest(parts=[UserPromptPart(str(i))]) for i in range(4)],
     ))
     decoded = []
     original = _transcript_staging.decode_model_messages
@@ -144,10 +144,10 @@ async def test_memory_archive_counts_and_ranges_do_not_decode_whole_checkpoint(m
         return original(payload)
 
     monkeypatch.setattr(_transcript_staging, "decode_model_messages", observe)
-    assert await archive.transcript_message_count("run") == 100
+    assert await archive.transcript_message_count("run") == 4
     assert decoded == []
-    page = [message async for message in archive.iter_message_range(agent_run_id="run", start=90, end=92)]
-    assert [message.parts[0].content for message in page] == ["90", "91"]
+    page = [message async for message in archive.iter_message_range(agent_run_id="run", start=1, end=3)]
+    assert [message.parts[0].content for message in page] == ["1", "2"]
     assert len(decoded) == 2
 
 

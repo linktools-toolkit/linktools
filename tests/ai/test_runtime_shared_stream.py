@@ -681,10 +681,10 @@ async def test_marker_batch_prefetched_tail_respects_authority_deadline(authorit
 
 
 @pytest.mark.asyncio
-async def test_marker_batch_prefetch_remains_bounded_to_durable_page_size() -> None:
+async def test_marker_batch_prefetch_remains_bounded_to_durable_page_size(authority_clock) -> None:
     stream, _, events = await _marker_batch_stream([
-        {"kind": "event", "durable": target} for target in (1, 201, 401)
-    ], durable_count=401)
+        {"kind": "event", "durable": target} for target in (1, 201)
+    ], durable_count=201)
     original_list = events.list
     limits = []
 
@@ -694,10 +694,11 @@ async def test_marker_batch_prefetch_remains_bounded_to_durable_page_size() -> N
 
     events.list = record_list
     try:
-        values = [await anext(stream) for _ in range(401)]
-        assert [value.durable_seq for value in values] == list(range(1, 402))
-        assert [value.position[1] for value in values] == [1] * 200 + [2] * 200 + [3]
-        assert events.reads == 3 and limits == [200, 200, 1]
+        values = [await anext(stream) for _ in range(201)]
+        assert [value.durable_seq for value in values] == list(range(1, 202))
+        assert [value.position[1] for value in values] == [1] * 200 + [2]
+        assert events.reads == len(limits) == 2
+        assert all(0 < limit <= 200 for limit in limits)
     finally:
         await stream.aclose()
 

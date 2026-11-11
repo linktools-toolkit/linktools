@@ -7,8 +7,8 @@ import os
 
 def select_ci_tier(event: str, draft: bool, requested: str) -> str:
     if requested:
-        if event != "workflow_dispatch" or requested not in ("daily", "merge", "all"):
-            raise ValueError("A test tier can only be selected by manual workflow dispatch")
+        if event != "workflow_dispatch" or requested not in ("daily", "merge"):
+            raise ValueError("CI accepts daily or merge coverage only through manual workflow dispatch")
         return requested
     if event == "pull_request" and draft:
         return "daily"

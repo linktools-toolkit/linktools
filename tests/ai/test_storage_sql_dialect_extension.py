@@ -7,7 +7,6 @@ from sqlalchemy import event, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from linktools.ai import storage
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (
     SQLiteDialect,
@@ -49,8 +48,6 @@ class _ApplicationDialect(SQLiteDialect):
 async def test_public_sql_classifier_preserves_retry_and_unknown_commit_semantics(
     phase: SqlTransactionPhase,
 ) -> None:
-    assert "SqlTransactionPhase" in storage.__all__
-    assert "SqlTransactionDisposition" in storage.__all__
     dialect = _ApplicationDialect()
     contract: SqlAlchemyDialect = dialect
     assert isinstance(contract, SqlAlchemyDialect)

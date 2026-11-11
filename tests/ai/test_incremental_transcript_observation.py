@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """Durable pending parts have incremental cost and immutable read cuts."""
 
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 import random
 
 import pytest
 import pytest_asyncio
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolReturnPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, ToolReturnPart
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
@@ -111,7 +112,13 @@ async def test_pending_observation_rejects_drift_and_stale_commit(observation_st
 
 
 @pytest.mark.asyncio
-async def test_pending_part_encoding_grows_with_added_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("counts", (
+    pytest.param((3,), id="contract"),
+    pytest.param((16, 32, 64), marks=pytest.mark.manual, id="growth"),
+))
+async def test_pending_part_encoding_grows_with_added_bodies(
+    monkeypatch: pytest.MonkeyPatch, counts: tuple[int, ...],
+) -> None:
     original = _history.encode_model_messages
     encoded_parts = 0
 
@@ -122,7 +129,7 @@ async def test_pending_part_encoding_grows_with_added_bodies(monkeypatch: pytest
 
     monkeypatch.setattr(_history, "encode_model_messages", measure)
     totals = []
-    for count in (16, 32, 64):
+    for count in counts:
         store = InMemoryStateStore()
         await store.initialize()
         repository = _repository(store)
@@ -131,42 +138,64 @@ async def test_pending_part_encoding_grows_with_added_bodies(monkeypatch: pytest
         parts = []
         keys = []
         for index in range(count):
+            before_part = encoded_parts
             parts.append(ToolReturnPart("tool", "body" * 128, tool_call_id=str(index)))
             keys.append(f"tool_result:{index}")
             pending = ModelRequest(parts=list(parts))
             prepared = await repository.prepare_observation(
                 "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
             )
+            assert len(prepared.new_pending_parts) == 1
             await store.mutate(lambda tx: repository.commit_observation(tx, prepared))
             unchanged = await repository.prepare_observation(
                 "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
             )
+            assert unchanged.new_pending_parts == ()
             await store.mutate(lambda tx: repository.commit_observation(tx, unchanged))
+            assert encoded_parts - before_part <= 2, "adding one body must not encode the confirmed prefix"
+            warmed = encoded_parts
+            await repository.prepare_observation(
+                "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
+            )
+            assert encoded_parts == warmed, "an unchanged confirmed observation must not encode bodies"
+        before_final = encoded_parts
+        message = replace(pending, parts=list(reversed(parts)))
         completed = await repository.prepare_observation(
-            "run", (replace(pending, parts=list(reversed(parts))),), first_message_index=0,
+            "run", (message,), first_message_index=0,
             pending=None, pending_keys=(),
         )
         await store.mutate(lambda tx: repository.commit_observation(tx, completed))
+        assert encoded_parts - before_final <= count * 2
         totals.append(encoded_parts - before)
+        assert await repository.load_messages("run") == (message,)
+        await repository.validate_integrity()
         await store.close()
-    assert totals[1] <= totals[0] * 2 + 4
-    assert totals[2] <= totals[1] * 2 + 4
+    for smaller, larger in zip(totals, totals[1:]):
+        assert larger <= smaller * 2 + 4
 
 
 @pytest.mark.asyncio
-async def test_pending_object_bytes_scale_with_new_content(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("counts", (
+    pytest.param((3,), id="contract"),
+    pytest.param((8, 16, 32), marks=pytest.mark.manual, id="growth"),
+))
+async def test_pending_object_bytes_scale_with_new_content(
+    monkeypatch: pytest.MonkeyPatch, counts: tuple[int, ...],
+) -> None:
     original = InMemoryObjectStore.put
     submitted_bytes = 0
+    submitted_keys = Counter()
 
     async def measure(self, key, chunks, *, expected_size, expected_digest):
         nonlocal submitted_bytes
         submitted_bytes += expected_size
+        submitted_keys[key] += 1
         return await original(self, key, chunks, expected_size=expected_size, expected_digest=expected_digest)
 
     monkeypatch.setattr(InMemoryObjectStore, "put", measure)
     totals = []
     retained = []
-    for count in (8, 16, 32):
+    for count in counts:
         store = InMemoryStateStore()
         await store.initialize()
         objects = InMemoryObjectStore("runtime")
@@ -177,28 +206,53 @@ async def test_pending_object_bytes_scale_with_new_content(monkeypatch: pytest.M
         await repository.create_head("run")
         generator = random.Random(17)
         before = submitted_bytes
+        submitted_keys.clear()
         parts = []
         keys = []
         for index in range(count):
-            parts.append(ToolReturnPart("tool", generator.randbytes(12_000).hex(), tool_call_id=str(index)))
+            before_part = submitted_bytes
+            attachment = BinaryContent(generator.randbytes(64), media_type="application/octet-stream")
+            parts.append(ToolReturnPart("tool", attachment, tool_call_id=str(index)))
             keys.append(f"tool_result:{index}")
+            pending = ModelRequest(parts=list(parts))
             prepared = await repository.prepare_observation(
-                "run", (), first_message_index=0,
-                pending=ModelRequest(parts=list(parts)), pending_keys=tuple(keys),
+                "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
             )
+            assert len(prepared.new_pending_parts) == 1
             await store.mutate(lambda tx: repository.commit_observation(tx, prepared))
+            assert submitted_bytes - before_part == len(attachment.data), "only the new attachment must be submitted"
+            warmed = submitted_bytes
+            unchanged = await repository.prepare_observation(
+                "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
+            )
+            assert unchanged.new_pending_parts == ()
+            await store.mutate(lambda tx: repository.commit_observation(tx, unchanged))
+            await repository.prepare_observation(
+                "run", (), first_message_index=0, pending=pending, pending_keys=tuple(keys),
+            )
+            assert submitted_bytes == warmed, "confirmed bodies must not be resubmitted"
+        assert len(submitted_keys) == count and set(submitted_keys.values()) == {1}
+        pending_object_keys = set(submitted_keys)
+        pending_bytes = submitted_bytes - before
+        message = ModelRequest(parts=list(reversed(parts)))
         final = await repository.prepare_observation(
-            "run", (ModelRequest(parts=list(reversed(parts))),),
+            "run", (message,),
             first_message_index=0, pending=None, pending_keys=(),
         )
         await store.mutate(lambda tx: repository.commit_observation(tx, final))
         totals.append(submitted_bytes - before)
-        retained.append(sum(len(raw) for raw in objects._objects.values()))
+        retained.append(sum([item.size async for item in objects.list_objects()]))
+        assert set(submitted_keys) == pending_object_keys
+        # The final combined message may publish each attachment once more.
+        assert max(submitted_keys.values()) <= 2
+        assert retained[-1] == pending_bytes
+        assert retained[-1] <= totals[-1] <= 2 * retained[-1]
+        assert await repository.load_messages("run") == (message,)
         await repository.validate_integrity()
         await store.close()
     for values in (totals, retained):
-        assert values[1] <= values[0] * 2.2
-        assert values[2] <= values[1] * 2.2
+        for smaller, larger in zip(values, values[1:]):
+            assert larger <= smaller * 2.2
 
 
 @pytest.mark.asyncio
@@ -341,8 +395,13 @@ async def test_rolled_back_pending_cache_uses_other_writers_committed_parts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("counts", (
+    pytest.param((3,), id="contract"),
+    pytest.param((16, 32, 64), marks=pytest.mark.manual, id="growth"),
+))
 async def test_confirmed_pending_prefix_reads_only_added_parts(
     monkeypatch: pytest.MonkeyPatch,
+    counts: tuple[int, ...],
 ) -> None:
     rows = 0
     decoded = 0
@@ -362,7 +421,7 @@ async def test_confirmed_pending_prefix_reads_only_added_parts(
 
     monkeypatch.setattr(_MemoryTransaction, "list_facts", read)
     monkeypatch.setattr(TranscriptRepository, "_decode_chunk_messages", decode)
-    for count in (16, 32, 64):
+    for count in counts:
         store = InMemoryStateStore()
         await store.initialize()
         repository = _repository(store)
@@ -370,6 +429,7 @@ async def test_confirmed_pending_prefix_reads_only_added_parts(
         before = rows, decoded
         parts = []
         for index in range(count):
+            before_part = rows, decoded
             parts.append(ToolReturnPart("tool", "body" * 128, tool_call_id=str(index)))
             pending = ModelRequest(parts=list(parts))
             keys = tuple(f"tool_result:{position}" for position in range(len(parts)))
@@ -378,6 +438,8 @@ async def test_confirmed_pending_prefix_reads_only_added_parts(
                     "run", (), first_message_index=0, pending=pending, pending_keys=keys,
                 )
                 await store.mutate(lambda tx: repository.commit_observation(tx, prepared))
+            assert rows - before_part[0] <= 1, "adding one body must not reread the confirmed prefix"
+            assert decoded - before_part[1] <= 1
             warmed = rows, decoded
             await repository.prepare_observation(
                 "run", (), first_message_index=0, pending=pending, pending_keys=keys,
@@ -385,4 +447,12 @@ async def test_confirmed_pending_prefix_reads_only_added_parts(
             assert (rows, decoded) == warmed, "unchanged confirmed parts must not be read again"
         assert rows - before[0] <= count
         assert decoded - before[1] <= count
+        message = replace(pending, parts=list(reversed(parts)))
+        completed = await repository.prepare_observation(
+            "run", (message,), first_message_index=0, pending=None, pending_keys=(),
+        )
+        await store.mutate(lambda tx: repository.commit_observation(tx, completed))
+        assert (rows, decoded) == warmed
+        assert await repository.load_messages("run") == (message,)
+        await repository.validate_integrity()
         await store.close()

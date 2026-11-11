@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       test-tier:
-        description: 'Coverage: daily, merge acceptance, or all including manual scale/stress probes'
+        description: 'Coverage: daily representatives or merge acceptance'
         type: choice
-        options: [daily, merge, all]
+        options: [daily, merge]
         default: merge
         required: true
   workflow_call:
@@ -89,7 +89,7 @@ jobs:
     name: Python ${{ matrix.python-version }} ${{ matrix.check.name }}
     needs: discover
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ needs.discover.outputs.test-tier == 'all' && 60 || 20 }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -195,5 +195,5 @@ jobs:
           test "$DISCOVER_RESULT" = success
           test "$COMPATIBILITY_RESULT" = success
           test "$PYTHON_RESULT" = success
-          case "$TEST_TIER" in daily|merge|all) ;; *) exit 1 ;; esac
+          case "$TEST_TIER" in daily|merge) ;; *) exit 1 ;; esac
           echo "Passed test coverage: $TEST_TIER" >> "$GITHUB_STEP_SUMMARY"
