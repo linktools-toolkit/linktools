@@ -27,7 +27,7 @@ _INSTALL_MODULE_PATTERN = re.compile(
 _SUPPORTED_CHECKS = {"gate", "ruff", "pytest", "ci-pool", "setup"}
 _GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
-_PYTEST_FIELDS = {"paths", "groups"}
+_PYTEST_FIELDS = {"paths", "groups", "shards"}
 
 __missing__ = object()
 
@@ -440,8 +440,19 @@ def load_project_checks(project: str, project_path: str) -> "typing.Dict[str, ty
                 print("[-] %s pytest groups require exactly one empty-list fallback group" % project, file=sys.stderr)
                 raise SystemExit(1)
             result["pytest"]["groups"] = normalized
-    if "ci-pool" in result and "groups" in result.get("pytest", {}):
-        print("[-] %s cannot combine checks.ci-pool and pytest.groups" % project, file=sys.stderr)
+        if "shards" in pytest:
+            shards = _require_mapping(pytest["shards"], "%s checks.pytest.shards" % project)
+            groups = result["pytest"].get("groups", {"all": ()})
+            for group, count in shards.items():
+                if group not in groups:
+                    print("[-] %s pytest shards reference unknown group: %r" % (project, group), file=sys.stderr)
+                    raise SystemExit(1)
+                if type(count) is not int or count < 1:
+                    print("[-] %s pytest shard count for %s must be a positive integer" % (project, group), file=sys.stderr)
+                    raise SystemExit(1)
+            result["pytest"]["shards"] = dict(shards)
+    if "ci-pool" in result and {"groups", "shards"}.intersection(result.get("pytest", {})):
+        print("[-] %s cannot combine checks.ci-pool and pytest.groups or pytest.shards" % project, file=sys.stderr)
         raise SystemExit(1)
     paths = list(result.get("pytest", {}).get("paths", ()))
     for path in _default_pytest_paths(project, project_path):

@@ -91,10 +91,16 @@ def test_runtime_ci_output_keeps_failures_without_per_case_progress(
     root = Path(__file__).resolve().parents[2]
     pytester.makeconftest((root / "conftest.py").read_text(encoding="utf-8"))
     pytester.makeini((root / "pytest.ini").read_text(encoding="utf-8"))
-    check = manage.load_project_checks("linktools-ai", str(root / "linktools-ai"))["pytest"]
-    check["paths"] = [str(pytester.path)]
+    project = pytester.path / "linktools-example"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.6"\n', encoding="utf-8")
+    (project / "linktools.yml").write_text(yaml.safe_dump({
+        "checks": {"pytest": {"paths": [".."], "groups": {"runtime": []}}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(manage, "PROJECT_PATH", str(pytester.path))
+    check = manage.load_project_checks(project.name, str(project))["pytest"]
     monkeypatch.setenv("LINKTOOLS_PYTEST", json.dumps(check))
-    row = next(row for row in package_checks(("linktools-ai",)) if row["group"] == "runtime")
+    row, = package_checks((project.name,))
     monkeypatch.setenv("PYTEST_ADDOPTS", row["pytest-args"])
     pytester.makepyfile(test_runtime_output='''
 import warnings

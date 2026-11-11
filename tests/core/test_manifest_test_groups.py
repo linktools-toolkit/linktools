@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -150,8 +151,9 @@ def test_group_selection_prevents_unselected_test_module_imports(
 
 
 @pytest.mark.parametrize("owned_path", ("suite", "suite/nested"))
+@pytest.mark.parametrize("sharded", (False, True))
 def test_group_selection_preserves_package_collectors(
-    repository: Path, capfd: pytest.CaptureFixture, owned_path: str,
+    repository: Path, capfd: pytest.CaptureFixture, owned_path: str, sharded: bool,
 ) -> None:
     project = _new_package(repository)
     nested = repository / "suite" / "nested"
@@ -174,8 +176,19 @@ def test_group_selection_preserves_package_collectors(
         encoding="utf-8",
     )
     _write_manifest(project, {"specific": ["test_feature.py"], "remaining": []}, ("../" + owned_path,))
+    options = "--test-group=specific"
+    if sharded:
+        _set_shards(project, {"specific": 2})
+        shard = "1/2"
+        try:
+            _collect_package(project, "specific", capfd, "--test-shard=" + shard)
+        except subprocess.CalledProcessError as error:
+            assert error.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
+            capfd.readouterr()
+            shard = "2/2"
+        options += " --test-shard=" + shard
     check = manage.load_project_checks(project.name, str(project))["pytest"]
-    environment = dict(manage._check_environment(), PYTEST_ADDOPTS="--test-group=specific")
+    environment = dict(manage._check_environment(), PYTEST_ADDOPTS=options)
     manage._run_pytest(project.name, check, environment, "merge")
     assert "1 passed" in capfd.readouterr().out
     assert (nested / "torn-down").is_file()
@@ -346,14 +359,21 @@ def test_unknown_named_groups_fail_clearly_even_without_manifest_payload(
         assert "Unknown test group 'unknown'" in result.stderr
 
 
-@pytest.mark.parametrize("group", ("all", "specific", "remaining"))
+@pytest.mark.parametrize("group,sharded", (
+    ("all", False), ("specific", False), ("remaining", False),
+    ("specific", True), ("remaining", True),
+))
 def test_overlapping_nonfallback_groups_fail_instead_of_duplicating_coverage(
-    repository: Path, capfd: pytest.CaptureFixture, group: str,
+    repository: Path, capfd: pytest.CaptureFixture, group: str, sharded: bool,
 ) -> None:
     project = _new_package(repository)
     _write_manifest(project, {"specific": ["test_alpha.py"], "broad": ["test_*.py"], "remaining": []})
+    extra = ()
+    if sharded:
+        _set_shards(project, {group: 2})
+        extra = ("--test-shard=1/2",)
     with pytest.raises(subprocess.CalledProcessError) as error:
-        _collect_package(project, group, capfd)
+        _collect_package(project, group, capfd, *extra)
     assert error.value.returncode == pytest.ExitCode.USAGE_ERROR
     assert "Ambiguous test groups" in capfd.readouterr().err
 
@@ -519,3 +539,192 @@ def test_ci_pool_cannot_mix_with_pytest_groups(
     with pytest.raises(SystemExit, match="1"):
         package_checks((project.name,))
     assert "cannot combine checks.ci-pool and pytest.groups" in capsys.readouterr().err
+
+
+def _set_shards(project: Path, shards: object) -> None:
+    path = project / "linktools.yml"
+    data = yaml.safe_load(path.read_text())
+    data["checks"]["pytest"]["shards"] = shards
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("shards,message", (
+    (None, "must be a mapping"),
+    ([], "must be a mapping"),
+    ({"unknown": 2}, "unknown group"),
+    ({"all": 2}, "unknown group"),
+    ({"specific": 0}, "positive integer"),
+    ({"specific": -1}, "positive integer"),
+    ({"specific": True}, "positive integer"),
+    ({"specific": 1.5}, "positive integer"),
+    ({"specific": "2"}, "positive integer"),
+))
+def test_invalid_shard_declarations_fail_before_matrix_generation(
+    repository: Path, capsys: pytest.CaptureFixture, shards: object, message: str,
+) -> None:
+    project = _new_package(repository)
+    _write_manifest(project, {"specific": ["test_alpha.py"], "remaining": []})
+    _set_shards(project, shards)
+    for load in (
+        lambda: manage.load_project_checks(project.name, str(project)),
+        lambda: package_checks((project.name,)),
+    ):
+        with pytest.raises(SystemExit, match="1"):
+            load()
+        assert message in capsys.readouterr().err
+
+
+def test_ci_pool_cannot_hide_package_shard_counts(
+    repository: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    project = _new_package(repository)
+    _set_shards(project, {"all": 2})
+    _set_ci_pool(project, "quick")
+    with pytest.raises(SystemExit, match="1"):
+        package_checks((project.name,))
+    assert "cannot combine checks.ci-pool" in capsys.readouterr().err
+
+
+def _sharded_package(repository: Path) -> Path:
+    project = _new_package(repository)
+    _write_manifest(project, {"specific": ["test_feature_*.py"], "remaining": []})
+    for family in ("feature", "new"):
+        for index in range(12):
+            (project / "tests" / ("test_%s_%d.py" % (family, index))).write_text(
+                "import pytest\n"
+                "def test_example_daily(): pass\n"
+                "@pytest.mark.merge\n"
+                "def test_example_merge(): pass\n"
+                "@pytest.mark.manual\n"
+                "def test_example_manual(): pass\n",
+                encoding="utf-8",
+            )
+    _set_shards(project, {"specific": 2, "remaining": 3})
+    return project
+
+
+@pytest.mark.parametrize("tier", ("daily", "merge", "all"))
+def test_generated_matrix_shards_partition_every_test_at_each_tier(
+    repository: Path, capfd: pytest.CaptureFixture, tier: str,
+) -> None:
+    project = _sharded_package(repository)
+    rows = package_checks((project.name,))
+    assert len(rows) == len({row["name"] for row in rows}) == 5
+    baseline = _collect_package(project, "all", capfd, tier=tier)
+    selected = set()
+    file_owners = {}
+    for row in rows:
+        options = tuple(arg for arg in shlex.split(row["pytest-args"]) if arg.startswith("--test-"))
+        partition = _collect_package(project, row["group"], capfd, *options, tier=tier)
+        assert partition
+        assert selected.isdisjoint(partition)
+        selected.update(partition)
+        for node in partition:
+            file = node.split("::")[0]
+            assert file_owners.setdefault(file, row["name"]) == row["name"]
+    assert selected == baseline
+
+
+def test_manifest_shard_changes_update_only_the_declared_group(repository: Path) -> None:
+    project = _new_package(repository)
+    _write_manifest(project, {"specific": ["test_alpha.py"], "remaining": []})
+    for count in (1, 2, 4):
+        _set_shards(project, {"specific": count})
+        rows = package_checks((project.name,))
+        specific = [row for row in rows if row["group"] == "specific"]
+        assert len(specific) == count
+        assert [row["shard"] for row in specific] == (
+            ["%d/%d" % (index, count) for index in range(1, count + 1)] if count > 1 else [""]
+        )
+        remaining, = [row for row in rows if row["group"] == "remaining"]
+        assert not remaining["shard"]
+        assert not any(arg.startswith("--test-shard") for arg in shlex.split(remaining["pytest-args"]))
+
+
+def test_shard_selection_prevents_unselected_module_imports(
+    repository: Path, capfd: pytest.CaptureFixture,
+) -> None:
+    project = _sharded_package(repository)
+    selected = _collect_package(project, "remaining", capfd, "--test-shard=1/3")
+    selected_files = {repository / node.split("::")[0] for node in selected}
+    all_files = set((project / "tests").glob("test_*.py"))
+    assert selected_files and selected_files < all_files
+    for path in all_files - selected_files:
+        path.write_text("raise AssertionError('unselected module was imported')\n", encoding="utf-8")
+    assert _collect_package(project, "remaining", capfd, "--test-shard=1/3") == selected
+
+
+@pytest.mark.parametrize("suffix", ("", "::test_example_daily"))
+def test_explicit_file_and_node_selectors_cannot_escape_their_shard(
+    repository: Path, capfd: pytest.CaptureFixture, suffix: str,
+) -> None:
+    project = _sharded_package(repository)
+    expected = _collect_package(project, "specific", capfd, "--test-shard=1/2")
+    paths = sorted((project / "tests").glob("test_feature_*.py"))
+    check = manage.load_project_checks(project.name, str(project))["pytest"]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--collect-only",
+         "--test-group=specific", "--test-shard=1/2"] + [str(path) + suffix for path in paths],
+        cwd=repository, env=dict(manage._check_environment(), LINKTOOLS_PYTEST=json.dumps(check)),
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {line for line in result.stdout.splitlines() if "::test_example" in line} == {
+        node for node in expected if not suffix or node.endswith(suffix)
+    }
+
+
+@pytest.mark.parametrize("shard", ("", "1", "0/2", "-1/2", "1/0", "3/2", "1/3", "01/2", "1/2/3", "1/x"))
+def test_invalid_shard_selectors_fail_before_test_import(
+    repository: Path, capfd: pytest.CaptureFixture, shard: str,
+) -> None:
+    project = _new_package(repository)
+    _set_shards(project, {"all": 2})
+    (project / "tests" / "test_alpha.py").write_text(
+        "raise AssertionError('test imported before validation')\n", encoding="utf-8",
+    )
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        _collect_package(project, "all", capfd, "--test-shard=" + shard)
+    assert error.value.returncode == pytest.ExitCode.USAGE_ERROR
+    output = capfd.readouterr()
+    assert "shard" in output.err
+    assert "test imported before validation" not in output.out + output.err
+
+
+def test_shard_union_works_without_named_groups(
+    repository: Path, capfd: pytest.CaptureFixture,
+) -> None:
+    project = _sharded_package(repository)
+    _write_manifest(project)
+    _set_shards(project, {"all": 2})
+    first = _collect_package(project, "all", capfd, "--test-shard=1/2")
+    second = _collect_package(project, "all", capfd, "--test-shard=2/2")
+    assert first and second and first.isdisjoint(second)
+    assert first | second == _collect_package(project, "all", capfd)
+
+
+def test_sharding_requires_the_package_manifest_payload(repository: Path) -> None:
+    project = _new_package(repository)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--test-shard=1/1", str(project / "tests")],
+        cwd=repository, env=manage._check_environment(), capture_output=True, text=True,
+    )
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert "use manage.py check" in result.stderr
+
+
+def test_shard_ownership_survives_relocation_hash_seeds_and_new_files(
+    repository: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture,
+) -> None:
+    project = _sharded_package(repository)
+    baseline = _collect_package(project, "remaining", capfd, "--test-shard=1/3")
+    relocated = repository.with_name(repository.name + "-relocated")
+    shutil.copytree(repository, relocated)
+    monkeypatch.setattr(manage, "PROJECT_PATH", str(relocated))
+    monkeypatch.setenv("PYTHONHASHSEED", "1234")
+    project = relocated / project.name
+    assert _collect_package(project, "remaining", capfd, "--test-shard=1/3") == baseline
+    new = project / "tests" / "test_added_feature.py"
+    _write_test(new)
+    selected = _collect_package(project, "remaining", capfd, "--test-shard=1/3")
+    assert selected - {"%s::test_example" % new.relative_to(relocated)} == baseline
