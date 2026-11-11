@@ -35,7 +35,10 @@ from .test_step_projection import _execution
 
 
 @asynccontextmanager
-async def _source(tmp_path: Path, *, confirmed: bool = True, restart: bool = True, large: bool = True, default_metadata: bool = False) -> AsyncIterator[tuple]:
+async def _source(
+    tmp_path: Path, *, confirmed: bool = True, restart: bool = True, large: bool = True,
+    default_metadata: bool = False, extra_metadata: dict[str, str] | None = None,
+) -> AsyncIterator[tuple]:
     state = Persistence(_storage("sqlite", tmp_path))
     await state.initialize(namespace="native-run-facts", tenant_id="tenant")
     native = await state.create_step_store()
@@ -48,7 +51,7 @@ async def _source(tmp_path: Path, *, confirmed: bool = True, restart: bool = Tru
                    "agent_run_seq": "1", "linktools.transcript_start": "0", "linktools.transcript_run_id": "run"}
                   if default_metadata else
                   {"shared": "shared-native-payload" * (200 if large else 1), "different": "native",
-                   "native-only": "retained", "linktools.transcript_start": "0"}),
+                   "native-only": "retained", "linktools.transcript_start": "0"}) | (extra_metadata or {}),
     )
     run = replace(OfficialStepReader.project_run(source),
         started_at=source.started_at + timedelta(microseconds=1),

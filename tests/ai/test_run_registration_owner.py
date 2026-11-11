@@ -142,3 +142,55 @@ async def test_registration_has_final_seed_before_domain_admission(shared_start:
     assert native == admitted
     with pytest.raises(ValueError):
         registration.prepare(conversation_id="conversation", registration_id="different-registration")
+
+
+@pytest.mark.asyncio
+async def test_cold_sql_conversation_run_uses_one_connection_without_event_tables(tmp_path) -> None:
+    from sqlalchemy import inspect
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from linktools.ai.core import PersistenceDomain
+    from linktools.ai.migrate import provision_runtime_database
+    from linktools.ai.persistence._model_interaction_store import ModelInteractionStateStepArchive
+    from linktools.ai.persistence._sql import SqlStateStore
+    from linktools.ai.persistence._step_store import SqlStepStore
+    from linktools.ai.storage import InMemoryObjectStore
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'single-connection.db'}",
+        pool_size=1, max_overflow=0, pool_timeout=0.1,
+    )
+    state = SqlStateStore(engine, runtime_domain=PersistenceDomain.CONVERSATION)
+    archive = None
+    try:
+        await provision_runtime_database(engine, domains={PersistenceDomain.CONVERSATION})
+        async with engine.connect() as connection:
+            tables = await connection.run_sync(lambda sync: inspect(sync).get_table_names())
+        assert "ai_step_runs" in tables and "ai_step_events" not in tables
+        await state.initialize()
+        native = SqlStepStore(state.context, namespace="owner", tenant_id="tenant")
+        owner = RunRegistrationStore(state, namespace="owner", tenant_id="tenant", native=native)
+
+        def open_archive():
+            return ModelInteractionStateStepArchive(
+                state, object_store=InMemoryObjectStore(), namespace="owner", tenant_id="tenant",
+                runtime_domain=PersistenceDomain.CONVERSATION, run_registrations=owner,
+            )
+
+        source = RunRecord(run_id="cold", metadata={"source": "canonical"})
+        projected = OfficialStepReader.project_run(source)
+        archive = open_archive()
+        await archive.initialize()
+        await archive.register_agent_run(projected)
+        await archive.close()
+        archive = open_archive()
+        await archive.initialize()
+        assert not archive.can_share_native_start(native)
+        assert await archive.get_agent_run(agent_run_id="cold") == projected
+        assert await archive.list_agent_runs() == [projected]
+        run, interactions = await archive.read_model_interactions_with_run(agent_run_id="cold")
+        assert run == projected and interactions == []
+    finally:
+        if archive is not None:
+            await archive.close()
+        await state.close()
+        await engine.dispose()

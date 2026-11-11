@@ -2760,6 +2760,7 @@ class StateCommands:
             final_cursor = replace(next_cursor, message_count=end)
         elif successful and conversation_agent_run is not None and conversation_checkpoint is not None:
             assert archive is not None
+            await archive.prepare_run_registration(conversation_agent_run)
             _checkpoint, prepared = await archive.prepare_conversation_checkpoint(
                 conversation_agent_run, conversation_checkpoint,
             )
@@ -2947,6 +2948,7 @@ class StateCommands:
         *,
         archive: PreparedArchive | None = None,
     ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch, ConversationHistoryRecord | None]:
+        await owner.prepare_run_registration(run)
         history_owner = self._conversation_history
         if history_owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3078,6 +3080,7 @@ class StateCommands:
             and conversation_agent_run is not None
             and conversation_checkpoint is not None
         ):
+            await self._conversation_run_store.prepare_run_registration(conversation_agent_run)
             if session_id is None:
                 conversation_checkpoint, prepared_conversation = await self._conversation_run_store.prepare_conversation_checkpoint(
                     conversation_agent_run, conversation_checkpoint, archive=shared_archive,

@@ -55,6 +55,7 @@ async def test_runtime_native_producer_and_cold_trace_share_exact_registration(
 ) -> None:
     from sqlalchemy.ext.asyncio import create_async_engine
     from linktools.ai.persistence._native_run_reference import is_native_run_reference
+    from linktools.ai.persistence._run_registration import RunRegistrationReference
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
@@ -93,11 +94,12 @@ async def test_runtime_native_producer_and_cold_trace_share_exact_registration(
                 assert await archive.get_agent_run(agent_run_id=source.run_id) == projected
                 rows = await archive.state_store.read(lambda tx: tx.scan_records())
                 run = next(row for row in rows if row.kind == "agent_run")
-                if is_native_run_reference(run.data):
-                    reference = run.data["value"]["payload"]
-                    assert reference["metadata"] == {}
-                    assert reference["removed"] == []
-                    assert reference["started_at"] is None
+                assert is_native_run_reference(run.data)
+                reference = RunRegistrationReference.from_data(run.data)
+                assert reference.metadata == {}
+                assert reference.removed_metadata == ()
+                assert reference.fields == {}
+                assert reference.project(source) == projected
             finally:
                 await cold.preflight_close()
                 await cold.close()
@@ -109,7 +111,6 @@ async def test_runtime_native_producer_and_cold_trace_share_exact_registration(
 @pytest.mark.asyncio
 async def test_cold_registration_replay_confirms_original_without_another_select(tmp_path: Path, record_property) -> None:
     async with _source(tmp_path, confirmed=False) as (state, native, source, _):
-        await native.register_run(source)
         await native.close()
         supplied = replace(source, metadata={"changed": "caller"}, agent_name="different",
                            started_at=source.started_at + timedelta(seconds=1))
@@ -155,7 +156,6 @@ async def test_replay_source_is_not_confirmed_before_transaction_outcome(
     from sqlalchemy.ext.asyncio import AsyncSessionTransaction
 
     async with _source(tmp_path, confirmed=False) as (state, native, source, _):
-        await native.register_run(source)
         await native.close()
         original = AsyncSessionTransaction.__aexit__
 
@@ -188,10 +188,12 @@ async def test_committed_run_lineage_and_cached_snapshot_do_not_depend_on_shared
     from ._runtime_test_helpers import tool_run_context
     from .test_native_tool_effect_owner import _bridge
 
-    async with _source(tmp_path, confirmed=False) as (state, sql, original, _):
-        source = replace(original, metadata={**original.metadata, "large": "x" * (1024 * 1024 + 1)})
+    async with _source(
+        tmp_path, confirmed=False, extra_metadata={"large": "x" * (1024 * 1024 + 1)},
+    ) as (state, sql, source, _):
         native = InMemoryStepStore() if backend == "split" else sql
-        await native.register_run(source)
+        if backend == "split":
+            await native.register_run(source)
         if backend == "sql_oversized":
             assert sql.confirmed_run(source.run_id) is None
         bridge = _bridge(state)

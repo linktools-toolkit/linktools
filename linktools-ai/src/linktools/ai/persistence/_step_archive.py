@@ -1182,6 +1182,12 @@ class StateStepArchive(AgentRunStore):
         self._closed = False
         self._native_runs: NativeRunReferences | None = None
         self._native_events: NativeEventReferences | None = None
+        native_owner = self._run_registrations.native
+        if (isinstance(store, SqlStateStore) and native_owner is not None
+                and native_owner.storage_context.engine is store.context.engine):
+            # Canonical metadata is read in the domain's existing snapshot and
+            # connection. This does not enable native lifecycle publication.
+            self._native_runs = NativeRunReferences(store, namespace=namespace, tenant_id=tenant_id)
         self._trace_events = (SqlTraceEventStore(store, namespace=namespace, tenant_id=tenant_id)
                               if runtime_domain is PersistenceDomain.TRACE and isinstance(store, SqlStateStore) else None)
 
@@ -1192,6 +1198,7 @@ class StateStepArchive(AgentRunStore):
                      and self._run_registrations.native.storage_context.engine is self._store.context.engine)):
             if self._native_runs is None:
                 self._native_runs = NativeRunReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+            if self._native_events is None:
                 self._native_events = NativeEventReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
 
     def bind_native_run_store(self, native: SqlStepStore) -> None:
@@ -1201,8 +1208,11 @@ class StateStepArchive(AgentRunStore):
                     namespace=self._namespace, tenant_id=self._tenant_id,
                 )):
             self._history.bind_native_message_store(native)
-        if self._native_runs is not None:
-            self._native_runs.bind(native)
+        if self._native_events is not None:
+            # Only lifecycle projections consume the bound writer's receipts.
+            # Run-only readers resolve their source directly in the SQL JOIN.
+            if self._native_runs is not None:
+                self._native_runs.bind(native)
             self._native_events.bind(native)
 
     def can_share_native_start(self, native: object) -> bool:
@@ -1976,7 +1986,6 @@ class StateStepArchive(AgentRunStore):
         """Relocate and prepare one conversation checkpoint from one metadata capture."""
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.prepare_conversation_checkpoint")
-        await self.prepare_run_registration(run)
         if observed_records is not None and active_state_scope() is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
@@ -2264,7 +2273,6 @@ class StateStepArchive(AgentRunStore):
         observed_message_count: int | None = None,
         archive: PreparedArchive | None = None,
     ) -> PreparedAgentRunCheckpointBatch:
-        await self.prepare_run_registration(run)
         values = checkpoints
         if not values:
             if observed_message_count is not None:
@@ -2552,6 +2560,7 @@ class StateStepArchive(AgentRunStore):
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.sync_projection")
+        await self.prepare_run_registration(run)
         prepared = await self._prepare_checkpoints(
             run,
             checkpoints,
@@ -2772,6 +2781,7 @@ class StateStepArchive(AgentRunStore):
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.materialize_checkpoint")
+        await self.prepare_run_registration(run)
         prepared = await self._prepare_checkpoints(
             run,
             (checkpoint,),

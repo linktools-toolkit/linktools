@@ -927,6 +927,7 @@ async def test_model_reads_preserve_custom_archive_overrides() -> None:
         custom = CustomArchive(
             archive.state_store, object_store=None, namespace=_NAMESPACE,
             tenant_id="tenant", runtime_domain=PersistenceDomain.TRACE,
+            run_registrations=state.run_store.run_registrations,
         )
         page = await _metadata(_service(state, reader=_reader(state, store=custom)))
         assert [item.model_request_seq for item in page] == [1]

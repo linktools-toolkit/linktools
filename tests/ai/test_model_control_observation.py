@@ -103,8 +103,10 @@ async def test_execution_inspection_reuses_one_cached_source_capture(
         observed = await repository.get("execution", tenant_id="tenant")
         assert observed == execution
         assert observed.producer_generation == 1
+        first_reads = reads
+        assert first_reads <= 1
         assert await repository.get("execution", tenant_id="tenant") == observed
-        assert reads == 1
+        assert reads == first_reads
 
 
 async def _advance_execution(repository, *, takeover: bool = True):

@@ -1192,6 +1192,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         pending_keys=projection.transcript.pending_keys,
                         archive=interaction_archive,
                     )
+                await archive.prepare_run_registration(projection.run)
                 batch = await archive.prepare_checkpoints_after_seal(
                     projection.run,
                     projection.checkpoints,
@@ -1841,6 +1842,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     pending_keys=captured.transcript.pending_keys,
                     archive=interaction_archive,
                 )
+            await archive.prepare_run_registration(captured.run)
             prepared = await archive.prepare_checkpoints(
                 captured.run,
                 captured.checkpoints,
