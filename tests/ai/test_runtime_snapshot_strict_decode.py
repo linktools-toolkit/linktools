@@ -54,7 +54,7 @@ from linktools.ai.persistence.state import (
     alias_key,
     operation_key,
     scope_key,
-    stream_digest,
+    stream_key,
 )
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 from linktools.ai.workspace import Workspace
@@ -585,7 +585,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
     )
     stored = StoredOperation(
         operation_key("runtime", "tenant", "conversation", operation.operation_id),
-        stream_digest(
+        stream_key(
             "runtime",
             "tenant",
             PersistenceDomain.CONVERSATION.value,
@@ -609,7 +609,7 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
 
     assert aliases == ()
     assert sequences == {
-        stream_digest(
+        stream_key(
             "runtime",
             "tenant",
             PersistenceDomain.CONVERSATION.value,
@@ -629,12 +629,12 @@ def _execution_stub(*, event_seq: int) -> ExecutionRecord:
 
 def _execution_fact(owner_key: bytes, sequence: int = 1) -> StoredFact:
     return StoredFact(
-        stream_digest(
+        stream_key(
             "runtime",
             "tenant",
             PersistenceDomain.EXECUTION.value,
             "execution",
-            "execution",
+            ("execution",),
         ),
         sequence,
         owner_key,

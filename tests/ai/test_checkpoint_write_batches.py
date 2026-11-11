@@ -7,6 +7,7 @@ import sqlite3
 
 from collections import Counter
 from collections.abc import Sequence
+from copy import copy
 from dataclasses import replace
 from pathlib import Path
 
@@ -39,7 +40,7 @@ async def _snapshot(store, *, scope_mapping=None):
     async def read(transaction):
         return (
             tuple(sorted(await transaction.scan_records(), key=lambda item: item.key)),
-            tuple(sorted(await transaction.scan_facts(), key=lambda item: (item.stream_digest, item.sequence))),
+            tuple(sorted(await transaction.scan_facts(), key=lambda item: (item.stream_key, item.sequence))),
             await transaction.scan_sequences(),
         )
     snapshot = await store.read(read)
@@ -265,11 +266,10 @@ async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_p
         prepared, = await archive.prepare_checkpoints(run, (checkpoint,))
         chunk, = prepared.chunks
         expected = repository.checkpoint_record_keys("run", ())
-        for changed in (
-            replace(chunk, owner_id="foreign"),
-            replace(chunk, message_count=10**100),
-            replace(chunk, first_message_index=-1),
-        ):
+        for field, invalid in (("owner_id", "foreign"), ("message_count", 10**100), ("first_message_index", -1)):
+            # Corrupt durable values bypass authoring-time index bounds.
+            changed = copy(chunk)
+            object.__setattr__(changed, field, invalid)
             assert repository.checkpoint_record_keys("run", (changed,)) == expected
         before = await _snapshot(archive.state_store)
         with pytest.raises(AIError) as raised:

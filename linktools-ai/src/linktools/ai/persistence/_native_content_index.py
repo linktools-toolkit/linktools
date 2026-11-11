@@ -306,7 +306,7 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
     import hashlib
     import json
     from sqlalchemy import JSON, LargeBinary, column, select, table
-    from .state import RECORD_KEY_MAX_BYTES, record_key
+    from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, record_key
     pending = session.info.pop(_PENDING, {})
     if group_id is None and any(pending.values()):
         records = table("ai_state_records", column("store_digest"), column("key", LargeBinary(RECORD_KEY_MAX_BYTES)), column("payload_json", JSON()))
@@ -320,10 +320,10 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
         names = {"record": "ai_state_records", "fact": "ai_state_facts", "operation": "ai_state_operations"}
         key_column = "operation_key" if kind == "operation" else "key"
         owner = table(names[kind], column("id"), column("store_digest"), column(key_column, LargeBinary(RECORD_KEY_MAX_BYTES)),
-                      column("stream_digest"), column("sequence"))
+                      column("stream_key", LargeBinary(STREAM_KEY_MAX_BYTES)), column("sequence"))
         conditions = (owner.c.store_digest == store,)
         if kind == "fact":
-            conditions += (owner.c.stream_digest == identity[0], owner.c.sequence == identity[1])
+            conditions += (owner.c.stream_key == identity[0], owner.c.sequence == identity[1])
         else:
             conditions += (owner.c[key_column] == identity[0],)
         sources = select(owner.c.id).where(*conditions)

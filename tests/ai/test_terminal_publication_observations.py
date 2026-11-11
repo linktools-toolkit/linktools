@@ -50,7 +50,7 @@ async def test_terminal_observations_keep_physical_guards_and_rollback(
                     async def read(tx):
                         return (
                             tuple(sorted(await tx.scan_records(), key=lambda value: value.key)),
-                            tuple(sorted(await tx.scan_facts(), key=lambda value: (value.stream_digest, value.sequence))),
+                            tuple(sorted(await tx.scan_facts(), key=lambda value: (value.stream_key, value.sequence))),
                             dict(await tx.scan_sequences()),
                         )
                     stores = dict.fromkeys(runtime._state._stores.values())

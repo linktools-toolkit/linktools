@@ -17,7 +17,7 @@ from linktools.ai.persistence._official_step_reader import OfficialStepReader
 from linktools.ai.persistence._step_backup import NativeStepBackup
 from linktools.ai.persistence._step_store import _replay_digest
 from linktools.ai.persistence.codec import _encode_step_envelope, encode_envelope
-from linktools.ai.persistence.state import StoredRecord, StoredFact, record_key, stream_digest
+from linktools.ai.persistence.state import StoredRecord, StoredFact, record_key, stream_key
 
 
 def _digest(value: str) -> str:
@@ -60,7 +60,7 @@ def test_portable_event_projection_requires_exact_source_and_trace_position() ->
     reference = encode_envelope({"type": "native_event_reference", "payload": {
         "key": backup.events[0]["key_digest"], "index": 2,
     }})
-    projected = StoredFact(stream_digest("portable", "tenant", "trace", "event", "run"), 7,
+    projected = StoredFact(stream_key("portable", "tenant", "trace", "event", ("run",)), 7,
         record_key("portable", "tenant", "trace", "agent_run", ("run",)),
         "step_event", None, "AGENT_RUN_STARTED", _encode_step_envelope(projection))
     validator = NativeBackupProjections(backup, namespace="portable", tenant_id="tenant")

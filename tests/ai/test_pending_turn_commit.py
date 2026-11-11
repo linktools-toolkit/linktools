@@ -136,7 +136,7 @@ async def _snapshot(state: _TurnState) -> tuple[object, ...]:
     async def read(transaction: StateTransaction) -> tuple[object, ...]:
         return (
             tuple(sorted(await transaction.scan_records(), key=lambda value: value.key)),
-            tuple(sorted(await transaction.scan_facts(), key=lambda value: (value.stream_digest, value.sequence))),
+            tuple(sorted(await transaction.scan_facts(), key=lambda value: (value.stream_key, value.sequence))),
             dict(await transaction.scan_sequences()),
             tuple(sorted(await transaction.scan_aliases(), key=lambda value: value.alias_key)),
             tuple(sorted(await transaction.scan_operations(), key=lambda value: value.key)),

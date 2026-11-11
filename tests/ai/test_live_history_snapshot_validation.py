@@ -22,7 +22,7 @@ from linktools.ai.persistence._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
 )
-from linktools.ai.persistence.state import stream_digest
+from linktools.ai.persistence.state import stream_key
 
 from .test_step_archive_read_boundaries import _archive
 
@@ -55,9 +55,9 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
                 chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
                 if corruption == "future-index":
                     chunk = replace(chunk, first_message_index=1)
-                    fact = replace(fact, stream_digest=stream_digest(
+                    fact = replace(fact, stream_key=stream_key(
                         "archive-boundaries", "tenant", PersistenceDomain.TRACE.value,
-                        "transcript_pending_parts", ["run", 1],
+                        "transcript_pending_parts", ("run", "1"),
                     ))
                 elif corruption == "content-scope":
                     chunk = replace(chunk, content=replace(chunk.content, store_digest="0" * 64))

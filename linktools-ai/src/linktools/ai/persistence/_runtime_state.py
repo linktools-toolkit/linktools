@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, TypedDict, TypeVar
 from linktools.core import environ
 from ..observe.stream import await_stream_cleanup
 
-from ..core import validate_persistence_namespace, validate_tenant_id, canonical_json_bytes
+from ..core import validate_capability_id, validate_persistence_namespace, validate_tenant_id, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
@@ -219,8 +219,7 @@ class Persistence:
 
     async def capability_store(self, identity: str) -> StateStore:
         """Borrow an isolated capability partition, using the execution route by default."""
-        if not isinstance(identity, str) or not identity:
-            raise ValueError("capability identity must be nonempty")
+        validate_capability_id(identity)
         async with self._lock:
             self._require_ready()
             if self._read_only:

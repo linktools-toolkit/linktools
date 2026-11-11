@@ -179,7 +179,7 @@ class SqlAlchemyDialect(Protocol):
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
-    ) -> "Mapping[str, int]": ...
+    ) -> "Mapping[SqlValue, int]": ...
 
     async def delete_returning(
         self,
@@ -417,7 +417,7 @@ class SQLiteDialect:
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
-    ) -> "Mapping[str, int]":
+    ) -> "Mapping[SqlValue, int]":
         if not rows:
             return {}
 
@@ -439,7 +439,7 @@ class SQLiteDialect:
             self.name,
             len(rows),
         )
-        return {str(row[0]): int(row[1]) for row in result}
+        return {row[0]: int(row[1]) for row in result}
 
     async def delete_returning(
         self,
@@ -715,7 +715,7 @@ class MySQLDialect(SQLiteDialect):
         column: str,
         index_elements: "Sequence[str]",
         returning_key: str,
-    ) -> "Mapping[str, int]":
+    ) -> "Mapping[SqlValue, int]":
         if not rows:
             return {}
         from sqlalchemy import and_, or_, select
@@ -750,7 +750,7 @@ class MySQLDialect(SQLiteDialect):
             self.name,
             len(rows),
         )
-        return {str(row[0]): int(row[1]) for row in result.all()}
+        return {row[0]: int(row[1]) for row in result.all()}
 
     async def delete_returning(
         self,

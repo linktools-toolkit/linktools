@@ -17,7 +17,7 @@ from ..storage import (
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
+from .state import STREAM_KEY_MAX_BYTES, ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, SORT_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -206,10 +206,10 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
         ),
         Column(
-            "stream_digest",
-            digest,
+            "stream_key",
+            LargeBinary(STREAM_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STREAM_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of the append-only fact stream.",
+            comment="Exact bounded binary identity of the append-only fact stream.",
         ),
         Column(
             "sequence",
@@ -251,9 +251,9 @@ def build_runtime_sql_metadata(
         comment=_FACT_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(facts, "store_digest", "stream_digest", "sequence")
+    sql_unique(facts, "store_digest", "stream_key", "sequence")
     sql_query_index(facts, "owner_key")
-    sql_query_index(facts, "stream_digest", "subject_id", "sequence")
+    sql_query_index(facts, "stream_key", "subject_id", "sequence")
     sql_audit_indexes(facts)
 
     sequences = Table(
@@ -267,10 +267,10 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.",
         ),
         Column(
-            "key_digest",
-            digest,
+            "stream_key",
+            LargeBinary(STREAM_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STREAM_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of the monotonic sequence counter.",
+            comment="Exact bounded binary identity of the monotonic sequence counter.",
         ),
         Column(
             "value",
@@ -282,7 +282,7 @@ def build_runtime_sql_metadata(
         comment=_SEQUENCE_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(sequences, "store_digest", "key_digest")
+    sql_unique(sequences, "store_digest", "stream_key")
     sql_audit_indexes(sequences)
 
     operations = Table(
@@ -299,13 +299,13 @@ def build_runtime_sql_metadata(
             "operation_key",
             LargeBinary(OPERATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(OPERATION_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Binary operation address, at most 1024 bytes.",
+            comment="Binary operation address, at most 1152 bytes.",
         ),
         Column(
-            "stream_digest",
-            digest,
+            "stream_key",
+            LargeBinary(STREAM_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STREAM_KEY_MAX_BYTES), "mysql"),
             nullable=False,
-            comment="Canonical SHA-256 identity of the ordered operation stream.",
+            comment="Exact bounded binary identity of the ordered operation stream.",
         ),
         Column(
             "sequence",
@@ -336,8 +336,8 @@ def build_runtime_sql_metadata(
         **sql_table_options(),
     )
     sql_unique(operations, "store_digest", "operation_key")
-    sql_unique(operations, "store_digest", "stream_digest", "sequence")
-    sql_query_index(operations, "stream_digest", "state", "sequence")
+    sql_unique(operations, "store_digest", "stream_key", "sequence")
+    sql_query_index(operations, "stream_key", "state", "sequence")
     sql_audit_indexes(operations)
     return metadata
 

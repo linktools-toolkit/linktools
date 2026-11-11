@@ -52,6 +52,7 @@ from .state import (
     active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
+    validate_stream_key,
     validate_alias_key,
     validate_relation_key,
     validate_record_key,
@@ -796,7 +797,7 @@ class SqlStateStore:
             sequence_rows = (
                 (
                     await transaction._execute(
-                        select(sequences.c.key_digest, sequences.c.value).where(
+                        select(sequences.c.stream_key, sequences.c.value).where(
                             sequences.c.store_digest == transaction._store_hex
                         )
                     )
@@ -805,7 +806,7 @@ class SqlStateStore:
                 .all()
             )
             for row in sequence_rows:
-                _row_digest(row["key_digest"])
+                _row_stream_key(row["stream_key"])
                 _row_nonnegative_int(row["value"])
             alias_rows = (
                 (
@@ -871,17 +872,17 @@ class SqlStateStore:
             if not values:
                 break
             for value in values:
-                if value.stream_digest != previous_stream:
+                if value.stream_key != previous_stream:
                     if value.sequence != 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 elif (
                     previous_sequence is None or value.sequence != previous_sequence + 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                previous_stream = value.stream_digest
+                previous_stream = value.stream_key
                 previous_sequence = value.sequence
             last = values[-1]
-            fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
+            fact_cursor = FactScanCursor(last.stream_key, last.sequence)
 
         operation_cursor: OperationScanCursor | None = None
         while True:
@@ -2000,6 +2001,7 @@ class _SqlTransaction:
             self._alias_cache[alias.alias_key] = alias.record_key
 
     async def get_sequence(self, key: bytes) -> int:
+        validate_stream_key(key)
         if key in self._sequence_cache:
             return self._sequence_cache[key]
         values = await self.get_sequences((key,))
@@ -2010,7 +2012,7 @@ class _SqlTransaction:
             return {}
         from sqlalchemy import select
 
-        unique_keys = tuple(dict.fromkeys(keys))
+        unique_keys = tuple(dict.fromkeys(validate_stream_key(key) for key in keys))
         missing = tuple(key for key in unique_keys if key not in self._sequence_cache)
         table = self._table("ai_state_sequences")
         if missing:
@@ -2019,7 +2021,7 @@ class _SqlTransaction:
                     await self._execute(
                         select(table).where(
                             table.c.store_digest == self._store_hex,
-                            table.c.key_digest.in_(tuple(_hex(key) for key in missing))
+                            table.c.stream_key.in_(tuple(validate_stream_key(key) for key in missing))
                         )
                     )
                 )
@@ -2028,7 +2030,7 @@ class _SqlTransaction:
             )
             self._sequence_cache.update(
                 {
-                    _row_digest(row["key_digest"]): _row_nonnegative_int(row["value"])
+                    _row_stream_key(row["stream_key"]): _row_nonnegative_int(row["value"])
                     for row in rows
                 }
             )
@@ -2044,11 +2046,11 @@ class _SqlTransaction:
             await self._execute(
                 select(table)
                 .where(table.c.store_digest == self._store_hex)
-                .order_by(table.c.key_digest)
+                .order_by(table.c.stream_key)
             )
         ).mappings().all()
         return {
-            _row_digest(row["key_digest"]): _row_nonnegative_int(row["value"])
+            _row_stream_key(row["stream_key"]): _row_nonnegative_int(row["value"])
             for row in rows
         }
 
@@ -2064,14 +2066,14 @@ class _SqlTransaction:
         table = self._table("ai_state_sequences")
         statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
-            statement = statement.where(table.c.key_digest > _hex(after))
+            statement = statement.where(table.c.stream_key > validate_stream_key(after))
         rows = (
             await self._execute(
-                statement.order_by(table.c.key_digest).limit(limit)
+                statement.order_by(table.c.stream_key).limit(limit)
             )
         ).mappings().all()
         return {
-            _row_digest(row["key_digest"]): _row_nonnegative_int(row["value"])
+            _row_stream_key(row["stream_key"]): _row_nonnegative_int(row["value"])
             for row in rows
         }
 
@@ -2089,6 +2091,8 @@ class _SqlTransaction:
             for count in requests.values()
         ):
             raise ValueError("sequence reservation count must be a positive integer")
+        for key in requests:
+            validate_stream_key(key)
         if not requests:
             return {}
         table = self._table("ai_state_sequences")
@@ -2098,9 +2102,9 @@ class _SqlTransaction:
                 self._context.dialect.upsert_increment(
                     self._session,
                     table=table,
-                    values={"store_digest": self._store_hex, "key_digest": _hex(key)},
+                    values={"store_digest": self._store_hex, "stream_key": validate_stream_key(key)},
                     column="value",
-                    index_elements=("store_digest", "key_digest"),
+                    index_elements=("store_digest", "stream_key"),
                     step=count,
                 )
             )
@@ -2110,7 +2114,7 @@ class _SqlTransaction:
         rows = [
             {
                     "store_digest": self._store_hex,
-                "key_digest": _hex(key),
+                "stream_key": validate_stream_key(key),
                 "value": requests[key],
             }
             for key in sorted(requests)
@@ -2120,11 +2124,11 @@ class _SqlTransaction:
             table=table,
             rows=rows,
             column="value",
-            index_elements=("store_digest", "key_digest"),
-            returning_key="key_digest",
+            index_elements=("store_digest", "stream_key"),
+            returning_key="stream_key",
         ))
         result = {
-            _row_digest(key): _row_nonnegative_int(value)
+            _row_stream_key(key): _row_nonnegative_int(value)
             for key, value in values.items()
         }
         self._sequence_cache.update(result)
@@ -2140,7 +2144,7 @@ class _SqlTransaction:
             update(table)
             .where(
                 table.c.store_digest == self._store_hex,
-                table.c.key_digest == _hex(key),
+                table.c.stream_key == validate_stream_key(key),
                 table.c.value == expected,
             )
             .values(value=expected + 1, updated_at=func.current_timestamp())
@@ -2162,8 +2166,8 @@ class _SqlTransaction:
         await self._execute(
             delete(self._table("ai_state_sequences")).where(
                 self._table("ai_state_sequences").c.store_digest == self._store_hex,
-                self._table("ai_state_sequences").c.key_digest.in_(
-                    tuple(_hex(key) for key in values)
+                self._table("ai_state_sequences").c.stream_key.in_(
+                    tuple(validate_stream_key(key) for key in values)
                 ),
             )
         )
@@ -2192,11 +2196,11 @@ class _SqlTransaction:
             )
         )
         for fact in facts:
-            self._stage_native_owner("fact", (_hex(fact.stream_digest), fact.sequence), fact.data, state=fact.state, inserting=True)
+            self._stage_native_owner("fact", (validate_stream_key(fact.stream_key), fact.sequence), fact.data, state=fact.state, inserting=True)
         self._log_batch("insert_facts", len(facts), 1)
 
     async def get_facts(
-        self, stream_digest: bytes, sequences: Sequence[int],
+        self, stream_key: bytes, sequences: Sequence[int],
     ) -> tuple[StoredFact, ...]:
         from sqlalchemy import select
 
@@ -2209,7 +2213,7 @@ class _SqlTransaction:
             rows = (await self._execute(
                 select(table).where(
                     table.c.store_digest == self._store_hex,
-                    table.c.stream_digest == _hex(stream_digest),
+                    table.c.stream_key == validate_stream_key(stream_key),
                     table.c.sequence.in_(ordered[offset:offset + _FACT_READ_BATCH_SIZE]),
                 ).order_by(table.c.sequence)
             )).mappings().all()
@@ -2222,7 +2226,7 @@ class _SqlTransaction:
         table = self._table("ai_state_facts")
         conditions = [
             table.c.store_digest == self._store_hex,
-            table.c.stream_digest == _hex(query.stream_digest),
+            table.c.stream_key == validate_stream_key(query.stream_key),
         ]
         if query.after_sequence is not None:
             conditions.append(table.c.sequence > query.after_sequence)
@@ -2238,7 +2242,7 @@ class _SqlTransaction:
                 select(table)
                 .where(
                     table.c.store_digest == self._store_hex,
-                    table.c.stream_digest == _hex(query.stream_digest),
+                    table.c.stream_key == validate_stream_key(query.stream_key),
                     table.c.sequence.in_(latest_sequences),
                 )
                 .order_by(table.c.sequence)
@@ -2284,9 +2288,9 @@ class _SqlTransaction:
         if after is not None:
             conditions.append(
                 or_(
-                    table.c.stream_digest > _hex(after.stream_digest),
+                    table.c.stream_key > validate_stream_key(after.stream_key),
                     and_(
-                        table.c.stream_digest == _hex(after.stream_digest),
+                        table.c.stream_key == validate_stream_key(after.stream_key),
                         table.c.sequence > after.sequence,
                     ),
                 )
@@ -2294,7 +2298,7 @@ class _SqlTransaction:
         statement = (
             select(table)
             .where(*conditions)
-            .order_by(table.c.stream_digest, table.c.sequence)
+            .order_by(table.c.stream_key, table.c.sequence)
             .limit(limit)
         )
         rows = (await self._execute(statement)).mappings().all()
@@ -2376,8 +2380,8 @@ class _SqlTransaction:
 
         table = self._table("ai_state_operations")
         conditions = [table.c.store_digest == self._store_hex]
-        if query.stream_digest is not None:
-            conditions.append(table.c.stream_digest == _hex(query.stream_digest))
+        if query.stream_key is not None:
+            conditions.append(table.c.stream_key == validate_stream_key(query.stream_key))
         if query.states is not None:
             conditions.append(table.c.state.in_(tuple(query.states)))
         if query.after_sequence is not None:
@@ -2542,7 +2546,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
 
 def _fact_values(fact: StoredFact) -> dict[str, object]:
     return {
-        "stream_digest": _hex(fact.stream_digest),
+        "stream_key": validate_stream_key(fact.stream_key),
         "sequence": fact.sequence,
         "owner_key": validate_record_key(fact.owner_key),
         "kind": fact.kind,
@@ -2557,7 +2561,7 @@ def _fact_values(fact: StoredFact) -> dict[str, object]:
 def _fact_from_row(row: Mapping[str, object]) -> StoredFact:
     try:
         return StoredFact(
-            _row_digest(row["stream_digest"]),
+            _row_stream_key(row["stream_key"]),
             _row_nonnegative_int(row["sequence"]),
             _row_record_key(row["owner_key"]),
             _row_string(row["kind"]),
@@ -2576,7 +2580,7 @@ def _operation_values(
 ) -> dict[str, object]:
     values: dict[str, object] = {
         "operation_key": value.key,
-        "stream_digest": _hex(value.stream_digest),
+        "stream_key": validate_stream_key(value.stream_key),
         "sequence": value.sequence,
         "state": value.state,
         "compactable": value.compactable,
@@ -2593,7 +2597,7 @@ def _operation_from_row(row: Mapping[str, object]) -> StoredOperation:
     try:
         return StoredOperation(
             row["operation_key"],
-            _row_digest(row["stream_digest"]),
+            _row_stream_key(row["stream_key"]),
             _row_nonnegative_int(row["sequence"]),
             _row_string(row["state"]),
             _row_bool(row["compactable"]),
@@ -2617,6 +2621,13 @@ def _hex(value: bytes) -> str:
     if not isinstance(value, bytes) or len(value) != 32:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value.hex()
+
+
+def _row_stream_key(value: object) -> bytes:
+    try:
+        return validate_stream_key(value)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _row_record_key(value: object) -> bytes:

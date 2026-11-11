@@ -92,7 +92,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
         async def remove(transaction: StateTransaction) -> None:
             assert await transaction.get_record(deleted.key) == deleted
             assert await transaction.resolve_alias(_alias(deleted).alias_key) == deleted.key
-            assert await transaction.list_facts(FactQuery(_fact(deleted).stream_digest)) == (_fact(deleted),)
+            assert await transaction.list_facts(FactQuery(_fact(deleted).stream_key)) == (_fact(deleted),)
             assert await transaction.guard_record(deleted.key, expected_storage_revision=0)
             await transaction.insert_alias(staged_alias)
             await transaction.insert_fact(_fact(deleted, 2))
@@ -108,8 +108,8 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
             assert await transaction.resolve_aliases((
                 _alias(deleted).alias_key, staged_alias.alias_key, _alias(staged).alias_key,
             )) == {}
-            assert await transaction.list_facts(FactQuery(_fact(deleted).stream_digest)) == ()
-            assert await transaction.list_facts(FactQuery(_fact(staged).stream_digest)) == ()
+            assert await transaction.list_facts(FactQuery(_fact(deleted).stream_key)) == ()
+            assert await transaction.list_facts(FactQuery(_fact(staged).stream_key)) == ()
             assert await transaction.list_records(RecordQuery(kind="probe")) == (retained,)
             assert await transaction.get_sequence(counter) == 1
             assert await transaction.get_operation(operation.key) == operation
@@ -148,8 +148,8 @@ async def test_batch_delete_rolls_back_owners_aliases_and_facts(
             _alias(record) for record in records
         }
         facts = await store.read(lambda transaction: transaction.scan_facts())
-        assert {fact.stream_digest: fact for fact in facts} == {
-            _fact(record).stream_digest: _fact(record) for record in records
+        assert {fact.stream_key: fact for fact in facts} == {
+            _fact(record).stream_key: _fact(record) for record in records
         }
         await store.validate_integrity()
 
@@ -171,7 +171,7 @@ async def test_batch_delete_allows_reusing_deleted_identity(
             await transaction.insert_fact(replacement_fact)
             assert await transaction.get_record(record.key) == replacement
             assert await transaction.resolve_alias(_alias(record).alias_key) == record.key
-            assert await transaction.list_facts(FactQuery(replacement_fact.stream_digest)) == (replacement_fact,)
+            assert await transaction.list_facts(FactQuery(replacement_fact.stream_key)) == (replacement_fact,)
 
         await store.mutate(recreate)
         assert await store.read(lambda transaction: transaction.get_record(record.key)) == replacement

@@ -59,7 +59,7 @@ from .state import (
     StoredFact,
     StoredRecord,
     operation_key,
-    stream_digest,
+    stream_key,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -706,9 +706,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await self._projected_content(stored, updated),
             stored.storage_revision,
         )
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace, self._tenant_id, self._domain.value,
-            "execution", execution.execution_id,
+            "execution", (execution.execution_id,),
         )
         await transaction.insert_facts((
             StoredFact(
@@ -781,9 +781,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await self._projected_content(stored, updated),
             stored.storage_revision,
         )
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace, self._tenant_id, self._domain.value,
-            "execution", execution.execution_id,
+            "execution", (execution.execution_id,),
         )
         await transaction.insert_facts(tuple(
             StoredFact(
@@ -1058,12 +1058,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 )
             )
             await transaction.replace_records(tuple(replacements))
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
             "execution",
-            claim.execution_id,
+            (claim.execution_id,),
         )
         await transaction.insert_facts(
             (
@@ -1428,12 +1428,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         ):
             raise TypeError("pending execution events require a string event type")
         key = self._key("execution", (execution_id,))
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
             "execution",
-            execution_id,
+            (execution_id,),
         )
 
         async def mutate(transaction: StateTransaction) -> ExecutionRecord:
@@ -1570,12 +1570,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         transaction: StateTransaction | None = None,
     ) -> ExecutionTerminalCommitResult:
         key = self._key("execution", (commit.execution.execution_id,))
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
             "execution",
-            commit.execution.execution_id,
+            (commit.execution.execution_id,),
         )
 
         async def mutate(
@@ -1855,7 +1855,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             execution_record,
             self._idempotency._stored("idempotency", identity, completed, state=completed.status.value),
         ))
-        stream = stream_digest(self._namespace, self._tenant_id, self._domain.value, "execution", execution_id)
+        stream = stream_key(self._namespace, self._tenant_id, self._domain.value, "execution", (execution_id,))
         await transaction.insert_facts(tuple(
             StoredFact(stream, index, self._key("execution", (execution_id,)), str(event.event_type),
                        None, None, event.payload)
@@ -2213,12 +2213,12 @@ class EventRepositoryImpl(_RepositoryBase):
         if any(not isinstance(event.payload, Mapping) for event in events):
             raise TypeError("event payload must be a mapping")
         key = self._key("execution", (execution_id,))
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
             "execution",
-            execution_id,
+            (execution_id,),
         )
         current = await transaction.get_record(key)
         if current is None:
@@ -2305,12 +2305,12 @@ class EventRepositoryImpl(_RepositoryBase):
         if tenant_id != self._tenant_id:
             return Page(())
         _validate_page_limit(limit)
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
             "execution",
-            execution_id,
+            (execution_id,),
         )
         values = await self._store.read(
             lambda transaction: transaction.list_facts(

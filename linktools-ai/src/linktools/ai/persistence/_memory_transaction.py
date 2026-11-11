@@ -23,6 +23,7 @@ from .state import (
     StoredOperation,
     StoredRecord,
     validate_alias_key,
+    validate_stream_key,
     validate_relation_key,
     validate_operation_replacement,
     validate_record_identity,
@@ -429,10 +430,11 @@ class _MemoryTransaction:
             self.aliases[alias.alias_key] = alias.record_key
 
     async def get_sequence(self, key: bytes) -> int:
+        validate_stream_key(key)
         return self.sequences.get(key, 0)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
-        return {key: self.sequences.get(key, 0) for key in keys}
+        return {validate_stream_key(key): self.sequences.get(key, 0) for key in keys}
 
     async def scan_sequences(self) -> Mapping[bytes, int]:
         return dict(sorted(self.sequences.items()))
@@ -444,6 +446,8 @@ class _MemoryTransaction:
         limit: int,
     ) -> Mapping[bytes, int]:
         _require_scan_limit(limit)
+        if after is not None:
+            validate_stream_key(after)
         values = [
             (key, value)
             for key, value in sorted(self.sequences.items())
@@ -452,6 +456,7 @@ class _MemoryTransaction:
         return dict(values)
 
     async def next_sequence(self, key: bytes) -> int:
+        validate_stream_key(key)
         value = self.sequences.get(key, 0) + 1
         self.sequences[key] = value
         return value
@@ -465,6 +470,8 @@ class _MemoryTransaction:
             for count in requests.values()
         ):
             raise ValueError("sequence reservation count must be a positive integer")
+        for key in requests:
+            validate_stream_key(key)
         values = {
             key: self.sequences.get(key, 0) + requests[key]
             for key in sorted(requests)
@@ -473,6 +480,7 @@ class _MemoryTransaction:
         return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
+        validate_stream_key(key)
         if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
             raise ValueError("expected sequence must be a non-negative integer")
         current = self.sequences.get(key, 0)
@@ -484,11 +492,11 @@ class _MemoryTransaction:
         await self.delete_sequences((key,))
 
     async def delete_sequences(self, keys: Sequence[bytes]) -> None:
-        for key in sorted(set(keys)):
+        for key in sorted(set(validate_stream_key(key) for key in keys)):
             self.sequences.pop(key, None)
 
     async def insert_fact(self, fact: StoredFact) -> None:
-        key = (fact.stream_digest, fact.sequence)
+        key = (fact.stream_key, fact.sequence)
         if key in self.facts:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if fact.owner_key not in self.guarded_record_keys:
@@ -500,11 +508,12 @@ class _MemoryTransaction:
             await self.insert_fact(fact)
 
     async def get_facts(
-        self, stream_digest: bytes, sequences: Sequence[int],
+        self, stream_key: bytes, sequences: Sequence[int],
     ) -> tuple[StoredFact, ...]:
+        validate_stream_key(stream_key)
         return tuple(
             fact for sequence in sorted(set(sequences))
-            if (fact := self.facts.get((stream_digest, sequence))) is not None
+            if (fact := self.facts.get((stream_key, sequence))) is not None
         )
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
@@ -515,7 +524,7 @@ class _MemoryTransaction:
             start = 1 if query.after_sequence is None else query.after_sequence + 1
             consecutive: list[StoredFact] = []
             for sequence in range(start, start + query.limit):
-                fact = self.facts.get((query.stream_digest, sequence))
+                fact = self.facts.get((query.stream_key, sequence))
                 if fact is None:
                     break
                 consecutive.append(fact)
@@ -524,7 +533,7 @@ class _MemoryTransaction:
         values = [
             fact
             for fact in self.facts.values()
-            if fact.stream_digest == query.stream_digest
+            if fact.stream_key == query.stream_key
         ]
         if query.after_sequence is not None:
             values = [fact for fact in values if fact.sequence > query.after_sequence]
@@ -554,14 +563,14 @@ class _MemoryTransaction:
         _require_scan_limit(limit)
         values = sorted(
             self.facts.values(),
-            key=lambda value: (value.stream_digest, value.sequence),
+            key=lambda value: (value.stream_key, value.sequence),
         )
         if after is not None:
             values = [
                 value
                 for value in values
-                if (value.stream_digest, value.sequence)
-                > (after.stream_digest, after.sequence)
+                if (value.stream_key, value.sequence)
+                > (after.stream_key, after.sequence)
             ]
         return tuple(values[:limit])
 
@@ -573,10 +582,10 @@ class _MemoryTransaction:
     async def insert_operation(self, value: StoredOperation) -> None:
         if value.key in self.operations:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if self._operation_key(value.stream_digest, value.sequence) is not None:
+        if self._operation_key(value.stream_key, value.sequence) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self.operations[value.key] = value
-        self._set_operation_key(value.stream_digest, value.sequence, value.key)
+        self._set_operation_key(value.stream_key, value.sequence, value.key)
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
         return self.operations.get(key)
@@ -599,8 +608,8 @@ class _MemoryTransaction:
             operation
             for operation in self.operations.values()
             if (
-                query.stream_digest is None
-                or operation.stream_digest == query.stream_digest
+                query.stream_key is None
+                or operation.stream_key == query.stream_key
             )
             and (query.states is None or operation.state in query.states)
             and (query.after_sequence is None or operation.sequence > query.after_sequence)
@@ -645,7 +654,7 @@ class _MemoryTransaction:
         values = await self.list_operations(query)
         for value in values:
             del self.operations[value.key]
-            self._set_operation_key(value.stream_digest, value.sequence, None)
+            self._set_operation_key(value.stream_key, value.sequence, None)
         return values
 
     def _operation_key(self, stream: bytes, sequence: int) -> bytes | None:
@@ -700,7 +709,7 @@ async def _validate_transaction_integrity(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     fact_sequences: dict[bytes, list[int]] = {}
     for fact in facts:
-        fact_sequences.setdefault(fact.stream_digest, []).append(fact.sequence)
+        fact_sequences.setdefault(fact.stream_key, []).append(fact.sequence)
     for sequences in fact_sequences.values():
         if sorted(sequences) != list(range(1, max(sequences) + 1)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

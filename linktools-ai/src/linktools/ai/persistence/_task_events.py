@@ -12,7 +12,7 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
-    stream_digest,
+    stream_key,
 )
 
 
@@ -50,7 +50,7 @@ def _task_event_stream(
     domain: str,
     graph_id: str,
 ) -> bytes:
-    return stream_digest(namespace, tenant_id, domain, "task_event", graph_id)
+    return stream_key(namespace, tenant_id, domain, "task_event", (graph_id,))
 
 
 def _task_node_changed(left: TaskNodeView, right: TaskNodeView) -> bool:

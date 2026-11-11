@@ -121,7 +121,7 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
         async def delete(transaction: StateTransaction) -> None:
             assert await transaction.delete_record(record.key)
             await transaction.delete_sequence(sequence)
-            await transaction.delete_operations(OperationQuery(stream_digest=stream))
+            await transaction.delete_operations(OperationQuery(stream_key=stream))
 
         await writer.mutate(delete)
         assert await reader.read(observe) == (None, None, 0, (), None, ())

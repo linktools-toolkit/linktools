@@ -65,16 +65,15 @@ an equality predicate compatible with MySQL 5.7 index selection.
 Record and fact `subject_id` projections keep the original resource ID, using
 its existing nonempty, exact UTF-8 contract and 128-byte limit. They do not add a
 subject hash. Record lookup remains scoped by `scope_key`; fact lookup and
-latest-per-subject grouping remain scoped by `stream_digest`. Subject identity
+latest-per-subject grouping remain scoped by `stream_key`. Subject identity
 is immutable during record CAS, including changes between `None` and an ID.
 
 The wire stores the original string. SQL encodes it once as UTF-8 in MySQL
 `VARBINARY(128)`, PostgreSQL `BYTEA` or SQLite `BLOB`, preserving case and Unicode
 code points without collation or normalization changes. Application validation
 enforces the byte limit on every backend. The record subject index declares at
-most 1152 bytes on MySQL and PostgreSQL. The fact subject index declares 392
-MySQL key bytes including its sequence, or 200 PostgreSQL field bytes before
-index tuple overhead, well below an ordinary B-tree entry limit.
+most 1152 bytes on MySQL and PostgreSQL. The fact subject index declares 1416 field bytes
+including its sequence on both MySQL and PostgreSQL, before index tuple overhead, well below an ordinary B-tree entry limit.
 
 This removes subject JSON serialization and hashing without another lookup or
 encoded ordering key. SQL subject values are their actual UTF-8 length rather
@@ -120,7 +119,7 @@ cursor addresses are omitted from object representations.
 
 ## State operation addresses
 
-`StoredOperation.key` is a binary address of 1..1024 bytes. Public repositories
+`StoredOperation.key` is a binary address of 1..1152 bytes. Public repositories
 can share a bare or custom StateStore, so ordinary ledger keys carry their
 namespace, tenant and domain even when standard stores also use a
 `store_digest` partition. Built-in families reserve distinct first bytes:
@@ -128,7 +127,7 @@ namespace, tenant and domain even when standard stores also use a
 | Family | Physical address | Maximum bytes |
 | --- | --- | --- |
 | Ordinary ledger | `01`, then namespace, tenant, domain and operation ID, each framed by its two-byte big-endian UTF-8 byte length | 661 |
-| Capability receipt | `02` followed by the existing 32-byte composite receipt digest | 33 |
+| Capability receipt | `02`, then role, namespace, tenant, capability ID, revision, run ID and write key with u16 UTF-8 lengths | 1074 |
 | Capability partition marker | `00` followed by ASCII `capability-partitions` | 22 |
 
 Ordinary operation IDs use the existing idempotency-key contract: nonempty,
@@ -140,15 +139,13 @@ Case and Unicode code points are preserved without normalization or truncation.
 Primitive callers may still supply any bounded binary key, including 32-byte
 values; callers sharing built-in partitions must avoid reserved addresses.
 Request digests and upstream idempotency ID generators are unchanged.
-Capability receipts retain their composite SHA-256 of namespace, tenant,
-capability ID, revision, run ID and write key, including currently unbounded
-custom write keys. Their streams and the marker stream retain their existing
-32-byte digests. Ordinary stream digests remain globally scoped, and repository
+Capability receipts retain all original identity components under their owning
+bounds, as detailed below. All streams remain globally scoped, and repository
 reads verify the key, stream and payload against the bound scope.
 
-SQL stores operation and alias addresses directly: MySQL `VARBINARY(1024)`,
+SQL stores operation and alias addresses directly: MySQL `VARBINARY(1152)` and `VARBINARY(1024)`,
 PostgreSQL `BYTEA`, SQLite `BLOB`. Each unique `(store_digest, address)` index
-declares at most 1280 MySQL key bytes; PostgreSQL field payload is at most 1088
+declares at most 1408 MySQL key bytes; PostgreSQL field payload is at most 1216
 bytes before index tuple overhead. Binary comparison defines scan ordering on
 all backends. Current snapshot wire encodes the key as canonical lowercase hex
 and decodes the same bounded bytes. Native content ownership uses that binary
@@ -163,6 +160,39 @@ Scope is repeated to preserve public shared-store isolation. A generated
 `conversation` uses 98 bytes rather than the previous 64 SQL hex bytes or 32
 in-memory digest bytes. No universal storage or measured runtime speedup is
 implied.
+
+## State stream and capability addresses
+
+Fact and operation streams, pagination cursors and sequence counters use the
+same exact binary `stream_key` of 1..1280 bytes. Built-in addresses encode the
+flat tuple `(stream, namespace, tenant, domain, relation, *owner_parts)` with a
+big-endian unsigned two-byte UTF-8 length for each component. Scope is complete
+even when multiple public repositories share one bare StateStore. There is no
+embedded record tuple, recursive JSON encoding, shadow mapping or hash fallback.
+The tenant-wide session-list counter has an empty owner tuple. Pending transcript
+positions are canonical decimal strings validated as nonnegative signed-64-bit
+indices by their writer and current reader.
+
+SQL stores `VARBINARY(1280)` / `BYTEA` / `BLOB` directly. The fact subject index is
+`(stream_key, subject_id, sequence)` with at most 1280+128+8=1416 field bytes.
+The operation status index is `(stream_key, state, sequence)`, at most
+1280+256+8=1544 declared MySQL bytes. Existing store filters remain, and every
+composite index still has at most three columns. Counter snapshots name the
+same `stream_key`; canonical lowercase hex is only the portable wire encoding.
+Current readers reject malformed or oversized keys without a format-version
+bump or an obsolete hashed-format path. Stream fields are excluded from repr.
+
+Capability receipts use family byte 2 followed by the exact tuple
+`(capability-write, namespace, tenant, capability_id, revision, run_id, write_key)`.
+The revision is canonical positive signed-64-bit decimal. Owning limits are
+256 UTF-8 bytes for capability ID and write key and 128 bytes for run ID.
+These retain all original parts and require at most 1074 bytes. Operation
+addresses accept 1..1152 bytes; the receipt reuses its address as its stream.
+Ordinary ledger addresses retain family byte 1. The fixed partition marker
+retains `b"\\x00capability-partitions"` and uses that same fixed address as stream.
+The receipt request SHA-256 stays because it detects conflicting replay content,
+not identity. Buffer transport carries the raw hashable bytes. Cancellation,
+unknown-commit readback and non-atomic partition marker semantics are unchanged.
 
 ## State record relations
 
@@ -199,8 +229,7 @@ components; custom primitive relations are bounded by the complete 1024-byte
 limit. The existing memory-scope digest is a component, not recomputed as a
 second relation hash. Reused record parents are the full binary record
 references described above. ContentArchive's independent scope digest remains
-32 bytes. Store identities, fact streams and native Step scopes retain their
-separate digest contracts.
+32 bytes. Store identities and native Step scopes retain their separate digest contracts.
 
 SQL binds raw bytes as MySQL `VARBINARY(1024)` for scopes and
 `VARBINARY(1152)` for parents, PostgreSQL `BYTEA` or SQLite `BLOB`.

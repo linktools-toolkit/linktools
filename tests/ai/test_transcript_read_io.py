@@ -354,13 +354,13 @@ async def test_transcript_first_yield_prefetches_only_one_bounded_fact_page(
         monkeypatch.setattr(_history, "_TRANSCRIPT_CHUNK_MAX_MESSAGES", 1)
         await _materialize(state, "first", tuple(f"prompt:{index}" for index in range(35)))
         repository = state.run_store.read_store(PersistenceDomain.CONVERSATION).transcript_repository
-        stream_digest = repository.transcript_stream(session.history_id)
+        stream_key = repository.transcript_stream(session.history_id)
         original = _MemoryTransaction.list_facts
         rows = []
 
         async def capture_facts(transaction, query):
             facts = await original(transaction, query)
-            if query.stream_digest == stream_digest:
+            if query.stream_key == stream_key:
                 assert query.limit is not None and query.limit <= 64
                 rows.extend(facts)
             return facts

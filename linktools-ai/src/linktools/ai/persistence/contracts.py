@@ -378,6 +378,10 @@ class TranscriptChunk:
     raw_size: int
     content: ArchiveRoot | NativeMessageRoot
 
+    def __post_init__(self) -> None:
+        _validate_transcript_index(self.first_message_index)
+        _validate_transcript_index(self.message_count)
+
 
 class TranscriptSeekDimension(str, Enum):
     __str__ = str.__str__

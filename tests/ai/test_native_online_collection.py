@@ -86,7 +86,7 @@ async def test_online_collection_preserves_all_committed_root_owners_including_u
                 assert await tx.replace_operation(replace(previous, state="DONE"), expected_state="UNKNOWN")
             await state.mutate(transition)
             assert (await native.read_message_roots((root,)))[0]
-            await state.mutate(lambda tx: tx.delete_operations(OperationQuery(stream_digest=b"s" * 32)))
+            await state.mutate(lambda tx: tx.delete_operations(OperationQuery(stream_key=b"s" * 32)))
         elif owner == "record":
             assert await state.mutate(lambda tx: tx.replace_record(
                 replace(record, data={}, storage_revision=1), expected_storage_revision=0,

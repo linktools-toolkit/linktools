@@ -106,7 +106,7 @@ from .state import (
     require_no_run_history_lock,
     scope_key,
     sortable_timestamp,
-    stream_digest,
+    stream_key,
 )
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
@@ -1235,7 +1235,7 @@ class StateStepArchive(AgentRunStore):
         if self._native_events is not None:
             return await self._native_events.read(transaction, query=query, sequences=sequences, full_source=full_source)
         if sequences is not None and isinstance(transaction, FactReader):
-            return await transaction.get_facts(query.stream_digest, sequences)
+            return await transaction.get_facts(query.stream_key, sequences)
         return await transaction.list_facts(query)
 
     def confirm_native_run(self, record: RunRecord) -> None:
@@ -2060,7 +2060,7 @@ class StateStepArchive(AgentRunStore):
         return record_key(self._namespace, self._tenant_id, self._runtime_domain.value, "agent_run", (agent_run_id,))
 
     def _stream(self, agent_run_id: str, family: str) -> bytes:
-        return stream_digest(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
+        return stream_key(self._namespace, self._tenant_id, self._runtime_domain.value, family, (agent_run_id,))
 
     async def register_agent_run(
         self,

@@ -64,7 +64,7 @@ from .state import (
     parent_key,
     record_key,
     scope_key,
-    stream_digest,
+    stream_key,
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
@@ -537,7 +537,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
             if _operation_matches(current, value):
                 return current
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace, self._tenant_id, self._domain.value,
             "operation", [value.resource_kind.value, value.resource_id],
         )
@@ -622,7 +622,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
     ) -> tuple[OperationLedgerRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -632,7 +632,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         values = await self._store.read(
             lambda transaction: transaction.list_operations(
                 OperationQuery(
-                    stream_digest=stream,
+                    stream_key=stream,
                     states=(
                         frozenset({"PENDING", "RUNNING"})
                         if states is None
@@ -655,7 +655,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
     ) -> None:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        stream = stream_digest(
+        stream = stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -666,7 +666,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
             transaction: StateTransaction,
         ) -> None:
             query = OperationQuery(
-                stream_digest=stream,
+                stream_key=stream,
                 states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
                 through_sequence=through_sequence,
                 compactable=True,
@@ -680,7 +680,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
             )
             await transaction.delete_operations(
                 OperationQuery(
-                    stream_digest=stream,
+                    stream_key=stream,
                     states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
                     through_sequence=anchor.sequence - 1,
                     compactable=True,
@@ -1058,7 +1058,7 @@ async def _reserve_operation(
             return current, True
         raise AIError(ErrorCode.STORAGE_CONFLICT)
     sequence = await transaction.next_sequence(
-        stream_digest(
+        stream_key(
             repository._namespace,
             repository._tenant_id,
             repository._domain.value,
@@ -1079,7 +1079,7 @@ async def _insert_operation(
     await transaction.insert_operation(
         StoredOperation(
             key,
-            stream_digest(
+            stream_key(
                 repository._namespace,
                 repository._tenant_id,
                 repository._domain.value,
@@ -1104,14 +1104,14 @@ def _decode_operation(
     candidate = _decode_enveloped_domain(value.data, OperationLedgerInput)
     try:
         expected_key = operation_key(namespace, tenant_id, domain.value, candidate.operation_id)
+        expected_stream = stream_key(
+            namespace, tenant_id, domain.value, "operation",
+            (candidate.resource_kind.value, candidate.resource_id),
+        )
     except (AIError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    expected_stream = stream_digest(
-        namespace, tenant_id, domain.value, "operation",
-        [candidate.resource_kind.value, candidate.resource_id],
-    )
     if (candidate.tenant_id != tenant_id or value.key != expected_key
-            or value.stream_digest != expected_stream or value.state != candidate.status.value
+            or value.stream_key != expected_stream or value.state != candidate.status.value
             or value.compactable != candidate.compactable):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _operation_record(candidate, value.sequence)  # type: ignore[arg-type]

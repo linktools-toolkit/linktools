@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from linktools.core import environ
 
+from ..core import validate_capability_id
 from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
@@ -136,6 +137,8 @@ async def materialize_runtime_storage(
         for domain in PersistenceDomain
     )
     participant_routes = dict(capability_routes or {})
+    for identity in participant_routes:
+        validate_capability_id(identity)
     requests += tuple(
         StorageResourceRequest(
             name=f"capability:{identity}", route=route,

@@ -22,7 +22,7 @@ from ._step_schema import build_step_sql_metadata
 from ._step_store import PreparedStep, SqlStepStore, StepWriteReceipt
 from ..steps import NativeLifecycleEvent
 from .codec import _encode_step_envelope, decode_envelope, encode_envelope
-from .state import FactQuery, FactScanCursor, SqlStateFactReader, StateTransaction, StoredFact, record_key, stream_digest
+from .state import FactQuery, FactScanCursor, SqlStateFactReader, StateTransaction, StoredFact, record_key, stream_key
 
 if TYPE_CHECKING:
     from sqlalchemy.sql import Select
@@ -121,11 +121,14 @@ class NativeEventReferences:
             event = cls.project(source, event_index=reference["index"])
         except (TypeError, ValueError, KeyError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if (reference["key"] != row.get("key_digest") or fact.kind != "step_event"
-                or fact.state != event.event_type or fact.subject_id is not None
-                or fact.owner_key != record_key(namespace, tenant_id, "trace", "agent_run", (source.run_id,))
-                or fact.stream_digest != stream_digest(namespace, tenant_id, "trace", "event", source.run_id)):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            if (reference["key"] != row.get("key_digest") or fact.kind != "step_event"
+                    or fact.state != event.event_type or fact.subject_id is not None
+                    or fact.owner_key != record_key(namespace, tenant_id, "trace", "agent_run", (source.run_id,))
+                    or fact.stream_key != stream_key(namespace, tenant_id, "trace", "event", (source.run_id,))):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        except (AIError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return replace(fact, data=_encode_step_envelope(event))
 
     async def stage(self, run: RunRecord, source: NativeStepEvent, event: StepEvent) -> None:
@@ -338,7 +341,7 @@ class NativeEventReferences:
             if isinstance(node, BindParameter) else None
         )).where(facts.c.store_digest == self._state.store_digest.hex())
         if query is not None:
-            conditions = [facts.c.stream_digest == query.stream_digest.hex()]
+            conditions = [facts.c.stream_key == query.stream_key]
             if query.after_sequence is not None:
                 conditions.append(facts.c.sequence > query.after_sequence)
             if query.subject_id is not None:
@@ -349,7 +352,7 @@ class NativeEventReferences:
                 latest = select(func.max(facts.c.sequence)).where(
                     facts.c.store_digest == self._state.store_digest.hex(), *conditions,
                 ).group_by(facts.c.subject_id)
-                conditions = [facts.c.stream_digest == query.stream_digest.hex(), facts.c.sequence.in_(latest)]
+                conditions = [facts.c.stream_key == query.stream_key, facts.c.sequence.in_(latest)]
             statement = statement.where(*conditions).order_by(facts.c.sequence.desc() if query.latest else facts.c.sequence)
             if query.limit is not None or query.latest:
                 statement = statement.limit(1 if query.latest else query.limit)
@@ -358,10 +361,10 @@ class NativeEventReferences:
             if type(limit) is not int or not 1 <= limit <= 1000:
                 raise ValueError("fact page limit must be between 1 and 1000")
             if after is not None:
-                statement = statement.where(or_(facts.c.stream_digest > after.stream_digest.hex(), and_(
-                    facts.c.stream_digest == after.stream_digest.hex(), facts.c.sequence > after.sequence,
+                statement = statement.where(or_(facts.c.stream_key > after.stream_key, and_(
+                    facts.c.stream_key == after.stream_key, facts.c.sequence > after.sequence,
                 )))
-            statement = statement.order_by(facts.c.stream_digest, facts.c.sequence).limit(limit)
+            statement = statement.order_by(facts.c.stream_key, facts.c.sequence).limit(limit)
         return statement
 
     async def read(self, transaction: StateTransaction, *, query: FactQuery | None = None,
@@ -395,11 +398,14 @@ class NativeEventReferences:
                     event = self.project(source, event_index=reference["index"])
                 except (TypeError, ValueError, KeyError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if (reference["key"] != row["native_key_digest"] or fact.kind != "step_event"
-                        or fact.state != event.event_type or fact.subject_id is not None
-                        or fact.owner_key != record_key(self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,))
-                        or fact.stream_digest != stream_digest(self._namespace, self._tenant_id, "trace", "event", source.run_id)):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    if (reference["key"] != row["native_key_digest"] or fact.kind != "step_event"
+                            or fact.state != event.event_type or fact.subject_id is not None
+                            or fact.owner_key != record_key(self._namespace, self._tenant_id, "trace", "agent_run", (source.run_id,))
+                            or fact.stream_key != stream_key(self._namespace, self._tenant_id, "trace", "event", (source.run_id,))):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                except (AIError, TypeError, ValueError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 publication = self._runs_pending.get(source.run_id)
                 pending = None if publication is None else publication.pending.get(source.idempotency_key)
                 if full_source and pending is not None:

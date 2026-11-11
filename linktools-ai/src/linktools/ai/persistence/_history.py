@@ -62,7 +62,7 @@ from .state import (
     active_state_scope,
     record_key,
     require_no_run_history_lock,
-    stream_digest,
+    stream_key,
 )
 
 if TYPE_CHECKING:
@@ -900,9 +900,9 @@ class TranscriptRepository:
             await transaction.replace_records(tuple(replacements))
         requests = {stream: len(chunks)}
         if checkpoint_fact is not None:
-            if checkpoint_fact.stream_digest == stream:
+            if checkpoint_fact.stream_key == stream:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            requests[checkpoint_fact.stream_digest] = 1
+            requests[checkpoint_fact.stream_key] = 1
         high_waters = await transaction.reserve_sequences(requests)
         final = high_waters[stream]
         sequences = tuple(range(final - len(chunks) + 1, final + 1))
@@ -924,7 +924,7 @@ class TranscriptRepository:
                 )
                 for sequence, chunk in zip(sequences, chunks, strict=True)
             ) + (() if checkpoint_fact is None else (
-                replace(checkpoint_fact, sequence=high_waters[checkpoint_fact.stream_digest]),
+                replace(checkpoint_fact, sequence=high_waters[checkpoint_fact.stream_key]),
             ))
         )
         await self._insert_message_seek_boundaries(
@@ -1049,21 +1049,21 @@ class TranscriptRepository:
         return ContextProjection((ArchivedContextBlock(root, raw_digest, raw_size),))
 
     def history_stream(self, history_id: str) -> bytes:
-        return stream_digest(
+        return stream_key(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
             "history_transcript",
-            history_id,
+            (history_id,),
         )
 
     def agent_run_stream(self, agent_run_id: str) -> bytes:
-        return stream_digest(
+        return stream_key(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
             "run_transcript",
-            agent_run_id,
+            (agent_run_id,),
         )
 
     def transcript_stream(self, agent_run_id: str) -> bytes:
@@ -2319,9 +2319,11 @@ class TranscriptRepository:
         )
 
     def _pending_stream(self, owner_id: str, message_index: int) -> bytes:
-        return stream_digest(
+        if isinstance(message_index, bool) or not isinstance(message_index, int) or not 0 <= message_index < 1 << 63:
+            raise ValueError("transcript index is outside the signed 64-bit range")
+        return stream_key(
             self._namespace, self._tenant_id, self._runtime_domain.value,
-            "transcript_pending_parts", [owner_id, message_index],
+            "transcript_pending_parts", (owner_id, str(message_index)),
         )
 
     def _projection_key(self, agent_run_id: str) -> bytes:

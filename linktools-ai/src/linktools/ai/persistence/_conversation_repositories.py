@@ -42,7 +42,7 @@ from .state import (
     StateTransaction,
     StoredFact,
     StoredRecord,
-    stream_digest,
+    stream_key,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -455,7 +455,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
 
     def _timeline_stream(self, session_id: str) -> bytes:
-        return stream_digest(
+        return stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
@@ -519,14 +519,14 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return value
 
     def _list_generation_key(self, owner_principal_id: str | None = None) -> bytes:
-        return stream_digest(
+        return stream_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
             "session_list_owner"
             if owner_principal_id is not None
             else "session_list_tenant",
-            owner_principal_id if owner_principal_id is not None else [],
+            (owner_principal_id,) if owner_principal_id is not None else (),
         )
 
     async def _bump_list_generation(

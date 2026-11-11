@@ -215,6 +215,9 @@ from ._step_contracts import (
 )
 from .state import (
     ALIAS_KEY_MAX_BYTES,
+    STREAM_KEY_MAX_BYTES,
+    OPERATION_KEY_MAX_BYTES,
+    validate_stream_key,
     RELATION_KEY_MAX_BYTES,
     validate_relation_key,
     validate_record_key,
@@ -1379,7 +1382,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
 
 def encode_fact(fact: StoredFact) -> dict[str, JsonValue]:
     return {
-        "stream": fact.stream_digest.hex(),
+        "stream": fact.stream_key.hex(),
         "sequence": fact.sequence,
         "owner": fact.owner_key.hex(),
         "kind": fact.kind,
@@ -1403,7 +1406,7 @@ def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         return StoredFact(
-            _digest_wire(_string(value, "stream")),
+            _stream_key_wire(_string(value, "stream")),
             _integer(value, "sequence"),
             _record_key_wire(_string(value, "owner")),
             _string(value, "kind"),
@@ -1418,7 +1421,7 @@ def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
 def encode_operation(operation: StoredOperation) -> dict[str, JsonValue]:
     return {
         "key": operation.key.hex(),
-        "stream": operation.stream_digest.hex(),
+        "stream": operation.stream_key.hex(),
         "sequence": operation.sequence,
         "state": operation.state,
         "compactable": operation.compactable,
@@ -1439,7 +1442,7 @@ def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
     try:
         return StoredOperation(
             _operation_key_wire(_string(value, "key")),
-            _digest_wire(_string(value, "stream")),
+            _stream_key_wire(_string(value, "stream")),
             _integer(value, "sequence"),
             _string(value, "state"),
             _bool(value, "compactable"),
@@ -2745,20 +2748,21 @@ def _alias_key_wire(value: str) -> bytes:
 
 
 def _operation_key_wire(value: str) -> bytes:
+    if not 2 <= len(value) <= 2 * OPERATION_KEY_MAX_BYTES:
+        raise ValueError("operation key encoding length is invalid")
     result = bytes.fromhex(value)
     if result.hex() != value:
         raise ValueError("operation key must be canonical lowercase hex")
     return result
 
 
-def _digest_wire(value: str) -> bytes:
-    try:
-        result = bytes.fromhex(value)
-    except ValueError as error:
-        raise ValueError("digest must be canonical lowercase hex") from error
-    if len(result) != 32 or result.hex() != value:
-        raise ValueError("digest must be canonical lowercase hex for 32 bytes")
-    return result
+def _stream_key_wire(value: str) -> bytes:
+    if not 2 <= len(value) <= 2 * STREAM_KEY_MAX_BYTES:
+        raise ValueError("stream key encoding length is invalid")
+    result = bytes.fromhex(value)
+    if result.hex() != value:
+        raise ValueError("stream key encoding is not canonical")
+    return validate_stream_key(result)
 
 
 def _record_key_wire(value: str) -> bytes:

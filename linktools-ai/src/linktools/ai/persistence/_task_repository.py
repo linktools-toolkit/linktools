@@ -59,7 +59,7 @@ from .state import (
     StoredFact,
     StoredRecord,
     active_state_scope,
-    stream_digest,
+    stream_key,
 )
 from ._repository_common import decode_operation as _decode_operation
 
@@ -943,7 +943,7 @@ class TaskRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         latest = facts[0]
         if (
-            latest.stream_digest != stream
+            latest.stream_key != stream
             or latest.owner_key != owner
             or latest.subject_id is not None
             or latest.state is not None
@@ -1185,7 +1185,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             latest = facts[0]
             if (
-                latest.stream_digest != stream
+                latest.stream_key != stream
                 or latest.owner_key != owner
                 or latest.subject_id is not None
                 or latest.state is not None
@@ -1338,7 +1338,7 @@ class TaskRepositoryImpl(RepositoryBase):
         for value in values[:limit]:
             expected_event_seq += 1
             if (
-                value.stream_digest != stream
+                value.stream_key != stream
                 or value.owner_key != owner
                 or value.subject_id is not None
                 or value.sequence != expected_event_seq
@@ -1378,7 +1378,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 return None
             fact = values[0]
             if (
-                fact.stream_digest != stream
+                fact.stream_key != stream
                 or fact.owner_key != owner
                 or fact.subject_id is not None
                 or fact.state is not None
@@ -2552,7 +2552,7 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             pending_operations = await transaction.list_operations(
                 OperationQuery(
-                    stream_digest=stream_digest(
+                    stream_key=stream_key(
                         self._namespace,
                         self._tenant_id,
                         self._domain.value,

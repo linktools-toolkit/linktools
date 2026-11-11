@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_idempotency_key, validate_persistence_namespace, validate_resource_id, validate_tenant_id
+from ..core import validate_capability_id, validate_capability_revision, validate_capability_write_key, ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_idempotency_key, validate_persistence_namespace, validate_resource_id, validate_tenant_id
 from ..errors import AIError
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 from ._record_key import RECORD_KEY_MAX_BYTES, validate_record_key
@@ -28,7 +28,8 @@ if TYPE_CHECKING:
 ValueT = TypeVar("ValueT")
 
 ALIAS_KEY_MAX_BYTES = 1024
-OPERATION_KEY_MAX_BYTES = 1024
+OPERATION_KEY_MAX_BYTES = 1152
+STREAM_KEY_MAX_BYTES = 1280
 SORT_KEY_MAX_BYTES = 1152
 RELATION_KEY_MAX_BYTES = 1024
 PARENT_KEY_MAX_BYTES = RECORD_KEY_MAX_BYTES
@@ -245,12 +246,6 @@ def _require_operation_key(value: bytes) -> bytes:
     return value
 
 
-def _require_digest(value: bytes, name: str) -> bytes:
-    if not isinstance(value, bytes) or len(value) != 32:
-        raise ValueError(f"{name} must be a 32-byte digest")
-    return value
-
-
 def _require_subject_id(value: str) -> str:
     try:
         return validate_resource_id(value)
@@ -383,7 +378,7 @@ class StoredAlias:
 
 @dataclass(frozen=True, slots=True)
 class StoredFact:
-    stream_digest: bytes
+    stream_key: bytes = field(repr=False)
     sequence: int
     owner_key: bytes = field(repr=False)
     kind: str
@@ -392,7 +387,7 @@ class StoredFact:
     data: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        _require_digest(self.stream_digest, "stream_digest")
+        validate_stream_key(self.stream_key)
         validate_record_key(self.owner_key)
         if self.subject_id is not None:
             _require_subject_id(self.subject_id)
@@ -408,7 +403,7 @@ class StoredFact:
 @dataclass(frozen=True, slots=True)
 class StoredOperation:
     key: bytes = field(repr=False)
-    stream_digest: bytes
+    stream_key: bytes = field(repr=False)
     sequence: int
     state: str
     compactable: bool
@@ -416,7 +411,7 @@ class StoredOperation:
 
     def __post_init__(self) -> None:
         _require_operation_key(self.key)
-        _require_digest(self.stream_digest, "stream_digest")
+        validate_stream_key(self.stream_key)
         _require_nonnegative_int(self.sequence, "operation sequence")
         _require_state(self.state, "operation state", optional=False)
         if not isinstance(self.compactable, bool):
@@ -439,11 +434,11 @@ class RecordScanCursor:
 
 @dataclass(frozen=True, slots=True)
 class FactScanCursor:
-    stream_digest: bytes
+    stream_key: bytes = field(repr=False)
     sequence: int
 
     def __post_init__(self) -> None:
-        _require_digest(self.stream_digest, "stream_digest")
+        validate_stream_key(self.stream_key)
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
             raise TypeError("fact scan cursor sequence must be an integer")
         if self.sequence < 1:
@@ -518,7 +513,7 @@ class RecordQuery:
 
 @dataclass(frozen=True, slots=True)
 class FactQuery:
-    stream_digest: bytes
+    stream_key: bytes = field(repr=False)
     after_sequence: int | None = None
     limit: int | None = None
     subject_id: str | None = None
@@ -526,7 +521,7 @@ class FactQuery:
     latest_per_subject: bool = False
 
     def __post_init__(self) -> None:
-        _require_digest(self.stream_digest, "stream_digest")
+        validate_stream_key(self.stream_key)
         if self.after_sequence is not None:
             _require_nonnegative_int(self.after_sequence, "after_sequence")
         if self.subject_id is not None:
@@ -542,7 +537,7 @@ class FactQuery:
 
 @dataclass(frozen=True, slots=True)
 class OperationQuery:
-    stream_digest: bytes | None = None
+    stream_key: bytes | None = field(default=None, repr=False)
     states: frozenset[str] | None = None
     through_sequence: int | None = None
     compactable: bool | None = None
@@ -552,8 +547,8 @@ class OperationQuery:
     def __post_init__(self) -> None:
         if self.after_sequence is not None:
             _require_nonnegative_int(self.after_sequence, "after_sequence")
-        if self.stream_digest is not None:
-            _require_digest(self.stream_digest, "stream_digest")
+        if self.stream_key is not None:
+            validate_stream_key(self.stream_key)
         if self.through_sequence is not None:
             _require_nonnegative_int(self.through_sequence, "through_sequence")
         if self.compactable is not None and not isinstance(self.compactable, bool):
@@ -787,7 +782,7 @@ class FactReader(Protocol):
     """
 
     async def get_facts(
-        self, stream_digest: bytes, sequences: Sequence[int],
+        self, stream_key: bytes, sequences: Sequence[int],
     ) -> tuple[StoredFact, ...]: ...
 
 
@@ -1136,9 +1131,9 @@ class _ReadOnlyFactReader(_ReadOnlyStateTransaction):
         self._fact_reader = reader
 
     async def get_facts(
-        self, stream_digest: bytes, sequences: Sequence[int],
+        self, stream_key: bytes, sequences: Sequence[int],
     ) -> tuple[StoredFact, ...]:
-        return await self._fact_reader.get_facts(stream_digest, sequences)
+        return await self._fact_reader.get_facts(stream_key, sequences)
 
 
 StateCallback = Callable[[StateTransaction], Awaitable[ValueT]]
@@ -1374,14 +1369,44 @@ def validate_alias_key(value: bytes) -> bytes:
     return value
 
 
-def stream_digest(
+def stream_key(
     namespace: str,
     tenant_id: str,
     runtime_domain: str,
     relation: str,
-    identity: JsonValue,
+    identity: Sequence[str],
 ) -> bytes:
-    return _digest(["stream", namespace, tenant_id, runtime_domain, relation, identity])
+    """Encode a globally scoped stream from explicit, exact UTF-8 owner parts."""
+    if not all(isinstance(value, str) and value for value in (runtime_domain, relation)):
+        raise ValueError("stream domain and relation must be non-empty strings")
+    if not isinstance(identity, Sequence) or isinstance(identity, (str, bytes)):
+        raise TypeError("stream identity must be a flat sequence of strings")
+    return _encode_key_components(
+        ("stream", validate_persistence_namespace(namespace), validate_tenant_id(tenant_id),
+         runtime_domain, relation, *identity),
+        STREAM_KEY_MAX_BYTES,
+    )
+
+
+def validate_stream_key(value: bytes) -> bytes:
+    """Validate the complete bounded stream/counter address, including custom keys."""
+    if type(value) is not bytes or not 1 <= len(value) <= STREAM_KEY_MAX_BYTES:
+        raise ValueError(f"stream key must contain 1..{STREAM_KEY_MAX_BYTES} bytes")
+    return value
+
+
+def capability_receipt_key(
+    namespace: str, tenant_id: str, capability_id: str, revision: int,
+    run_id: str, write_key: str,
+) -> bytes:
+    """Address the retained capability write identity in its operation family."""
+    return b"\x02" + _encode_key_components(
+        ("capability-write", validate_persistence_namespace(namespace),
+         validate_tenant_id(tenant_id), validate_capability_id(capability_id),
+         str(validate_capability_revision(revision)), validate_resource_id(run_id),
+         validate_capability_write_key(write_key)),
+        OPERATION_KEY_MAX_BYTES - 1,
+    )
 
 
 def operation_key(
@@ -1453,7 +1478,7 @@ def validate_operation_replacement(
     """Keep immutable operation identity stable across a state replacement."""
     if (
         current.key != candidate.key
-        or current.stream_digest != candidate.stream_digest
+        or current.stream_key != candidate.stream_key
         or current.sequence != candidate.sequence
         or current.compactable != candidate.compactable
     ):
@@ -1467,4 +1492,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'SORT_KEY_MAX_BYTES', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'SORT_KEY_MAX_BYTES', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_digest', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

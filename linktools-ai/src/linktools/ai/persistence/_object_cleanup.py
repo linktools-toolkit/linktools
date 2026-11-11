@@ -88,7 +88,7 @@ async def _capture_owners(partitions: Mapping[StateStore, PersistenceDomain]) ->
             values.extend(dict(value.data) for value in page)
             if len(page) < 1000:
                 break
-            cursor = FactScanCursor(page[-1].stream_digest, page[-1].sequence)
+            cursor = FactScanCursor(page[-1].stream_key, page[-1].sequence)
         cursor = None
         while True:
             page = await store.read(lambda tx: tx.scan_operations_page(after=cursor, limit=1000))
@@ -349,7 +349,7 @@ async def _purge_unreferenced_objects(
                 await collect(dict(fact.data), domain)
             if len(facts) < 1000:
                 break
-            fact_cursor = FactScanCursor(facts[-1].stream_digest, facts[-1].sequence)
+            fact_cursor = FactScanCursor(facts[-1].stream_key, facts[-1].sequence)
         operation_cursor = None
         while True:
             operations = await store.read(lambda tx: tx.scan_operations_page(after=operation_cursor, limit=1000))

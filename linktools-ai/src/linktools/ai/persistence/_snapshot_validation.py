@@ -78,7 +78,7 @@ from .state import (
     record_key,
     scope_key,
     sortable_timestamp,
-    stream_digest,
+    stream_key,
 )
 
 
@@ -207,14 +207,17 @@ def canonical_snapshot_indexes(
     _records_by_key, values = _decode_snapshot_records(domain, records)
     _validate_budget_projections(values)
     aliases = _canonical_aliases(namespace, tenant_id, domain, values)
-    sequences = _canonical_sequences(
-        namespace,
-        tenant_id,
-        domain,
-        facts,
-        operations,
-        values,
-    )
+    try:
+        sequences = _canonical_sequences(
+            namespace,
+            tenant_id,
+            domain,
+            facts,
+            operations,
+            values,
+        )
+    except (AIError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     return aliases, sequences
 
 
@@ -305,23 +308,26 @@ def validate_snapshot_domain(
     if aliases != expected_aliases:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    _validate_facts(
-        namespace,
-        tenant_id,
-        domain,
-        facts,
-        records_by_key,
-        values,
-    )
-    _validate_operations(namespace, tenant_id, domain, operations)
-    expected_sequences = _canonical_sequences(
-        namespace,
-        tenant_id,
-        domain,
-        facts,
-        operations,
-        values,
-    )
+    try:
+        _validate_facts(
+            namespace,
+            tenant_id,
+            domain,
+            facts,
+            records_by_key,
+            values,
+        )
+        _validate_operations(namespace, tenant_id, domain, operations)
+        expected_sequences = _canonical_sequences(
+            namespace,
+            tenant_id,
+            domain,
+            facts,
+            operations,
+            values,
+        )
+    except (AIError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if dict(sequences) != dict(expected_sequences):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -1007,15 +1013,15 @@ def _validate_facts(
     current_pending_owners: set[bytes] = set()
     pending_keys: set[str] = set()
     for fact in facts:
-        if previous_stream is None or fact.stream_digest > previous_stream:
+        if previous_stream is None or fact.stream_key > previous_stream:
             if previous_owner is not None and previous_fact is not None:
                 _validate_fact_high_water(previous_owner, previous_sequence, previous_fact)
             if fact.sequence != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            previous_stream = fact.stream_digest
+            previous_stream = fact.stream_key
             previous_sequence = 1
             pending_keys.clear()
-        elif fact.stream_digest == previous_stream:
+        elif fact.stream_key == previous_stream:
             if fact.sequence != previous_sequence + 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous_sequence = fact.sequence
@@ -1024,7 +1030,7 @@ def _validate_facts(
         owner = values.get(fact.owner_key)
         if fact.owner_key not in records or owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if fact.stream_digest != _fact_stream(namespace, tenant_id, domain, fact, owner):
+        if fact.stream_key != _fact_stream(namespace, tenant_id, domain, fact, owner):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, AgentRunRecord) and fact.kind == "step_checkpoint":
             checkpoint = _decode_enveloped_domain(fact.data, StoredAgentRunCheckpoint)
@@ -1100,7 +1106,7 @@ def _fact_stream(
         )
         if not scope_matches or chunk.content.count != chunk.message_count:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return stream_digest(
+    return stream_key(
         namespace,
         tenant_id,
         domain.value,
@@ -1113,9 +1119,9 @@ def _fact_storage_identity(
     domain: PersistenceDomain,
     fact: StoredFact,
     owner: object,
-) -> tuple[str, object]:
+) -> tuple[str, tuple[str, ...]]:
     if isinstance(owner, ExecutionRecord):
-        return "execution", owner.execution_id
+        return "execution", (owner.execution_id,)
     if isinstance(owner, SessionRecord):
         if fact.kind != "session_turn":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1130,7 +1136,7 @@ def _fact_storage_identity(
         execution_id = cast(str, fact.data["execution_id"])
         if fact.subject_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return "session_turn", [owner.session_id]
+        return "session_turn", (owner.session_id,)
     if isinstance(owner, TranscriptHeadRecord):
         if fact.kind == "transcript_pending_part":
             chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
@@ -1145,7 +1151,7 @@ def _fact_storage_identity(
                 or fact.state is not None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return "transcript_pending_parts", [owner.owner_id, chunk.first_message_index]
+            return "transcript_pending_parts", (owner.owner_id, str(chunk.first_message_index))
         if fact.kind != "transcript_chunk":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
@@ -1156,7 +1162,7 @@ def _fact_storage_identity(
             if domain is PersistenceDomain.CONVERSATION
             else "run_transcript"
         )
-        return relation, owner.owner_id
+        return relation, (owner.owner_id,)
     if isinstance(owner, AgentRunRecord):
         relation = {
             "step_event": "event",
@@ -1164,9 +1170,9 @@ def _fact_storage_identity(
         }.get(fact.kind)
         if relation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return relation, owner.agent_run_id
+        return relation, (owner.agent_run_id,)
     if isinstance(owner, TaskGraphView):
-        return "task_event", owner.graph_id
+        return "task_event", (owner.graph_id,)
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -1190,8 +1196,8 @@ def _canonical_sequences(
     for agent_run_id, admitted in interactions.items():
         if set(admitted) != set(range(1, len(admitted) + 1)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        key = stream_digest(
-            namespace, tenant_id, domain.value, "interaction", agent_run_id
+        key = stream_key(
+            namespace, tenant_id, domain.value, "interaction", (agent_run_id,)
         )
         sequences[key] = len(admitted)
     for fact in facts:
@@ -1201,7 +1207,7 @@ def _canonical_sequences(
         if isinstance(owner, ExecutionRecord) or fact.kind == "transcript_pending_part":
             continue
         relation, value = _fact_storage_identity(domain, fact, owner)
-        key = stream_digest(
+        key = stream_key(
             namespace,
             tenant_id,
             domain.value,
@@ -1214,7 +1220,7 @@ def _canonical_sequences(
         value = _decode_enveloped_domain(operation.data, OperationLedgerInput)
         if value.tenant_id != tenant_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        key = stream_digest(
+        key = stream_key(
             namespace,
             tenant_id,
             domain.value,
@@ -1237,18 +1243,18 @@ def _validate_operations(
             expected_key = operation_key(namespace, tenant_id, domain.value, value.operation_id)
         except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        expected_stream = stream_digest(
+        expected_stream = stream_key(
             namespace,
             tenant_id,
             domain.value,
             "operation",
             [value.resource_kind.value, value.resource_id],
         )
-        position = (operation.stream_digest, operation.sequence)
+        position = (operation.stream_key, operation.sequence)
         if (
             value.tenant_id != tenant_id
             or operation.key != expected_key
-            or operation.stream_digest != expected_stream
+            or operation.stream_key != expected_stream
             or operation.state != value.status.value
             or operation.compactable != value.compactable
             or operation.sequence < 1

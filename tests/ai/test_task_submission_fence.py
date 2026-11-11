@@ -21,7 +21,7 @@ from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence.codec import (
     _decode_enveloped_domain, _encode_persisted_domain, encode_envelope,
 )
-from linktools.ai.persistence.state import OperationQuery, RecordQuery, StateTransaction, stream_digest
+from linktools.ai.persistence.state import OperationQuery, RecordQuery, StateTransaction, stream_key
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskGraph,
@@ -589,7 +589,7 @@ async def test_prepare_disposition_missing_head_never_recreates_existing_resourc
                     records = await transaction.list_records(RecordQuery(kind=kind))
                     await transaction.delete_records(tuple(record.key for record in records))
             if remaining != "admit_operation":
-                await transaction.delete_operations(OperationQuery(stream_digest=stream_digest(
+                await transaction.delete_operations(OperationQuery(stream_key=stream_key(
                     submission.namespace, submission.ref.tenant_id, PersistenceDomain.TASK.value,
                     "operation", [ResourceKind.TASK_GRAPH.value, submission.graph.graph_id],
                 )))

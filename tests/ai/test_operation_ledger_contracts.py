@@ -294,7 +294,7 @@ async def test_operation_ids_keep_exact_utf8_addresses_replay_and_scan_order(sto
     for value in seen:
         assert decode_operation(encode_operation(value)) == value
         assert await operations.state_store.read(lambda tx: tx.get_operation(value.key)) == value
-    stream = seen[0].stream_digest
+    stream = seen[0].stream_key
     assert await operations.state_store.read(lambda tx: tx.get_sequence(stream)) == len(ids)
 
 
@@ -344,6 +344,7 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
     from hashlib import sha256
     from linktools.ai.persistence.capabilities import CapabilityWriter, RuntimeCapabilityWrites
     from linktools.ai.persistence._capability_marker import has_capability_partition_marker
+    from linktools.ai.persistence.state import capability_receipt_key
 
     persisted = []
 
@@ -363,16 +364,13 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
     name = "capability-partitions"
     ordinary = StoredOperation(operation_key("operations", "tenant", "conversation", name), b"o" * 32, 0, "ordinary", False, {})
     await store.mutate(lambda tx: tx.insert_operation(ordinary))
-    write_key = "界" * 256
+    write_key = "界" * 85 + "a"
     scopes = (("one", "tenant"), ("two", "tenant"), ("one", "other"))
     for index, (namespace, tenant) in enumerate(scopes):
-        receipt_digest = sha256(canonical_json_bytes([
-            "capability-write", namespace, tenant, "probe", 1, "run", write_key,
-        ])).digest()
-        # A digest-valued primitive and a textual digest ID cannot alias a receipt.
-        for key, stream in ((receipt_digest, b"p" * 32), (operation_key("operations", "tenant", "conversation", receipt_digest.hex()), b"o" * 32)):
-            value = StoredOperation(key, stream, index + 1, "ordinary", False, {})
-            await store.mutate(lambda tx: tx.insert_operation(value))
+        address = capability_receipt_key(namespace, tenant, "probe", 1, "run", write_key)
+        # Same tuple bytes with the ordinary family remain a different identity.
+        value = StoredOperation(b"\x01" + address[1:], b"ordinary" + bytes((index,)), index + 1, "ordinary", False, {})
+        await store.mutate(lambda tx: tx.insert_operation(value))
         writes = RuntimeCapabilityWrites(
             {"probe": store}, namespace=namespace, tenant_id=tenant,
             durable_capability_ids=frozenset({"probe"}), require_active_run=lambda *_: None,
@@ -383,15 +381,15 @@ async def test_capability_receipts_and_markers_keep_separate_operation_families(
             payload = {"scope": index}
             await capability.writer.submit(key=write_key, payload=payload)
             await capability.writer.submit(key=write_key, payload=payload)
-            receipt = await store.read(lambda tx: tx.get_operation(b"\x02" + receipt_digest))
-            assert receipt.stream_digest == receipt_digest
+            receipt = await store.read(lambda tx: tx.get_operation(address))
+            assert receipt.stream_key == address
             assert receipt.data == {"request_digest": sha256(canonical_json_bytes(payload)).hexdigest()}
         finally:
             await writes.close()
     assert persisted == [{"scope": index} for index in range(len(scopes))]
     assert await store.read(has_capability_partition_marker)
     marker = await store.read(lambda tx: tx.get_operation(b"\x00capability-partitions"))
-    assert marker.stream_digest == sha256(b"linktools.runtime.capability-partitions").digest()
+    assert marker.stream_key == marker.key == b"\x00capability-partitions"
     assert await store.read(lambda tx: tx.get_operation(ordinary.key)) == ordinary
 
 
@@ -418,12 +416,12 @@ async def test_operation_readers_reject_corrupt_persisted_identity(storage: Pers
     with pytest.raises(AIError) as snapshot:
         validate_snapshot_domain(namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
                                  records=(), aliases=(), facts=(), operations=(corrupted,),
-                                 sequences={corrupted.stream_digest: corrupted.sequence})
+                                 sequences={corrupted.stream_key: corrupted.sequence})
     assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("physical_field", ("key", "stream_digest"))
+@pytest.mark.parametrize("physical_field", ("key", "stream_key"))
 @pytest.mark.parametrize("scope", (("other", "tenant", "conversation"),
                                    ("operations", "other", "conversation"),
                                    ("operations", "tenant", "execution")))
@@ -435,13 +433,13 @@ async def test_operation_readers_reject_foreign_physical_scope(storage: Persiste
     await operations.append(_operation())
     stored = await operations.state_store.read(lambda tx: tx.get_operation(
         operation_key("operations", "tenant", "conversation", "operation")))
-    from linktools.ai.persistence.state import stream_digest
+    from linktools.ai.persistence.state import stream_key
     physical = (operation_key(*scope, "operation") if physical_field == "key"
-                else stream_digest(*scope, "operation", ["SESSION", "session"]))
+                else stream_key(*scope, "operation", ["SESSION", "session"]))
     corrupted = replace(stored, **{physical_field: physical})
     with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
         decode_ledger_operation(corrupted, namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION)
     with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
         validate_snapshot_domain(namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
                                  records=(), aliases=(), facts=(), operations=(corrupted,),
-                                 sequences={corrupted.stream_digest: corrupted.sequence})
+                                 sequences={corrupted.stream_key: corrupted.sequence})

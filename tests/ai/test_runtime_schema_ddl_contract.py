@@ -167,21 +167,21 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_created_at",
         },
         "ai_state_facts": {
-            "uk_store_digest_stream_digest_sequence",
+            "uk_store_digest_stream_key_sequence",
             "ix_owner_key",
-            "ix_stream_digest_subject_id_sequence",
+            "ix_stream_key_subject_id_sequence",
             "ix_updated_at",
             "ix_created_at",
         },
         "ai_state_sequences": {
-            "uk_store_digest_key_digest",
+            "uk_store_digest_stream_key",
             "ix_updated_at",
             "ix_created_at",
         },
         "ai_state_operations": {
             "uk_store_digest_operation_key",
-            "uk_store_digest_stream_digest_sequence",
-            "ix_stream_digest_state_sequence",
+            "uk_store_digest_stream_key_sequence",
+            "ix_stream_key_state_sequence",
             "ix_updated_at",
             "ix_created_at",
         },
@@ -195,13 +195,13 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
         },
         "ai_state_aliases": {"uk_alias_key", "ix_store_digest_alias_key"},
         "ai_state_facts": {
-            "uk_stream_digest_sequence",
-            "ix_store_digest_stream_digest_sequence",
+            "uk_stream_key_sequence",
+            "ix_store_digest_stream_key_sequence",
         },
         "ai_state_sequences": {"uk_key_digest", "ix_store_digest_key_digest"},
         "ai_state_operations": {
             "uk_key_digest",
-            "uk_stream_digest_sequence",
+            "uk_stream_key_sequence",
             "ix_store_digest_key_digest",
         },
     }
@@ -229,7 +229,7 @@ def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None
 
     for fragment in (
         "KEY ix_store_digest_alias_key ",
-        "KEY ix_store_digest_stream_digest_sequence ",
+        "KEY ix_store_digest_stream_key_sequence ",
         "KEY ix_store_digest_key_digest ",
     ):
         assert fragment not in migration
@@ -321,9 +321,9 @@ def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(diale
     from sqlalchemy.dialects import postgresql, sqlite
     table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION})).tables["ai_state_operations"]
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
-    assert table.c.operation_key.type.length == 1024
+    assert table.c.operation_key.type.length == 1152
     assert table.c.operation_key.type.compile(dialect=dialect) == {
-        "mysql": "VARBINARY(1024)", "postgresql": "BYTEA", "sqlite": "BLOB",
+        "mysql": "VARBINARY(1152)", "postgresql": "BYTEA", "sqlite": "BLOB",
     }[dialect_name]
     assert any(index.unique and tuple(column.name for column in index.columns) == ("store_digest", "operation_key")
                for index in table.indexes)
@@ -344,3 +344,23 @@ def test_runtime_alias_schema_uses_partitioned_binary_indexes() -> None:
     # CHAR(64) utf8mb4 contributes up to 256 index bytes; the alias is binary.
     assert table.c.store_digest.type.length * 4 + table.c.alias_key.type.length == 1280
     assert table.c.store_digest.type.length + table.c.alias_key.type.length == 1088
+
+
+@pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
+def test_state_stream_and_counter_schema_uses_complete_binary_keys(dialect_name: str) -> None:
+    from sqlalchemy.dialects import postgresql, sqlite
+    dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
+    for name in ("ai_state_facts", "ai_state_operations", "ai_state_sequences"):
+        table = metadata.tables[name]
+        assert table.c.stream_key.type.length == 1280
+        assert table.c.stream_key.type.compile(dialect=dialect) == {
+            "mysql": "VARBINARY(1280)", "postgresql": "BYTEA", "sqlite": "BLOB",
+        }[dialect_name]
+        assert all(len(index.columns) <= 3 for index in table.indexes)
+    facts = metadata.tables["ai_state_facts"]
+    assert any(tuple(column.name for column in index.columns) == ("stream_key", "subject_id", "sequence")
+               for index in facts.indexes)
+    operations = metadata.tables["ai_state_operations"]
+    assert any(tuple(column.name for column in index.columns) == ("stream_key", "state", "sequence")
+               for index in operations.indexes)

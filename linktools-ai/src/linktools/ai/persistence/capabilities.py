@@ -6,15 +6,19 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeVar
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
-from ..core import CommitPolicy, ImmutableJsonMapping, JsonValue, canonical_json_bytes
+from ..core import (
+    CommitPolicy, ImmutableJsonMapping, JsonValue, canonical_json_bytes,
+    validate_capability_id, validate_capability_revision, validate_capability_write_key,
+    validate_persistence_namespace, validate_resource_id, validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
 from ._capability_contracts import CapabilityPersistence, CapabilityWriter
-from .state import StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction, StoredOperation
+from .state import capability_receipt_key, StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction, StoredOperation
 from .durability import CommitObservation, DurableCommitState, run_durable_commit, await_owned_task
 from ._capability_marker import ensure_capability_partition_marker, has_capability_partition_marker
 
@@ -28,7 +32,7 @@ class _Write:
     store: StateStore
     persist: _Persist
     payload: Mapping[str, JsonValue]
-    receipt_key: bytes
+    receipt_key: bytes = field(repr=False)
     digest: str
     content: bytes
     buffered: bool
@@ -37,7 +41,7 @@ class _Write:
 
     @property
     def operation_key(self) -> bytes:
-        return b"\x02" + self.receipt_key
+        return self.receipt_key
 
 
 class _PartitionMarker:
@@ -131,7 +135,7 @@ class _WriteScope:
                     try:
                         accepted, append_error, cancelled = await await_owned_task(
                             asyncio.create_task(self.policy.buffer.append(
-                                self.id, write.id, write.receipt_key.hex(), write.content, wait=False,
+                                self.id, write.id, write.receipt_key, write.content, wait=False,
                             )), self.tasks,
                         )
                         if append_error is not None:
@@ -188,7 +192,7 @@ class _WriteScope:
                 assert self.policy.buffer is not None
                 retained = tuple(write for write in self.pending if write.buffered)
                 queued = await self.policy.buffer.read_batch(self.id, limit=len(retained))
-                expected = {write.id: (write.receipt_key.hex(), write.content) for write in retained}
+                expected = {write.id: (write.receipt_key, write.content) for write in retained}
                 returned = tuple(entry[0] for entry in queued)
                 if (len(set(returned)) != len(returned)
                         or any(expected.get(identity) != (key, content) for identity, key, content in queued)
@@ -321,14 +325,20 @@ class PreparedCapabilityWrites:
                 continue
             await write.persist(transaction, write.payload)
             await transaction.insert_operation(StoredOperation(
-                key=write.operation_key, stream_digest=write.receipt_key,
+                key=write.operation_key, stream_key=write.receipt_key,
                 sequence=0, state="committed", compactable=False,
                 data={"request_digest": write.digest},
             ))
 
     @classmethod
     def _validate_receipt(cls, receipt: StoredOperation, write: _Write) -> None:
-        if receipt.state != "committed" or receipt.data.get("request_digest") != write.digest:
+        digest = receipt.data.get("request_digest")
+        if (receipt.key != write.operation_key or receipt.stream_key != write.receipt_key
+                or receipt.sequence != 0 or receipt.state != "committed" or receipt.compactable
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if digest != write.digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
 
     async def readback(self) -> bool:
@@ -400,17 +410,14 @@ class _BoundWriter(CapabilityWriter):
         self.persist: _Persist | None = None
 
     async def submit(self, *, key: str, payload: Mapping[str, JsonValue]) -> None:
-        if not isinstance(key, str) or not key:
-            raise ValueError("capability write key must be nonempty")
+        validate_capability_write_key(key)
         if self.persist is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         content = canonical_json_bytes(dict(payload))
         copied = ImmutableJsonMapping(json.loads(content))
-        # Keep the composite receipt identity and stream; its operation address
-        # uses a separate family from ordinary ledger IDs and partition markers.
-        receipt_key = hashlib.sha256(canonical_json_bytes([
-            "capability-write", self.namespace, self.tenant_id, *self.identity, key,
-        ])).digest()
+        receipt_key = capability_receipt_key(
+            self.namespace, self.tenant_id, *self.identity, key,
+        )
         await self.scope.submit(_Write(
             id=uuid4().hex, store=self.store, persist=self.persist, payload=copied,
             receipt_key=receipt_key, digest=hashlib.sha256(content).hexdigest(), content=content,
@@ -430,12 +437,12 @@ class RuntimeCapabilityWrites:
         durable_capability_ids: frozenset[str], require_active_run: Callable[[str, str], None],
         has_active_execution: Callable[[str], bool], marker_store: StateStore | None = None,
     ) -> None:
-        self.stores = dict(stores)
-        self._durable_capability_ids = durable_capability_ids
+        self.stores = {validate_capability_id(identity): store for identity, store in stores.items()}
+        self._durable_capability_ids = frozenset(validate_capability_id(identity) for identity in durable_capability_ids)
         self._require_active_run = require_active_run
         self._has_active_execution = has_active_execution
-        self.namespace = namespace
-        self.tenant_id = tenant_id
+        self.namespace = validate_persistence_namespace(namespace)
+        self.tenant_id = validate_tenant_id(tenant_id)
         self._scopes: dict[tuple[str, int, int, CommitPolicy], _WriteScope] = {}
         self._tasks: set[asyncio.Task[object]] = set()
         self._marker = _PartitionMarker(marker_store, self._tasks) if marker_store is not None else None
@@ -445,6 +452,7 @@ class RuntimeCapabilityWrites:
 
     def register_store(self, capability_id: str, store: StateStore, *, durable: bool) -> None:
         """Add a current declaration's partition without replacing active writers."""
+        validate_capability_id(capability_id)
         if self._closing:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         previous = self.stores.get(capability_id)
@@ -459,6 +467,9 @@ class RuntimeCapabilityWrites:
         capability: CapabilityPersistence, *, revision: int = 1,
         adapt: Callable[[CapabilityPersistence, Callable[[CapabilityPersistence], None]], _AdaptedT] | None = None,
     ) -> CapabilityPersistence | _AdaptedT:
+        validate_capability_id(capability_id)
+        validate_capability_revision(revision)
+        validate_resource_id(run_id)
         self._require_active_run(run_id, execution_id)
         if self._closing or execution_id in self._sealed:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

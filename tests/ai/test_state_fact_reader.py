@@ -28,7 +28,7 @@ from .test_state_batch_delete_backends import _digest, _fact, _open_store, _reco
 async def test_fact_reads_preserve_exact_scope_and_transaction_view(tmp_path: Path, backend: str) -> None:
     owner = _record(1)
     facts = tuple(_fact(owner, sequence) for sequence in (0, 2, 5))
-    stream = facts[0].stream_digest
+    stream = facts[0].stream_key
     other_stream = _digest("other-stream")
     async with _open_store(backend, tmp_path / backend) as store:
         other = await store.storage_group.open_partition(_digest("other-store"), create=True)
@@ -37,7 +37,7 @@ async def test_fact_reads_preserve_exact_scope_and_transaction_view(tmp_path: Pa
         async def seed(transaction):
             assert isinstance(transaction, FactReader)
             await transaction.insert_record(owner)
-            await transaction.insert_facts((*facts, replace(facts[1], stream_digest=other_stream)))
+            await transaction.insert_facts((*facts, replace(facts[1], stream_key=other_stream)))
             assert await transaction.get_facts(stream, (5, 1, 0, 2, 5)) == facts
             assert await transaction.get_facts(stream, ()) == ()
 
@@ -48,7 +48,7 @@ async def test_fact_reads_preserve_exact_scope_and_transaction_view(tmp_path: Pa
         async def read(transaction):
             assert isinstance(transaction, FactReader)
             assert await transaction.get_facts(stream, (5, 1, 0, 2, 5)) == facts
-            assert await transaction.get_facts(other_stream, (0, 2, 5)) == (replace(facts[1], stream_digest=other_stream),)
+            assert await transaction.get_facts(other_stream, (0, 2, 5)) == (replace(facts[1], stream_key=other_stream),)
             assert await transaction.get_facts(_digest("absent"), (0, 2, 5)) == ()
             assert await transaction.get_facts(stream, ()) == ()
             with pytest.raises(StateTransactionNestingError):
@@ -97,10 +97,10 @@ async def test_sql_fact_reads_bound_parameters_and_skip_empty_selections(tmp_pat
         engine = store.storage_group.context.engine.sync_engine
         event.listen(engine, "before_cursor_execute", capture)
         try:
-            assert await store.read(lambda tx: tx.get_facts(facts[0].stream_digest, ())) == ()
+            assert await store.read(lambda tx: tx.get_facts(facts[0].stream_key, ())) == ()
             assert parameter_counts == []
             selected = (1100, 0, 0, *range(10, 1100))
-            assert await store.read(lambda tx: tx.get_facts(facts[0].stream_digest, selected)) == (facts[0], facts[3])
+            assert await store.read(lambda tx: tx.get_facts(facts[0].stream_key, selected)) == (facts[0], facts[3])
         finally:
             event.remove(engine, "before_cursor_execute", capture)
         assert materialized == [0, 1100]
@@ -118,8 +118,8 @@ class _LegacyTransaction:
 
 
 class _CustomFactReader(_LegacyTransaction):
-    async def get_facts(self, stream_digest: bytes, sequences: Sequence[int]) -> tuple[StoredFact, ...]:
-        return await self._transaction.get_facts(stream_digest, sequences)
+    async def get_facts(self, stream_key: bytes, sequences: Sequence[int]) -> tuple[StoredFact, ...]:
+        return await self._transaction.get_facts(stream_key, sequences)
 
 
 class _CustomSqlFactReader(_CustomFactReader):
@@ -186,8 +186,8 @@ async def test_history_rejects_inexact_custom_fact_results(tmp_path: Path, monke
         archive, run_id = await _seed_trace(storage, 5)
 
         class Reader(_CustomFactReader):
-            async def get_facts(self, stream_digest: bytes, sequences: Sequence[int]) -> tuple[StoredFact, ...]:
-                facts = await super().get_facts(stream_digest, sequences)
+            async def get_facts(self, stream_key: bytes, sequences: Sequence[int]) -> tuple[StoredFact, ...]:
+                facts = await super().get_facts(stream_key, sequences)
                 if malformed == "missing":
                     return facts[:-1]
                 if malformed == "duplicate":

@@ -22,7 +22,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceStorage, PersistencePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.persistence._plan import PersistenceDomain
-from linktools.ai.persistence.state import OperationQuery, stream_digest
+from linktools.ai.persistence.state import OperationQuery, stream_key
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.task import (
     TaskGraph,
@@ -280,7 +280,7 @@ async def test_corrupt_occupied_graph_without_its_admission_operation_fails_clos
             tenant_id="tenant",
         )
         assert operation is not None
-        operation_stream = stream_digest(
+        operation_stream = stream_key(
             "task-test",
             "tenant",
             PersistenceDomain.TASK.value,
@@ -290,7 +290,7 @@ async def test_corrupt_occupied_graph_without_its_admission_operation_fails_clos
         deleted = await state.task.operations.state_store.mutate(
             lambda transaction: transaction.delete_operations(
                 OperationQuery(
-                    stream_digest=operation_stream,
+                    stream_key=operation_stream,
                     states=frozenset({OperationStatus.SUCCEEDED.value}),
                     through_sequence=operation.sequence,
                 )

@@ -677,7 +677,7 @@ async def test_unknown_buffer_admission_cannot_publish_missing_payload(tmp_path:
         assert opened.probe.writes == []
         scope = audit.writer.scope
         write, = scope.pending
-        await _Buffer.append(buffer, scope.id, write.id, write.receipt_key.hex(), write.content, wait=False)
+        await _Buffer.append(buffer, scope.id, write.id, write.receipt_key, write.content, wait=False)
         await audit.flush()
         assert len(await opened.probe.facts("audit")) == 1
 

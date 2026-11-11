@@ -596,7 +596,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         )
         assert await second.mutate(
             lambda transaction: transaction.delete_operations(
-                OperationQuery(stream_digest=operation_stream)
+                OperationQuery(stream_key=operation_stream)
             )
         ) == ()
 
@@ -658,8 +658,8 @@ async def test_operation_compaction_keeps_one_stream_anchor(tmp_path: Path, back
 
         async def counter_matches_stream(transaction: StateTransaction) -> None:
             stored = await transaction.scan_operations()
-            assert len({value.stream_digest for value in stored}) == 1
-            stream = stored[0].stream_digest
+            assert len({value.stream_key for value in stored}) == 1
+            stream = stored[0].stream_key
             assert await transaction.get_sequence(stream) == 3
 
         await state.conversation.operations.state_store.read(counter_matches_stream)

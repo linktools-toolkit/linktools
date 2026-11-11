@@ -91,7 +91,7 @@ async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeM
                 roots.extend(iter_native_message_roots(row.data))
             if len(page) < 1000:
                 break
-            cursor = FactScanCursor(page[-1].stream_digest, page[-1].sequence)
+            cursor = FactScanCursor(page[-1].stream_key, page[-1].sequence)
         cursor = None
         while True:
             page = await store.read(lambda tx: tx.scan_operations_page(after=cursor, limit=1000))
