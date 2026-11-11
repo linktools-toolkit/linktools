@@ -62,8 +62,8 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     records = metadata.tables["ai_state_records"]
     dialect = mysql.dialect()
 
-    assert records.c.subject_digest.nullable
-    assert records.c.subject_digest.type.compile(dialect=dialect) == "CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+    assert records.c.subject_id.nullable
+    assert records.c.subject_id.type.compile(dialect=dialect) == "VARBINARY(128)"
     assert "partition_digest" not in records.c
     assert (
         records.c.sort_key.type.compile(dialect=dialect)
@@ -83,7 +83,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         ddl = str(CreateIndex(mysql_indexes[name]).compile(dialect=dialect))
         assert "sort_key(128)" in ddl
 
-    assert not mysql_indexes["ix_scope_digest_subject_digest"].unique
+    assert not mysql_indexes["ix_scope_digest_subject_id"].unique
     migration = (
         Path(__file__).resolve().parents[2]
         / "linktools-ai"
@@ -100,7 +100,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         "ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128))",
         "ix_scope_digest_sort_key (scope_digest, sort_key(128))",
         "ix_parent_digest_sort_key (parent_digest, sort_key(128))",
-        "ix_scope_digest_subject_digest (scope_digest, subject_digest)",
+        "ix_scope_digest_subject_id (scope_digest, subject_id)",
     ):
         assert fragment in migration
 
@@ -154,7 +154,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "uk_store_digest_key_digest",
             "ix_store_digest_kind_sort_key",
             "ix_scope_digest_sort_key",
-            "ix_scope_digest_subject_digest",
+            "ix_scope_digest_subject_id",
             "ix_parent_digest_sort_key",
             "ix_updated_at",
             "ix_created_at",
@@ -168,7 +168,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
         "ai_state_facts": {
             "uk_store_digest_stream_digest_sequence",
             "ix_owner_key_digest",
-            "ix_stream_digest_subject_digest_sequence",
+            "ix_stream_digest_subject_id_sequence",
             "ix_updated_at",
             "ix_created_at",
         },

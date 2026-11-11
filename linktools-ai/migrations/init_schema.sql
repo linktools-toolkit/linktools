@@ -6,7 +6,7 @@ CREATE TABLE ai_state_records (
     store_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 store scope for one namespace, tenant, and Runtime domain.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the persisted runtime record.',
     scope_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping key used by the record kind''s primary list query.',
-    subject_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 subject identity used for exact lookups within a record scope.',
+    subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.',
     parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 identity of the logical parent used by hierarchical list queries.',
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
     sort_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
@@ -22,7 +22,7 @@ CREATE TABLE ai_state_records (
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_key_digest (store_digest, key_digest),
     KEY ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128)),
     KEY ix_scope_digest_sort_key (scope_digest, sort_key(128)),
-    KEY ix_scope_digest_subject_digest (scope_digest, subject_digest),
+    KEY ix_scope_digest_subject_id (scope_digest, subject_id),
     KEY ix_parent_digest_sort_key (parent_digest, sort_key(128)),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current durable state for runtime and step resources persisted as versioned records.';
@@ -46,13 +46,13 @@ CREATE TABLE ai_state_facts (
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
     owner_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record that owns this fact.',
     kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.',
-    subject_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping identity for multiple facts of one logical subject such as a tool call.',
+    subject_id VARBINARY(128) NULL COMMENT 'Exact UTF-8 subject identifier grouping facts such as one tool call.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.',
     payload_json JSON NOT NULL COMMENT 'Canonical immutable fact JSON encoded as a JSON string preserving numeric representations.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_store_digest_stream_digest_sequence (store_digest, stream_digest, sequence),
-    KEY ix_owner_key_digest (owner_key_digest), KEY ix_stream_digest_subject_digest_sequence (stream_digest, subject_digest, sequence),
+    KEY ix_owner_key_digest (owner_key_digest), KEY ix_stream_digest_subject_id_sequence (stream_digest, subject_id, sequence),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ordered runtime facts including events, checkpoints, and effects.';
 

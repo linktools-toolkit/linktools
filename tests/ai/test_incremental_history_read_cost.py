@@ -310,7 +310,7 @@ async def test_trace_pages_batch_fact_reads_without_overfetch(
             value = original_fact(row)
             logical_json_bytes += len(canonical_json_bytes(value.data))
             tracked = TrackedFact(value.stream_digest, value.sequence, value.owner_key_digest,
-                                  value.kind, value.subject_digest, value.state, value.data)
+                                  value.kind, value.subject_id, value.state, value.data)
             alive += 1
             maximum_alive = max(maximum_alive, alive)
             weakref.finalize(tracked, released)

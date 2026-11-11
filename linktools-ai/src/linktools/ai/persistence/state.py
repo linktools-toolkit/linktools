@@ -15,7 +15,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
+from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, validate_resource_id
+from ..errors import AIError
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 
 if TYPE_CHECKING:
@@ -237,6 +238,13 @@ def _require_digest(value: bytes, name: str) -> bytes:
     return value
 
 
+def _require_subject_id(value: str) -> str:
+    try:
+        return validate_resource_id(value)
+    except AIError as error:
+        raise ValueError("subject_id must be a valid resource identifier") from error
+
+
 def _require_nonnegative_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an integer")
@@ -322,7 +330,7 @@ class StoredRecord:
     lease_fence: int
     lease_expires_at: datetime | None
     data: Mapping[str, JsonValue]
-    subject_digest: bytes | None = None
+    subject_id: str | None = None
     payload_bytes: bytes | None = None
 
     def __post_init__(self) -> None:
@@ -333,8 +341,8 @@ class StoredRecord:
             _require_digest(self.scope_digest, "scope_digest")
         if self.parent_digest is not None:
             _require_digest(self.parent_digest, "parent_digest")
-        if self.subject_digest is not None:
-            _require_digest(self.subject_digest, "subject_digest")
+        if self.subject_id is not None:
+            _require_subject_id(self.subject_id)
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
             raise ValueError("record kind must contain at most 32 characters")
         if self.kind in {".", ".."} or any(character in self.kind for character in "/\\"):
@@ -371,15 +379,15 @@ class StoredFact:
     sequence: int
     owner_key_digest: bytes
     kind: str
-    subject_digest: bytes | None
+    subject_id: str | None
     state: str | None
     data: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
         _require_digest(self.stream_digest, "stream_digest")
         _require_digest(self.owner_key_digest, "owner_key_digest")
-        if self.subject_digest is not None:
-            _require_digest(self.subject_digest, "subject_digest")
+        if self.subject_id is not None:
+            _require_subject_id(self.subject_id)
         _require_nonnegative_int(self.sequence, "fact sequence")
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
             raise ValueError("fact kind must contain at most 32 characters")
@@ -509,7 +517,7 @@ class FactQuery:
     stream_digest: bytes
     after_sequence: int | None = None
     limit: int | None = None
-    subject_digest: bytes | None = None
+    subject_id: str | None = None
     latest: bool = False
     latest_per_subject: bool = False
 
@@ -517,14 +525,14 @@ class FactQuery:
         _require_digest(self.stream_digest, "stream_digest")
         if self.after_sequence is not None:
             _require_nonnegative_int(self.after_sequence, "after_sequence")
-        if self.subject_digest is not None:
-            _require_digest(self.subject_digest, "subject_digest")
+        if self.subject_id is not None:
+            _require_subject_id(self.subject_id)
         if not isinstance(self.latest, bool) or not isinstance(self.latest_per_subject, bool):
             raise TypeError("latest flags must be bool values")
         if self.latest and self.latest_per_subject:
             raise ValueError("latest and latest_per_subject cannot both be true")
-        if self.latest_per_subject and self.subject_digest is not None:
-            raise ValueError("latest_per_subject cannot be combined with subject_digest")
+        if self.latest_per_subject and self.subject_id is not None:
+            raise ValueError("latest_per_subject cannot be combined with subject_id")
         _validate_limit(self.limit)
 
 
@@ -758,7 +766,7 @@ class RecordSubjectReader(Protocol):
     """
 
     async def read_record_subjects(
-        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+        self, *, scope_digest: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...] | None: ...
 
 
@@ -882,11 +890,11 @@ class _ReadOnlyStateTransaction(StateTransaction):
         return await self._transaction.read_joined_facts(context, statement)
 
     async def read_record_subjects(
-        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+        self, *, scope_digest: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...] | None:
         if isinstance(self._transaction, RecordSubjectReader):
             return await self._transaction.read_record_subjects(
-                scope_digest=scope_digest, kind=kind, subject_digests=subject_digests,
+                scope_digest=scope_digest, kind=kind, subject_ids=subject_ids,
             )
         return None
 
@@ -1299,10 +1307,6 @@ def operation_key(
     return _digest(["operation", namespace, tenant_id, runtime_domain, identity])
 
 
-def subject_digest(identity: JsonValue) -> bytes:
-    return _digest(["subject", identity])
-
-
 def sortable_timestamp(value: datetime, key: bytes) -> str:
     if value.tzinfo is None:
         raise ValueError("sortable timestamp must be timezone-aware")
@@ -1330,11 +1334,12 @@ def validate_record_identity(record: StoredRecord) -> None:
         ("key_digest", record.key_digest),
         ("scope_digest", record.scope_digest),
         ("parent_digest", record.parent_digest),
-        ("subject_digest", record.subject_digest),
     )
     for name, value in values:
         if value is not None and (not isinstance(value, bytes) or len(value) != 32):
             raise ValueError(f"record {name} is invalid")
+    if record.subject_id is not None:
+        _require_subject_id(record.subject_id)
     encode_sort_key(record.sort_key)
     if type(record.data) is ImmutableJsonMapping:
         return
@@ -1350,7 +1355,7 @@ def validate_record_replacement(current: StoredRecord, candidate: StoredRecord) 
         current.key_digest != candidate.key_digest
         or current.scope_digest != candidate.scope_digest
         or current.parent_digest != candidate.parent_digest
-        or current.subject_digest != candidate.subject_digest
+        or current.subject_id != candidate.subject_id
         or current.kind != candidate.kind
         or current.sort_key != candidate.sort_key
     ):
@@ -1378,4 +1383,4 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("limit must be between 1 and 1000")
 
 
-__all__ = ['SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'subject_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_digest', 'decode_sort_key', 'encode_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_digest', 'record_key_digest', 'require_no_run_history_lock', 'scope_digest', 'sortable_timestamp', 'state_store_digest', 'stream_digest', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

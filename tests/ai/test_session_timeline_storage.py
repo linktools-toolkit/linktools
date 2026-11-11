@@ -159,7 +159,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
                     sequence,
                     repository._key("session", "session"),
                     "session_turn",
-                    repository._timeline_subject("duplicate"),
+                    "duplicate",
                     None,
                     {"version": 1, "execution_id": "duplicate"},
                 )

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import PersistenceDomain
 from linktools.ai.persistence.contracts import ModelInteractionRecord
@@ -35,7 +34,7 @@ async def test_interaction_fact_cannot_replace_missing_authoritative_record(
         stream = archive._stream(run.agent_run_id, "interaction")
         fact = StoredFact(
             stream, 1, archive._agent_run_key(run.agent_run_id),
-            "model_interaction", bytes.fromhex(canonical_sha256({"agent_run_id": old.agent_run_id, "model_request_seq": 1})), old.status, _encode_step(old),
+            "model_interaction", "request-1", old.status, _encode_step(old),
         )
 
         async def seed(transaction):

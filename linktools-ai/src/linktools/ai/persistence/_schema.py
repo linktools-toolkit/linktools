@@ -4,6 +4,7 @@
 
 from typing import TYPE_CHECKING
 
+from ..core import RESOURCE_ID_MAX_BYTES
 from ..storage import (
     sql_audit_columns,
     sql_audit_indexes,
@@ -47,6 +48,7 @@ def build_runtime_sql_metadata(
         JSON,
         Boolean,
         Column,
+        LargeBinary,
         MetaData,
         String,
         Table,
@@ -90,10 +92,10 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 grouping key used by the record kind's primary list query.",
         ),
         Column(
-            "subject_digest",
-            digest,
+            "subject_id",
+            LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
             nullable=True,
-            comment="Canonical SHA-256 subject identity used for exact lookups within a record scope.",
+            comment="Exact UTF-8 subject identifier used for lookups within a record scope.",
         ),
         Column(
             "parent_digest",
@@ -159,7 +161,7 @@ def build_runtime_sql_metadata(
     sql_unique(records, "store_digest", "key_digest")
     sql_query_index(records, "store_digest", "kind", "sort_key", mysql_length=128)
     sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
-    sql_query_index(records, "scope_digest", "subject_digest")
+    sql_query_index(records, "scope_digest", "subject_id")
     sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
     sql_audit_indexes(records)
 
@@ -228,10 +230,10 @@ def build_runtime_sql_metadata(
             comment="Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.",
         ),
         Column(
-            "subject_digest",
-            digest,
+            "subject_id",
+            LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
             nullable=True,
-            comment="Canonical SHA-256 grouping identity for multiple facts of one logical subject such as a tool call.",
+            comment="Exact UTF-8 subject identifier grouping facts such as one tool call.",
         ),
         Column(
             "state",
@@ -251,7 +253,7 @@ def build_runtime_sql_metadata(
     )
     sql_unique(facts, "store_digest", "stream_digest", "sequence")
     sql_query_index(facts, "owner_key_digest")
-    sql_query_index(facts, "stream_digest", "subject_digest", "sequence")
+    sql_query_index(facts, "stream_digest", "subject_id", "sequence")
     sql_audit_indexes(facts)
 
     sequences = Table(

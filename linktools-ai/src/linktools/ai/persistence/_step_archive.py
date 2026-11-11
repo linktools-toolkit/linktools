@@ -3418,7 +3418,7 @@ class StateStepArchive(AgentRunStore):
         agent_run_id: str,
         family: str,
         *,
-        subject: bytes | None = None,
+        subject: str | None = None,
         latest: bool = False,
         latest_per_subject: bool = False,
     ) -> tuple[StoredFact, ...]:
@@ -3428,7 +3428,7 @@ class StateStepArchive(AgentRunStore):
         return await self._store.read(
             lambda transaction: (self.read_event_facts if family == "event" else lambda tx, query: tx.list_facts(query))(
                 transaction, FactQuery(
-                    self._stream(agent_run_id, family), subject_digest=subject,
+                    self._stream(agent_run_id, family), subject_id=subject,
                     latest=latest, latest_per_subject=latest_per_subject,
                 ),
             )

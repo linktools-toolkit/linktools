@@ -43,7 +43,6 @@ from .state import (
     StoredFact,
     StoredRecord,
     stream_digest,
-    subject_digest,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -485,10 +484,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             encode_session_turn_commit(value),
         )
 
-    @staticmethod
-    def _timeline_subject(execution_id: str) -> bytes:
-        return subject_digest(execution_id)
-
     def _decode_timeline_turn(
         self, session_id: str, fact: StoredFact
     ) -> SessionTurnRef:
@@ -501,7 +496,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         execution_id = str(fact.data["execution_id"])
-        if fact.subject_digest != self._timeline_subject(execution_id):
+        if fact.subject_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return SessionTurnRef(session_id, fact.sequence, execution_id)
 
@@ -1005,7 +1000,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         _require_repository_tenant(tenant_id, self._tenant_id)
         if admitted_turn is None:
             turns = await transaction.list_facts(FactQuery(
-                self._timeline_stream(session_id), subject_digest=self._timeline_subject(execution_id),
+                self._timeline_stream(session_id), subject_id=execution_id,
             ))
             if not turns and allow_unadmitted:
                 return None
@@ -1370,7 +1365,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         sequence,
                         self._key("session", session_id),
                         "session_turn",
-                        self._timeline_subject(execution_id),
+                        execution_id,
                         None,
                         {"version": 1, "execution_id": execution_id},
                     )
@@ -1517,7 +1512,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         allow_unadmitted: bool = False,
     ) -> SessionTurnCommit | None:
         turns = await transaction.list_facts(FactQuery(
-            self._timeline_stream(session_id), subject_digest=self._timeline_subject(execution_id),
+            self._timeline_stream(session_id), subject_id=execution_id,
         ))
         if not turns and allow_unadmitted:
             return None
@@ -1567,7 +1562,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         sequence = sequences[stream]
         await transaction.insert_fact(StoredFact(
             stream, sequence, record.key_digest, "session_turn",
-            self._timeline_subject(execution_id), None, {"version": 1, "execution_id": execution_id},
+            execution_id, None, {"version": 1, "execution_id": execution_id},
         ))
         await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommit(
             current.session_id, sequence, execution_id, start_message_index, end_message_index,

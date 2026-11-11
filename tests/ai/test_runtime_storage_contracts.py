@@ -270,8 +270,8 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
     event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
     owner = b"o" * 32
     stream = b"s" * 32
-    subject_a = b"a" * 32
-    subject_b = b"b" * 32
+    subject_a = "a"
+    subject_b = "b"
     record = StoredRecord(
         owner,
         None,

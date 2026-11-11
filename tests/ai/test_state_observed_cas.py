@@ -165,7 +165,7 @@ async def test_mysql_identity_conditions_compare_bytes_and_bind_text(
     from sqlalchemy.dialects.mysql.asyncmy import dialect
 
     compiler_dialect = dialect(dbapi=dialect.import_dbapi())
-    values = {"scope_digest": None, "parent_digest": None, "subject_digest": None,
+    values = {"scope_digest": None, "parent_digest": None, "subject_id": None,
               "kind": "probe 測🙂 ", "sort_key": "0001 測🙂 "}
     async with _database(tmp_path / "compile.db") as (_, store, _):
         async def inspect(tx: StateTransaction) -> None:

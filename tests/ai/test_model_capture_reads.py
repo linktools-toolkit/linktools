@@ -876,7 +876,6 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
     from .test_model_interaction_lifecycle_paging import _terminal
     from linktools.ai.persistence._step_archive import _encode_step
     from linktools.ai.persistence.state import StoredFact
-    from linktools.ai.core import canonical_sha256
 
     state = Persistence(PersistenceStorage.sqlite(tmp_path / "missing-record-metadata.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
@@ -888,7 +887,7 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
         fact = StoredFact(
             archive._stream(run.agent_run_id, "interaction"), 1,
             archive._agent_run_key(run.agent_run_id), "model_interaction",
-            bytes.fromhex(canonical_sha256({"agent_run_id": terminal.agent_run_id, "model_request_seq": 1})), terminal.status, _encode_step(terminal),
+            "request-1", terminal.status, _encode_step(terminal),
         )
         async def seed(transaction):
             owner = await transaction.get_record(fact.owner_key_digest)

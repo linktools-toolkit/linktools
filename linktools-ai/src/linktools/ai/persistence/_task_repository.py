@@ -945,7 +945,7 @@ class TaskRepositoryImpl(RepositoryBase):
         if (
             latest.stream_digest != stream
             or latest.owner_key_digest != owner
-            or latest.subject_digest is not None
+            or latest.subject_id is not None
             or latest.state is not None
             or latest.sequence < 1
         ):
@@ -1187,7 +1187,7 @@ class TaskRepositoryImpl(RepositoryBase):
             if (
                 latest.stream_digest != stream
                 or latest.owner_key_digest != owner
-                or latest.subject_digest is not None
+                or latest.subject_id is not None
                 or latest.state is not None
                 or latest.sequence < 1
             ):
@@ -1340,7 +1340,7 @@ class TaskRepositoryImpl(RepositoryBase):
             if (
                 value.stream_digest != stream
                 or value.owner_key_digest != owner
-                or value.subject_digest is not None
+                or value.subject_id is not None
                 or value.sequence != expected_event_seq
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1380,7 +1380,7 @@ class TaskRepositoryImpl(RepositoryBase):
             if (
                 fact.stream_digest != stream
                 or fact.owner_key_digest != owner
-                or fact.subject_digest is not None
+                or fact.subject_id is not None
                 or fact.state is not None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

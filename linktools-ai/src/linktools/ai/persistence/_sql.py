@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from linktools.core import environ
 
-from ..core import canonical_json_bytes
+from ..core import canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
 from ..storage import (
     CacheBackend,
@@ -1172,22 +1172,22 @@ class _SqlTransaction:
         }
 
     async def read_record_subjects(
-        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+        self, *, scope_digest: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...]:
-        subjects = tuple(dict.fromkeys(subject_digests))
+        subjects = tuple(dict.fromkeys(subject_ids))
         if not subjects:
             return ()
         from sqlalchemy import select
 
         scope_hex = _hex(scope_digest)
-        subject_hexes = tuple(_hex(subject) for subject in subjects)
+        subject_values = tuple(validate_resource_id(subject).encode("utf-8") for subject in subjects)
         table = self._table("ai_state_records")
         records: list[StoredRecord] = []
         for offset in range(0, len(subjects), _RECORD_SUBJECT_READ_BATCH_SIZE):
             matches = select(table.c.id).where(
                 table.c.scope_digest == scope_hex,
-                table.c.subject_digest.in_(
-                    subject_hexes[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]
+                table.c.subject_id.in_(
+                    subject_values[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]
                 ),
             ).subquery("record_subjects")
             rows = (await self._execute(
@@ -1447,7 +1447,7 @@ class _SqlTransaction:
         prepared = tuple(_record_values(value.record) for value in ordered)
         columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json", "payload_bytes")
-        identity_columns = ("scope_digest", "parent_digest", "subject_digest", "kind", "sort_key")
+        identity_columns = ("scope_digest", "parent_digest", "subject_id", "kind", "sort_key")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
@@ -2213,13 +2213,13 @@ class _SqlTransaction:
         ]
         if query.after_sequence is not None:
             conditions.append(table.c.sequence > query.after_sequence)
-        if query.subject_digest is not None:
-            conditions.append(table.c.subject_digest == _hex(query.subject_digest))
+        if query.subject_id is not None:
+            conditions.append(table.c.subject_id == query.subject_id.encode("utf-8"))
         if query.latest_per_subject:
             latest_sequences = (
                 select(func.max(table.c.sequence))
                 .where(*conditions)
-                .group_by(table.c.subject_digest)
+                .group_by(table.c.subject_id)
             )
             statement = (
                 select(table)
@@ -2450,7 +2450,7 @@ class _SqlTransaction:
         from sqlalchemy.dialects.mysql import BINARY
 
         conditions = []
-        for name in ("scope_digest", "parent_digest", "subject_digest", "kind", "sort_key"):
+        for name in ("scope_digest", "parent_digest", "subject_id", "kind", "sort_key"):
             column = table.c[name]
             # MySQL text equality may ignore case or trailing spaces even when
             # the in-memory identity contract distinguishes those values.
@@ -2487,9 +2487,9 @@ def _record_values(
         "parent_digest": None
         if record.parent_digest is None
         else _hex(record.parent_digest),
-        "subject_digest": None
-        if record.subject_digest is None
-        else _hex(record.subject_digest),
+        "subject_id": None
+        if record.subject_id is None
+        else record.subject_id.encode("utf-8"),
         "kind": record.kind,
         "sort_key": record.sort_key,
         "state": record.state,
@@ -2521,7 +2521,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             _row_nonnegative_int(row["lease_fence"]),
             _datetime_or_none(row["lease_expires_at"]),
             _row_mapping(row["payload_json"]),
-            subject_digest=_row_digest_or_none(row["subject_digest"]),
+            subject_id=_row_subject_id(row["subject_id"]),
             payload_bytes=row["payload_bytes"],
         )
     except AIError:
@@ -2537,9 +2537,9 @@ def _fact_values(fact: StoredFact) -> dict[str, object]:
         "sequence": fact.sequence,
         "owner_key_digest": _hex(fact.owner_key_digest),
         "kind": fact.kind,
-        "subject_digest": None
-        if fact.subject_digest is None
-        else _hex(fact.subject_digest),
+        "subject_id": None
+        if fact.subject_id is None
+        else fact.subject_id.encode("utf-8"),
         "state": fact.state,
         "payload_json": canonical_json_bytes(dict(fact.data)).decode("utf-8"),
     }
@@ -2552,7 +2552,7 @@ def _fact_from_row(row: Mapping[str, object]) -> StoredFact:
             _row_nonnegative_int(row["sequence"]),
             _row_digest(row["owner_key_digest"]),
             _row_string(row["kind"]),
-            _row_digest_or_none(row["subject_digest"]),
+            _row_subject_id(row["subject_id"]),
             _row_optional_string(row["state"]),
             _row_mapping(row["payload_json"]),
         )
@@ -2624,6 +2624,14 @@ def _row_digest(value: object) -> bytes:
 
 def _row_digest_or_none(value: object) -> bytes | None:
     return None if value is None else _row_digest(value)
+
+
+def _row_subject_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, bytes):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value.decode("utf-8")
 
 
 def _row_nonnegative_int(value: object) -> int:

@@ -60,6 +60,28 @@ Identity, sequence, state, lease, CAS, revision, ordering and time columns are n
 compressed. Snapshot pruning uses the `(store_digest, run_id, pruned)` index and
 an equality predicate compatible with MySQL 5.7 index selection.
 
+## State subject identities
+
+Record and fact `subject_id` projections keep the original resource ID, using
+its existing nonempty, exact UTF-8 contract and 128-byte limit. They do not add a
+subject hash. Record lookup remains scoped by `scope_digest`; fact lookup and
+latest-per-subject grouping remain scoped by `stream_digest`. Subject identity
+is immutable during record CAS, including changes between `None` and an ID.
+
+The wire stores the original string. SQL encodes it once as UTF-8 in MySQL
+`VARBINARY(128)`, PostgreSQL `BYTEA` or SQLite `BLOB`, preserving case and Unicode
+code points without collation or normalization changes. Application validation
+enforces the byte limit on every backend. The record subject index declares at
+most 384 MySQL key bytes; the fact subject index declares 392 including its
+sequence. Their PostgreSQL payloads remain at most 192 and 200 bytes before
+index tuple overhead, well below an ordinary B-tree entry limit.
+
+This removes subject JSON serialization and hashing without another lookup or
+encoded ordering key. SQL subject values are their actual UTF-8 length rather
+than 64 ASCII hex characters: short IDs shrink, while a maximum-length ID can
+use 128 bytes. It is not a claim that every ID or in-memory representation uses
+less storage.
+
 ## Native Step identities and digest ownership
 
 Native `run_id`, `conversation_id` and `parent_run_id` use the resource ID

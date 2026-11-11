@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
-from ..core import canonical_json_bytes
+from ..core import canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
 from .state import (
     RecordLeaseTransition, FactQuery,
@@ -324,15 +324,15 @@ class _MemoryTransaction:
             self.guarded_record_keys.discard(key)
 
     async def read_record_subjects(
-        self, *, scope_digest: bytes, kind: str, subject_digests: Sequence[bytes],
+        self, *, scope_digest: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...]:
-        subjects = frozenset(subject_digests)
+        subjects = frozenset(validate_resource_id(subject) for subject in subject_ids)
         if not subjects:
             return ()
         return tuple(sorted(
             (record for record in self.records.values()
              if record.scope_digest == scope_digest and record.kind == kind
-             and record.subject_digest in subjects),
+             and record.subject_id in subjects),
             key=lambda record: (record.sort_key, record.key_digest),
         ))
 
@@ -502,7 +502,7 @@ class _MemoryTransaction:
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         if (
-            query.limit is not None and query.subject_digest is None
+            query.limit is not None and query.subject_id is None
             and not query.latest and not query.latest_per_subject
         ):
             start = 1 if query.after_sequence is None else query.after_sequence + 1
@@ -521,15 +521,15 @@ class _MemoryTransaction:
         ]
         if query.after_sequence is not None:
             values = [fact for fact in values if fact.sequence > query.after_sequence]
-        if query.subject_digest is not None:
-            values = [fact for fact in values if fact.subject_digest == query.subject_digest]
+        if query.subject_id is not None:
+            values = [fact for fact in values if fact.subject_id == query.subject_id]
         values.sort(key=lambda fact: fact.sequence)
         if query.latest:
             return () if not values else (values[-1],)
         if query.latest_per_subject:
-            latest: dict[bytes | None, StoredFact] = {}
+            latest: dict[str | None, StoredFact] = {}
             for fact in values:
-                latest[fact.subject_digest] = fact
+                latest[fact.subject_id] = fact
             values = sorted(latest.values(), key=lambda fact: fact.sequence)
         if query.limit is not None:
             values = values[: query.limit]

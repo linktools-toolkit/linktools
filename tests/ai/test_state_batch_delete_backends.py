@@ -44,7 +44,7 @@ def _alias(record: StoredRecord) -> StoredAlias:
 def _fact(record: StoredRecord, sequence: int = 1) -> StoredFact:
     return StoredFact(
         _digest(f"stream-{record.sort_key}"), sequence, record.key_digest, "probe",
-        _digest(f"subject-{sequence}"), None, {"sequence": sequence},
+        f"subject-{sequence}", None, {"sequence": sequence},
     )
 
 

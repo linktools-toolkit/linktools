@@ -1296,7 +1296,7 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
         "key": record.key_digest.hex(),
         "scope": None if record.scope_digest is None else record.scope_digest.hex(),
         "parent": None if record.parent_digest is None else record.parent_digest.hex(),
-        "subject": None if record.subject_digest is None else record.subject_digest.hex(),
+        "subject": record.subject_id,
         "kind": record.kind,
         "sort": record.sort_key,
         "state": record.state,
@@ -1351,7 +1351,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             _integer(lease, "fence"),
             _optional_datetime(lease["expires_at"]),
             dict(data),
-            subject_digest=_optional_digest(value["subject"]),
+            subject_id=_optional_string(value["subject"]),
             payload_bytes=None if value.get("payload_bytes") is None else base64.b64decode(value["payload_bytes"], validate=True),
         )
     except (TypeError, ValueError, KeyError) as error:
@@ -1365,7 +1365,7 @@ def encode_fact(fact: StoredFact) -> dict[str, JsonValue]:
         "sequence": fact.sequence,
         "owner": fact.owner_key_digest.hex(),
         "kind": fact.kind,
-        "subject": None if fact.subject_digest is None else fact.subject_digest.hex(),
+        "subject": fact.subject_id,
         "state": fact.state,
         "data": dict(fact.data),
     }
@@ -1389,7 +1389,7 @@ def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
             _integer(value, "sequence"),
             _digest_wire(_string(value, "owner")),
             _string(value, "kind"),
-            _optional_digest(value["subject"]),
+            _optional_string(value["subject"]),
             _optional_string(value["state"]),
             dict(data),
         )

@@ -63,7 +63,6 @@ from .state import (
     record_key_digest,
     scope_digest,
     stream_digest,
-    subject_digest,
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
@@ -306,7 +305,7 @@ class _RepositoryBase:
             payload_transform=lambda payload: _restore_lease_fields(payload, target),
         )
         if isinstance(value, ToolOperationRecord):
-            if record.subject_digest != subject_digest(value.tool_call_id):
+            if record.subject_id != value.tool_call_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replace(value, owner=record.lease_owner, fence=record.lease_fence)
         if isinstance(value, TaskNodeView):
@@ -747,7 +746,7 @@ def project_record(
         lease_fence,
         lease_expires_at,
         _domain_data(value) if encoded is None else encode_envelope({"type": wire_type_id(value), "payload": encoded}),
-        subject_digest=subject_digest(value.tool_call_id) if isinstance(value, ToolOperationRecord) else None,
+        subject_id=value.tool_call_id if isinstance(value, ToolOperationRecord) else None,
     )
 
 

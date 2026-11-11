@@ -79,7 +79,6 @@ from .state import (
     scope_digest,
     sortable_timestamp,
     stream_digest,
-    subject_digest,
 )
 
 
@@ -984,7 +983,7 @@ def _same_physical_identity(left: StoredRecord, right: StoredRecord) -> bool:
         left.key_digest == right.key_digest
         and left.scope_digest == right.scope_digest
         and left.parent_digest == right.parent_digest
-        and left.subject_digest == right.subject_digest
+        and left.subject_id == right.subject_id
         and left.kind == right.kind
         and left.sort_key == right.sort_key
         and left.state == right.state
@@ -1133,7 +1132,7 @@ def _fact_storage_identity(
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         execution_id = cast(str, fact.data["execution_id"])
-        if fact.subject_digest != subject_digest(execution_id):
+        if fact.subject_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return "session_turn", [owner.session_id]
     if isinstance(owner, TranscriptHeadRecord):
@@ -1146,7 +1145,7 @@ def _fact_storage_identity(
                 or chunk.first_message_index > owner.message_count
                 or chunk.message_count != 1
                 or chunk.origin is not TranscriptOrigin.RAW
-                or fact.subject_digest is not None
+                or fact.subject_id is not None
                 or fact.state is not None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

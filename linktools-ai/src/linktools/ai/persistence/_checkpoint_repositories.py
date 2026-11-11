@@ -40,7 +40,6 @@ from .state import (
     StoredAlias,
     StoredRecord,
     alias_digest,
-    subject_digest,
 )
 from ._repository_common import (
     RepositoryBase as _RepositoryBase,
@@ -839,7 +838,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             if isinstance(transaction, RecordSubjectReader):
                 records = await transaction.read_record_subjects(
                     kind="tool_operation", scope_digest=scope,
-                    subject_digests=tuple(subject_digest(call_id) for call_id in ordered),
+                    subject_ids=ordered,
                 )
             if records is None:
                 records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_digest=scope))

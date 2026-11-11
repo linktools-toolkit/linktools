@@ -106,7 +106,7 @@ def test_record_identity_still_validates_custom_mapping_behavior() -> None:
     ("key_digest", "ab" * 31),
     ("scope_digest", "not-a-digest"),
     ("parent_digest", "AB" * 32),
-    ("subject_digest", 1),
+    ("subject_id", 1),
     ("sort_key", "non-ascii-\N{LATIN SMALL LETTER E WITH ACUTE}"),
 ))
 def test_record_readers_reject_malformed_physical_identity(
@@ -117,7 +117,7 @@ def test_record_readers_reject_malformed_physical_identity(
         if source == "filesystem":
             wire_field = {
                 "key_digest": "key", "scope_digest": "scope", "parent_digest": "parent",
-                "subject_digest": "subject", "sort_key": "sort",
+                "subject_id": "subject", "sort_key": "sort",
             }[field]
             decode_record({**encode_record(record), wire_field: value})
         else:

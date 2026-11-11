@@ -122,7 +122,7 @@ class NativeEventReferences:
         except (TypeError, ValueError, KeyError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if (reference["key"] != row.get("key_digest") or fact.kind != "step_event"
-                or fact.state != event.event_type or fact.subject_digest is not None
+                or fact.state != event.event_type or fact.subject_id is not None
                 or fact.owner_key_digest != record_key_digest(namespace, tenant_id, "trace", "agent_run", source.run_id)
                 or fact.stream_digest != stream_digest(namespace, tenant_id, "trace", "event", source.run_id)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -341,14 +341,14 @@ class NativeEventReferences:
             conditions = [facts.c.stream_digest == query.stream_digest.hex()]
             if query.after_sequence is not None:
                 conditions.append(facts.c.sequence > query.after_sequence)
-            if query.subject_digest is not None:
-                conditions.append(facts.c.subject_digest == query.subject_digest.hex())
+            if query.subject_id is not None:
+                conditions.append(facts.c.subject_id == query.subject_id.encode("utf-8"))
             if sequences is not None:
                 conditions.append(facts.c.sequence.in_(tuple(sequences)))
             if query.latest_per_subject:
                 latest = select(func.max(facts.c.sequence)).where(
                     facts.c.store_digest == self._state.store_digest.hex(), *conditions,
-                ).group_by(facts.c.subject_digest)
+                ).group_by(facts.c.subject_id)
                 conditions = [facts.c.stream_digest == query.stream_digest.hex(), facts.c.sequence.in_(latest)]
             statement = statement.where(*conditions).order_by(facts.c.sequence.desc() if query.latest else facts.c.sequence)
             if query.limit is not None or query.latest:
@@ -396,7 +396,7 @@ class NativeEventReferences:
                 except (TypeError, ValueError, KeyError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 if (reference["key"] != row["native_key_digest"] or fact.kind != "step_event"
-                        or fact.state != event.event_type or fact.subject_digest is not None
+                        or fact.state != event.event_type or fact.subject_id is not None
                         or fact.owner_key_digest != record_key_digest(self._namespace, self._tenant_id, "trace", "agent_run", source.run_id)
                         or fact.stream_digest != stream_digest(self._namespace, self._tenant_id, "trace", "event", source.run_id)):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -16,7 +16,7 @@ from linktools.ai.persistence import Persistence, PersistenceDomain, Persistence
 from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from linktools.ai.persistence.codec import decode_record, encode_record
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import RecordQuery, StateTransaction, subject_digest
+from linktools.ai.persistence.state import RecordQuery, StateTransaction
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore
 
 from .test_runtime_record_cache import _record, _store
@@ -124,12 +124,12 @@ async def test_tool_subject_projection_roundtrips_and_rejects_corruption(tmp_pat
     async with Persistence.open("tool-locator", tenant_id="tenant", storage=_storage(backend, tmp_path / "calls.db")) as state:
         source = await state.checkpoint.tools.admit(_request())
         stored, = await state.checkpoint.tools.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="tool_operation")))
-        assert stored.subject_digest == subject_digest(source.tool_call_id)
+        assert stored.subject_id == source.tool_call_id
         assert decode_record(encode_record(stored)) == stored
-        for bad_subject in (None, subject_digest("other-call")):
+        for bad_subject in (None, "other-call"):
             with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
-                await state.checkpoint.tools._decode(replace(stored, subject_digest=bad_subject), type(source))
-            corrupted = replace(stored, subject_digest=bad_subject)
+                await state.checkpoint.tools._decode(replace(stored, subject_id=bad_subject), type(source))
+            corrupted = replace(stored, subject_id=bad_subject)
             indexes = dict(namespace="tool-locator", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
                            records=(corrupted,), facts=(), operations=())
             aliases, sequences = canonical_snapshot_indexes(**indexes)
@@ -171,7 +171,7 @@ async def test_tool_locator_reopen_and_same_version_snapshot(tmp_path: Path) -> 
 @pytest.mark.parametrize("backend", ("memory", "sql"))
 async def test_record_subject_survives_shared_cache_codec(tmp_path: Path, monkeypatch, backend: str) -> None:
     async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
-        record = replace(_record(1), subject_digest=subject_digest("call"))
+        record = replace(_record(1), subject_id="call")
         await store.mutate(lambda tx: tx.insert_record(record))
         original = store.read
         reads = 0
