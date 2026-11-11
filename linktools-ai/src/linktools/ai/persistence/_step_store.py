@@ -172,7 +172,8 @@ class SqlStepStore:
         self._message_archive: ContentArchive | None = None
         self._message_proofs: OrderedDict[NativeMessageSequence, CommittedNativeMessages] = OrderedDict()
         self._message_integrity: OrderedDict[NativeMessageSequence, tuple[str, int]] = OrderedDict()
-        self._prepared_integrity: WeakKeyDictionary[PreparedNativeMessages, tuple[str, int]] = WeakKeyDictionary()
+        self._message_snapshots: dict[NativeMessageSequence, MessageSnapshot] = {}
+        self._prepared_messages: WeakKeyDictionary[PreparedNativeMessages, MessageSnapshot] = WeakKeyDictionary()
         self._message_inputs: OrderedDict[str, tuple[str, int, int, NativeMessageSequence]] = OrderedDict()
         self._frozen_messages = MessageArchive()
         self._confirmed_runs: OrderedDict[str, _RunFields] = OrderedDict()
@@ -1040,7 +1041,8 @@ class SqlStepStore:
         self._message_content.invalidate()
         self._message_proofs.clear()
         self._message_integrity.clear()
-        self._prepared_integrity.clear()
+        self._message_snapshots.clear()
+        self._prepared_messages.clear()
         self._message_inputs.clear()
 
     async def _prepare_message_payload(
@@ -1074,15 +1076,17 @@ class SqlStepStore:
                         and sequence.slices[0].start == 0
                         and sequence.slices[0].end == sequence.slices[0].count)
             if proof is not None and complete and sequence.count <= len(messages):
-                prefix = messages[:sequence.count]
-                if prefix.encoded_digest() == (digest, size):
+                known = self._message_snapshots.get(sequence)
+                shared = (known is not None and self._message_integrity.get(sequence) == (digest, size)
+                          and messages.shared_prefix_length(known) == sequence.count)
+                if shared or messages[:sequence.count].encoded_digest() == (digest, size):
                     base, start = proof, sequence.count
         prepared = await self._message_content.prepare_append(
             messages[start:], prepare_payload=self._prepare_message_payload, base=base,
             archive=archive,
             reuse_payload=self._prepare_message_payload,
         )
-        self._prepared_integrity[prepared] = messages.encoded_digest()
+        self._prepared_messages[prepared] = messages
         candidate = ref(prepared)
 
         async def rebuild() -> None:
@@ -1093,7 +1097,7 @@ class SqlStepStore:
                 messages, prepare_payload=self._prepare_message_payload, use_cache=False,
             )
             self._message_content.replace_prepared(previous, cold)
-            self._prepared_integrity[cold] = self._prepared_integrity[previous]
+            self._prepared_messages[cold] = messages
 
         self._message_content.bind_recovery(prepared, rebuild)
         return prepared
@@ -1111,10 +1115,13 @@ class SqlStepStore:
                 continue
             proof = self._message_content.confirm_current(receipt)
             if proof is not None:
-                self._remember_message_proof(proof, integrity=self._prepared_integrity.get(receipt.prepared))
+                messages = self._prepared_messages.get(receipt.prepared)
+                self._remember_message_proof(proof, messages=messages,
+                    integrity=None if messages is None else messages.encoded_digest())
 
     def _remember_message_proof(
         self, proof: CommittedNativeMessages, *, integrity: tuple[str, int] | None = None,
+        messages: MessageSnapshot | None = None,
     ) -> None:
         if not self._max_cached_messages:
             return
@@ -1122,9 +1129,12 @@ class SqlStepStore:
         self._message_proofs.move_to_end(proof.root)
         if integrity is not None:
             self._message_integrity[proof.root] = integrity
+        if messages is not None:
+            self._message_snapshots[proof.root] = messages
         while len(self._message_proofs) > _RUN_CACHE_SIZE:
             root, _proof = self._message_proofs.popitem(last=False)
             self._message_integrity.pop(root, None)
+            self._message_snapshots.pop(root, None)
 
     def can_reuse_message_root(self, root: NativeMessageRoot, *, raw_digest: str, raw_size: int) -> bool:
         """Reuse only an actual same-group committed/readback integrity proof."""

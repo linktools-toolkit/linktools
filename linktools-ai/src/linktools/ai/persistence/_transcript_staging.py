@@ -67,6 +67,26 @@ class MessageSnapshot(Sequence[ModelMessage]):
                 stack.append(node.right)
                 stack.append(node.left)
 
+    def shared_prefix_length(self, other: "MessageSnapshot") -> int:
+        """Count the common immutable prefix without inspecting message bodies."""
+        left, right = list(reversed(self._roots)), list(reversed(other._roots))
+        count = 0
+        while left and right:
+            first, second = left[-1], right[-1]
+            if first is second:
+                count += first.count
+                left.pop()
+                right.pop()
+            elif first.count >= second.count and first.payload is None:
+                left.pop()
+                left.extend((first.right, first.left))
+            elif second.payload is None:
+                right.pop()
+                right.extend((second.right, second.left))
+            else:
+                break
+        return count
+
     def encoded_payloads(self) -> Iterator[bytes]:
         """Yield the already frozen canonical singleton arrays."""
         return self._payloads()

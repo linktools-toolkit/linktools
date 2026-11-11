@@ -3,6 +3,7 @@
 """Frozen checkpoint ownership and delta hashing without trusting mutable history."""
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -98,3 +99,59 @@ async def test_terminal_confirmation_compares_logical_reference_messages() -> No
     persisted = NativeCheckpoint.decode(commits[0]['snapshot'])
     assert persisted.output_retries_used == 2
     assert native_checkpoint_messages(persisted.messages, restore=True) == messages
+
+
+@pytest.mark.asyncio
+async def test_frozen_snapshot_batches_do_not_revisit_committed_bodies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from linktools.ai.persistence import SqlStepStore
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batches.db'}")
+    native = SqlStepStore(engine, namespace='batches', tenant_id='tenant', max_cached_messages=2)
+    await native.initialize(local=True)
+    archive = MessageArchive()
+    messages = archive.snapshot([
+        ModelRequest(parts=[UserPromptPart(f'history-{index}' * 1024)]) for index in range(7)
+    ])
+    visited = []
+    original = MessageSnapshot._payloads
+
+    def observed(snapshot):
+        for payload in original(snapshot):
+            visited.append(payload)
+            yield payload
+
+    try:
+        await native.save_snapshot(ContinuableSnapshot(run_id='run', step_index=0, messages=messages))
+        monkeypatch.setattr(MessageSnapshot, '_payloads', observed)
+        for step in range(1, 3):
+            committed = set(original(messages))
+            visited.clear()
+            for index in range(2):
+                messages = archive.append(messages, [ModelRequest(parts=[UserPromptPart(f'{step}-{index}')])])
+            await native.save_snapshot(ContinuableSnapshot(run_id='run', step_index=step, messages=messages))
+            # The body budget observes actual traversal, including digest input,
+            # rather than counting calls that might return cached digest values.
+            assert not committed.intersection(visited)
+        monkeypatch.setattr(MessageSnapshot, '_payloads', original)
+        assert (await native.latest_snapshot(run_id='run')).messages == list(messages)
+        native.invalidate_message_content()
+        assert not native._message_snapshots
+    finally:
+        await native.close()
+        await engine.dispose()
+
+
+def test_shared_prefix_proof_stops_at_changed_frozen_content() -> None:
+    archive = MessageArchive()
+    source = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(7)]
+    original = archive.snapshot(source)
+    extended = archive.append(archive.append(original, source[:1]), source[1:2])
+    assert extended.shared_prefix_length(original) == len(original)
+    source[3].parts[0].content = 'changed'
+    changed = archive.snapshot(source)
+    assert changed.shared_prefix_length(original) == 3
+    assert changed[:3].shared_prefix_length(original) == 3
+    assert original.shared_prefix_length(archive.snapshot([])) == 0
