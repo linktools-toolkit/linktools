@@ -48,7 +48,6 @@ from linktools.ai.core import (
     TaskStatus,
     WorkspaceFileInput,
     canonical_sha256,
-    idempotency_key_digest,
     principal_identity_payload,
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
@@ -835,7 +834,7 @@ async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
         assert cancelled_target.status is TaskStatus.CANCELLED
         assert still_running_sibling.status is TaskStatus.RUNNING
         pending_cancel = await runtime._state.task.operations.get(
-            idempotency_key_digest("node-cancel-recovery-cancel-0001"),
+            "node-cancel-recovery-cancel-0001",
             tenant_id=runtime.tenant_id,
         )
         assert pending_cancel is not None
@@ -853,7 +852,7 @@ async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
         assert after_recovery_sibling.status is TaskStatus.RUNNING
         assert sibling_calls == 1
         settled_cancel = await runtime._state.task.operations.get(
-            idempotency_key_digest("node-cancel-recovery-cancel-0001"),
+            "node-cancel-recovery-cancel-0001",
             tenant_id=runtime.tenant_id,
         )
         assert settled_cancel is not None
@@ -969,11 +968,11 @@ async def test_terminal_node_cancel_recovery_settles_and_replays_same_receipt(
         recovery_key = "terminal-node-cancel-recovery-recover-0001"
         recovered = await graph_run.recover(idempotency_key=recovery_key)
         cancel_receipt = await runtime._state.task.operations.get(
-            idempotency_key_digest("terminal-node-cancel-recovery-cancel-0001"),
+            "terminal-node-cancel-recovery-cancel-0001",
             tenant_id=runtime.tenant_id,
         )
         recovery_receipt = await runtime._state.task.operations.get(
-            idempotency_key_digest(recovery_key),
+            recovery_key,
             tenant_id=runtime.tenant_id,
         )
         assert recovered.status is TaskStatus.CANCELLED

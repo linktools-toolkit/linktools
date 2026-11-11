@@ -17,7 +17,6 @@ from linktools.ai.core import (
     TaskStatus,
     TenantAuthorizationPolicy,
     canonical_sha256,
-    idempotency_key_digest,
 )
 from linktools.ai.observe import Observation
 from linktools.ai.persistence import PersistenceStorage
@@ -525,7 +524,7 @@ async def test_metric_cancellation_preserves_cancel_ledger_and_dependency_handof
         assert recorder.producer_tasks == [producer]
         assert dependencies.released == {graph.graph_id}
         ledger = await storage.task.operations.get(
-            idempotency_key_digest("cancel"), tenant_id="tenant",
+            "cancel", tenant_id="tenant",
         )
         assert ledger is not None
         assert ledger.status is OperationStatus.SUCCEEDED
@@ -592,7 +591,7 @@ async def test_detached_cancel_cleanup_does_not_take_over_metric_delivery() -> N
         assert dependencies.released == {graph.graph_id}
         assert not recorder.started.is_set()
         ledger = await storage.task.operations.get(
-            idempotency_key_digest("cancel"), tenant_id="tenant",
+            "cancel", tenant_id="tenant",
         )
         assert ledger is not None
         assert ledger.status is OperationStatus.SUCCEEDED

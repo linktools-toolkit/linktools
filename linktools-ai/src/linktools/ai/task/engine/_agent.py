@@ -26,7 +26,6 @@ from ...core import (
     Principal,
     ThinkingValue,
     canonical_sha256,
-    idempotency_key_digest,
     normalize_json_value,
     normalize_thinking,
     principal_identity_payload,
@@ -315,7 +314,7 @@ class AgentTaskRunner(Generic[AppT]):
         operation = OperationLedgerInput(
             operation_id=canonical_sha256({
                 "action": "task.bound_execution.recover",
-                "graph_operation_id": idempotency_key_digest(request.idempotency_key),
+                "graph_operation_id": request.idempotency_key,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
                 "execution_id": execution.execution_id,

@@ -23,7 +23,6 @@ from ..core import (
     TaskStatus,
     canonical_json_bytes,
     canonical_sha256,
-    idempotency_key_digest,
     normalize_correlation,
     normalize_tool_effects,
     ToolEffects,
@@ -781,7 +780,7 @@ class TaskGraphAdmission:
     graph_id: str
     principal: Principal
     limits: TaskGraphLimits
-    operation_id: str
+    operation_id: str = field(repr=False)
     initial_request_digest: str
     correlation: CorrelationData = field(default_factory=dict)
     budget: RunBudget | None = None
@@ -803,10 +802,13 @@ class TaskGraphAdmission:
             or self.version < 1
             or not isinstance(self.graph_id, str)
             or not self.graph_id.strip()
-            or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
             or re.fullmatch(r"[0-9a-f]{64}", self.initial_request_digest) is None
         ):
             raise ValueError("task graph admission is invalid")
+        try:
+            validate_idempotency_key(self.operation_id)
+        except AIError as error:
+            raise ValueError("task graph operation id is invalid") from error
         expected_scope = None if self.budget is None else "graph:" + self.graph_id
         if self.budget_scope_id != expected_scope:
             raise ValueError("task graph budget scope is invalid")
@@ -821,7 +823,7 @@ class TaskGraphAdmission:
             request.graph.graph_id,
             request.principal,
             request.limits,
-            idempotency_key_digest(request.idempotency_key),
+            request.idempotency_key,
             _task_graph_request_digest(
                 request.graph, request.principal, request.limits, request.budget, request.tool_effects,
                 request_identity_version,

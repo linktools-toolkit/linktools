@@ -11,7 +11,7 @@ import hashlib
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
@@ -407,12 +407,12 @@ class StoredFact:
 
 @dataclass(frozen=True, slots=True)
 class StoredOperation:
-    key: bytes
+    key: bytes = field(repr=False)
     stream_digest: bytes
     sequence: int
     state: str
     compactable: bool
-    data: Mapping[str, JsonValue]
+    data: Mapping[str, JsonValue] = field(repr=False)
 
     def __post_init__(self) -> None:
         _require_operation_key(self.key)
@@ -452,7 +452,7 @@ class FactScanCursor:
 
 @dataclass(frozen=True, slots=True)
 class OperationScanCursor:
-    key: bytes
+    key: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         _require_operation_key(self.key)

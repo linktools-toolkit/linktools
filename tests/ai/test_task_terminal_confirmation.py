@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import ExecutionStatus, OperationStatus, Principal, TaskStatus, idempotency_key_digest
+from linktools.ai.core import ExecutionStatus, OperationStatus, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.storage import FilesystemObjectStore
@@ -35,6 +35,7 @@ async def test_control_confirmation_retries_same_receipt_immediately(
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite", object_store=store)
     principal = Principal("actor", "tenant")
     calls = 0
+    operation_id = "控" * 85 + "r"
 
     async def body(ctx):
         nonlocal calls
@@ -57,9 +58,9 @@ async def test_control_confirmation_retries_same_receipt_immediately(
         async def apply(value):
             if control == "effect":
                 return await run.resolve_effect(
-                    "node", bound.fence, TaskEffectResolution("applied", value), idempotency_key="control",
+                    "node", bound.fence, TaskEffectResolution("applied", value), idempotency_key=operation_id,
                 )
-            return await run.resume("node", TaskInputSupplyRequest(principal, bound.execution_id, value, "control"))
+            return await run.resume("node", TaskInputSupplyRequest(principal, bound.execution_id, value, operation_id))
 
         owner = engine._execution_service if fault_owner == "service" else engine._execution_reads
         read = owner.result
@@ -81,7 +82,8 @@ async def test_control_confirmation_retries_same_receipt_immediately(
         cause = error.__cause__
         assert isinstance(cause, AIError)
         _assert_confirmation(error, cause, "task_terminal_confirmation" if fault_owner == "service" else "task_result_confirmation")
-        receipt = await state.task.operations.get(idempotency_key_digest("control"), tenant_id="tenant")
+        receipt = await state.task.operations.get(operation_id, tenant_id="tenant")
+        assert receipt.operation_id == operation_id
         assert receipt.status is OperationStatus.RUNNING
         graph = await run.state()
         assert graph.status is expected_graph
@@ -93,7 +95,7 @@ async def test_control_confirmation_retries_same_receipt_immediately(
         original_result = producer.result
 
         assert (await apply(value)).status is TaskStatus.SUCCEEDED
-        receipt = await state.task.operations.get(idempotency_key_digest("control"), tenant_id="tenant")
+        receipt = await state.task.operations.get(operation_id, tenant_id="tenant")
         assert receipt.status is OperationStatus.SUCCEEDED
         assert await run.result("node") == value
         producer = await state.execution.executions.get(bound.execution_id, tenant_id="tenant")
