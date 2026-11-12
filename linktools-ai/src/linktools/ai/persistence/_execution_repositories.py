@@ -328,6 +328,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if record is None:
                 return None
             self._decode_header(record, execution_id)
+            record, = await self._execution_content.expand_policies((record,))
             record, = await self._execution_content.expand_terminal_details((record,))
             payloads = await self._execution_content.read_payloads((record,), result_only=True)
             return decode_execution_content(record.data, payloads, result=True)

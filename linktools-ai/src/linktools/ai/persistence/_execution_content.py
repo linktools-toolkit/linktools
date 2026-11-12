@@ -160,7 +160,7 @@ def _expand_execution_content(record: StoredRecord, contents: Mapping[tuple[str,
     if binding is not None:
         record = expand_binding(record, decoded[binding])
     values = {reference: _decode_payload(raw, reference[2]) for reference, raw in decoded.items()
-              if reference != binding}
+              if reference != binding and reference != policy}
     def expand(payload: Mapping) -> JsonValue:
         reference = payload_reference(payload)
         return payload if reference is None else _encode_persisted_domain(decode_execution_payload(payload, values))
