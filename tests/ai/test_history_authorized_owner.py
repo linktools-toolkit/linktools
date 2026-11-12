@@ -41,7 +41,7 @@ async def test_history_checks_post_authorization_owner_without_masking_source_er
                             repository.execution_record_key("execution")))
                     elif damage == "source":
                         async with repository.state_store.storage_group.context.engine.begin() as connection:
-                            await connection.execute(text("DELETE FROM ai_step_messages"))
+                            await connection.execute(text("DELETE FROM ai_state_records WHERE kind = 'archive_content'"))
 
             class CustomService(DefaultExecutionHistoryService):
                 pass
