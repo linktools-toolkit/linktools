@@ -15,7 +15,7 @@ from ._archive import (ArchiveRoot, ArchiveSlice, ContentRecord, ImmutableSequen
                        validate_archive_content_identity, validate_archive_group_id)
 from ._message_root import NativeMessageRoot, NativeMessageSlice
 from ._payload import decode_payload_bytes
-from ._tool_operation_content import tool_payload_slots, tool_payload_reference, map_tool_payload_slots
+from .codec import tool_payload_slots, tool_payload_reference, map_tool_payload_slots
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,

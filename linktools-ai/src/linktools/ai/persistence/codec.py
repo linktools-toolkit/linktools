@@ -2146,6 +2146,54 @@ def _execution_content_reference(value: Mapping, marker: str) -> tuple[str, str,
     return scope, content_scope, identity
 
 
+TOOL_PAYLOAD_CODEC = "tool-operation-payload"
+_TOOL_PAYLOAD_SLOTS = ("arguments_payload", "result_payload", "error_payload")
+
+
+def tool_payload_slots(value: object) -> Iterator[tuple[str, Mapping]]:
+    if not isinstance(value, Mapping) or value.get("$dataclass") != "tool_operation":
+        return
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    for name in _TOOL_PAYLOAD_SLOTS:
+        payload = fields.get(name)
+        if payload is not None:
+            if not isinstance(payload, Mapping) or payload.get("$dataclass") != "stored_payload":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            yield name, payload
+
+
+def tool_payload_reference(payload: Mapping) -> tuple[str, str, str] | None:
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if "content" not in fields:
+        return None
+    content = fields["content"]
+    if (set(fields) != {"content"} or not isinstance(content, Mapping)
+            or set(content) != {"$tool_payload", "archive_scope", "content_scope"}):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    scope, owner, identity = content["archive_scope"], content["content_scope"], content["$tool_payload"]
+    if (not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope)
+            or not isinstance(identity, str) or not identity.startswith(TOOL_PAYLOAD_CODEC + ":")
+            or len(identity) != len(TOOL_PAYLOAD_CODEC) + 65
+            or any(c not in "0123456789abcdef" for c in identity[-64:])):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    decode_archive_scope(owner)
+    return scope, owner, identity
+
+
+def map_tool_payload_slots(value: Mapping, mapper: Callable[[Mapping], JsonValue]) -> dict:
+    slots = tuple(tool_payload_slots(value))
+    if not slots:
+        return dict(value)
+    fields = dict(value["fields"])
+    for name, payload in slots:
+        fields[name] = mapper(payload)
+    return {**value, "fields": fields}
+
+
 def binding_reference(value: object) -> tuple[str, str, str] | None:
     """Recognize the complete-binding reference and its derived view fields."""
     if not isinstance(value, Mapping) or "$execution_binding" not in value:
@@ -2241,7 +2289,6 @@ def _iter_runtime_object_refs(
                 stored = cast(StoredUserInput, _decode_domain(prompt.get("value"), StoredUserInput, codec))
                 yield from _iter_runtime_object_refs(stored.payload, PersistenceDomain.TASK, codec)
         if dataclass_name == codec.wire_ids.get(ToolOperationRecord):
-            from ._tool_operation_content import map_tool_payload_slots, tool_payload_reference
             fields_value = map_tool_payload_slots(value,
                 lambda payload: None if tool_payload_reference(payload) is not None else payload)["fields"]
             for item in fields_value.values():
@@ -3009,4 +3056,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

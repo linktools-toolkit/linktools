@@ -4,68 +4,21 @@
 
 import hashlib
 import json
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import PayloadPolicy
-from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity, decode_archive_scope
+from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity
 from ._payload import decode_payload_bytes
-from .codec import decode_envelope, encode_envelope
+from .codec import (TOOL_PAYLOAD_CODEC, decode_envelope, encode_envelope,
+                    tool_payload_slots, tool_payload_reference, map_tool_payload_slots)
 from .state import StateStore, StoredRecord, active_state_scope
-
-TOOL_PAYLOAD_CODEC = "tool-operation-payload"
-_SLOTS = ("arguments_payload", "result_payload", "error_payload")
-
 
 class ToolContentReadRequired(AIError):
     def __init__(self) -> None:
         super().__init__(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def tool_payload_slots(value: object) -> Iterator[tuple[str, Mapping]]:
-    if not isinstance(value, Mapping) or value.get("$dataclass") != "tool_operation":
-        return
-    fields = value.get("fields")
-    if not isinstance(fields, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for name in _SLOTS:
-        payload = fields.get(name)
-        if payload is not None:
-            if not isinstance(payload, Mapping) or payload.get("$dataclass") != "stored_payload":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            yield name, payload
-
-
-def tool_payload_reference(payload: Mapping) -> tuple[str, str, str] | None:
-    fields = payload.get("fields")
-    if not isinstance(fields, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if "content" not in fields:
-        return None
-    content = fields["content"]
-    if (set(fields) != {"content"} or not isinstance(content, Mapping)
-            or set(content) != {"$tool_payload", "archive_scope", "content_scope"}):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    scope, owner, identity = content["archive_scope"], content["content_scope"], content["$tool_payload"]
-    if (not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope)
-            or not isinstance(identity, str) or not identity.startswith(TOOL_PAYLOAD_CODEC + ":")
-            or len(identity) != len(TOOL_PAYLOAD_CODEC) + 65
-            or any(c not in "0123456789abcdef" for c in identity[-64:])):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    decode_archive_scope(owner)
-    return scope, owner, identity
-
-
-def map_tool_payload_slots(value: Mapping, mapper: Callable[[Mapping], JsonValue]) -> dict:
-    slots = tuple(tool_payload_slots(value))
-    if not slots:
-        return dict(value)
-    fields = dict(value["fields"])
-    for name, payload in slots:
-        fields[name] = mapper(payload)
-    return {**value, "fields": fields}
 
 
 def _map_record(record: StoredRecord, mapper: Callable[[Mapping], JsonValue]) -> StoredRecord:
@@ -185,4 +138,4 @@ class ToolOperationContent:
         return tuple(_map_record(record, lambda payload: values.get(tool_payload_reference(payload), payload)) for record in records)
 
 
-__all__ = ["ToolContentReadRequired", "ToolOperationContent", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "tool_content_size", "expand_tool_content"]
+__all__ = ["ToolContentReadRequired", "ToolOperationContent", "tool_content_size", "expand_tool_content"]
