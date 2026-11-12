@@ -2471,7 +2471,7 @@ class LocalExecutionBackend:
             tenant_id=self._tenant_id, execution_id=execution.execution_id,
             agent_run_id=source_agent_run_id, tool_call_id=call.tool_call_id,
         )
-        arguments_payload = StoredPayload.inline_json(arguments)
+        arguments_payload = StoredPayload.inline_bytes(canonical_json_bytes(arguments))
         return PendingDeferredCall(
             call.tool_call_id,
             call.tool_name,
@@ -2633,7 +2633,12 @@ class LocalExecutionBackend:
                 payload, read_object=lambda ref: read_runtime_object(self._checkpoint_objects, ref),
             ))
         elif payload.kind == "inline":
-            value = payload.decode()
+            try:
+                value = payload.decode()
+                if payload.encoding == "base64":
+                    value = json.loads(value)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:
             if payload.ref is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

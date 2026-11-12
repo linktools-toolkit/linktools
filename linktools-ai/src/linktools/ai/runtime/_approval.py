@@ -245,10 +245,11 @@ def _pending_approval(
 
 async def _decode_arguments(objects: ObjectStore, payload: StoredPayload) -> object:
     if payload.kind == "inline":
-        if payload.encoding != "json":
+        if payload.encoding not in {"json", "base64"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            return normalize_json_value(payload.decode())
+            value = payload.decode()
+            return normalize_json_value(json.loads(value) if payload.encoding == "base64" else value)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     try:
