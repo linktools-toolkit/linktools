@@ -69,6 +69,6 @@ async def test_uncached_full_execution_join_retries_cold_archive_and_checks_sour
                 assert await repository.get_fresh("execution", tenant_id="tenant") == loaded
             finally:
                 event.remove(engine, "before_cursor_execute", observe)
-            # One current owner/content JOIN plus the authenticated Native range.
-            assert len(statements) == 2
+            # Current owner, fixed contents and authenticated Native root-head share one JOIN.
+            assert len(statements) == 1
             assert sum("ai_step_sequences" in statement for statement in statements) == 1

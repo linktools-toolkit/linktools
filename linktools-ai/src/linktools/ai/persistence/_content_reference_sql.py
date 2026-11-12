@@ -15,14 +15,19 @@ if TYPE_CHECKING:
     from sqlalchemy.sql import Select
 
 
-def content_reference_batch_size(path_count: int) -> int:
+def content_reference_batch_size(path_count: int, *, native_path_count: int = 0) -> int:
     """Bound the largest supported positional-bind expansion, including MySQL 5.7."""
     if type(path_count) is not int or not 1 <= path_count <= 16:
         raise ValueError("content reference paths must contain between one and sixteen slots")
     # Derived owner/refs occur in three UNION arms: two identity binds per
     # owner in each. Each path's JSON/CASE expressions repeat at most 32 binds;
     # the remaining tagged columns, scope predicates and link guards fit in 80.
-    return min(200, (999 - 80 - 32 * path_count) // 6)
+    if type(native_path_count) is not int or not 0 <= native_path_count <= 4:
+        raise ValueError("native paths must contain between zero and four slots")
+    # The optional fixed-source arm repeats the owner selection and JSON paths
+    # in MySQL derived SQL; budget those binds rather than assuming CTE reuse.
+    return max(1, min(200, (999 - 80 - 32 * path_count - 32 * native_path_count)
+                       // (8 if native_path_count else 6)))
 
 
 def content_reference_statement(
@@ -88,7 +93,7 @@ def content_reference_statement(
             extra.c.store_key == store_key,
             extra.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in keys)),
             extra.c.key.in_(tuple(keys))))
-    if native_root_paths:
+    if native_root_paths and "ai_step_sequences" in metadata.tables:
         from ..steps import native_store_key, native_store_locator
 
         nodes = metadata.tables["ai_step_sequences"].alias("fixed_native_nodes")
@@ -112,7 +117,10 @@ def content_reference_statement(
             messages.c.store_key == partition, messages.c.store_locator == locator,
             messages.c.sha256 == nodes.c.message_sha256,
         ))
-        selections.append(select(literal(4).label("source_kind"), *owners.c, *native_nulls,
+        owner_locator = tuple(column if column.name in {"key", "store_key"} else cast(null(),
+            String(column.type.length) if isinstance(column.type, String) else column.type).label(column.name)
+            for column in owners.c)
+        selections.append(select(literal(4).label("source_kind"), *owner_locator, *native_nulls,
             native_slots.c.slot.label("native_slot"),
             *(column.label("native_" + column.name) for column in source_columns)
         ).select_from(native_join).where(first.is_not(None)))

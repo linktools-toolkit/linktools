@@ -184,7 +184,7 @@ class _SqlGroupTransaction:
         if dialect not in {"sqlite", "mysql", "postgresql"}:
             return None
         paths = tuple(dict.fromkeys(content_paths))
-        native_paths = tuple(dict.fromkeys(native_root_paths))
+        native_paths = (() if active.writable else tuple(dict.fromkeys(native_root_paths)))
         if (len(native_paths) > 4 or any(not path or len(path) > 16
                 or any(not isinstance(part, str) or not part for part in path) for path in native_paths)):
             raise ValueError("native content requires bounded declared root paths")
@@ -204,7 +204,25 @@ class _SqlGroupTransaction:
             record = owner._record_cache[key]
             if record is None:
                 continue
-            if native_paths:
+            native_missing = False
+            for path in native_paths:
+                from ._message_root import NativeMessageRoot
+
+                value = record.data
+                for part in path:
+                    value = value.get(part) if isinstance(value, Mapping) else None
+                if value is None:
+                    continue
+                try:
+                    root = NativeMessageRoot.from_json(value)
+                except (TypeError, ValueError):
+                    continue  # Typed decoding rejects malformed references.
+                if (len(root.slices) == 1 and root.slices[0].start == root.slices[0].count - 1
+                        and root.slices[0].end == root.slices[0].count
+                        and root not in self._native_message_rows):
+                    native_missing = True
+                    break
+            if native_missing:
                 required.append(key)
                 continue
             for path in paths:
@@ -231,7 +249,8 @@ class _SqlGroupTransaction:
         extra_stores = {self.transaction(store)._store_key: store for store in extras}
         found: dict[StateStore, dict[bytes, StoredRecord]] = {owner_store: {}, content_store: {}}
         found.update({store: {} for store in extras if store not in found})
-        size = max(1, content_reference_batch_size(len(paths)) - (sum(map(len, extras.values())) * 3 + 5) // 6)
+        size = max(1, content_reference_batch_size(len(paths), native_path_count=len(native_paths))
+                   - (sum(map(len, extras.values())) * 3 + 5) // 6)
         offsets = (0,) if owner_query is not None else range(0, len(required), size)
         for offset in offsets:
             batch = tuple(required[offset:offset + size])
@@ -245,8 +264,19 @@ class _SqlGroupTransaction:
                                  if owner_query is not None else None),
                 native_root_paths=native_paths,
             )
-            for row in (await owner._execute(statement)).mappings():
+            captured_rows = tuple((await owner._execute(statement)).mappings())
+            # UNION order is unspecified; seed owner rows before decoding source locators.
+            for row in captured_rows:
+                if row["source_kind"] == 0:
+                    if row["store_key"] != owner._store_key or owner_query is None and row["key"] not in batch:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    record = _record_from_row(row)
+                    owner._record_cache[record.key] = record
+                    found[owner_store][record.key] = record
+            for row in captured_rows:
                 kind = row["source_kind"]
+                if kind == 0:
+                    continue
                 if kind == 4:
                     from ._message_root import NativeMessageRoot
                     from ..steps import native_store_key
@@ -256,7 +286,9 @@ class _SqlGroupTransaction:
                     slot = row["native_slot"]
                     if type(slot) is not int or not 0 <= slot < len(native_paths):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    record = _record_from_row(row)
+                    record = found[owner_store].get(row["key"])
+                    if record is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     value = record.data
                     for part in native_paths[slot]:
                         value = value.get(part) if isinstance(value, Mapping) else None
