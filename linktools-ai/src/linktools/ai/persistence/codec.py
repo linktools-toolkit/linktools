@@ -4,7 +4,7 @@
 
 from ..storage import StorageRetentionMode
 from ._archive import ArchiveRoot, ArchiveSlice, decode_archive_scope, validate_archive_content_identity, validate_archive_group_id
-from ._message_root import NativeMessageRoot, NativeMessageSlice, NativeTextReference
+from ._message_root import NativeMessageRoot, NativeMessageSlice, NativeTextReference, NativeToolResultReference
 
 import base64
 import binascii
@@ -2202,7 +2202,26 @@ def tool_payload_slots(value: object) -> Iterator[tuple[str, Mapping]]:
         if payload is not None:
             if not isinstance(payload, Mapping) or payload.get("$dataclass") != "stored_payload":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if native_tool_result_reference(payload) is not None and name != "result_payload":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             yield name, payload
+
+
+def native_tool_result_reference(payload: Mapping) -> NativeToolResultReference | None:
+    """Recognize only the declared immutable tool receipt projection wrapper."""
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = fields.get("content")
+    if not isinstance(content, Mapping) or "$native_tool_result" not in content:
+        return None
+    _validate_dataclass_wrapper(payload, StoredPayload, _CURRENT_CODEC, persisted=True)
+    if set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return NativeToolResultReference.from_json(content)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def tool_payload_reference(payload: Mapping) -> tuple[str, str, str] | None:
@@ -2213,6 +2232,8 @@ def tool_payload_reference(payload: Mapping) -> tuple[str, str, str] | None:
         return None
     # Expansion replaces this wrapper, so validate it before reading its body.
     _validate_dataclass_wrapper(payload, StoredPayload, _CURRENT_CODEC, persisted=True)
+    if native_tool_result_reference(payload) is not None:
+        return None
     content = fields["content"]
     if (set(fields) != {"content"} or not isinstance(content, Mapping)
             or set(content) != {"$tool_payload", "archive_scope", "content_scope"}):
@@ -2333,7 +2354,7 @@ def _iter_runtime_object_refs(
                 yield from _iter_runtime_object_refs(stored.payload, PersistenceDomain.TASK, codec)
         if dataclass_name == codec.wire_ids.get(ToolOperationRecord):
             fields_value = map_tool_payload_slots(value,
-                lambda payload: None if tool_payload_reference(payload) is not None else payload)["fields"]
+                lambda payload: None if tool_payload_reference(payload) is not None or native_tool_result_reference(payload) is not None else payload)["fields"]
             for item in fields_value.values():
                 yield from _iter_runtime_object_refs(item, domain, codec)
             return
@@ -3110,4 +3131,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

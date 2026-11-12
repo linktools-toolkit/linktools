@@ -252,6 +252,7 @@ async def materialize_runtime_storage(
         objects,
         history_repository=repositories.conversation.histories,
         execution_repository=repositories.execution.executions,
+        tool_repository=repositories.checkpoint.tools,
         namespace=namespace,
         tenant_id=tenant_id,
     )

@@ -7,7 +7,8 @@ from ..storage import StorageRetentionMode
 from collections.abc import Mapping
 from functools import partial
 
-from .contracts import ConversationHistoryRepository, ExecutionRepository
+from .contracts import ConversationHistoryRepository, ExecutionRepository, ToolStateRepository
+from ._checkpoint_repositories import ToolRepositoryImpl
 from ._model_interaction_store import (
     ModelInteractionStateStepArchive,
 )
@@ -37,6 +38,7 @@ def build_runtime_agent_run_store(
     namespace: str,
     tenant_id: str,
     run_registrations: RunRegistrationStore | None = None,
+    tool_repository: ToolStateRepository | None = None,
 ) -> RuntimeAgentRunStore:
     if run_registrations is None:
         candidates = (PersistenceDomain.EXECUTION, PersistenceDomain.TRACE, PersistenceDomain.CONVERSATION)
@@ -79,6 +81,9 @@ def build_runtime_agent_run_store(
                 execution_repository if domain is PersistenceDomain.TRACE else None
             ),
         )
+    trace_archive = archives.get(PersistenceDomain.TRACE)
+    if isinstance(trace_archive, StateStepArchive) and type(tool_repository) is ToolRepositoryImpl:
+        trace_archive.bind_tool_repository(tool_repository)
     native_by_engine: dict[object, SqlStepStore] = {}
     for domain, archive in archives.items():
         state = stores[domain]

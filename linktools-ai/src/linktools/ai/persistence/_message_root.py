@@ -179,4 +179,40 @@ class NativeTextReference:
         return cls(NativeMessageRoot.from_json(value["$native_text"]), value["digest"], value["size"])
 
 
-__all__ = ["NativeTextReference", "NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]
+@dataclass(frozen=True, slots=True)
+class NativeToolResultReference:
+    """Project one published return into an exact original operation receipt."""
+
+    root: NativeMessageRoot
+    part_index: int
+    tool_name: str
+    tool_call_id: str
+    template: str
+    digest: str
+    size: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
+            raise ValueError("native tool result requires one message")
+        _count(self.part_index)
+        _digest(self.digest)
+        _count(self.size)
+        if any(not isinstance(value, str) or not value for value in
+               (self.tool_name, self.tool_call_id, self.template)):
+            raise ValueError("native tool result identity is invalid")
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"$native_tool_result": self.root.to_json(), "part_index": self.part_index,
+                "tool_name": self.tool_name, "tool_call_id": self.tool_call_id,
+                "template": self.template, "digest": self.digest, "size": self.size}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeToolResultReference":
+        if not isinstance(value, Mapping) or set(value) != {
+                "$native_tool_result", "part_index", "tool_name", "tool_call_id", "template", "digest", "size"}:
+            raise ValueError("native tool result wire is invalid")
+        return cls(NativeMessageRoot.from_json(value["$native_tool_result"]), value["part_index"],
+                   value["tool_name"], value["tool_call_id"], value["template"], value["digest"], value["size"])
+
+
+__all__ = ["NativeToolResultReference", "NativeTextReference", "NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]

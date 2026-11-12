@@ -11,10 +11,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ._tool_operation_content import expand_tool_content, tool_content_size
+from ._tool_operation_content import expand_tool_content, tool_content_size, expand_native_tool_content
+from ._native_tool_result import restore_native_tool_result_payload
 from ._execution_content import (ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size,
     expand_native_execution_content, restore_native_text_payload)
-from .codec import decode_envelope, execution_payload_slots, native_text_reference, binding_reference
+from .codec import (decode_envelope, execution_payload_slots, native_text_reference, binding_reference,
+    tool_payload_slots, native_tool_result_reference)
 
 from ..core import (
     JsonValue,
@@ -795,7 +797,7 @@ async def _export_snapshot(
             if not page:
                 break
             for value in page:
-                semantic_value = _expand_snapshot_native_text(value,
+                semantic_value = _expand_snapshot_native_content(value,
                     {group: (rows[1], rows[2]) for group, rows in (source.native_rows or {}).items()},
                     source.native_payloads or {}, namespace=source.namespace, tenant_id=source.tenant_id)
                 semantic_value = _expand_run_reference(semantic_value, source.run_registrations or {})
@@ -1222,7 +1224,7 @@ async def restore_snapshot(
 
         records = tuple(decode_record(value) for value in raw_records)
         semantic_records = tuple(expand_snapshot_capture(expand_snapshot_execution_content(
-            _expand_run_reference(_expand_snapshot_native_text(record,
+            _expand_run_reference(_expand_snapshot_native_content(record,
                 {group: (entry["sequences"], entry["messages"]) for group, entry in native_entries.items()},
                 native_encoded_payloads, namespace=namespace, tenant_id=tenant_id), run_registrations), binding_contents,
             namespace=namespace, tenant_id=tenant_id), binding_contents,
@@ -1897,23 +1899,26 @@ def _validate_native_checkpoint_payloads(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _expand_snapshot_native_text(
+def _expand_snapshot_native_content(
     record: StoredRecord,
     rows: Mapping[str, tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]],
     payloads: Mapping[str, Mapping[tuple[bytes, str], bytes]], *, namespace: str, tenant_id: str,
 ) -> StoredRecord:
-    if record.kind != "execution":
+    if record.kind not in {"execution", "tool_operation"}:
         return record
     value = decode_envelope(record.data).value["payload"]
+    is_execution = record.kind == "execution"
+    slots = execution_payload_slots(value) if is_execution else tool_payload_slots(value)
     restored = {}
-    for _path, payload in execution_payload_slots(value):
-        reference = native_text_reference(payload)
+    for _path, payload in slots:
+        reference = native_text_reference(payload) if is_execution else native_tool_result_reference(payload)
         if reference is None or reference in restored:
             continue
         root = reference.root
-        binding = binding_reference(value["fields"].get("binding"))
-        if binding is None or binding[0] != root.group_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if is_execution:
+            binding = binding_reference(value["fields"].get("binding"))
+            if binding is None or binding[0] != root.group_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _validate_native_partition(root.store_key, namespace, tenant_id)
         owner = rows.get(root.group_id)
         if owner is None:
@@ -1932,8 +1937,10 @@ def _expand_snapshot_native_text(
         _validate_archive_content(content, encoded)
         raw = decode_payload_bytes(encoded, codec=content.compression,
             raw_digest=content.raw_digest, raw_size=content.raw_size)
-        restored[reference] = restore_native_text_payload(reference, raw)
-    return expand_native_execution_content(record, restored)
+        restored[reference] = (restore_native_text_payload(reference, raw) if is_execution
+                               else restore_native_tool_result_payload(reference, raw))
+    return (expand_native_execution_content(record, restored) if is_execution
+            else expand_native_tool_content(record, restored))
 
 
 async def _capture_native_payloads(

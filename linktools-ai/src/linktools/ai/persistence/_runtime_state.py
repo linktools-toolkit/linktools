@@ -293,6 +293,7 @@ class Persistence:
             self._plan, self._stores, self._objects,
             history_repository=self.conversation.histories,
             execution_repository=self.execution.executions,
+            tool_repository=self.checkpoint.tools,
             namespace=self.namespace, tenant_id=self.tenant_id,
             run_registrations=self.run_store.run_registrations,
         )

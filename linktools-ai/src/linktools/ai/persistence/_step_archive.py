@@ -13,7 +13,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
@@ -135,6 +135,10 @@ class _StepArchiveBatch(Protocol):
         *,
         execution_id: str | None = None,
     ) -> None: ...
+
+
+if TYPE_CHECKING:
+    from ._checkpoint_repositories import ToolRepositoryImpl
 
 
 @dataclass(slots=True)
@@ -1176,6 +1180,7 @@ class StateStepArchive(AgentRunStore):
             object_reader=object_reader,
         )
         self._execution_repository = execution_repository
+        self._tool_repository: "ToolRepositoryImpl | None" = None
         self._context_baselines: dict[str, LoadedModelContext] = {}
         self._context_cache = cache if isinstance(cache, CacheBackend) else None
         self._context_cache_keys: OrderedDict[str, str] = OrderedDict()
@@ -1201,6 +1206,28 @@ class StateStepArchive(AgentRunStore):
                 self._native_runs = NativeRunReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
             if self._native_events is None:
                 self._native_events = NativeEventReferences(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+
+    def bind_tool_repository(self, repository: "ToolRepositoryImpl") -> None:
+        """Join receipt ownership only when its state shares this publication group."""
+        if repository.state_store.storage_group is self._store.storage_group:
+            self._tool_repository = repository
+
+    async def share_published_tool_results(
+        self, run: AgentRunRecord, *, execution_id: str | None,
+        checkpoints: Sequence[PreparedAgentRunCheckpoint],
+        observation: PreparedTranscriptObservation | None, archive: PreparedArchive,
+    ) -> None:
+        repository = self._tool_repository
+        if repository is None or execution_id is None:
+            return
+        chunks = tuple(chunk for checkpoint in checkpoints for chunk in checkpoint.chunks)
+        if observation is not None:
+            chunks += observation.chunks
+        roots = tuple(dict.fromkeys(chunk.content for chunk in chunks if isinstance(chunk.content, NativeMessageRoot)))
+        combined = PreparedArchive.combine((archive, *(checkpoint.archive for checkpoint in checkpoints),
+                                            *((observation.archive,) if observation is not None else ())))
+        await repository.share_published_results(agent_run_id=run.agent_run_id, execution_id=execution_id,
+                                                roots=roots, archive=combined)
 
     def bind_native_run_store(self, native: SqlStepStore) -> None:
         if (type(native) is SqlStepStore and isinstance(self._store, SqlStateStore)
@@ -1351,6 +1378,8 @@ class StateStepArchive(AgentRunStore):
         """Enlist evidence and its authoritative producer head atomically."""
         repository = self._execution_repository
         stores = [self._store]
+        if self._tool_repository is not None:
+            stores.append(self._tool_repository.state_store)
         if repository is not None:
             stores.append(repository.state_store)
         if self._run_registrations is not None:
@@ -2577,6 +2606,8 @@ class StateStepArchive(AgentRunStore):
             )
             if archive is not None:
                 await self._history.publish_native_archive(transaction, archive, owner_written=True)
+            await self.share_published_tool_results(run, execution_id=execution_id, checkpoints=prepared.checkpoints,
+                                                   observation=None, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
     def combine_projection_archives(
@@ -2635,6 +2666,8 @@ class StateStepArchive(AgentRunStore):
             )
             if archive is not None:
                 await self._history.publish_native_archive(transaction, archive, owner_written=True)
+            await self.share_published_tool_results(run, execution_id=execution_id, checkpoints=values,
+                                                   observation=observation, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
     async def _sync_projection_in_transaction(
@@ -2930,6 +2963,8 @@ class StateStepArchive(AgentRunStore):
         )
         if archive is not None:
             await self._history.publish_native_archive(transaction, archive, owner_written=True)
+        await self.share_published_tool_results(run, execution_id=execution_id, checkpoints=checkpoints,
+                                               observation=observation, archive=archive or PreparedArchive())
 
     async def _ensure_run_with_head_in_transaction(
         self,

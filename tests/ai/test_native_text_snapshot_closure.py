@@ -19,13 +19,13 @@ from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMess
 from linktools.ai.persistence.codec import (
     _encode_persisted_domain, decode_envelope, encode_envelope, native_text_reference,
 )
-from linktools.ai.persistence.snapshots import _expand_snapshot_native_text
+from linktools.ai.persistence.snapshots import _expand_snapshot_native_content
 from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.steps import native_store_key
 from linktools.ai.storage import StoredPayload
 
 
-def _projection():
+def _projection() -> tuple[StoredRecord, dict, NativeTextReference, StoredPayload, dict, dict]:
     text = "native result " * 6000
     raw = encode_model_messages([ModelResponse(parts=[TextPart(text)])])
     identity = hashlib.sha256(raw).hexdigest()
@@ -54,7 +54,7 @@ def _projection():
 
 def test_native_text_snapshot_expands_before_payload_domain_decode() -> None:
     record, value, reference, expected, rows, payloads = _projection()
-    restored = _expand_snapshot_native_text(record, rows, payloads, namespace="test", tenant_id="tenant")
+    restored = _expand_snapshot_native_content(record, rows, payloads, namespace="test", tenant_id="tenant")
     output = decode_envelope(restored.data).value["payload"]["fields"]["result"]["fields"]["output"]
     assert output == _encode_persisted_domain(expected)
     assert tuple(iter_native_message_roots(record.data)) == (reference.root,)
@@ -77,7 +77,7 @@ def test_native_text_snapshot_rejects_corrupt_or_foreign_sources(damage: str) ->
         value["fields"]["result"]["fields"]["output"]["fields"]["content"]["digest"] = "e" * 64
     record = replace(record, data=encode_envelope({"type": "execution_record", "payload": value}))
     with pytest.raises(AIError):
-        _expand_snapshot_native_text(record, rows, payloads, namespace="test", tenant_id="tenant")
+        _expand_snapshot_native_content(record, rows, payloads, namespace="test", tenant_id="tenant")
 
 
 def test_native_text_rekey_changes_only_declared_owner_slot() -> None:

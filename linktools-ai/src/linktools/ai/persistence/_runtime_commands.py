@@ -3374,6 +3374,18 @@ class StateCommands:
                         await terminal_archives[0].transcript_repository.publish_native_archive(
                             group.transaction(terminal_archives[0].state_store), shared_archive, owner_written=True,
                         )
+                        if self._execution_run_store is not None:
+                            for projection in terminal_projections:
+                                await self._execution_run_store.share_published_tool_results(
+                                    projection.run, execution_id=commit.execution.execution_id,
+                                    checkpoints=projection.checkpoints, observation=projection.observation,
+                                    archive=shared_archive,
+                                )
+                            if not terminal_projections and execution_run is not None:
+                                await self._execution_run_store.share_published_tool_results(
+                                    execution_run, execution_id=commit.execution.execution_id,
+                                    checkpoints=tuple(prepared_execution), observation=None, archive=shared_archive,
+                                )
                     if closed_result is None:
                         if seal is not None:
                             await self._execution.put_history_seal_in_transaction(execution_transaction, seal)

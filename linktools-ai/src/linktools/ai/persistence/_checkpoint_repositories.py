@@ -22,7 +22,14 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import PayloadPolicy, StoredPayload
+from ..model.messages import decode_model_messages
+from pydantic_ai.messages import ModelRequest, ToolReturnPart
+from ._message_root import NativeMessageRoot
+from ._native_tool_result import prepare_native_tool_result
+from .codec import decode_envelope, encode_envelope, native_tool_result_reference
+from ._archive import PreparedArchive
+from ._payload import decode_payload_bytes
 from .contracts import ToolOperationRecord
 from .contracts import (
     ApprovalRecord,
@@ -1224,6 +1231,69 @@ class ToolRepositoryImpl(_RepositoryBase):
             transaction=transaction,
             observed=observed,
         )
+
+    async def share_published_results(
+        self, *, agent_run_id: str, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
+    ) -> None:
+        """Replace settled receipts only after their immutable Step source is published."""
+        # Ordinary/small boundaries do not perform extra SQL. Inspect only new,
+        # already-prepared large ordinary message bodies before selecting roots.
+        possible = False
+        for prepared in archive.native_messages.values():
+            for _identity, content in prepared.messages:
+                if content.payload is not None or content.raw_size <= PayloadPolicy().inline_limit_bytes:
+                    continue
+                raw = decode_payload_bytes(content.body, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
+                messages = decode_model_messages(raw)
+                if any(isinstance(message, ModelRequest) and any(isinstance(part, ToolReturnPart)
+                       and isinstance(part.content, str) and len(part.content.encode("utf-8")) > PayloadPolicy().inline_limit_bytes
+                       for part in message.parts) for message in messages):
+                    possible = True
+                    break
+        if not possible or not roots:
+            return
+        sources = await self._tool_content.capture_native_sources(roots)
+        candidates = {}
+        for root, messages in sources.items():
+            for index, raw in enumerate(messages):
+                decoded = decode_model_messages(raw)
+                if len(decoded) != 1 or not isinstance(decoded[0], ModelRequest):
+                    continue
+                for part_index, part in enumerate(decoded[0].parts):
+                    if (isinstance(part, ToolReturnPart) and isinstance(part.content, str)
+                            and len(part.content.encode("utf-8")) > PayloadPolicy().inline_limit_bytes):
+                        candidates[part.tool_call_id] = (root.slice(index, index + 1), raw, part_index, part.tool_name)
+        if not candidates:
+            return
+        async def update(transaction: StateTransaction) -> None:
+            scope = self._scope("tool_operation", "agent_run", (agent_run_id,))
+            records = (await transaction.read_record_subjects(kind="tool_operation", scope_key=scope,
+                       subject_ids=tuple(candidates)) if isinstance(transaction, RecordSubjectReader) else None)
+            if records is None:
+                records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_key=scope))
+            for stored in records:
+                envelope = decode_envelope(stored.data)
+                payload = envelope.value["payload"]
+                current_ref = payload.get("fields", {}).get("result_payload")
+                if isinstance(current_ref, Mapping) and native_tool_result_reference(current_ref) is not None:
+                    continue
+                value = await self._decode(stored, ToolOperationRecord)
+                source = candidates.get(value.tool_call_id)
+                if (source is None or value.execution_id != execution_id or value.agent_run_id != agent_run_id
+                        or value.tool_name != source[3] or value.status is not ToolOperationStatus.COMPLETED
+                        or value.result_payload is None):
+                    continue
+                reference = prepare_native_tool_result(source[0], source[1], source[2], value.result_payload,
+                                                       operation_id=value.tool_operation_id)
+                if reference is None:
+                    continue
+                fields = {**payload["fields"], "result_payload": {"$dataclass": "stored_payload", "schema": 1,
+                          "fields": {"content": reference.to_json()}}}
+                candidate = replace(stored, storage_revision=stored.storage_revision + 1,
+                                    data=encode_envelope({**envelope.value, "payload": {**payload, "fields": fields}}))
+                await _replace_checked(transaction, candidate, stored.storage_revision)
+        await self._store.mutate(update)
 
     async def _replace_tool_in_transaction(
         self,
