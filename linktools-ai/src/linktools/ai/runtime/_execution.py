@@ -2961,6 +2961,17 @@ class DefaultExecutionService(TaskExecutionService):
         return record if record is not None else pending
 
 
+    async def budget_usage(self, execution_id: str, *, principal: Principal) -> BudgetUsage | None:
+        if type(self._state.executions) is not ExecutionRepositoryImpl:
+            return await super().budget_usage(execution_id, principal=principal)
+        execution = await self.manager.load_view_authorized(
+            execution_id, principal, AuthorizationAction.EXECUTION_READ, observed=True,
+        )
+        if execution.budget_scope_id is None:
+            return None
+        return await self._state.budgets.read(execution.budget_scope_id)
+
+
     async def load_observed_authorized(
         self, execution_id: str, principal: Principal, action: AuthorizationAction
     ) -> ExecutionRecord:

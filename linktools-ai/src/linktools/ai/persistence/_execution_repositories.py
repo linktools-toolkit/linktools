@@ -30,6 +30,8 @@ from ._budget import BudgetRepositoryImpl
 from .contracts import (
     ExecutionCandidate,
     ExecutionCandidatePage,
+    ExecutionMetadataCandidate,
+    ExecutionMetadataCandidatePage,
     ExecutionViewCandidate,
     ExecutionViewCandidatePage,
     ExecutionCancelRequestCommit,
@@ -872,6 +874,25 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 _owner, view = decode_execution_view(record.data, tenant_id=tenant_id)
                 candidates.append(ExecutionViewCandidate(view, _record_cursor(stored)))
             return ExecutionViewCandidatePage(tuple(candidates), has_more)
+        return await self.read_content(read)
+
+    async def list_metadata_candidates(
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
+    ) -> ExecutionMetadataCandidatePage:
+        """Read diagnostics without hydrating accepted input or terminal output."""
+        async def read(_group):
+            selected, has_more = await self._candidate_records(tenant_id=tenant_id, session_id=session_id,
+                parent_execution_id=parent_execution_id, cursor=cursor, limit=limit)
+            expanded = await self._execution_content.expand_bindings(selected)
+            expanded = await self._execution_content.expand_projection_components(
+                expanded, result=True, terminal_details=True)
+            candidates = []
+            for stored, record in zip(selected, expanded, strict=True):
+                value = decode_execution_metadata(record.data, tenant_id=tenant_id)
+                self._decode_header(stored, value.execution_id)
+                candidates.append(ExecutionMetadataCandidate(value, _record_cursor(stored)))
+            return ExecutionMetadataCandidatePage(tuple(candidates), has_more)
         return await self.read_content(read)
 
     async def get_in_transaction(

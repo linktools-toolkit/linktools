@@ -41,7 +41,7 @@ from ..execution import (
 import binascii
 import json
 from ..session import SessionRepository as SessionRepositoryContract
-from ..execution import ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
+from ..execution import ExecutionMetadataRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
 from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -906,6 +906,18 @@ class ExecutionCandidate:
 @dataclass(frozen=True, slots=True)
 class ExecutionCandidatePage:
     items: tuple[ExecutionCandidate, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionMetadataCandidate:
+    record: ExecutionMetadataRecord
+    cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionMetadataCandidatePage:
+    items: tuple[ExecutionMetadataCandidate, ...]
     has_more: bool
 
 

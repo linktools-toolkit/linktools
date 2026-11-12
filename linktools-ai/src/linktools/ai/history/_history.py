@@ -580,8 +580,10 @@ class History:
         recent: list[tuple[datetime, str, ExecutionInfo]] = []
         cursor: str | None = None
 
+        list_candidates = (executions.list_metadata_candidates if type(executions) is ExecutionRepositoryImpl
+                           else executions.list_candidates)
         while True:
-            page = await executions.list_candidates(
+            page = await list_candidates(
                 tenant_id=principal.tenant_id,
                 session_id=None,
                 parent_execution_id=None,
@@ -608,7 +610,7 @@ class History:
                         continue
                     raise
                 info = _project_execution_info(record)
-                entry = (record.created_at, record.execution_id, info)
+                entry = (info.created_at, info.execution_id, info)
                 if len(recent) < limit:
                     heapq.heappush(recent, entry)
                 elif entry[:2] > recent[0][:2]:

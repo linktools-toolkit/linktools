@@ -53,6 +53,7 @@ class _ExecutionViewSource(Protocol):
     result: "ResultRecord | None"
     durable_trace: bool
     restart_checkpoints: bool
+    budget_scope_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +85,7 @@ class ExecutionView:
     terminal_at: datetime | None = None
     durable_trace: bool = False
     restart_checkpoints: bool = False
+    budget_scope_id: str | None = None
 
 
 def project_execution_view(source: object) -> ExecutionView:
@@ -101,6 +103,7 @@ def project_execution_view(source: object) -> ExecutionView:
         created_at=value.created_at,
         durable_trace=value.durable_trace,
         restart_checkpoints=value.restart_checkpoints,
+        budget_scope_id=value.budget_scope_id,
         session_id=value.session_id,
         binding_kind=value.binding_kind,
         task_id=value.task_id,
