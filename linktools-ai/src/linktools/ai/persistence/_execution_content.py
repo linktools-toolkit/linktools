@@ -705,6 +705,10 @@ class ExecutionContent:
                 # The caller still CASes that owner's physical revision; ordinary
                 # reads and policy changes must inspect their current source.
                 policy_overrides = decode_envelope(previous.data).value["payload"]["fields"].get("runtime_overrides", {})
+            elif encode_policy(effective_policy)[0] == policy_identity:
+                # The exact admitted base needs no delta. Retain its immutable
+                # identity without reading configuration for a control-only CAS.
+                policy_overrides = {}
             else:
                 policy_raw, = await archive.read_contents((previous_policy[2],), codec=POLICY_CODEC)
                 base_policy = decode_policy(previous_policy, policy_raw)
@@ -877,9 +881,26 @@ class ExecutionContent:
 
     async def terminal_matches(self, current: StoredRecord, candidate: StoredRecord, value: ExecutionRecord) -> bool:
         # Recovery templates may disappear or change phase when a prepared
-        # handoff is published. Their identities are not terminal facts. Read
-        # the existing owners instead of treating candidate identities as a
-        # substitute for the previous execution's semantic projection.
+        # handoff is published. Their identities are not terminal facts. When
+        # terminal references change, read existing owners rather than using
+        # candidate values as proof of the previous semantic projection.
+        previous_fields = decode_envelope(current.data).value["payload"]["fields"]
+        candidate_fields = decode_envelope(candidate.data).value["payload"]["fields"]
+        terminal_fields = (
+            "execution_id", "session_id", "parent_execution_id", "principal_id", "principal_kind",
+            "status", "stored_user_input", "result", "created_at", "completed_at", "error_code",
+            "safe_error_details", "error_diagnostics", "terminal_details", "conversation",
+            "runtime_policy", "runtime_overrides",
+        )
+        if (previous_fields.get("completed_at") is not None
+                and not any(native_user_input_reference(payload) is not None
+                            or native_text_reference(payload) is not None for _, payload in _payloads(current))
+                and canonical_json_bytes({name: previous_fields[name] for name in terminal_fields if name in previous_fields})
+                == canonical_json_bytes({name: candidate_fields[name] for name in terminal_fields if name in candidate_fields})):
+            # A control update retains precisely the same content-addressed
+            # terminal facts. It neither consumes nor republishes their bodies;
+            # their next reader still authenticates the original source.
+            return True
         current, = await self.expand_policies((current,))
         payloads = await self.read_payloads((current,))
         previous = decode_execution_content(current.data, payloads, timeline=True)

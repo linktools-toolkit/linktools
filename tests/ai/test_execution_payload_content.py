@@ -38,10 +38,13 @@ async def test_large_payloads_survive_repeated_control_cas_without_body_reads_or
         raw = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
         assert len(canonical_json_bytes(raw.data)) < 12000
         refs = tuple(iter_archive_content_refs(raw.data))
-        assert len(refs) == 3
+        assert len(refs) == 5
         _, archive = repository.state_store.storage_group.opened_archive
         before = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
-        assert len(before) == 3
+        assert len(before) == 5
+        assert sorted(ContentRecord.from_record(row).codec for row in before) == [
+            "execution-binding", "execution-payload", "execution-payload", "execution-payload", "runtime-policy",
+        ]
         original = ContentArchive.read_contents
 
         async def reject_body(*args, **kwargs):
@@ -76,6 +79,18 @@ async def test_large_payloads_survive_repeated_control_cas_without_body_reads_or
                 next_record=replace(value, revision=value.revision + 1,
                     result=replace(value.result, output=StoredPayload.inline_json("changed " * 20000))))
         assert immutable.value.code is ErrorCode.EXECUTION_RESULT_CONFLICT
+        # Retaining an existing immutable reference is not consuming its body.
+        # A control CAS must not recreate a missing source from the candidate;
+        # the next actual consumer must still reject that missing source.
+        policy_row = next(row for row in before if ContentRecord.from_record(row).codec == "runtime-policy")
+        await archive.mutate(lambda tx: tx.delete_record(policy_row.key))
+        changed = replace(value, revision=value.revision + 1, event_seq=value.event_seq + 1)
+        await repository.compare_and_swap(value.execution_id, tenant_id="tenant",
+            expected_revision=value.revision, next_record=changed)
+        assert await archive.read_record(policy_row.key) is None
+        with pytest.raises(AIError) as missing:
+            await repository.get_fresh(value.execution_id, tenant_id="tenant")
+        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 

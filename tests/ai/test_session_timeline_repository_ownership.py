@@ -213,7 +213,7 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
         assert [turn.execution_id for turn in result.items] == ["failed", "active"]
         assert len(begins) == 2  # Fresh authorization header, then one metadata snapshot.
         assert [turn.conversation_committed for turn in result.items] == [True, False]
-        selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+        selects = [sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))]
         # Execution and conversation records may share one metadata batch.
         assert len(selects) <= 6
         assert not any("ai_object_chunks" in sql for sql in selects)
