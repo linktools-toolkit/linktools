@@ -3,9 +3,9 @@
 """Canonical Step run sequence addresses owned by local admission rows."""
 
 from ._record_key import decode_key_components, encode_key_components
+from ._record_owner import RUN_COUNTER_COLUMNS
 from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, record_key, stream_key
 
-RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
 _FAMILIES = ("event", "checkpoint", "interaction")
 _DOMAINS = {"trace", "checkpoint", "conversation"}
 

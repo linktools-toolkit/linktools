@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
-from linktools.ai.persistence._run_counters import run_counter_streams
+from linktools.ai.persistence._run_counters import run_counter_address, run_counter_streams
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.state import StateTransaction, stream_key
 from linktools.ai.storage import InMemoryObjectStore
@@ -84,5 +84,61 @@ async def test_runtime_admission_counter_snapshot_restores_unique_owner(tmp_path
         async with store.storage_group.context.engine.connect() as connection:
             rows = (await connection.execute(text("SELECT event_high_water,checkpoint_high_water FROM ai_step_run_admissions WHERE store_key=:store"), {"store": store.store_key})).all()
             assert rows and any(row[0] is not None or row[1] is not None for row in rows)
-            assert await connection.scalar(text("SELECT count(*) FROM ai_state_counters WHERE store_key=:store"), {"store": store.store_key}) == 0
+            ordinary = (await connection.execute(text("SELECT stream_key FROM ai_state_counters WHERE store_key=:store"),
+                {"store": store.store_key})).scalars().all()
+            assert all(run_counter_address(key) is None for key in ordinary)
         assert (await state.execution.executions.get_fresh("execution", tenant_id="tenant")).result == commit.result
+
+
+def test_run_counter_cursor_mapping_preserves_arbitrary_binary_order() -> None:
+    from linktools.ai.persistence._run_counters import RUN_COUNTER_COLUMNS, run_counter_page_start
+    from linktools.ai.persistence.state import record_key
+    owners = tuple(record_key(namespace, "tenant", domain, "agent_run", (run,))
+        for namespace in ("a", "long-name", "é") for domain in ("trace", "checkpoint", "conversation")
+        for run in ("a", "z", "long-run"))
+    streams = tuple(key for owner in owners for key in run_counter_streams(owner))
+    cursors = {b"\x00", b"opaque", b"\xff", *(key[:end] for key in streams for end in range(1, len(key) + 1)),
+               *(key + b"\x00" for key in streams), *(key + b"\xff" for key in streams)}
+    for after in cursors:
+        for index, column in enumerate(RUN_COUNTER_COLUMNS):
+            bound = run_counter_page_start(after, column)
+            for owner in owners:
+                if bound is None:
+                    actual = False
+                else:
+                    start, inclusive = bound
+                    actual = start is None or (owner >= start if inclusive else owner > start)
+                assert actual is (run_counter_streams(owner)[index] > after), (after, column, owner)
+
+
+@pytest.mark.asyncio
+async def test_sql_run_counter_pages_bound_each_physical_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence._sql import _SqlTransaction
+    from linktools.ai.persistence.state import record_key
+    async with _open_store("sql", tmp_path) as store:
+        records = tuple(replace(_admission(run), key=record_key(namespace, "tenant", domain, "agent_run", (run,)))
+            for namespace, domain, run in (("a", "trace", "one"), ("long", "checkpoint", "two"),
+                                            ("é", "conversation", "three")))
+        async def publish(tx: StateTransaction) -> None:
+            await tx.insert_records(records)
+            await tx.reserve_sequences({key: index + 1 for index, key in enumerate(
+                (b"\x00", b"opaque", *(key for record in records for key in run_counter_streams(record.key))))})
+        await store.mutate(publish)
+        all_values = await store.read(lambda tx: tx.scan_sequences())
+        original = _SqlTransaction._execute
+        reads = []
+        async def bounded(self: _SqlTransaction, statement: object) -> object:
+            if str(statement).lstrip().upper().startswith("SELECT"):
+                assert statement._limit_clause is not None
+                assert statement._limit_clause.value == 2
+                reads.append(statement)
+            return await original(self, statement)
+        monkeypatch.setattr(_SqlTransaction, "_execute", bounded)
+        cursors = (None, b"\x00", b"opaque", b"\xff", *all_values,
+                   *(key[:-1] for key in all_values if len(key) > 1))
+        for after in cursors:
+            reads.clear()
+            actual = await store.read(lambda tx: tx.scan_sequences_page(after=after, limit=2))
+            expected = dict(tuple((key, value) for key, value in all_values.items() if after is None or key > after)[:2])
+            assert actual == expected
+            assert 1 <= len(reads) <= 4

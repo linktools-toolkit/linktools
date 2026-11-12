@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.selectable import FromClause
 
 
+RUN_COUNTER_COLUMNS = ("event_high_water", "checkpoint_high_water", "interaction_high_water")
 RECORD_OWNER_TABLES = ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions")
 _KIND_OWNERS = {"tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
@@ -59,7 +60,6 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
                       include_run_counters: bool = False) -> "FromClause":
     """Read a bounded owner set as one SQL statement, preserving global ordering."""
     from sqlalchemy import BigInteger, String, cast, literal, null, select, union_all
-    from ._run_counters import RUN_COUNTER_COLUMNS
 
     if owner is not None and owner not in RECORD_OWNER_TABLES:
         raise ValueError("unknown record owner")
@@ -97,4 +97,4 @@ def record_owner_values(name: str, values: Mapping[str, object]) -> dict[str, ob
 
 
 
-__all__ = ["RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]
+__all__ = ["RUN_COUNTER_COLUMNS", "RECORD_OWNER_TABLES", "record_owner_table", "record_owner_edge", "record_owner_names", "record_owner_rows", "record_owner_values"]

@@ -16,7 +16,7 @@ from .test_native_text_result_runtime import _prepare, _publish
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ("none", "missing_counter", "orphan_counter", "wrong_raw_key", "negative"))
+@pytest.mark.parametrize("damage", ("none", "missing_counter", "missing_admission", "wrong_raw_key", "negative"))
 async def test_history_capture_joins_counters_and_rejects_corrupt_controls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
 ) -> None:
@@ -27,24 +27,24 @@ async def test_history_capture_joins_counters_and_rejects_corrupt_controls(
         store = archive.state_store
         event_key = archive._stream("run", "event")
         await store.mutate(lambda tx: tx.reserve_sequence(event_key, 1))
-        if damage == "orphan_counter":
-            await store.mutate(lambda tx: tx.delete_records((archive._agent_run_key("run"), archive._history.head_key("run"))))
+        if damage == "missing_admission":
+            await store.mutate(lambda tx: tx.delete_record(archive._agent_run_key("run")))
         elif damage in {"missing_counter", "wrong_raw_key", "negative"}:
             async with store.storage_group.context.engine.begin() as connection:
                 if damage == "missing_counter":
-                    await connection.execute(text("DELETE FROM ai_state_counters WHERE store_key=:store"), {"store": store.store_key})
+                    await connection.execute(text("UPDATE ai_step_run_admissions SET event_high_water=NULL,checkpoint_high_water=NULL,interaction_high_water=NULL WHERE store_key=:store"), {"store": store.store_key})
                 elif damage == "wrong_raw_key":
-                    await connection.execute(text("UPDATE ai_state_counters SET stream_key=:other WHERE store_key=:store AND stream_key=:key"),
-                        {"other": archive._stream("other", "event"), "store": store.store_key, "key": event_key})
+                    await connection.execute(text("UPDATE ai_step_run_admissions SET key=:other WHERE store_key=:store AND key=:key"),
+                        {"other": archive._agent_run_key("other"), "store": store.store_key, "key": archive._agent_run_key("run")})
                 else:
-                    await connection.execute(text("UPDATE ai_state_counters SET value=-1 WHERE store_key=:store AND stream_key=:key"),
-                        {"store": store.store_key, "key": event_key})
+                    await connection.execute(text("UPDATE ai_step_run_admissions SET event_high_water=-1 WHERE store_key=:store AND key=:key"),
+                        {"store": store.store_key, "key": archive._agent_run_key("run")})
         statements: list[str] = []
         original = _SqlTransaction._execute
 
         async def execute(self: _SqlTransaction, statement: object) -> object:
             sql = str(statement)
-            if "joined_sequence_row" in sql:
+            if "event_high_water" in sql:
                 for dialect in (sqlite.dialect(), postgresql.dialect(), mysql.dialect()):
                     compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
                     assert len(compiled.params) < 999
@@ -54,7 +54,7 @@ async def test_history_capture_joins_counters_and_rejects_corrupt_controls(
             return await original(self, statement)
 
         monkeypatch.setattr(_SqlTransaction, "_execute", execute)
-        if damage in {"orphan_counter", "wrong_raw_key", "negative"}:
+        if damage in {"missing_admission", "wrong_raw_key", "negative"}:
             with pytest.raises(AIError) as caught:
                 await archive.capture_history(("run",))
             assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -65,7 +65,7 @@ async def test_history_capture_joins_counters_and_rejects_corrupt_controls(
             if damage == "missing_counter":
                 assert captured["run"].event_count == 0
         assert len(statements) == 1
-        assert "joined_sequence_row" in statements[0]
+        assert "event_high_water" in statements[0]
         statements.clear()
         assert await archive.capture_history(()) == {}
         assert statements == []
