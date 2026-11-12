@@ -48,7 +48,7 @@ filename conventions require explicit pytest configuration.
 | Ready PR opened, synchronized, reopened or made ready for review | `merge` |
 | Push to `master` | `merge` |
 | Release checks through `workflow_call` | `merge` |
-| Manual `Python checks` dispatch | Explicit `daily`, `merge` or `all`; default `merge` |
+| Manual `Python checks` dispatch | Explicit `daily` or `merge`; default `merge` |
 
 The reusable workflow intentionally declares no tier input. It cannot accept an
 `all` choice from a caller; the publishing workflow's manual release-version
@@ -146,8 +146,9 @@ package architecture/lint gates before its own tests; files stay intact for
 fixture reuse and four-worker `loadfile` scheduling. The partition preserves
 existing coverage and fixture locality, but is not a guarantee of balanced wall
 time. Runner startup, installation and repeated gates also affect both latency
-and total runner usage. Automatic execution jobs
-have a 20-minute limit; explicit `all` runs allow 60 minutes for manual probes.
+and total runner usage. CI execution jobs have a 20-minute limit. The workflow
+runs only `daily` or `merge`; the `all` tier, including manual probes, is reserved
+for explicit local invocation.
 
 Named `manage.py install` selections include their transitive local dependencies
 and requested extras in the same pip resolution. CI uses this for all packages
