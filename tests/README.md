@@ -100,14 +100,9 @@ checks:
     paths:
       - ../tests/ai
     groups:
-      evaluation-recovery:
-        - test_evaluation*
-        - test_captured*
-        - test_graph_capture*
-        - test_runtime_recovery_ownership.py
-        - test_runtime_process_recovery.py
-        - test_keyed_execution_recovery.py
-      runtime: []
+      runtime-evaluation: []
+    shards:
+      runtime-evaluation: 5
 ```
 
 `paths` may be omitted when conventional test directories are present. A
@@ -128,8 +123,8 @@ the selected package's manifest, and unknown groups fail clearly. Tier selection
 remains independent:
 
 ```bash
-PYTEST_ADDOPTS='--test-group=evaluation-recovery' python manage.py check linktools-ai --test-tier daily
-PYTEST_ADDOPTS='--test-group=runtime' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--test-group=runtime-evaluation' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--test-group=runtime-evaluation --test-shard=1/5' python manage.py check linktools-ai --test-tier daily
 ```
 
 The `Python checks passed` gate directly requires discovery, compatibility and
@@ -138,13 +133,20 @@ count as completed coverage. Per-job summaries identify package, Python, group,
 tier and outcome; pytest also prints skip reasons. The final summary states the
 selected tier. Repository protection settings are managed separately.
 
-The current five packages use 9 jobs: 6 execution jobs, discovery, Python 3.6
-compatibility and final coverage. Each AI group installs its
-local dependency closure and runs the package architecture/lint gates before
-its own tests; files stay intact for fixture reuse and four-worker `loadfile` scheduling.
-The file-family split preserves existing coverage and fixture locality, but is
-not a guarantee of balanced wall time. Runner startup, installation and repeated
-gates also affect both latency and total runner usage. Automatic execution jobs
+Runtime and evaluation/recovery share one AI test group, partitioned into five
+shards per Python version. Each file belongs to exactly one shard based on the
+SHA-256 of its repository-relative path; adding a file includes it automatically.
+The combined shard union retains all AI test files, including recovery and fault
+cases, and tier selection still applies within each shard.
+
+The current five packages use 15 jobs: 10 AI shards and 2 ordinary package-pool
+jobs across Python 3.11 and 3.x, plus discovery, Python 3.6 compatibility and
+final coverage. Each AI shard installs its local dependency closure and runs the
+package architecture/lint gates before its own tests; files stay intact for
+fixture reuse and four-worker `loadfile` scheduling. The partition preserves
+existing coverage and fixture locality, but is not a guarantee of balanced wall
+time. Runner startup, installation and repeated gates also affect both latency
+and total runner usage. Automatic execution jobs
 have a 20-minute limit; explicit `all` runs allow 60 minutes for manual probes.
 
 Named `manage.py install` selections include their transitive local dependencies
