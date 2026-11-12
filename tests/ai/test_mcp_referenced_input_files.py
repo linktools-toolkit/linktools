@@ -68,6 +68,8 @@ for line in sys.stdin:
     elif method == "ping":
         result = {{}}
     else:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"],
+                          "error": {{"code": -32601, "message": "Method not found"}}}}), flush=True)
         continue
     print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
 exiting(None, None)
