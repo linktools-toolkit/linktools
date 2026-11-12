@@ -26,6 +26,7 @@ from pydantic_ai.tools import (
     DeferredToolRequests,
 )
 
+from ..asset import AssetStoreReader
 from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
 from ..spec import CapabilityRef, RepositoryInstructionResolver, RepositoryInstructions
@@ -305,6 +306,7 @@ class LocalExecutionBackend:
         *,
         archive_objects: ObjectStore | None = None,
         archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
         restore_binding: "Callable[[AgentBindingContract], Awaitable[AgentBinding]] | None" = None,
         native_step_source: Callable[[AgentBinding], Awaitable[NativeStepSource | None]] | None = None,
         workspace: "Workspace | None",
@@ -346,7 +348,7 @@ class LocalExecutionBackend:
         self._checkpoint = checkpoint
         self._execution_objects = execution_objects
         self._context_archive = ExecutionContextArchive(execution_state.executions.state_store, archive_objects or execution_objects,
-            namespace=namespace, tenant_id=tenant_id, object_reader=archive_object_reader)
+            namespace=namespace, tenant_id=tenant_id, object_reader=archive_object_reader, asset_sources=asset_sources)
         self._checkpoint_objects = checkpoint_objects
         self._metric_recorder = metric_recorder
         self._worker_completed = worker_completed

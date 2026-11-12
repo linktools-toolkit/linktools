@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Protocol, TypeAlias
 
 from ..agent import AgentBindingContract, AgentInputCaptureRef
-from ..asset import AssetVersionRef
+from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, ImmutableJsonMapping, JsonValue,
     Principal, ResourceKind, ResourceRef, TaskStatus, WorkspaceFileInput, canonical_json_bytes,
@@ -156,6 +156,7 @@ class InputCaptures:
         authorization: AuthorizationPolicy,
         execution: InputCaptureExecutionPort,
         materializer: ExecutionInputMaterializer | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
         prepare_pending_capture: Callable[[str, Principal], Awaitable[None]] | None = None,
     ) -> "InputCaptures":
         """Compose captures over borrowed storage and the producer's execution boundary."""
@@ -175,6 +176,7 @@ class InputCaptures:
                 persistence.execution.executions.state_store,
                 persistence.archive_object_store(PersistenceDomain.EXECUTION),
                 namespace=persistence.namespace, tenant_id=persistence.tenant_id,
+                asset_sources=asset_sources,
                 object_reader=lambda reference: persistence.read_archive_object(PersistenceDomain.EXECUTION, reference),
             ),
             execution_retention=persistence.plan.route(PersistenceDomain.EXECUTION).retention,
@@ -232,6 +234,20 @@ class InputCaptures:
 
     async def _publish(self, kind: str, principal: Principal, key: str, payload: Mapping[str, JsonValue],
                        *, expires_at: datetime | None = None) -> tuple[str, str]:
+        if kind == "agent":
+            payload = dict(payload)
+            instructions = payload["repository_instructions"]
+            if instructions is not None:
+                payload["repository_instructions"] = await self._context_archive.encode_repository_instructions(instructions)
+            context = payload.get("input_context")
+            if context is not None:
+                context = dict(context)
+                if context["repository_instructions"] is not None:
+                    context["repository_instructions"] = (
+                        payload["repository_instructions"] if context["repository_instructions"] == instructions
+                        else await self._context_archive.encode_repository_instructions(context["repository_instructions"])
+                    )
+                payload["input_context"] = context
         identity, value = self._publication(kind, principal, key, payload, expires_at=expires_at)
         object_key = self._key(principal.tenant_id, kind, identity)
         if await self._get(input_capture_expiry_key(object_key)) is not None:
@@ -670,7 +686,19 @@ class InputCaptures:
         return TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, execution_id)
 
     async def read_agent(self, reference: AgentInputCaptureRef, *, principal: Principal) -> AgentInputCapture:
-        payload = await self._read(reference, "agent", principal)
+        payload = dict(await self._read(reference, "agent", principal))
+        instructions = payload["repository_instructions"]
+        if instructions is not None:
+            payload["repository_instructions"] = await self._context_archive.decode_repository_instructions(instructions)
+        context = payload.get("input_context")
+        if context is not None:
+            context = dict(context)
+            if context["repository_instructions"] is not None:
+                context["repository_instructions"] = (
+                    payload["repository_instructions"] if context["repository_instructions"] == instructions
+                    else await self._context_archive.decode_repository_instructions(context["repository_instructions"])
+                )
+            payload["input_context"] = context
         source = payload["source_execution_id"]
         if source != reference.source_execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

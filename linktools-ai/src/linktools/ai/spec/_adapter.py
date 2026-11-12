@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 
+from ..asset import AssetVersionRef
 from ..core import validate_logical_id
 from ..errors import AIError, ErrorCode
 from ._codec import (
@@ -18,6 +19,37 @@ from ._codec import (
     decode_author_yaml_mapping,
 )
 from ._contract import AgentSpec, MCPServerSpec, SkillSpec
+from ._instructions import RepositoryInstructionDocument
+
+
+class RuleInstructionAdapter:
+    """Parse Rule Markdown while retaining its exact Asset provenance."""
+
+    def decode_markdown(
+        self, data: bytes, *, asset_source_id: str, asset: AssetVersionRef,
+    ) -> RepositoryInstructionDocument:
+        asset.verify_content(data)
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+        scope = "."
+        if content.startswith("---\n"):
+            metadata, separator, content = content[4:].partition("\n---\n")
+            if not separator:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            declared_scope: str | None = None
+            for item in metadata.splitlines():
+                if not item.startswith("scope:"):
+                    continue
+                if declared_scope is not None or not item.startswith("scope: "):
+                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                declared_scope = item[len("scope: "):]
+            if declared_scope is not None:
+                scope = declared_scope
+        return RepositoryInstructionDocument(
+            f"rule:{asset.key.id[:-3]}", scope, content, asset_source_id, asset,
+        )
 
 
 class AgentSpecAdapter:
@@ -458,4 +490,4 @@ def _split_lines(value: str) -> list[str]:
     return lines
 
 
-__all__ = ["AgentSpecAdapter", "MCPServerSpecAdapter", "SkillSpecAdapter"]
+__all__ = ["AgentSpecAdapter", "MCPServerSpecAdapter", "RuleInstructionAdapter", "SkillSpecAdapter"]
