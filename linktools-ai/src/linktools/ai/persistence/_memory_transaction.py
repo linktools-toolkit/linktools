@@ -9,6 +9,7 @@ from typing import Generic, TypeVar
 
 from ..core import canonical_json_bytes, validate_resource_id
 from ..errors import AIError, ErrorCode
+from ._run_counters import RUN_COUNTER_COLUMNS, run_counter_address, run_counter_streams
 from .state import (
     RecordLeaseTransition, FactQuery,
     FactScanCursor,
@@ -90,11 +91,13 @@ class _MemoryTransaction:
         now: datetime | None = None,
         validate_record: Callable[[StoredRecord], None] = validate_record_identity,
         record_values: Callable[[], Iterator[StoredRecord]] | None = None,
+        run_counters: Mapping[bytes, tuple[int | None, ...]] | None = None,
     ) -> None:
         self._validate_record = validate_record
         self._record_values = record_values
         self.records = _MemoryOverlay(records, validate=validate_record)
         self.sequences = _MemoryOverlay(sequences)
+        self.run_counters = None if run_counters is None else _MemoryOverlay(run_counters)
         self.facts = _MemoryOverlay(facts)
         self.operations = _MemoryOverlay(operations)
         self._operation_streams = operation_streams
@@ -329,6 +332,8 @@ class _MemoryTransaction:
                 del self.facts[fact_key]
         for key in keys:
             del self.records[key]
+            if self.run_counters is not None and run_counter_streams(key):
+                self.run_counters[key] = (None, None, None)
             self.guarded_record_keys.discard(key)
 
     def _iter_records(self) -> Iterator[StoredRecord]:
@@ -398,15 +403,44 @@ class _MemoryTransaction:
         return tuple(values[:limit])
 
 
+    def _run_counter(self, key: bytes) -> tuple[bytes, int] | None:
+        address = None if self.run_counters is None else run_counter_address(key)
+        return None if address is None else (address[0], RUN_COUNTER_COLUMNS.index(address[1]))
+
+    def _run_counter_value(self, owner: bytes, index: int) -> int | None:
+        if owner not in self.records:
+            return None
+        assert self.run_counters is not None
+        value = self.run_counters.get(owner, (None, None, None))[index]
+        if value is not None and (type(value) is not int or value < 0):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
+
+    def _set_run_counter(self, owner: bytes, index: int, value: int | None) -> None:
+        assert self.run_counters is not None
+        values = list(self.run_counters.get(owner, (None, None, None)))
+        values[index] = value
+        self.run_counters[owner] = tuple(values)
+
     async def get_sequence(self, key: bytes) -> int:
         validate_stream_key(key)
+        address = self._run_counter(key)
+        if address is not None:
+            return self._run_counter_value(*address) or 0
         return self.sequences.get(key, 0)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
-        return {validate_stream_key(key): self.sequences.get(key, 0) for key in keys}
+        return {key: await self.get_sequence(key) for key in keys}
 
     async def scan_sequences(self) -> Mapping[bytes, int]:
-        return dict(sorted(self.sequences.items()))
+        values = dict(self.sequences)
+        if self.run_counters is not None:
+            for record in self._iter_records():
+                for index, stream in enumerate(run_counter_streams(record.key)):
+                    value = self._run_counter_value(record.key, index)
+                    if value is not None:
+                        values[stream] = value
+        return dict(sorted(values.items()))
 
     async def scan_sequences_page(
         self,
@@ -417,42 +451,50 @@ class _MemoryTransaction:
         _require_scan_limit(limit)
         if after is not None:
             validate_stream_key(after)
-        values = [
-            (key, value)
-            for key, value in sorted(self.sequences.items())
+        return dict([
+            (key, value) for key, value in (await self.scan_sequences()).items()
             if after is None or key > after
-        ][:limit]
-        return dict(values)
+        ][:limit])
 
     async def next_sequence(self, key: bytes) -> int:
-        validate_stream_key(key)
-        value = self.sequences.get(key, 0) + 1
-        self.sequences[key] = value
-        return value
+        return await self.reserve_sequence(key, 1)
 
     async def reserve_sequence(self, key: bytes, count: int) -> int:
         return (await self.reserve_sequences({key: count}))[key]
 
     async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
-        if any(
-            isinstance(count, bool) or not isinstance(count, int) or count < 1
-            for count in requests.values()
-        ):
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 1
+               for count in requests.values()):
             raise ValueError("sequence reservation count must be a positive integer")
+        addresses = {}
+        values = {}
         for key in requests:
             validate_stream_key(key)
-        values = {
-            key: self.sequences.get(key, 0) + requests[key]
-            for key in sorted(requests)
-        }
-        self.sequences.update(values)
+        try:
+            for key in sorted(requests):
+                address = self._run_counter(key)
+                if address is not None and address[0] not in self.records:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                addresses[key] = address
+                values[key] = await self.get_sequence(key) + requests[key]
+        except BaseException as error:
+            if self.mutation_error is None:
+                self.mutation_error = error
+            raise
+        for key, value in values.items():
+            address = addresses[key]
+            if address is None:
+                self.sequences[key] = value
+            else:
+                self._set_run_counter(*address, value)
         return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         validate_stream_key(key)
         if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
             raise ValueError("expected sequence must be a non-negative integer")
-        current = self.sequences.get(key, 0)
+        address = self._run_counter(key)
+        current = self.sequences.get(key, 0) if address is None else self._run_counter_value(*address)
         if current != expected:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return await self.next_sequence(key)
@@ -462,7 +504,11 @@ class _MemoryTransaction:
 
     async def delete_sequences(self, keys: Sequence[bytes]) -> None:
         for key in sorted(set(validate_stream_key(key) for key in keys)):
-            self.sequences.pop(key, None)
+            address = self._run_counter(key)
+            if address is None:
+                self.sequences.pop(key, None)
+            elif address[0] in self.records:
+                self._set_run_counter(*address, None)
 
     async def insert_fact(self, fact: StoredFact) -> None:
         key = (fact.stream_key, fact.sequence)

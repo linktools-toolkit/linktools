@@ -783,8 +783,8 @@ class SqlStateRecordReader(Protocol):
 
     Results retain the physical record separately from joined columns. Raw
     scans and transaction caches continue to expose the persisted record.
-    Optional sequence keys populate the existing transaction counter view from
-    the same statement, including absent counters as zero.
+    Optional Step run sequence keys project counters from their admission rows
+    into the existing transaction counter view, including absent owners as zero.
     """
 
     def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]: ...

@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TypeVar
 from uuid import uuid4
@@ -39,11 +40,33 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.memory")
 
 
+@dataclass(frozen=True, slots=True)
+class _MemoryRunAdmission:
+    record: StoredRecord
+    counters: tuple[int | None, ...] = (None, None, None)
+
+
+class _MemoryRunCounterView(Mapping[bytes, tuple[int | None, ...]]):
+    def __init__(self, admissions: Mapping[bytes, _MemoryRunAdmission]) -> None:
+        self._admissions = admissions
+
+    def __getitem__(self, key: bytes) -> tuple[int | None, ...]:
+        return self._admissions[key].counters
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(self._admissions)
+
+    def __len__(self) -> int:
+        return len(self._admissions)
+
+
 class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
     """One transactional view over disjoint physical in-memory owners."""
 
     def __init__(self, owners: Mapping[str, dict[bytes, StoredRecord]], *, archive: bool = False) -> None:
-        self._owners = owners
+        self._owners = {name: values for name, values in owners.items() if name != "ai_step_run_admissions"}
+        self.run_admissions: dict[bytes, _MemoryRunAdmission] = {}
+        self.run_counter_values = _MemoryRunCounterView(self.run_admissions)
         self._archive = archive
         self.payload_rows: dict[tuple[bytes, str], dict[str, object]] = {}
 
@@ -53,12 +76,18 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
             payload_record_values(record)
 
     def __getitem__(self, key: bytes) -> StoredRecord:
+        if record_owner_table(key) == "ai_step_run_admissions":
+            return self.run_admissions[key].record
         if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
             from ._step_payload_owner import payload_address, payload_record_from_row
             return payload_record_from_row(self.payload_rows[payload_address(key)])
         return self._owners[record_owner_table(key)][key]
 
     def __setitem__(self, key: bytes, value: StoredRecord) -> None:
+        if record_owner_table(key) == "ai_step_run_admissions":
+            previous = self.run_admissions.get(key)
+            self.run_admissions[key] = (_MemoryRunAdmission(value) if previous is None else replace(previous, record=value))
+            return
         if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
             from ._step_payload_owner import payload_address, payload_record_values
             self.payload_rows[payload_address(key)] = payload_record_values(value)
@@ -66,6 +95,9 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
         self._owners[record_owner_table(key)][key] = value
 
     def __delitem__(self, key: bytes) -> None:
+        if record_owner_table(key) == "ai_step_run_admissions":
+            del self.run_admissions[key]
+            return
         if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
             from ._step_payload_owner import payload_address
             del self.payload_rows[payload_address(key)]
@@ -76,6 +108,7 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
         from ._step_payload_owner import payload_record_from_row
         for owner in self._owners.values():
             yield from owner
+        yield from self.run_admissions
         yield from (payload_record_from_row(row).key for row in self.payload_rows.values())
 
     def iter_records(self) -> Iterator[StoredRecord]:
@@ -83,11 +116,12 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
         from ._step_payload_owner import payload_record_from_row
         for owner in self._owners.values():
             yield from owner.values()
+        yield from (entry.record for entry in self.run_admissions.values())
         for row in self.payload_rows.values():
             yield payload_record_from_row(row)
 
     def __len__(self) -> int:
-        return sum(map(len, self._owners.values())) + len(self.payload_rows)
+        return sum(map(len, self._owners.values())) + len(self.run_admissions) + len(self.payload_rows)
 
 
 class _MemoryGroupTransaction:
@@ -287,6 +321,7 @@ class InMemoryStateStorageGroup:
             now=now,
             validate_record=store._record_owners.validate,
             record_values=store._record_owners.iter_records,
+            run_counters=store._record_owners.run_counter_values,
         )
 
     def _ensure_member(self, store: "InMemoryStateStore") -> None:
@@ -304,8 +339,8 @@ class InMemoryStateStore:
         owners: dict[str, dict[bytes, StoredRecord]] = {name: {} for name in RECORD_OWNER_TABLES}
         self._records = owners["ai_state_records"]
         self._step_tool_operations = owners["ai_step_tool_operations"]
-        self._step_run_admissions = owners["ai_step_run_admissions"]
         self._record_owners = _MemoryRecordOwners(owners, archive=archive)
+        self._step_run_admissions = self._record_owners.run_admissions
         self._sequences: dict[bytes, int] = {}
         self._facts: dict[tuple[bytes, int], StoredFact] = {}
         self._operations: dict[bytes, StoredOperation] = {}
@@ -394,6 +429,11 @@ class InMemoryStateStore:
 
     def _apply_transaction(self, transaction: _MemoryTransaction) -> None:
         transaction.records.apply_to(self._record_owners)
+        if transaction.run_counters is not None:
+            for key, counters in transaction.run_counters.changes().items():
+                entry = self._step_run_admissions.get(key)
+                if entry is not None:
+                    self._step_run_admissions[key] = replace(entry, counters=counters)
         transaction.sequences.apply_to(self._sequences)
         transaction.facts.apply_to(self._facts)
         transaction.operations.apply_to(self._operations)

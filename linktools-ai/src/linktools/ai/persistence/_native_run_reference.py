@@ -15,6 +15,7 @@ from ..errors import AIError, ErrorCode
 from ..steps import native_store_locator, encode_native_replay_key
 from ._run_registration import RunRegistrationReference
 from ._record_owner import record_owner_rows
+from ._run_counters import run_counter_address
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStore
@@ -120,14 +121,15 @@ class NativeRunReferences:
     def statement(self, *, keys: Sequence[bytes] | None = None, query: RecordQuery | None = None,
                   scan: tuple[RecordScanCursor | None, int] | None = None,
                   expected_start: NativeStepEvent | None = None,
-                  expected_terminal: NativeStepEvent | None = None) -> "Select":
+                  expected_terminal: NativeStepEvent | None = None, include_run_counters: bool = False) -> "Select":
         from ._sql import _key_matches, _keys_match
         from sqlalchemy import JSON, and_, bindparam, cast, select, type_coerce
         from sqlalchemy import literal_column
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
 
-        records = record_owner_rows(self._record_metadata, keys=keys, kind="agent_run" if query is not None else None)
+        records = record_owner_rows(self._record_metadata, keys=keys, kind="agent_run" if query is not None else None,
+                                    include_run_counters=include_run_counters)
         runs = self._runs
         encoded = type_coerce(records.c.payload_json, JSON)[()].as_string()
         payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
@@ -241,7 +243,7 @@ class NativeRunReferences:
             compiled = probe.compile(dialect=self._state.context.engine.dialect,
                                      compile_kwargs={"render_postcompile": True})
             count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
-            batch_size = 1 + (999 - count - (len(set(sequence_keys)) + 1 if sequence_keys else 0)) // 2
+            batch_size = 1 + (999 - count) // 2
             if batch_size < 1:
                 raise ValueError("native record read exceeds the SQL parameter budget")
             batches = tuple(missing[offset:offset + batch_size] for offset in range(0, len(missing), batch_size))
@@ -249,7 +251,9 @@ class NativeRunReferences:
         for batch in batches:
             rows.extend(await transaction.read_joined_records(
                 self._state.context, self.statement(keys=batch, query=query, scan=scan, expected_start=expected_start,
-                    expected_terminal=expected_terminal), keys=batch or (), sequence_keys=sequence_keys,
+                    expected_terminal=expected_terminal, include_run_counters=bool(sequence_keys)),
+                keys=batch or (), sequence_keys=tuple(key for key in sequence_keys
+                    if (address := run_counter_address(key)) is not None and (batch is None or address[0] in batch)),
             ))
         ordered: list[StoredRecord] = []
         for record, row in rows:

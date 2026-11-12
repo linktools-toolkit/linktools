@@ -55,14 +55,16 @@ def record_owner_names(*, keys: Sequence[bytes] | None = None, kind: str | None 
 
 
 def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = None,
-                      kind: str | None = None, owner: str | None = None) -> "FromClause":
+                      kind: str | None = None, owner: str | None = None,
+                      include_run_counters: bool = False) -> "FromClause":
     """Read a bounded owner set as one SQL statement, preserving global ordering."""
-    from sqlalchemy import String, cast, literal, null, select, union_all
+    from sqlalchemy import BigInteger, String, cast, literal, null, select, union_all
+    from ._run_counters import RUN_COUNTER_COLUMNS
 
     if owner is not None and owner not in RECORD_OWNER_TABLES:
         raise ValueError("unknown record owner")
     names = (owner,) if owner is not None else record_owner_names(keys=keys, kind=kind)
-    if names == ("ai_state_records",):
+    if names == ("ai_state_records",) and not include_run_counters:
         return metadata.tables[names[0]]
     canonical = metadata.tables["ai_state_records"]
     selections = []
@@ -79,7 +81,10 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
             (cast(null(), String(column.type.length) if isinstance(column.type, String) else column.type) if constants[column.name] is None else
              literal(constants[column.name], type_=column.type, literal_execute=True)).label(column.name)
             if column.name in constants else table.c[column.name]
-            for column in canonical.c)))
+            for column in canonical.c), *(
+                (table.c[name] if name in table.c else cast(null(), BigInteger)).label(name)
+                for name in RUN_COUNTER_COLUMNS if include_run_counters
+            )))
     return (selections[0] if len(selections) == 1 else union_all(*selections)).subquery("record_owners")
 
 

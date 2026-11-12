@@ -1,4 +1,4 @@
--- New Step admission owner; ai_step_runs unchanged. 14 columns, 4 physical indexes including PRIMARY.
+-- New Step admission owner; ai_step_runs unchanged. 17 columns, 4 physical indexes including PRIMARY.
 -- Requires schema review. Dialect-conditional portable indexes are not emitted for MySQL.
 
 CREATE TABLE ai_step_run_admissions (
@@ -14,6 +14,9 @@ CREATE TABLE ai_step_run_admissions (
 	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'SHA-256 lookup projection of the projected conversation scope.', 
 	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'SHA-256 lookup projection of the projected parent-run identity.', 
 	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 sort-key bytes used only for ordered lookup.', 
+	event_high_water BIGINT COMMENT 'Last allocated local event sequence; NULL means no event counter.',
+	checkpoint_high_water BIGINT COMMENT 'Last allocated local checkpoint sequence; NULL means no checkpoint counter.',
+	interaction_high_water BIGINT COMMENT 'Last allocated local interaction sequence; NULL means no interaction counter.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP, 
 	PRIMARY KEY (id)

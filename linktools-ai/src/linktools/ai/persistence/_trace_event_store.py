@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from ..errors import AIError, ErrorCode
 from ..core import canonical_json_bytes
 from ._record_key import decode_key_components
+from ._run_counters import run_counter_address
 from ._schema import build_runtime_sql_metadata
 from ._plan import PersistenceDomain
 from ._sql import SqlStateStore
@@ -305,7 +306,11 @@ class SqlTraceEventStore:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         table = self.table
         t = table.c
-        counters = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_state_counters"]
+        counters = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_step_run_admissions"]
+        address = run_counter_address(event_stream)
+        if address is None or address[1] != "event_high_water":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        counter_owner = address[0]
         messages = tuple(dict.fromkeys(map(_identity, message_identities)))
         tools = tuple(dict.fromkeys(map(_identity, tool_call_ids)))
         found: dict[int, StoredFact] = {}
@@ -335,14 +340,17 @@ class SqlTraceEventStore:
                 t.store_key == self.state.store_key, t.run_id == _identity(run_id)).subquery("events")
             anchor = select(literal(1).label("present")).subquery("anchor")
             source = anchor.outerjoin(counters, and_(counters.c.store_key == self.state.store_key,
-                counters.c.stream_locator == sha256(event_stream).hexdigest())).outerjoin(events, true())
-            statement = select(counters.c.stream_key.label("counter_stream"),
-                counters.c.value.label("counter_value"), *events.c).select_from(source).order_by(events.c.sequence)
+                counters.c.key_locator == sha256(counter_owner).hexdigest())).outerjoin(events, true())
+            statement = select(counters.c.key.label("counter_owner"),
+                counters.c.key_locator.label("counter_locator"), counters.c.event_high_water.label("counter_value"), *events.c).select_from(source).order_by(events.c.sequence)
             for row in await self._rows(transaction, statement):
                 value = row["counter_value"]
+                if row["counter_owner"] is not None and (row["counter_owner"] != counter_owner
+                        or row["counter_locator"] != sha256(counter_owner).hexdigest()):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if value is None:
                     value = 0
-                elif (row["counter_stream"] != event_stream or type(value) is not int or value < 0):
+                elif type(value) is not int or value < 0:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if value < high_water:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
