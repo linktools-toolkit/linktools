@@ -127,7 +127,7 @@ async def test_builtin_retention_avoids_owner_reread_and_custom_owner_keeps_fall
         for owner in (custom, repository):
             statements = []
             def capture(_connection, _cursor, statement, _parameters, _context, _many):
-                statements.append(statement.split()[0].upper())
+                statements.append("SELECT" if statement.lstrip().upper().startswith("WITH") else statement.split()[0].upper())
             calls = []
             controller = _controller(owner, calls)
             async def object_release(domain, *, owner_scope):
@@ -208,7 +208,7 @@ async def test_confirmed_terminal_handoff_reads_only_current_dependency_holds(tm
             assert await controller.release_execution_handoff("execution", tenant_id="tenant")
         finally:
             event.remove(engine, "before_cursor_execute", capture)
-        selects = [statement for statement in statements if statement.startswith("SELECT")]
+        selects = [statement for statement in statements if statement.lstrip().upper().startswith(("SELECT", "WITH"))]
         assert len(selects) == 2
         assert sum("ai_state_records" in statement for statement in selects) == 1
         assert sum(statement.startswith("UPDATE") for statement in statements) == 1
@@ -342,7 +342,7 @@ async def test_terminal_handoff_reuses_one_source_closure_read(tmp_path: Path) -
         statements = []
 
         def capture(_connection, _cursor, statement, _parameters, _context, _many):
-            statements.append(statement.split()[0].upper())
+            statements.append("SELECT" if statement.lstrip().upper().startswith("WITH") else statement.split()[0].upper())
 
         event.listen(engine, "before_cursor_execute", capture)
         try:

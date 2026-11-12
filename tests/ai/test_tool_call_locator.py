@@ -16,12 +16,11 @@ from linktools.ai.persistence import Persistence, PersistenceDomain, Persistence
 from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from linktools.ai.persistence.codec import decode_record, encode_record
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import RecordQuery, StateTransaction, StoredAlias, active_state_scope, alias_key, record_key
+from linktools.ai.persistence.state import RecordQuery, StateTransaction, active_state_scope, record_key
 from linktools.ai.persistence.repositories import ToolRepositoryImpl
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore
 
 from .test_runtime_record_cache import _record, _store
-from .test_state_fact_reader import _custom_transactions
 from .test_tool_execution_boundary import _request
 
 
@@ -61,14 +60,15 @@ async def test_tool_call_lookup_retains_direct_order_and_recovery(
             values[status.value] = await tools.reserve(replace(source, tool_operation_id=f"reserved-{status.value}",
                                                               tool_call_id=status.value, agent_run_id="resumed", status=status))
         if custom:
+            from .test_state_fact_reader import _custom_transactions
             _custom_transactions(monkeypatch, backend, _WithoutSubjectReads)
-        requested = ("CANCELLED", "call", "recovered", "EFFECT_UNKNOWN", "PENDING", "call", "missing")
-        assert await tools.get_by_call_ids("resumed", requested, tenant_id="tenant") == (
-            values["CANCELLED"], direct[-1], source_only, values["EFFECT_UNKNOWN"], values["PENDING"],
+        requested = ("reserved-CANCELLED", "last-direct", "source-only", "reserved-EFFECT_UNKNOWN", "reserved-PENDING", "last-direct", "missing")
+        assert await tools.get_operations(requested, tenant_id="tenant") == (
+            values["CANCELLED"], await tools.get_operation("last-direct", tenant_id="tenant"), source_only, values["EFFECT_UNKNOWN"], values["PENDING"],
         )
-        assert await tools.get_by_call_ids("resumed", requested, tenant_id="other") == ()
-        assert await tools.get_by_call_ids("other-run", requested, tenant_id="tenant") == ()
-        assert await tools.get_by_call_ids("resumed", (), tenant_id="tenant") == ()
+        assert await tools.get_operations(requested, tenant_id="other") == ()
+        assert await tools.get_operations(("other-operation",), tenant_id="tenant") == ()
+        assert await tools.get_operations((), tenant_id="tenant") == ()
 
 
 @pytest.mark.asyncio
@@ -106,10 +106,10 @@ async def test_exact_tool_lookup_bounds_materialized_payloads(tmp_path: Path, mo
             expected = (by_call["call-127"], by_call["call-000"])
             baseline = dict(counters)
             counters.clear()
-            assert await tools.get_by_call_ids("run", ("call-127", "call-000", "call-127"), tenant_id="tenant") == expected
+            assert await tools.get_operations(("opaque-127", "opaque-000", "opaque-127"), tenant_id="tenant") == expected
             candidate = dict(counters)
             counters.clear()
-            assert await tools.get_by_call_ids("run", (), tenant_id="tenant") == ()
+            assert await tools.get_operations((), tenant_id="tenant") == ()
             assert counters == {}
         finally:
             event.remove(engine, "before_cursor_execute", capture)
@@ -136,9 +136,9 @@ async def test_tool_subject_projection_roundtrips_and_rejects_corruption(tmp_pat
             corrupted = replace(stored, subject_id=bad_subject)
             indexes = dict(namespace="tool-locator", tenant_id="tenant", domain=PersistenceDomain.CHECKPOINT,
                            records=(corrupted,), facts=(), operations=())
-            aliases, sequences = canonical_snapshot_indexes(**indexes)
+            sequences = canonical_snapshot_indexes(**indexes)
             with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
-                validate_snapshot_domain(**indexes, aliases=aliases, sequences=sequences)
+                validate_snapshot_domain(**indexes, sequences=sequences)
         wire = encode_record(stored)
         del wire["subject"]
         with pytest.raises(AIError) as missing:
@@ -154,8 +154,8 @@ async def test_tool_locator_reopen_and_same_version_snapshot(tmp_path: Path) -> 
         source = await state.checkpoint.tools.admit(request)
         assert await state.checkpoint.tools.admit(replace(request, agent_run_id="resumed", recovery_agent_run_id="original")) == source
     async with Persistence.open("tool-locator", tenant_id="tenant", storage=storage) as state:
-        assert await state.checkpoint.tools.get_by_call("original", "call", tenant_id="tenant") == source
-        assert await state.checkpoint.tools.get_by_call("resumed", "call", tenant_id="tenant") == source
+        assert await state.checkpoint.tools.get_operation("arbitrary-source", tenant_id="tenant") == source
+        assert await state.checkpoint.tools.get_operation("arbitrary-source", tenant_id="tenant") == source
     reader = Persistence(storage)
     await reader.initialize(namespace="tool-locator", tenant_id="tenant", read_only=True)
     archive = InMemoryObjectStore()
@@ -167,8 +167,8 @@ async def test_tool_locator_reopen_and_same_version_snapshot(tmp_path: Path) -> 
     root = tmp_path / "restored"
     await Persistence.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
     async with Persistence.open("tool-locator", tenant_id="tenant", storage=PersistenceStorage.from_root(root)) as state:
-        assert await state.checkpoint.tools.get_by_call("original", "call", tenant_id="tenant") == source
-        assert await state.checkpoint.tools.get_by_call("resumed", "call", tenant_id="tenant") is None
+        assert await state.checkpoint.tools.get_operation("arbitrary-source", tenant_id="tenant") == source
+        assert await state.checkpoint.tools.get_operation("arbitrary-source", tenant_id="tenant") == source
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_record_subject_survives_shared_cache_codec(tmp_path: Path, monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sql"))
-async def test_tool_aliases_preserve_exact_unicode_case_and_component_boundaries(tmp_path: Path, backend: str) -> None:
+async def test_operation_identity_preserves_exact_unicode_case_and_component_boundaries(tmp_path: Path, backend: str) -> None:
     pairs = (("a:b", "c"), ("a", "b:c"), ("Run", "call"), ("run", "call"),
              ("é", "call"), ("e\u0301", "call"), ("run", "Call"),
              ("界" * 42 + "ab", "é" * 64))
@@ -207,10 +207,11 @@ async def test_tool_aliases_preserve_exact_unicode_case_and_component_boundaries
             assert await tools.admit(replace(request, agent_run_id=run_id, recovery_agent_run_id=request.agent_run_id)) == source
             expected.append(source)
         for (run_id, call_id), source in zip(pairs, expected, strict=True):
-            assert await tools.get_by_call(run_id, call_id, tenant_id="tenant") == source
-        aliases = await tools.state_store.read(lambda tx: tx.scan_aliases())
-        assert {value.alias_key for value in aliases} == {alias_key("tool-alias", "tenant", "checkpoint", "tool_call", pair) for pair in pairs}
-        assert len(aliases) == len(pairs)
+            assert await tools.get_operation(source.tool_operation_id, tenant_id="tenant") == source
+        from linktools.ai.execution._tool_identity import tool_operation_id
+        identities = {tool_operation_id(tenant_id="tenant", execution_id="execution", agent_run_id=run, tool_call_id=call)
+                      for run, call in pairs}
+        assert len(identities) == len(pairs)
         for field in ("agent_run_id", "tool_call_id", "recovery_agent_run_id"):
             with pytest.raises(ValueError):
                 replace(_request(), **{field: "é" * 65})
@@ -219,13 +220,13 @@ async def test_tool_aliases_preserve_exact_unicode_case_and_component_boundaries
                 replace(expected[0], **{field: "é" * 65})
         for run_id, call_id in (("é" * 65, "call"), ("run", "é" * 65)):
             with pytest.raises(AIError) as rejected:
-                await tools.get_by_call(run_id, call_id, tenant_id="tenant")
+                tool_operation_id(tenant_id="tenant", execution_id="execution", agent_run_id=run_id, tool_call_id=call_id)
             assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sql"))
-async def test_tool_recovery_alias_cannot_claim_two_targets(tmp_path: Path, backend: str) -> None:
+async def test_recovery_operation_cannot_claim_a_different_origin(tmp_path: Path, backend: str) -> None:
     async with Persistence.open("tool-alias", tenant_id="tenant", storage=_storage(backend, tmp_path / "aliases.db")) as state:
         tools = state.checkpoint.tools
         first_request = replace(_request(), agent_run_id="source-one")
@@ -234,50 +235,43 @@ async def test_tool_recovery_alias_cannot_claim_two_targets(tmp_path: Path, back
         second = await tools.admit(second_request)
         await tools.admit(replace(first_request, agent_run_id="recovered", recovery_agent_run_id="source-one"))
         with pytest.raises(AIError) as rejected:
-            await tools.admit(replace(second_request, agent_run_id="recovered", recovery_agent_run_id="source-two"))
+            await tools.admit(replace(second_request, tool_operation_id=first.tool_operation_id, agent_run_id="recovered", recovery_agent_run_id="source-two"))
         assert rejected.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-        assert await tools.get_by_call("recovered", "call", tenant_id="tenant") == first
+        assert await tools.get_operation(first.tool_operation_id, tenant_id="tenant") == first
         assert await tools.get_operation("second", tenant_id="tenant") == second
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sql"))
 @pytest.mark.parametrize("custom", (False, True))
-async def test_public_tool_repositories_isolate_recovery_aliases_on_one_store(
+async def test_public_tool_repositories_isolate_operation_ids_on_one_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, custom: bool,
 ) -> None:
     async with Persistence.open("host", tenant_id="host-tenant", storage=_storage(backend, tmp_path / "shared.db")) as state:
         store = state.checkpoint.tools.state_store
         if custom:
+            from .test_state_fact_reader import _custom_transactions
             _custom_transactions(monkeypatch, backend, _WithoutSubjectReads)
         scopes = (("namespace", "tenant"), ("other", "tenant"), ("namespace", "other"))
         repositories = [ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant) for namespace, tenant in scopes]
         sources = []
         for index, (repository, (_, tenant)) in enumerate(zip(repositories, scopes, strict=True)):
             assert await repository.get_operation("same-operation", tenant_id=tenant) is None
-            assert await repository.get_by_call("recovered", "call", tenant_id=tenant) is None
+            assert await repository.get_operation("same-operation", tenant_id=tenant) is None
             request = replace(_request(), tool_operation_id="same-operation", agent_run_id="source", execution_id=f"execution-{index}")
             source = await repository.admit(request)
             assert await repository.admit(replace(request, agent_run_id="recovered", recovery_agent_run_id="source")) == source
             sources.append(source)
         for repository, (_, tenant), source in zip(repositories, scopes, sources, strict=True):
             assert await repository.get_operation("same-operation", tenant_id=tenant) == source
-            assert await repository.get_by_call("recovered", "call", tenant_id=tenant) == source
-        for namespace, tenant in scopes[1:]:
-            corrupt = StoredAlias(alias_key(namespace, tenant, "checkpoint", "tool_call", ("foreign", "call")),
-                                  record_key("namespace", "tenant", "checkpoint", "tool_operation", ("same-operation",)))
-            async def insert_corrupt(transaction: StateTransaction) -> None:
-                target = await transaction.get_record(corrupt.record_key)
-                assert target is not None
-                assert await transaction.guard_record(
-                    target.key, expected_storage_revision=target.storage_revision,
-                )
-                await transaction.insert_alias(corrupt)
-
-            await store.mutate(insert_corrupt)
-            repository = ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant)
+            assert await repository.get_operation("same-operation", tenant_id=tenant) == source
+        # Even a custom store returning another namespace's exact record must fail closed.
+        foreign_key = record_key("namespace", "tenant", "checkpoint", "tool_operation", ("same-operation",))
+        foreign = await store.read_record(foreign_key)
+        assert foreign is not None
+        for repository in repositories[1:]:
             with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
-                await repository.get_by_call("foreign", "call", tenant_id=tenant)
+                await repository._decode(foreign, type(sources[0]))
 
 
 @pytest.mark.asyncio
@@ -289,6 +283,7 @@ async def test_public_tool_relations_isolate_shared_run_and_execution_on_one_sto
     async with Persistence.open("host", tenant_id="host", storage=_storage(backend, tmp_path / "relations.db")) as state:
         store = state.checkpoint.tools.state_store
         if custom:
+            from .test_state_fact_reader import _custom_transactions
             _custom_transactions(monkeypatch, backend, _WithoutSubjectReads)
         scopes = (("namespace", "tenant"), ("other", "tenant"), ("namespace", "other"))
         repositories = [ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant) for namespace, tenant in scopes]
@@ -298,4 +293,4 @@ async def test_public_tool_relations_isolate_shared_run_and_execution_on_one_sto
         for repository, (_, tenant), value in zip(repositories, scopes, values, strict=True):
             assert await repository.list_by_agent_run("shared-run", tenant_id=tenant) == (value,)
             assert await repository.list_by_execution("shared-execution", tenant_id=tenant) == (value,)
-            assert await repository.get_by_call_ids("shared-run", (value.tool_call_id,), tenant_id=tenant) == (value,)
+            assert await repository.get_operations((value.tool_operation_id,), tenant_id=tenant) == (value,)

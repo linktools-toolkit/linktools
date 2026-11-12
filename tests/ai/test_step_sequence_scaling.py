@@ -35,7 +35,6 @@ class _ReadTraffic:
         self, start: int, *, store_key: bytes, node_bound: int, message_bound: int,
     ) -> dict[str, list[tuple[object, ...]]]:
         batches = {"ai_step_sequences": [], "ai_step_messages": []}
-        collector_reads = 0
         for statement, parameters in self.reads[start:]:
             projection = " ".join(statement.split("FROM", 1)[0].split())
             columns = set(projection.removeprefix("SELECT ").split(", "))
@@ -47,13 +46,7 @@ class _ReadTraffic:
                     batches[table].append(parameters[2:])
                     break
             else:
-                collector_reads += 1
-                assert all(column.startswith("ai_native_content_edges.") for column in columns)
-                assert {column.split(".")[-1] for column in columns} <= {
-                    "id", "edge_kind", "source_id", "target_id", "revision", "updated_at", "created_at",
-                }
-                assert "LIMIT" in statement and 0 < parameters[-2] <= 32
-        assert collector_reads == 1
+                pytest.fail(f"Unexpected publication SQL: {statement}")
         for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
             identities = [identity for batch in batches[table] for identity in batch]
             assert 0 < len(identities) <= bound

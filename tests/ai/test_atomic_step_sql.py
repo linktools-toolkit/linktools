@@ -44,7 +44,7 @@ def _records() -> tuple[RunRecord, list[StepEvent], ContinuableSnapshot]:
 
 
 @pytest.mark.asyncio
-async def test_compound_native_records_use_one_owner_commit_and_bounded_maintenance(
+async def test_compound_native_records_use_one_owner_commit_without_online_maintenance(
     atomic_store: tuple[SqlStepStore, AsyncEngine], record_property,
 ) -> None:
     store, engine = atomic_store
@@ -72,10 +72,7 @@ async def test_compound_native_records_use_one_owner_commit_and_bounded_maintena
         assert len(owners) == 1
         assert owners[0].count(("INSERT", "ai_step_snapshots")) == 1
         maintenance = [group for group in commits if group is not owners[0]]
-        assert len(maintenance) <= 1
-        assert all(verb == "DELETE" and table in {
-            "ai_native_content_edges", "ai_step_sequences", "ai_step_messages",
-        } for group in maintenance for verb, table in group)
+        assert maintenance == []
         record_property("native_owner_commits", len(owners))
         record_property("native_maintenance_commits", len(maintenance))
 

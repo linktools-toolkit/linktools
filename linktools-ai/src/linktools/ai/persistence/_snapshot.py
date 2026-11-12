@@ -17,7 +17,13 @@ from ..storage import ObjectRef
 
 
 class SnapshotExclusiveGuard(Protocol):
-    """Quiesce every mutation source that can affect a portable snapshot."""
+    """Stop and drain all users of every participating physical store.
+
+    The caller must exclude reads and writes across processes, adapters and
+    routed groups until the context exits. This is an application-level
+    maintenance contract, not a database lock. Offline reclamation invalidates
+    content evidence before users may reopen the stores.
+    """
 
     def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 

@@ -1096,12 +1096,10 @@ class SqlStepStore:
                     continue
                 inserted = await session.execute(table.insert().values(**dict(row)))
                 if name == "snapshots" and not row["pruned"]:
-                    from ._native_content_index import replace_edges, resolve_targets
+                    from ._native_content_index import resolve_targets
                     root = self.snapshot_message_sequence(row)
                     targets = await resolve_targets(session, "sequence", self._store_key,
                                                     tuple(span.first for span in root.slices))
-                    await replace_edges(self._context, session, "snapshot",
-                                        inserted.inserted_primary_key[0], tuple(targets.values()))
         self.invalidate_context(self._context)
 
     @classmethod
@@ -1528,14 +1526,12 @@ class SqlStepStore:
         if run is None and not events and snapshot is None:
             return
         prepared = await self.prepare_step(run=run, events=events, snapshot=snapshot)
-        from ._native_content_index import maintain_native_content, run_native_mutation
-        receipt, maintenance = await run_native_mutation(self._context,
+        from ._native_content_index import run_native_mutation
+        receipt = await run_native_mutation(self._context,
             lambda session: self._write_prepared_step(session, prepared), domain="steps.boundary",
         )
         self.confirm_prepared_step(receipt)
         self._publish_receipt(receipt)
-        if maintenance:
-            await maintain_native_content(self._context, store_keys=(self._store_key,))
 
     async def commit_step_receipt(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
@@ -1555,11 +1551,9 @@ class SqlStepStore:
         async def write(session: "AsyncSession") -> StepWriteReceipt:
             return await self._write_snapshot(session, *prepared)
 
-        from ._native_content_index import maintain_native_content, run_native_mutation
-        receipt, maintenance = await run_native_mutation(self._context, write, domain="steps.snapshot")
+        from ._native_content_index import run_native_mutation
+        receipt = await run_native_mutation(self._context, write, domain="steps.snapshot")
         self.confirm_prepared_step(receipt)
-        if maintenance:
-            await maintain_native_content(self._context, store_keys=(self._store_key,))
 
     async def _prepare_snapshot(
         self, snapshot: ContinuableSnapshot,
@@ -1620,11 +1614,9 @@ class SqlStepStore:
         if snapshot_id is None:
             raise RuntimeError("snapshot insertion did not return its physical identity")
         content = await self._message_content.publish_in_session(session, prepared, owner_inserted=True)
-        from ._native_content_index import replace_edges
         targets = content.publication_targets(
             session, store_key=self._store_key, roots=tuple(span.first for span in prepared.root.slices),
         )
-        await replace_edges(self._context, session, "snapshot", snapshot_id, targets)
         await self._prune_snapshots(session, values["run_id"])
         return StepWriteReceipt((), (), native_messages=content)
 
@@ -1699,7 +1691,6 @@ class SqlStepStore:
         if last_complete is not None:
             complete_safe = or_(complete_safe, table.c.id < last_complete)
         conditions += (complete_safe,)
-        from ._native_content_index import replace_edges
         after = 0
         while True:
             retired = (await session.execute(select(table.c.id).where(
@@ -1711,9 +1702,6 @@ class SqlStepStore:
             await session.execute(table.update().where(
                 *self._run_predicates(table, run_id), table.c.id.in_(ids),
             ).values(pruned=True, messages="{}", sequence_root=None))
-            for row in retired:
-                await replace_edges(self._context, session, "snapshot",
-                                    row.id, ())
             after = retired[-1].id
             if len(retired) < 128:
                 break

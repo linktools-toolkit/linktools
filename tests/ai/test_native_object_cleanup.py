@@ -19,14 +19,6 @@ from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from .test_step_content_cleanup import _Offline, _snapshot
 
 
-@pytest.fixture(autouse=True)
-def _exercise_offline_reclamation(monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.persistence import _native_content_index
-    async def defer(_context, **kwargs):
-        pass
-    monkeypatch.setattr(_native_content_index, "maintain_native_content", defer)
-
-
 @asynccontextmanager
 async def _owners(path: Path):
     async with Persistence.open("native-gc", tenant_id="one", storage=PersistenceStorage.sqlite(path)) as state:
@@ -51,10 +43,9 @@ async def _bodies(native: SqlStepStore) -> dict[tuple[str, str], ContentRecord]:
 
 
 @pytest.mark.asyncio
-async def test_offline_cleanup_releases_shared_content_for_online_collection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_only_offline_cleanup_releases_shared_content(
+    tmp_path: Path,
 ) -> None:
-    from linktools.ai.persistence import _native_content_index
 
     async with _owners(tmp_path / "online-resume.db") as (state, native, foreign, archive):
         await native.save_snapshot(_snapshot("run", 1, "shared", "retired"))
@@ -66,11 +57,12 @@ async def test_offline_cleanup_releases_shared_content_for_online_collection(
         assert await native.latest_snapshot(run_id="run") == latest
         assert await foreign.latest_snapshot(run_id="foreign") == foreign_snapshot
 
-        monkeypatch.undo()
         await native.save_snapshot(_snapshot("run", 3))
-        await _native_content_index.maintain_native_content(
-            native.storage_context, store_keys=(native.store_key,),
-        )
+        async with native.storage_context.engine.connect() as connection:
+            assert await connection.scalar(text(
+                "SELECT count(*) FROM ai_step_messages WHERE store_key = :store"
+            ), {"store": native.store_key}) > 0
+        await state.purge_unreferenced_objects((), exclusive=_Offline())
         async with native.storage_context.engine.connect() as connection:
             for table in ("ai_step_sequences", "ai_step_messages"):
                 assert await connection.scalar(text(
@@ -78,8 +70,9 @@ async def test_offline_cleanup_releases_shared_content_for_online_collection(
                 ), {"store": native.store_key}) == 0
         assert await foreign.latest_snapshot(run_id="foreign") == foreign_snapshot
         await foreign.save_snapshot(_snapshot("foreign", 2))
+        await state.purge_unreferenced_objects((), exclusive=_Offline())
         async with native.storage_context.engine.connect() as connection:
-            for table in ("ai_step_sequences", "ai_step_messages", "ai_native_content_edges"):
+            for table in ("ai_step_sequences", "ai_step_messages"):
                 assert await connection.scalar(text(f"SELECT count(*) FROM {table}")) == 0
 
 
@@ -141,10 +134,6 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
         reference, = next(iter(before.values())).object_refs()
         await native.save_snapshot(_snapshot("retired", 2))
         context = native.storage_context
-        async with context.engine.connect() as connection:
-            edges_before = (await connection.execute(text(
-                "SELECT edge_kind, source_id, target_id, revision FROM ai_native_content_edges ORDER BY id"
-            ))).all()
         original = type(context).run_mutation
 
         async def unacknowledged(context, callback, **kwargs):
@@ -177,10 +166,6 @@ async def test_native_cleanup_failure_never_deletes_objects_and_expires_write_pr
         assert await _bodies(native) == (before if outcome == "rollback" else {})
         async with context.engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == (1 if outcome == "rollback" else 0)
-            edges_after = (await connection.execute(text(
-                "SELECT edge_kind, source_id, target_id, revision FROM ai_native_content_edges ORDER BY id"
-            ))).all()
-            assert edges_after == (edges_before if outcome == "rollback" else [])
         revived = replace(retired, run_id="revived")
         await native.save_snapshot(revived)
         reader = SqlStepStore(context, namespace="native-gc", tenant_id="one", max_cached_messages=0)

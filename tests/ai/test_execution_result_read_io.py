@@ -94,7 +94,7 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
         # The default policy never suspends, so Runtime reuses its authorized source record.
         limit = 2 if history else 1
         assert reads <= limit
-        assert sum(item.lstrip().upper().startswith("SELECT") for item in statements) <= limit
+        assert sum(item.lstrip().upper().startswith(("SELECT", "WITH")) for item in statements) <= limit
     finally:
         await state.close()
 

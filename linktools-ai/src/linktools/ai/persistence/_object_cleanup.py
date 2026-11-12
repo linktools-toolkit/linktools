@@ -489,7 +489,6 @@ async def _purge_unreferenced_objects(
     # outer guard invalidates cached content proofs before admitting writers.
     for group, (closure, bodies, domain, group_id, sequence_ids) in native_groups.items():
         from sqlalchemy import delete, select
-        from ._native_content_index import replace_owner_edges
 
         native_metadata = build_step_sql_metadata()
         unused = (
@@ -507,20 +506,6 @@ async def _purge_unreferenced_objects(
                 for store_key, scoped_ids in by_store.items():
                     for offset in range(0, len(scoped_ids), 128):
                         batch = scoped_ids[offset:offset + 128]
-                        target_ids = select(table.c.id).where(
-                            table.c.store_locator == native_store_locator(store_key),
-                            table.c.store_key == store_key, table.c.sha256.in_(batch),
-                        )
-                        if table is native_metadata.tables["ai_step_sequences"]:
-                            await replace_owner_edges(group.context, session, "sequence", target_ids, ())
-                            await replace_owner_edges(group.context, session, "message", target_ids, ())
-                            edge_kinds = ("record", "fact", "operation", "snapshot", "sequence", "candidate_sequence")
-                        else:
-                            edge_kinds = ("message", "candidate_message")
-                        edges = native_metadata.tables["ai_native_content_edges"]
-                        await session.execute(delete(edges).where(
-                            edges.c.edge_kind.in_(edge_kinds), edges.c.target_id.in_(target_ids),
-                        ))
                         removed = await session.execute(delete(table).where(
                             table.c.store_locator == native_store_locator(store_key),
                             table.c.store_key == store_key, table.c.sha256.in_(batch),

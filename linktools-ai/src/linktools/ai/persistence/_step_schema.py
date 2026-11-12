@@ -158,22 +158,8 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
             digest("left_sha256", "Immutable left subtree root.", nullable=True),
             digest("right_sha256", "Immutable right subtree root.", nullable=True),
             digest("next_sha256", "Next immutable tree in the sequence forest.", nullable=True),
-            Column("gc_revision", BigInteger, nullable=False, server_default=sql_text("0"),
-                   comment="Optimistic native dependency publication fence."),
         )
         sql_unique(sequences, "store_locator", "sha256")
-
-    if "ai_native_content_edges" not in metadata.tables:
-        edges = table(
-            "ai_native_content_edges", "Rebuildable native content dependencies and reclamation candidates.",
-            Column("edge_kind", sql_state(), nullable=False, comment="Physical source and target table relationship."),
-            Column("source_id", BigInteger, nullable=False, comment="Source table surrogate identifier; zero for candidates."),
-            Column("target_id", BigInteger, nullable=False, comment="Native target table surrogate identifier."),
-            Column("revision", BigInteger, nullable=False, server_default=sql_text("0"),
-                   comment="Candidate enqueue revision protecting concurrent reclamation."),
-        )
-        sql_unique(edges, "edge_kind", "source_id", "target_id")
-        sql_query_index(edges, "target_id", "edge_kind")
 
     return metadata
 
@@ -191,7 +177,7 @@ def build_step_domain_sql_metadata(domains: "Iterable[PersistenceDomain]", *, me
     existing = set(metadata.tables)
     build_step_sql_metadata(metadata=metadata)
     if PersistenceDomain.CHECKPOINT not in selected:
-        keep = {"ai_step_runs", "ai_step_messages", "ai_step_sequences", "ai_native_content_edges"}
+        keep = {"ai_step_runs", "ai_step_messages", "ai_step_sequences"}
         if selected.intersection({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}):
             keep.update({"ai_step_runs", "ai_step_events"})
         for name in set(metadata.tables) - existing - keep:

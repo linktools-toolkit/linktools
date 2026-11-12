@@ -161,6 +161,104 @@ class _SqlGroupTransaction:
             for store, keys in unique.items()
         }
 
+    async def read_content_references(
+        self, *, owner_store: StateStore, owner_keys: Sequence[bytes], content_store: StateStore,
+        content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
+    ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]] | None:
+        from ._archive import archive_scope_parts, validate_archive_content_identity
+        from ._content_reference_sql import content_reference_statement
+        from ._step_payload_owner import payload_record_from_row
+
+        active_state_group_transaction(self._group, (owner_store, content_store), writable=False)
+        active = active_state_scope()
+        if active is None or active.record_reader is not self:
+            raise StateTransactionNestingError("content source reader is outside its transaction")
+        owner, content = self.transaction(owner_store), self.transaction(content_store)
+        dialect = owner._context.dialect.name
+        if dialect not in {"sqlite", "mysql", "postgresql"}:
+            return None
+        paths = tuple(dict.fromkeys(content_paths))
+        if (not paths or len(paths) > 16 or any(not path or len(path) > 16
+                or any(not isinstance(part, str) or not part for part in path) for path in paths)):
+            raise ValueError("content references require bounded explicit JSON paths")
+        keys = tuple(dict.fromkeys(validate_record_key(key) for key in owner_keys))
+        namespace, tenant = archive_scope_parts(content_scope_key)
+        required = []
+        for key in keys:
+            if key not in owner._record_cache:
+                required.append(key)
+                continue
+            record = owner._record_cache[key]
+            if record is None:
+                continue
+            for path in paths:
+                value = record.data
+                for part in path:
+                    value = value.get(part) if isinstance(value, Mapping) else None
+                if not isinstance(value, str):
+                    continue
+                try:
+                    identity = validate_archive_content_identity(value)
+                except AIError:
+                    continue
+                target = record_key(namespace, tenant, "archive", "archive_content", (identity,))
+                if target not in content._record_cache:
+                    required.append(key)
+                    break
+        found: dict[StateStore, dict[bytes, StoredRecord]] = {owner_store: {}, content_store: {}}
+        offset = 0
+        while offset < len(required):
+            size = min(200, len(required) - offset)
+            while True:
+                batch = tuple(required[offset:offset + size])
+                statement = content_reference_statement(
+                    self._group.metadata, dialect=dialect, owner_store_key=owner._store_key, owner_keys=batch,
+                    content_store_key=content._store_key, content_scope_key=content_scope_key, content_paths=paths,
+                    typed_payloads=content._store_key == STATE_GROUP_ARCHIVE_KEY,
+                )
+                compiled = statement.compile(dialect=owner._context.engine.dialect,
+                                             compile_kwargs={"render_postcompile": True})
+                count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
+                if count <= _GROUP_RECORD_BIND_BUDGET:
+                    break
+                if size == 1:
+                    raise ValueError("content reference read exceeds the SQL parameter budget")
+                size = max(1, size // 2)
+            offset += size
+            for row in (await owner._execute(statement)).mappings():
+                kind = row["source_kind"]
+                if kind == 2:
+                    record = payload_record_from_row({key.removeprefix("typed_"): value
+                        for key, value in row.items() if key.startswith("typed_")})
+                    target_store, transaction = content_store, content
+                else:
+                    target_store, transaction = (owner_store, owner) if kind == 0 else (content_store, content)
+                    if kind not in {0, 1} or row["store_key"] != transaction._store_key:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    record = _record_from_row(row)
+                    if kind == 0 and record.key not in batch:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                transaction._record_cache[record.key] = record
+                found[target_store][record.key] = record
+            for key in batch:
+                owner._record_cache.setdefault(key, None)
+        found[owner_store].update((key, record) for key in keys if (record := owner._record_cache.get(key)) is not None)
+        for record in tuple(found[owner_store].values()):
+            for path in paths:
+                value = record.data
+                for part in path:
+                    value = value.get(part) if isinstance(value, Mapping) else None
+                if not isinstance(value, str):
+                    continue
+                try:
+                    identity = validate_archive_content_identity(value)
+                except AIError:
+                    continue
+                target = record_key(namespace, tenant, "archive", "archive_content", (identity,))
+                if (source := content._record_cache.get(target)) is not None:
+                    found[content_store][target] = source
+        return found
+
     @classmethod
     def _record_read_batches(
         cls, requests: Mapping[StateStore, Sequence[bytes]],
@@ -193,6 +291,14 @@ class _SqlGroupTransaction:
             table.c.store_key == self.transaction(store)._store_key,
             _keys_match(table.c.key, tuple(validate_record_key(key) for key in keys)),
         ) for store, keys in requests.items())))
+
+
+def _payload_table(metadata: "MetaData") -> "Table":
+    """Resolve the shared content owner without implicit schema provisioning."""
+    from ._step_schema import build_step_sql_metadata
+
+    table = metadata.tables.get("ai_step_messages")
+    return build_step_sql_metadata().tables["ai_step_messages"] if table is None else table
 
 
 class SqlStateStorageGroup:
@@ -228,12 +334,12 @@ class SqlStateStorageGroup:
         self._archive_scope_initialized = False
         self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
-        self._native_partitions: set[bytes] = set()
         self._native_content_index = native_content_index
 
     def bind_native_partition(self, store_key: bytes) -> None:
-        """Limit automatic physical maintenance to explicitly bound native owners."""
-        self._native_partitions.add(store_key)
+        """Enable publication validation for explicitly provisioned Native tables."""
+        from ..steps import native_store_locator
+        native_store_locator(store_key)
         self._native_content_index = True
 
     def add_member(self, store: "SqlStateStore") -> None:
@@ -262,7 +368,7 @@ class SqlStateStorageGroup:
                              "ai_state_counters", "ai_state_operations")
             ]
             if key == STATE_GROUP_ARCHIVE_KEY:
-                messages = self._metadata.tables["ai_step_messages"]
+                messages = _payload_table(self._metadata)
                 statements.append(select(literal(key)).where(func.substr(messages.c.store_key, 1, 14) == b"\x00\x0cstep_payload"))
             async with self._session() as session:
                 result = await self._context.run_statement(session.execute(union(*statements).limit(1)))
@@ -400,7 +506,7 @@ class SqlStateStorageGroup:
             for name in (*RECORD_OWNER_TABLES, "ai_state_facts",
                          "ai_state_counters", "ai_state_operations")
         ]
-        messages = self._metadata.tables["ai_step_messages"]
+        messages = _payload_table(self._metadata)
         statements.append(select(literal(STATE_GROUP_ARCHIVE_KEY)).where(
             func.substr(messages.c.store_key, 1, 14) == b"\x00\x0cstep_payload"))
         async with self._session() as session:
@@ -575,15 +681,13 @@ class SqlStateStorageGroup:
         if lock is not None:
             await lock.acquire()
         try:
-            from ._native_content_index import maintain_native_content, run_native_mutation
-            result, maintenance = await run_native_mutation(self._context, execute, domain="runtime.state.group")
+            from ._native_content_index import run_native_mutation
+            result = await run_native_mutation(self._context, execute, domain="runtime.state.group")
             confirmed = True
             if pending_archive_scope is not None:
                 self._opened_archive = pending_archive_scope, self._archive_member
             if self._archive_on_mutation:
                 self._archive_scope_initialized = True
-            if maintenance and self._native_partitions:
-                await maintain_native_content(self._context, store_keys=tuple(self._native_partitions))
             return result
         except asyncio.CancelledError:
             raise
@@ -1057,7 +1161,7 @@ class _SqlTransaction:
             if next(iter_native_message_roots(data), None) is not None:
                 error = AIError(
                     ErrorCode.STORAGE_CAPABILITY_MISSING,
-                    "Native content owners require an explicitly provisioned native content index",
+                    "Native content owners require an explicitly provisioned native content tables",
                 )
                 self._abort_mutation(error)
                 raise error
@@ -1076,23 +1180,13 @@ class _SqlTransaction:
         if previous is not None:
             from ._archive_closure import iter_native_message_roots
             # The successful owner CAS validates the transaction's old revision.
-            # Without old roots and new roots there are no edges to retire.
+            # An update without Native roots needs no publication validation.
             if (next(iter_native_message_roots(self._native_record_owner_data(previous)), None) is None
                     and next(iter_native_message_roots(data), None) is None):
                 return
         self._stage_native_owner(record_owner_edge(record.key), (validate_record_key(record.key),), data, state=record.state, inserting=inserting)
 
-    async def _retire_native_rows(self, kind: str, table: "Table", *conditions: "ColumnElement[bool]") -> None:
-        if not self._native_content_index:
-            return
-        from sqlalchemy import select
-        from ._native_content_index import replace_owner_edges
-        await replace_owner_edges(self._context, self._session, kind, select(table.c.id).where(*conditions), ())
 
-    async def _retire_native_facts(self, owner_keys: Sequence[bytes]) -> None:
-        table = self._table("ai_state_facts")
-        await self._retire_native_rows("fact", table,
-            table.c.store_key == self._store_key, _keys_match(table.c.owner_key, owner_keys))
 
     def _abort_mutation(self, error: BaseException) -> None:
         if self._mutation_error is None:
@@ -1822,9 +1916,6 @@ class _SqlTransaction:
                 if guarded.rowcount != len(current):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 cas_conditions = tuple((key, revision + 1) for key, revision in cas_conditions)
-                await self._retire_native_facts(record_keys)
-                await self._retire_native_rows(record_owner_edge(record_keys[0]), table,
-                    table.c.store_key == self._store_key, _keys_match(table.c.key, record_keys))
                 # Deleting the CAS-matched owners fences concurrent fact writers.
                 result = await self._execute(
                     delete(table).where(
@@ -1881,7 +1972,6 @@ class _SqlTransaction:
             return False
         if self._is_payload_key(key):
             try:
-                await self._retire_native_facts((key,))
                 facts = self._table("ai_state_facts")
                 await self._execute(delete(facts).where(facts.c.store_key == self._store_key,
                                                        _key_matches(facts.c.owner_key, key)))
@@ -1902,9 +1992,6 @@ class _SqlTransaction:
         )
         children_changed = False
         try:
-            await self._retire_native_facts((validate_record_key(key),))
-            await self._retire_native_rows(record_owner_edge(key), table,
-                table.c.store_key == self._store_key, _key_matches(table.c.key, validate_record_key(key)))
             children_changed = True
             await self._execute(
                 delete(self._table("ai_state_facts")).where(
@@ -2349,7 +2436,6 @@ class _SqlTransaction:
                 owner_key, expected_storage_revision=current.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await self._retire_native_facts((validate_record_key(owner_key),))
 
         await self._execute(
             delete(self._table("ai_state_facts")).where(
@@ -2486,8 +2572,6 @@ class _SqlTransaction:
                     raise error
             for offset in range(0, len(values), _RAW_KEY_BATCH_SIZE):
                 keys = tuple(value.key for value in values[offset:offset + _RAW_KEY_BATCH_SIZE])
-                await self._retire_native_rows("operation", table,
-                    table.c.store_key == self._store_key, _keys_match(table.c.operation_key, keys))
                 await self._execute(delete(table).where(
                     table.c.store_key == self._store_key, _keys_match(table.c.operation_key, keys),
                 ))
@@ -2519,7 +2603,7 @@ class _SqlTransaction:
 
     def _payload_owner(self):
         from ._step_payload_sql import StepPayloadSql
-        return StepPayloadSql(self._table("ai_step_messages"), self._execute, self._context, self._session)
+        return StepPayloadSql(_payload_table(self._metadata), self._execute, self._context, self._session)
 
     def _table(self, name: str) -> "Table":
         try:

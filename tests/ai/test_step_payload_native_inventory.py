@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """A shared bytes relation does not merge typed payload and Native ownership."""
 import hashlib
 from pathlib import Path
@@ -7,14 +9,14 @@ from sqlalchemy import insert, select
 from linktools.ai.errors import AIError
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import Persistence, PersistenceStorage
-from linktools.ai.persistence._native_content_index import collect_native_content, enqueue
+from .test_step_content_cleanup import _Offline
 from linktools.ai.persistence._step_maintenance import native_message_partitions
 from linktools.ai.persistence._step_payload_owner import payload_store_key, payload_store_locator
 from linktools.ai.persistence._step_schema import build_step_sql_metadata
 from linktools.ai.steps import native_store_key, native_store_locator
 
 @pytest.mark.asyncio
-async def test_same_digest_payload_partition_is_not_a_native_gc_candidate(tmp_path: Path) -> None:
+async def test_same_digest_payload_partition_is_not_in_native_offline_closure(tmp_path: Path) -> None:
     async with Persistence.open("shared-bytes", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "content.db")) as state:
         native = await state.create_step_store()
         try:
@@ -30,11 +32,10 @@ async def test_same_digest_payload_partition_is_not_a_native_gc_candidate(tmp_pa
                      "compression": "raw", "raw_size": len(raw), "payload_json": None}
                     for key, locator in ((model_key, native_store_locator(model_key)), (payload_key, payload_store_locator(payload_key)))])
                 assert await native_message_partitions(context, session, table) == (model_key,)
-                for identity in (await session.execute(select(table.c.id))).scalars():
-                    await enqueue(context, session, "message", identity)
-                await collect_native_content(context, session, store_keys=(model_key,))
+                await session.commit()
+            await native.purge_unreferenced_content(exclusive=_Offline())
+            async with context.sessions() as session:
                 assert (await session.execute(select(table.c.store_key, table.c.sha256))).all() == [(payload_key, digest)]
-                await session.rollback()
         finally:
             await native.close()
 

@@ -292,7 +292,6 @@ CREATE TABLE ai_step_sequences (
 	left_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Immutable left subtree root.',
 	right_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Immutable right subtree root.',
 	next_sha256 CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Next immutable tree in the sequence forest.',
-	gc_revision BIGINT NOT NULL COMMENT 'Optimistic native dependency publication fence.' DEFAULT 0,
 	store_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete store_key; raw identity must also match.',
 	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
@@ -326,21 +325,6 @@ CREATE TABLE ai_step_snapshots (
 	UNIQUE KEY uk_store_locator_run_id_idempotency_key (store_locator, run_id, idempotency_key)
 )ENGINE=InnoDB COMMENT='Upstream complete or interrupted message-history snapshots.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-
-CREATE TABLE ai_native_content_edges (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	edge_kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Physical source and target table relationship.',
-	source_id BIGINT NOT NULL COMMENT 'Source table surrogate identifier; zero for candidates.',
-	target_id BIGINT NOT NULL COMMENT 'Native target table surrogate identifier.',
-	revision BIGINT NOT NULL COMMENT 'Candidate enqueue revision protecting concurrent reclamation.' DEFAULT 0,
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_target_id_edge_kind (target_id, edge_kind),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_edge_kind_source_id_target_id (edge_kind, source_id, target_id)
-)ENGINE=InnoDB COMMENT='Rebuildable native content dependencies and reclamation candidates.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
 CREATE TABLE ai_trace_events (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,

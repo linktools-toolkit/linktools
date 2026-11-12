@@ -16,7 +16,8 @@ from ..execution import ExecutionRecord, ExecutionTimelineRecord, PendingToolCon
 from ..model import StoredUserInput
 from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
-from ._archive import archive_content_scope, archive_content_identity, ContentArchive, ContentRecord, PreparedArchive
+from ._archive_read import ContentReferenceReader
+from ._archive import archive_scope_key, archive_content_scope, archive_content_identity, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
 from ._message_root import NativeTextReference, NativeUserInputReference, NativeMessageRoot
 from ..steps import native_store_key
@@ -265,6 +266,38 @@ class ExecutionContent:
                                    or self._content_archive.store not in active.transactions):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return self._content_archive
+
+    async def prefetch_projection_owners(
+        self, keys: Sequence[bytes], *, bindings: bool = False, result: bool = False,
+        result_body: bool = False, recovery: bool = False, terminal_details: bool = False,
+    ) -> None:
+        """Capture current control rows and only the immutable slots consumed next."""
+        active = active_state_scope()
+        if (not keys or active is None or active.group is not self._store.storage_group
+                or not isinstance(active.record_reader, ContentReferenceReader)
+                or self._store.storage_group.opened_archive is None):
+            return
+        paths = [("runtime_policy", "$runtime_policy")]
+        if bindings:
+            paths.append(("binding", "$execution_binding"))
+        if result:
+            paths.append(("result", "fields", "content", "$execution_payload"))
+        if result_body:
+            paths.append(("result", "fields", "output", "fields", "content", "$execution_payload"))
+        if terminal_details:
+            paths.append(("terminal_details", "fields", "content", "$execution_payload"))
+        if recovery:
+            paths.extend((
+                ("recovery", "fields", "pending_tools", "fields", "content", "$execution_payload"),
+                ("recovery", "fields", "terminal_handoff", "fields", "content", "$execution_payload"),
+                ("recovery", "fields", "terminal_handoff", "fields", "terminal_details", "fields", "content", "$execution_payload"),
+            ))
+        archive = await self._archive()
+        await active.record_reader.read_content_references(
+            owner_store=self._store, owner_keys=keys, content_store=archive.store,
+            content_scope_key=archive_scope_key(self._namespace, self._tenant_id),
+            content_paths=tuple(("value", "payload", "fields", *path) for path in paths),
+        )
 
     async def prefetch_configuration_owner(self, hint: StoredRecord) -> None:
         """Use earlier reference addresses only to batch a fresh owner observation."""

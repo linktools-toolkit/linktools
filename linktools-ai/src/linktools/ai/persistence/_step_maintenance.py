@@ -228,18 +228,6 @@ async def purge_step_content(
         for table, identities in ((sequences, unused_nodes), (messages, unused_messages)):
             for offset in range(0, len(identities), 128):
                 batch = identities[offset:offset + 128]
-                from ._native_content_index import replace_owner_edges
-                if table is sequences:
-                    sources = select(table.c.id).where(table.c.store_locator == locator, table.c.store_key == store_key, table.c.sha256.in_(batch))
-                    await replace_owner_edges(context, session, "sequence", sources, ())
-                    await replace_owner_edges(context, session, "message", sources, ())
-                edge_table = metadata.tables["ai_native_content_edges"]
-                target_ids = select(table.c.id).where(table.c.store_locator == locator, table.c.store_key == store_key, table.c.sha256.in_(batch))
-                edge_kinds = (("record", "fact", "operation", "snapshot", "sequence", "candidate_sequence")
-                              if table is sequences else ("message", "candidate_message"))
-                await session.execute(delete(edge_table).where(
-                    edge_table.c.edge_kind.in_(edge_kinds), edge_table.c.target_id.in_(target_ids),
-                ))
                 removed = await session.execute(delete(table).where(
                     table.c.store_locator == locator, table.c.store_key == store_key, table.c.sha256.in_(batch),
                 ))
