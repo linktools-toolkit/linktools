@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 from .test_execution_recovery_commands import _execution
 
 import pytest
-from linktools.ai.core import canonical_sha256
+from linktools.ai.core import PersistenceDomain, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
-from linktools.ai.runtime._repository_instruction_overlay import RepositoryInstructionOverlay
+from linktools.ai.inputs import RepositoryInstructionPayload
 from linktools.ai.persistence.contracts import (
     ExecutionRecoveryDetail,
     RepositoryInstructionBarrier,
@@ -77,10 +77,10 @@ def _checkpoint(
         "call-b",
         canonical_sha256({"path": "pkg/deep/file.txt"}),
     )
-    reference = RepositoryInstructionOverlay(
+    reference = RepositoryInstructionPayload(
         canonical_sha256(latest.to_payload()) if latest_payload_digest is None else latest_payload_digest,
         latest.to_payload(),
-    ).to_reference()
+    ).to_reference(PersistenceDomain.CHECKPOINT)
     checkpoint = replace(_execution(datetime.now(timezone.utc)), recovery=ExecutionRecoveryDetail(
         agent_run_id="step",
         repository_instruction_overlay=reference,
@@ -186,7 +186,7 @@ async def test_dynamic_instruction_union_limits_precede_barrier_commit(tmp_path,
     if kind == "overlay":
         persisted = RepositoryInstructions((child,))
         checkpoint = replace(checkpoint, recovery=replace(checkpoint.recovery,
-            repository_instruction_overlay=RepositoryInstructionOverlay.capture(persisted, persisted.to_payload()).to_reference(),
+            repository_instruction_overlay=RepositoryInstructionPayload.capture(persisted, persisted.to_payload()).to_reference(PersistenceDomain.CHECKPOINT),
             repository_instruction_barriers=(RepositoryInstructionBarrier("earlier", "first", "a" * 64),)))
 
     class Port(_Port):

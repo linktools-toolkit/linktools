@@ -13,7 +13,7 @@ from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy, ExecutionStatus, PersistenceDomain, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionInputContext, RuntimePayloadRef
-from linktools.ai.inputs import ExecutionInputMaterializer
+from linktools.ai.inputs import ExecutionInputMaterializer, RepositoryInstructionPayload
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.codec import decode_domain, encode_domain
 from linktools.ai.persistence.objects import ObjectKeyFactory
@@ -66,7 +66,7 @@ async def test_large_instructions_stay_with_the_execution_owner() -> None:
     instructions = RepositoryInstructions((
         RepositoryInstructionDocument("agents:AGENTS.md", ".", "rule" * 30000),
     ))
-    payload = StoredPayload.inline_json(instructions.to_payload())
+    payload = RepositoryInstructionPayload.capture(instructions, instructions.to_payload()).to_reference(PersistenceDomain.EXECUTION).payload
     captured = replace(_record(ExecutionStatus.PENDING_START, 0),
                        repository_instructions=RuntimePayloadRef(payload, PersistenceDomain.EXECUTION))
     placed = await _materialize_execution_payloads(
@@ -74,7 +74,7 @@ async def test_large_instructions_stay_with_the_execution_owner() -> None:
     )
     reference = placed.repository_instructions.payload
     assert reference is payload
-    assert reference.decode() == instructions.to_payload()
+    assert reference.decode()["instructions"] == instructions.to_payload()
     assert objects.writes == []
     assert captured.repository_instructions.payload is payload
     assert captured.repository_instructions.payload.kind == "inline"
@@ -88,7 +88,7 @@ async def test_captured_context_owns_instruction_bytes_without_separate_object_w
     ))
     context = ExecutionInputContext.from_messages((), repository_instructions=instructions.to_payload())
     captured = replace(_record(ExecutionStatus.PENDING_START, 0),
-        repository_instructions=RuntimePayloadRef(StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.EXECUTION),
+        repository_instructions=RepositoryInstructionPayload.capture(instructions, instructions.to_payload()).to_reference(PersistenceDomain.EXECUTION),
         input_context=RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION))
     placed = await _materialize_execution_payloads(
         captured, input_materializer=None, tenant_id="tenant",

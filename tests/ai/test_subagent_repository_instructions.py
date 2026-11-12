@@ -18,6 +18,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.model import create_model
 from linktools.ai.execution import ExecutionRequest
+from linktools.ai.inputs import ExecutionContextArchive, RepositoryInstructionPayload
 from linktools.ai.persistence import PersistenceDomain, PersistenceStorage
 from linktools.ai.execution.events import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
@@ -132,7 +133,7 @@ def _pin(content: str) -> tuple[RepositoryInstructions, RuntimePayloadRef]:
     )
     return (
         instructions,
-        RuntimePayloadRef(StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.EXECUTION),
+        RepositoryInstructionPayload.capture(instructions, instructions.to_payload()).to_reference(PersistenceDomain.EXECUTION),
     )
 
 
@@ -177,6 +178,7 @@ def _service(
     *,
     resolver: _Resolver | None,
     ids: tuple[str, ...],
+    context_archive: ExecutionContextArchive | None = None,
 ) -> DefaultExecutionService:
     kwargs: dict[str, object] = {}
     if resolver is not None:
@@ -198,6 +200,7 @@ def _service(
         live_broker=LiveExecutionEventBroker(),
         operation_ids=iter(ids).__next__,
         history_reader=_History(),
+        context_archive=context_archive,
         **kwargs,
     )
 
@@ -281,7 +284,7 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
         )
         child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert child is not None and child.repository_instructions is not None
-        assert child.repository_instructions.payload.digest == StoredPayload.inline_json(
+        assert RepositoryInstructionPayload.from_reference(child.repository_instructions).semantic_digest == StoredPayload.inline_json(
             root.to_payload()
         ).digest
         assert resolver.calls == ["."]
@@ -349,3 +352,47 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
         assert resolver.calls == ["."]
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_context", (False, True))
+async def test_child_retains_parent_rule_version_after_head_deletion(
+    monkeypatch: pytest.MonkeyPatch, from_context: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+    from linktools.ai.asset import AssetKey
+    from linktools.ai.core import canonical_json_bytes
+    from linktools.ai.execution import ExecutionInputContext
+    from .test_rule_context_storage import _archive, _assets, _rules
+
+    async with _assets() as assets, Persistence.open(
+        "subagent-rule", storage=PersistenceStorage.in_memory(), tenant_id="tenant",
+    ) as state:
+        key = AssetKey("rule", "parent.md")
+        await assets.put(key, b"ACCEPTED_PARENT_RULE")
+        instructions = await _rules(assets)
+        archive = _archive(state, {"rules": assets})
+        pin = await archive.prepare_repository_instruction_payload(instructions, source_domain=PersistenceDomain.EXECUTION)
+        parent = _parent(pin)
+        if from_context:
+            context = ExecutionInputContext.from_messages((), repository_instructions=instructions.to_payload())
+            parent = replace(parent, input_context=RuntimePayloadRef(
+                StoredPayload.inline_json(context.to_payload()), PersistenceDomain.EXECUTION))
+        await state.execution.executions.create_execution(parent)
+        await assets.put(key, b"CHANGED_PARENT_RULE")
+        await assets.delete(key)
+        resolver = _Resolver(_pin("changed-live-root")[0])
+        service = _service(state, resolver=resolver, ids=("child",), context_archive=archive)
+        inherited = AsyncMock(return_value=instructions)
+        monkeypatch.setattr(service._runtime_bridge.port, "load_input_repository_instructions", inherited, raising=False)
+        handle = await service.start_subagent(
+            _binding().binding_digest, _request("child-rule"), parent_execution_id="parent",
+            parent_producer_generation=1, root_execution_id="parent", parent_invocation_id="delegate-call",
+        )
+        child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
+        assert child.repository_instructions == pin
+        assert b"ACCEPTED_PARENT_RULE" not in canonical_json_bytes(pin.payload.decode())
+        restored = await archive.load_repository_instruction_payload(child.repository_instructions)
+        assert restored.to_payload() == instructions.to_payload()
+        assert resolver.calls == []
+        assert inherited.await_count == int(from_context)

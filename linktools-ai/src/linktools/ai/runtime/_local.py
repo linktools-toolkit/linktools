@@ -220,7 +220,6 @@ from ._agent_run import (
     _WorkerFailure,
 )
 from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator
-from ._repository_instruction_overlay import RepositoryInstructionOverlay
 from ._repository_instructions import (
     _RepositoryInstructionBoundary,
     _repository_instructions_contain,
@@ -2339,88 +2338,13 @@ class LocalExecutionBackend:
             else CancelEffectOutcome.UNKNOWN
         )
 
-    @classmethod
-    def _decode_repository_instruction_object(
-        cls,
-        data: bytes,
-    ) -> Mapping[str, object]:
-        del cls
-
-        def reject_duplicate_keys(
-            pairs: list[tuple[str, object]],
-        ) -> dict[str, object]:
-            result: dict[str, object] = {}
-            for key, value in pairs:
-                if key in result:
-                    raise ValueError("duplicate JSON object key")
-                result[key] = value
-            return result
-
-        def reject_constant(value: str) -> object:
-            raise ValueError(f"invalid JSON constant: {value}")
-
-        try:
-            raw = json.loads(
-                data.decode("utf-8"),
-                object_pairs_hook=reject_duplicate_keys,
-                parse_constant=reject_constant,
-            )
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if not isinstance(raw, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return raw
-
     async def load_repository_instructions(
         self,
         reference: RuntimePayloadRef | None,
     ) -> RepositoryInstructions | None:
         if reference is None:
             return None
-        if reference.source_domain not in {
-            PersistenceDomain.EXECUTION,
-            PersistenceDomain.CHECKPOINT,
-        }:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if reference.source_domain is PersistenceDomain.CHECKPOINT:
-            stored = RepositoryInstructionOverlay.from_reference(reference)
-            instructions = RepositoryInstructions.from_payload(
-                await self._context_archive.decode_repository_instructions(stored.instructions)
-            )
-            stored.verify(instructions)
-            return instructions
-        objects = self._execution_objects
-        payload = reference.payload
-        if payload.kind == "inline":
-            if payload.encoding != "json":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                raw = payload.decode()
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if not isinstance(raw, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        elif payload.kind == "object":
-            if payload.ref is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            data = await read_runtime_object(objects, payload.ref)
-            raw = self._decode_repository_instruction_object(data)
-        else:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            instructions = RepositoryInstructions.from_payload(raw)
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
-                raise
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if canonical_sha256(instructions.to_payload()) != payload.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return instructions
+        return await self._context_archive.load_repository_instruction_payload(reference)
 
     async def reconcile_deferred(
         self,
@@ -6568,8 +6492,9 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
         instructions: RepositoryInstructions,
     ) -> RuntimePayloadRef:
-        stored = await self._context_archive.encode_repository_instructions(instructions.to_payload())
-        return RepositoryInstructionOverlay.capture(instructions, stored).to_reference()
+        return await self._context_archive.prepare_repository_instruction_payload(
+            instructions, source_domain=PersistenceDomain.CHECKPOINT,
+        )
 
     async def commit_repository_instruction_barrier(
         self,

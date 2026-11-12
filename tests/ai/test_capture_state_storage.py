@@ -269,3 +269,19 @@ async def test_task_binding_capture_reads_owner_and_contract_in_one_scope(tmp_pa
         assert await captures.load(admission) == expected
         assert owner_scopes[-1] is body_scopes[-1] and body_scopes[-1] is not None
         assert not body_scopes[-1].writable
+
+
+@pytest.mark.parametrize("inline_slot", ("tasks", "expanders"))
+def test_retained_task_declarations_cannot_overwrite_inline_declarations(inline_slot: str) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence.captures import _expand_task_binding_value
+
+    raw = canonical_json_bytes({"tasks": [], "expanders": []})
+    # This is the shared expansion boundary used by live reads and snapshots.
+    with pytest.raises(AIError) as error:
+        _expand_task_binding_value({"declarations": {}, inline_slot: []}, raw)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    # Keep unrelated metadata and optional-document omission unchanged.
+    assert _expand_task_binding_value({"declarations": {}, "format_version": 1}, raw) == {
+        "format_version": 1, "tasks": [], "expanders": [],
+    }

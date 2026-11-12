@@ -23,7 +23,7 @@ from linktools.ai.persistence import Persistence, PersistenceDomain, Persistence
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime._repository_instruction_overlay import RepositoryInstructionOverlay
+from linktools.ai.inputs import RepositoryInstructionPayload
 from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary, _validate_repository_instruction_frontier
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, StorageOverlay, StoredPayload
@@ -216,7 +216,7 @@ async def test_overlay_snapshot_keeps_asset_references_and_accepted_inline_bodie
             assert restored.to_payload() == overlay.to_payload()
             _validate_repository_instruction_frontier(retained, restored)
             assert _frontier(retained, restored) == expected_frontier
-            assert RepositoryInstructionOverlay.from_reference(retained.recovery.repository_instruction_overlay).semantic_digest == canonical_sha256(overlay.to_payload())
+            assert RepositoryInstructionPayload.from_reference(retained.recovery.repository_instruction_overlay).semantic_digest == canonical_sha256(overlay.to_payload())
     finally:
         await reopened.close()
 

@@ -363,3 +363,41 @@ async def test_cold_content_snapshot_restarts_after_another_reader_opens_its_arc
         assert captures == 2
         assert records[value.execution_id].stored_user_input == value.stored_user_input
         assert records[value.execution_id].result == value.result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slot", ("stored_user_input", "output"))
+@pytest.mark.parametrize("schema", (999, None, True))
+async def test_execution_reference_wrapper_damage_is_rejected_before_hydration(
+    tmp_path: Path, slot: str, schema: object,
+) -> None:
+    from copy import deepcopy
+
+    async with Persistence.open("payloads", tenant_id="tenant", storage=_storage("memory", tmp_path)) as state:
+        repository = state.execution.executions
+        value = _execution("execution", status=ExecutionStatus.SUCCEEDED, prompt="input " * 20000)
+        value = replace(value, result=replace(value.result, output=StoredPayload.inline_json("output " * 20000)))
+        await repository.create_execution(value)
+        record = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
+        scope, archive = repository.state_store.storage_group.opened_archive
+        rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
+        contents = {(scope, archive_scope_token(row.scope_key), row.sort_key.decode("utf-8")):
+                    ContentRecord.from_record(row) for row in rows}
+        data = deepcopy(dict(record.data))
+        fields = data["value"]["payload"]["fields"]
+        wrapper = fields["stored_user_input"] if slot == "stored_user_input" else fields["result"]["fields"]["output"]
+        assert "content" in wrapper["fields"]
+        if schema is None:
+            del wrapper["schema"]
+        else:
+            wrapper["schema"] = schema
+        damaged = replace(record, data=data)
+        expected = ErrorCode.STORAGE_VERSION_UNSUPPORTED if schema == 999 else ErrorCode.STORAGE_INTEGRITY_ERROR
+        # Supply corrupted stored bytes directly: public writes correctly reject
+        # these wrappers before they can be installed in the database.
+        with pytest.raises(AIError) as runtime_error:
+            await repository._execution_content.decode(damaged)
+        assert runtime_error.value.code is expected
+        with pytest.raises(AIError) as offline_error:
+            expand_snapshot_execution_content(damaged, contents, namespace="payloads", tenant_id="tenant")
+        assert offline_error.value.code is expected

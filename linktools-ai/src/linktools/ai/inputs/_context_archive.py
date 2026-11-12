@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from ..asset import AssetStoreReader
 from ._instruction_codec import RepositoryInstructionCodec
+from ._instruction_payload import RepositoryInstructionPayload
+from ..spec import RepositoryInstructions
 from ..core import JsonValue, PersistenceDomain, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..execution import RuntimePayloadRef
@@ -71,6 +73,24 @@ class ExecutionContextArchive:
     async def decode_repository_instructions(self, value: object) -> dict[str, JsonValue]:
         """Materialize an instruction projection using its original Asset owners."""
         return await self._instructions.decode(value)
+
+    async def prepare_repository_instruction_payload(
+        self, instructions: RepositoryInstructions, *, source_domain: PersistenceDomain,
+    ) -> RuntimePayloadRef:
+        """Retain accepted instruction identity and only verified Asset references."""
+        stored = await self.encode_repository_instructions(instructions.to_payload())
+        return RepositoryInstructionPayload.capture(instructions, stored).to_reference(source_domain)
+
+    async def load_repository_instruction_payload(
+        self, reference: RuntimePayloadRef, *, source_domain: PersistenceDomain | None = None,
+    ) -> RepositoryInstructions:
+        """Recover admission or overlay instructions from the original owners."""
+        stored = RepositoryInstructionPayload.from_reference(reference, source_domain=source_domain)
+        instructions = RepositoryInstructions.from_payload(
+            await self.decode_repository_instructions(stored.instructions)
+        )
+        stored.verify(instructions)
+        return instructions
 
     async def prepare(
         self, context: ExecutionInputContext, *, history_root: ArchiveRoot | NativeMessageRoot | None = None,

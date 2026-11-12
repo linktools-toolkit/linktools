@@ -31,7 +31,7 @@ from ._input import (
     CanonicalUserInput, ExecutionInputMaterializer, UserPromptInput,
     captured_input_files, captured_input_prompt, decode_task_prompt_draft, task_prompt_draft,
 )
-from ..execution import ExecutionInputContext
+from ..execution import ExecutionInputContext, RuntimePayloadRef
 from ._context_archive import ExecutionContextArchive
 from ..model import MaterializedUserContent
 from ..model.attachments import read_attachment_payload
@@ -612,6 +612,16 @@ class InputCaptures:
             if hold_id is not None:
                 await self._execution.release_dependency_hold(execution_id, tenant_id=principal.tenant_id, hold_id=hold_id)
 
+    async def _admitted_repository_instructions(
+        self, reference: RuntimePayloadRef | None,
+    ) -> dict[str, JsonValue] | None:
+        if reference is None:
+            return None
+        instructions = await self._context_archive.load_repository_instruction_payload(
+            reference, source_domain=PersistenceDomain.EXECUTION,
+        )
+        return instructions.to_payload()
+
     async def _capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         principal = request.principal
         repository = self._execution_repositories.executions
@@ -632,7 +642,7 @@ class InputCaptures:
             elif any(value is not None for value in (record.session_id, record.memory_scope, record.previous_execution_id, record.fork_base_execution_id)):
                 raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
             else:
-                instructions = None if record.repository_instructions is None else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
+                instructions = await self._admitted_repository_instructions(record.repository_instructions)
                 context = ExecutionInputContext.from_messages((), repository_instructions=instructions)
         invocation = await self._get(self._key(principal.tenant_id, "invocation", execution_id))
         if invocation is None and record.requires_task_invocation_capture:
@@ -662,8 +672,7 @@ class InputCaptures:
             elif record.input_context is not None:
                 instructions = await self._context_archive.load_repository_instructions(record.input_context)
             else:
-                instructions = None if record.repository_instructions is None else await self._payload(
-                    record.repository_instructions.payload, record.repository_instructions.source_domain)
+                instructions = await self._admitted_repository_instructions(record.repository_instructions)
             input_view = record.stored_user_input.view
             payload = {"prompt": task_prompt_draft(prompt), "input_view": None if input_view is None else dict(input_view), "binding": record.binding.to_payload(),
                        "original_input": dict(record.stored_user_input.view or {"prompt": task_prompt_draft(prompt)}) if task_input is None else dict(task_input.original_input),

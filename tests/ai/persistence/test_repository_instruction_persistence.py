@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetKey, AssetVersionRef
+from linktools.ai.inputs import RepositoryInstructionPayload
 from linktools.ai.capability import SkillDefinition, SkillResource, SkillSourceRef
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.persistence import PersistenceDomain
@@ -27,7 +28,7 @@ from linktools.ai.persistence.contracts import (
     RuntimePayloadRef,
     StoredUserInput,
 )
-from linktools.ai.spec import AgentSpec, SkillSpec
+from linktools.ai.spec import AgentSpec, RepositoryInstructions, SkillSpec
 from linktools.ai.storage import ObjectRef, StorageEntryRevision, StoredPayload
 
 
@@ -49,7 +50,7 @@ def _instruction_ref(*, object_backed: bool = False) -> RuntimePayloadRef:
             ObjectRef("runtime", "repository/instructions", "b" * 64, 17)
         )
     else:
-        payload = StoredPayload.inline_json({"version": 1, "documents": []})
+        payload = RepositoryInstructionPayload.capture(RepositoryInstructions(), {"version": 1, "documents": []}).to_reference(PersistenceDomain.EXECUTION).payload
     return RuntimePayloadRef(payload, PersistenceDomain.EXECUTION)
 
 

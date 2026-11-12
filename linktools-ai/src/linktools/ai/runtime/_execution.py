@@ -78,6 +78,7 @@ from ..core import (
 from ..asset import AssetVersionRef
 from ..session import SessionAdmission
 from ..spec import RepositoryInstructions
+from ..inputs import RepositoryInstructionPayload
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
@@ -511,11 +512,15 @@ class DefaultExecutionService(TaskExecutionService):
     def abandon_prepared_stream(self, execution_id: str) -> None:
         self._live_broker.abandon_prepared_local_producer(execution_id)
 
-    def _capture_repository_instructions(
+    async def _capture_repository_instructions(
         self, instructions: RepositoryInstructions,
     ) -> RuntimePayloadRef:
-        return RuntimePayloadRef(
-            StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.EXECUTION,
+        if self._context_archive is not None:
+            return await self._context_archive.prepare_repository_instruction_payload(
+                instructions, source_domain=PersistenceDomain.EXECUTION,
+            )
+        return RepositoryInstructionPayload.capture(instructions, instructions.to_payload()).to_reference(
+            PersistenceDomain.EXECUTION,
         )
 
     def _validate_tool_response_mode(
@@ -1478,7 +1483,7 @@ class DefaultExecutionService(TaskExecutionService):
                         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                     inherited = await port.load_input_repository_instructions(parent.input_context)
                     repository_instructions = (
-                        None if inherited is None else self._capture_repository_instructions(inherited)
+                        None if inherited is None else await self._capture_repository_instructions(inherited)
                     )
                 if repository_instructions is None or input_instruction_paths:
                     documents = {}
@@ -1500,7 +1505,7 @@ class DefaultExecutionService(TaskExecutionService):
                     resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                     self._instruction_resolver.validate(resolved_instructions)
                     if resolved_instructions.documents:
-                        repository_instructions = self._capture_repository_instructions(
+                        repository_instructions = await self._capture_repository_instructions(
                             resolved_instructions,
                         )
             else:
@@ -1529,7 +1534,7 @@ class DefaultExecutionService(TaskExecutionService):
                 resolved_instructions = RepositoryInstructions(tuple(documents.values()))
                 self._instruction_resolver.validate(resolved_instructions)
                 if resolved_instructions.documents:
-                    repository_instructions = self._capture_repository_instructions(
+                    repository_instructions = await self._capture_repository_instructions(
                         resolved_instructions,
                     )
 

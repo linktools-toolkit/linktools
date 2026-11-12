@@ -1938,6 +1938,8 @@ def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if "content" not in fields:
         return None
+    target = StoredUserInput if value.get("$dataclass") == "stored_user_input" else StoredPayload
+    _validate_dataclass_wrapper(value, target, _CURRENT_CODEC, persisted=True)
     reference = execution_payload_reference(fields["content"])
     if reference is None or set(fields) != {"content"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

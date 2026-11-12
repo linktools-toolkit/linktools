@@ -8,7 +8,8 @@ import json
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from ..core import WriteBufferBackend, canonical_json_bytes
+from ..core import PersistenceDomain, WriteBufferBackend, canonical_json_bytes
+from ..inputs import RepositoryInstructionPayload
 from ..errors import AIError, ErrorCode
 from ..execution import ExecutionRecord, ExecutionStartReservation, ExecutionTerminalCommit
 from ..persistence.codec import decode_domain, encode_domain
@@ -234,6 +235,11 @@ class _ExecutionPayloadBuffer:
                                 or previous.reservation is not None and captured.reservation != previous.reservation
                                 or previous.execution.repository_instructions is not None and (
                                     captured.execution.repository_instructions is None
+                                    or RepositoryInstructionPayload.from_reference(
+                                        captured.execution.repository_instructions, source_domain=PersistenceDomain.EXECUTION,
+                                    ).semantic_digest != RepositoryInstructionPayload.from_reference(
+                                        previous.execution.repository_instructions, source_domain=PersistenceDomain.EXECUTION,
+                                    ).semantic_digest
                                     or captured.execution.repository_instructions.payload.digest
                                     != previous.execution.repository_instructions.payload.digest)
                                 or previous.execution.input_context is not None and (

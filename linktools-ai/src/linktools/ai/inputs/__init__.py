@@ -27,6 +27,7 @@ from ._input_capture import (
     InputCaptures,
     InputCaptureExecutionPort,
 )
+from ._instruction_payload import RepositoryInstructionPayload
 from ._context_archive import (
     ExecutionContextArchive,
     PreparedExecutionContext,
@@ -47,4 +48,4 @@ from ..model import (
     UserPromptInput,
 )
 
-__all__ = ['AgentInputCapture', 'AgentTaskContextError', 'AgentTaskInput', 'AgentTaskInputBuilder', 'AgentTaskInputContext', 'CanonicalUserInput', 'CaptureGraphRequest', 'CaptureInputRequest', 'ExecutionContextArchive', 'ExecutionInputCaptureRef', 'ExecutionInputMaterializer', 'InputCaptureExecutionPort', 'InputCaptures', 'InputFileSource', 'InputIntent', 'PreparedExecutionContext', 'TaskGraphBindingCapture', 'TaskGraphBindingCaptureStore', 'UserPromptInput', 'builtin_task_declaration', 'captured_input_files', 'captured_input_prompt', 'decode_task_prompt_draft', 'decode_user_content_payload', 'encode_user_content', 'input_intent', 'merge_captured_input_files', 'stored_input_attachment_views', 'stored_user_input_view', 'task_declaration_semantics', 'task_prompt_draft', 'validate_user_input']
+__all__ = ['AgentInputCapture', 'AgentTaskContextError', 'AgentTaskInput', 'AgentTaskInputBuilder', 'AgentTaskInputContext', 'CanonicalUserInput', 'CaptureGraphRequest', 'CaptureInputRequest', 'ExecutionContextArchive', 'ExecutionInputCaptureRef', 'ExecutionInputMaterializer', 'InputCaptureExecutionPort', 'InputCaptures', 'InputFileSource', 'InputIntent', 'PreparedExecutionContext', 'RepositoryInstructionPayload', 'TaskGraphBindingCapture', 'TaskGraphBindingCaptureStore', 'UserPromptInput', 'builtin_task_declaration', 'captured_input_files', 'captured_input_prompt', 'decode_task_prompt_draft', 'decode_user_content_payload', 'encode_user_content', 'input_intent', 'merge_captured_input_files', 'stored_input_attachment_views', 'stored_user_input_view', 'task_declaration_semantics', 'task_prompt_draft', 'validate_user_input']

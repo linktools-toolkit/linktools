@@ -413,6 +413,9 @@ async def read_task_binding_value(store: StateStore, value: JsonValue, *,
 
 
 def _expand_task_binding_value(value: Mapping[str, JsonValue], raw: bytes) -> JsonValue:
+    # A retained declaration is the sole source, not an override for inline data.
+    if "tasks" in value or "expanders" in value:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         declarations = json.loads(raw)
         if not isinstance(declarations, Mapping) or set(declarations) != {"tasks", "expanders"}:
