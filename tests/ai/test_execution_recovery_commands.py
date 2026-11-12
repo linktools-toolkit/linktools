@@ -547,7 +547,7 @@ async def test_producer_guard_reuses_execution_without_history_control(
         assert await repository.state_store.mutate(guard) == ExecutionControlRecord(
             execution_id=admitted.execution_id, status=admitted.status,
             producer_generation=admitted.producer_generation, producer_claim_id=admitted.producer_claim_id,
-            durable_trace=admitted.durable_trace, history_seal_digest=admitted.history_seal_digest,
+            history_seal_digest=admitted.history_seal_digest,
             budget_scope_id=admitted.budget_scope_id, retention_closed=admitted.retention_closed,
         )
     finally:

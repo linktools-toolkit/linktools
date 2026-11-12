@@ -314,7 +314,6 @@ class ExecutionControlRecord:
     status: ExecutionStatus
     producer_generation: int
     producer_claim_id: str | None
-    durable_trace: bool
     history_seal_digest: str | None
     budget_scope_id: str | None
     retention_closed: bool

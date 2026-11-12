@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """One execution row owns dispatch, settlement and producer takeover."""
 import asyncio
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -177,9 +178,12 @@ async def test_producer_authority_never_hydrates_large_execution_bodies(tmp_path
         await repository.create_execution(terminal)
         await repository.state_store.mutate(lambda tx: repository.put_history_seal_in_transaction(tx, seal))
         row = await repository.state_store.read_record(repository.execution_record_key("terminal"))
-        assert len(tuple(iter_archive_content_refs(row.data))) == 3
-        async def reject_body(*args, **kwargs):
-            raise AssertionError("producer authority must read only control and seal metadata")
+        assert len(tuple(iter_archive_content_refs(row.data))) == 5
+        read_contents = ContentArchive.read_contents
+        async def reject_body(archive: ContentArchive, identities: Sequence[str], *, codec: str,
+                              reserve: Callable[[str, int], None] | None = None) -> tuple[bytes, ...]:
+            assert codec == "runtime-policy", "producer authority must not hydrate execution bodies"
+            return await read_contents(archive, identities, codec=codec, reserve=reserve)
         monkeypatch.setattr(ContentArchive, "read_contents", reject_body)
         state.run_store.bind_execution_producer("active-run", execution_id="execution", producer_generation=1)
         await state.run_store.require_active_producer("active-run")

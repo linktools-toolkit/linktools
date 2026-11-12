@@ -160,7 +160,7 @@ async def test_single_execution_cas_preserves_generation_and_subclass_guard(tmp_
             assert active == ExecutionControlRecord(
                 execution_id=updated.execution_id, status=updated.status,
                 producer_generation=updated.producer_generation, producer_claim_id=updated.producer_claim_id,
-                durable_trace=updated.durable_trace, history_seal_digest=updated.history_seal_digest,
+                history_seal_digest=updated.history_seal_digest,
                 budget_scope_id=updated.budget_scope_id, retention_closed=updated.retention_closed,
             )
             records, _facts, _sequences = await _snapshot(repository.state_store)

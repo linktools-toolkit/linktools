@@ -1833,18 +1833,38 @@ def decode_execution_header(value: Mapping[str, JsonValue], *, tenant_id: str) -
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def decode_execution_producer_control(
+def decode_execution_producer_authority(
     value: Mapping[str, JsonValue],
-) -> tuple[int, ExecutionStatus, bool, str | None]:
-    """Decode producer authority without reading input, output, or binding content."""
+) -> tuple[int, ExecutionStatus, str | None]:
+    """Validate dispatch authority without borrowing Runtime policy content."""
     source, codec = _execution_projection_fields(value)
+    payload = decode_envelope(value).value["payload"]
+    policy = runtime_policy_reference(payload)
+    if policy is not None:
+        overrides = source.get("runtime_overrides", {})
+        if (set(source).intersection(EXECUTION_POLICY_FIELDS) or not isinstance(overrides, Mapping)
+                or set(overrides) - set(EXECUTION_POLICY_FIELDS)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for name in overrides:
+            _execution_projection_field(overrides, name, codec)
     generation = _execution_projection_field(source, "producer_generation", codec)
     claim = _execution_projection_field(source, "producer_claim_id", codec)
     status = _execution_projection_field(source, "status", codec)
-    durable_trace = _execution_projection_field(source, "durable_trace", codec)
     seal = _execution_projection_field(source, "history_seal_digest", codec)
     if (generation < 0 or claim is not None and (not claim or generation < 1)
-            or seal is not None and (not durable_trace or len(seal) != 64)):
+            or seal is not None and (len(seal) != 64 or any(char not in "0123456789abcdef" for char in seal))):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return generation, status, seal
+
+
+def decode_execution_producer_control(
+    value: Mapping[str, JsonValue],
+) -> tuple[int, ExecutionStatus, bool, str | None]:
+    """Validate history retention after its fixed Runtime policy is resolved."""
+    source, codec = _execution_projection_fields(value)
+    generation, status, seal = decode_execution_producer_authority(value)
+    durable_trace = _execution_projection_field(source, "durable_trace", codec)
+    if seal is not None and not durable_trace:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return generation, status, durable_trace, seal
 
@@ -1852,7 +1872,7 @@ def decode_execution_producer_control(
 def decode_execution_control(value: Mapping[str, JsonValue]) -> ExecutionControlRecord:
     """Project the fields consumed by producer and history publication guards."""
     source, codec = _execution_projection_fields(value)
-    generation, status, durable_trace, seal = decode_execution_producer_control(value)
+    generation, status, seal = decode_execution_producer_authority(value)
     names = ("execution_id", "producer_claim_id", "budget_scope_id", "retention_closed")
     values = {name: _execution_projection_field(source, name, codec) for name in names}
     try:
@@ -1863,7 +1883,7 @@ def decode_execution_control(value: Mapping[str, JsonValue]) -> ExecutionControl
         if not isinstance(values["retention_closed"], bool):
             raise TypeError("execution retention_closed must be bool")
         return ExecutionControlRecord(**values, status=status, producer_generation=generation,
-                                      durable_trace=durable_trace, history_seal_digest=seal)
+                                      history_seal_digest=seal)
     except (AIError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -3311,4 +3331,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
