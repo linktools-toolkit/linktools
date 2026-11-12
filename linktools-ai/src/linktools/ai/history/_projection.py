@@ -570,14 +570,17 @@ class StepExecutionHistoryReader:
         }
         limit = validate_page_limit(limit)
         if authorized_executions is self._executions and type(authorized_executions) is ExecutionRepositoryImpl:
-            # Authorization has completed; this owner read also checks continued existence.
-            record = await authorized_executions.get(execution_id, tenant_id=tenant_id)
-            if record is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            if self._pending_execution is not None:
-                pending = await self._pending_execution(execution_id, tenant_id=tenant_id)
-                if pending is not None:
-                    record = pending
+            pending = (None if self._pending_execution is None else
+                       await self._pending_execution(execution_id, tenant_id=tenant_id))
+            if pending is not None:
+                if await authorized_executions.get_header(execution_id, tenant_id=tenant_id) is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                record = pending
+            else:
+                # Authorization has completed; this owner read also checks continued existence.
+                record = await authorized_executions.get(execution_id, tenant_id=tenant_id)
+                if record is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         else:
             if (authorized_executions is not None
                     and await authorized_executions.get_header(execution_id, tenant_id=tenant_id) is None):
