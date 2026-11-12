@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """One execution row owns dispatch, settlement and producer takeover."""
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -230,3 +231,91 @@ async def test_missing_custom_producer_control_implementation_cannot_grant_autho
         await repository.require_active_producer("execution", tenant_id="tenant", expected_producer_generation=1)
     with pytest.raises(NotImplementedError):
         await repository.require_revoked_producer("execution", tenant_id="tenant", producer_generation=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", (
+    ("execution_id", " "), ("execution_id", 42),
+    ("producer_generation", True), ("producer_claim_id", ""),
+    ("producer_claim_id", 42), ("budget_scope_id", " "),
+    ("budget_scope_id", 42), ("retention_closed", 1),
+))
+async def test_publication_control_projection_rejects_corrupt_metadata(field, value) -> None:
+    from copy import deepcopy
+    async with Persistence.open("producer-control", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state:
+        repository = state.execution.executions
+        await repository.create_execution(replace(_execution(), producer_generation=1, producer_claim_id="claim"))
+        async def corrupt(transaction):
+            key = repository.execution_record_key("execution")
+            record = await transaction.get_record(key)
+            data = deepcopy(dict(record.data))
+            data["value"]["payload"]["fields"][field] = value
+            await transaction.delete_record(key)
+            await transaction.insert_record(replace(record, data=data))
+        await repository.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as invalid:
+            await repository.state_store.mutate(lambda tx: repository.require_execution_producer_in_transaction(
+                tx, "execution", expected_producer_generation=1))
+        assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_reopened_mutation_enlists_existing_binding_before_callback(tmp_path: Path) -> None:
+    storage = PersistenceStorage.sqlite(tmp_path / "reopened-control.db")
+    initial = replace(_execution(), producer_generation=1, producer_claim_id="claim")
+    async with Persistence.open("producer-control", tenant_id="tenant", storage=storage) as state:
+        await state.execution.executions.create_execution(initial)
+    async with Persistence.open("producer-control", tenant_id="tenant", storage=storage) as state:
+        repository = state.execution.executions
+        assert repository.state_store.storage_group.opened_archive is None
+        calls = 0
+        async def read_full(transaction):
+            nonlocal calls
+            calls += 1
+            return await repository.get_in_transaction(transaction, "execution", tenant_id="tenant")
+        assert await repository.state_store.mutate(read_full) == initial
+        assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_first_mutation_enlists_a_competing_writers_archive(tmp_path: Path, monkeypatch) -> None:
+    from linktools.ai.persistence.state import STATE_GROUP_ARCHIVE_KEY
+    storage = PersistenceStorage.sqlite(tmp_path / "first-writer.db")
+    async with Persistence.open("producer-control", tenant_id="tenant", storage=storage) as reader:
+        repository = reader.execution.executions
+        group = repository.state_store.storage_group
+        open_partition = group._open_partition
+        published = False
+        async def publish_before_snapshot(key):
+            nonlocal published
+            handle = await open_partition(key)
+            if key == STATE_GROUP_ARCHIVE_KEY and not published:
+                published = True
+                async with Persistence.open("producer-control", tenant_id="tenant", storage=storage) as writer:
+                    await writer.execution.executions.create_execution(_execution())
+            return handle
+        monkeypatch.setattr(group, "_open_partition", publish_before_snapshot)
+        calls = 0
+        async def read_full(transaction):
+            nonlocal calls
+            calls += 1
+            return await repository.get_in_transaction(transaction, "execution", tenant_id="tenant")
+        result = await repository.state_store.mutate(read_full)
+        assert published and calls == 1
+        assert result.execution_id == "execution"
+
+
+@pytest.mark.asyncio
+async def test_first_scope_identity_is_published_only_after_confirmed_commit(tmp_path: Path) -> None:
+    storage = PersistenceStorage.sqlite(tmp_path / "scope-commit.db")
+    async with Persistence.open("producer-control", tenant_id="tenant", storage=storage) as state:
+        store = state.execution.executions.state_store
+        group = store.storage_group
+        async def abort(_transaction):
+            assert group.opened_archive is None
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        with pytest.raises(AIError):
+            await store.mutate(abort)
+        assert group.opened_archive is None
+        await store.mutate(lambda _transaction: asyncio.sleep(0))
+        assert group.opened_archive is not None

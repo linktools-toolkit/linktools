@@ -179,7 +179,7 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     details = []
     original_read = ContentArchive._read_content
     async def read(self, content):
-        observed.append((phase.get(), content.identity, content.raw_size, content.payload.kind))
+        observed.append((phase.get(), content.identity, content.raw_size, "body" if content.payload is None else content.payload.kind))
         return await original_read(self, content)
     def wrap(method, label):
         async def invoke(self, *args, **kwargs):

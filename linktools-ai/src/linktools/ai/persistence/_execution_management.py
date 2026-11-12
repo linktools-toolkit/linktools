@@ -15,7 +15,7 @@ from ..core import (
     PersistenceDomain,
 )
 from ..errors import AIError, ErrorCode
-from ..execution import ExecutionDriver, ExecutionRecord, ExecutionView, IdempotencyRecord, ResultRecord
+from ..execution import ExecutionResultRecord, ExecutionDriver, ExecutionRecord, ExecutionView, IdempotencyRecord, ResultRecord
 from ..storage import ObjectRef, ObjectStore
 from .contracts import ExecutionRepositories
 from ._execution_repositories import ExecutionRepositoryImpl
@@ -37,6 +37,9 @@ class StoredExecutionManagementAdapter:
         return None
 
     async def read_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
+        if type(self._repositories.executions) is ExecutionRepositoryImpl:
+            current = await self.read_source_view(execution_id, tenant_id=tenant_id)
+            return None if current is None else current[0]
         return await self.read_source_header(execution_id, tenant_id=tenant_id)
 
     def has_local_pending(self, execution_id: str, *, tenant_id: str) -> bool:
@@ -71,6 +74,12 @@ class StoredExecutionManagementAdapter:
         return await put_runtime_object(
             self._object_store, self._object_key_factory, PersistenceDomain.EXECUTION, tenant_id, content,
         )
+
+    async def read_result_record(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | ExecutionResultRecord | None:
+        repository = self._repositories.executions
+        if type(repository) is ExecutionRepositoryImpl:
+            return await repository.get_result_record(execution_id, tenant_id=tenant_id, fresh=True)
+        return await self.read_execution(execution_id, tenant_id=tenant_id)
 
     async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self.read_source_execution(execution_id, tenant_id=tenant_id)
@@ -127,7 +136,7 @@ class StoredExecutionManagementAdapter:
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None:
         return await self._repositories.executions.get_result(execution_id, tenant_id=tenant_id)
 
-    async def result_record(self, execution: ExecutionRecord, *, tenant_id: str) -> ResultRecord | None:
+    async def result_record(self, execution: ExecutionRecord | ExecutionResultRecord, *, tenant_id: str) -> ResultRecord | None:
         repository = self._repositories.executions
         return (execution.result if type(repository) is ExecutionRepositoryImpl else
                 await repository.get_result(execution.execution_id, tenant_id=tenant_id))

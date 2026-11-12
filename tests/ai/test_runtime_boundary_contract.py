@@ -261,7 +261,7 @@ async def test_wait_authorizes_before_abandoning_stream() -> None:
         del execution_id, principal, action
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
-    service.load_authorized = denied
+    service._manager = SimpleNamespace(load_result_authorized=denied)
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.wait.__wrapped__(
@@ -423,7 +423,7 @@ async def test_wait_timeout_includes_initial_authorized_read() -> None:
         await asyncio.sleep(0.05)
         return SimpleNamespace(execution_id="execution", status=ExecutionStatus.STARTED)
 
-    service.load_authorized = slow_authorized
+    service._manager = SimpleNamespace(load_result_authorized=slow_authorized)
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.wait.__wrapped__(

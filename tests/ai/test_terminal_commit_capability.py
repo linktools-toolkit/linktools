@@ -239,7 +239,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
         )
         assert written is not None
         assert decode_envelope(written.data).value["payload"]["fields"]["conversation"] is True
-        assert _decode_enveloped_domain(written.data, ExecutionRecord) == before
+        assert await repository._execution_content.decode(written) == before
 
     reopened = PersistenceStorage.from_root(storage_path, exclusive_writer=True)
     async with Persistence.open('conversation-feature', storage=reopened) as persistence_260, Runtime.attach(persistence=persistence_260, features=model_features(RuntimeUsageModels(), group)) as runtime:

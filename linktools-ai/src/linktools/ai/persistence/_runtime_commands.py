@@ -30,6 +30,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ._archive import ContentArchive, PreparedArchive
 from ..session import SessionTurnRef
+from ..execution import ExecutionControlRecord
 from .contracts import (
     deferred_resource_id,
     AgentAttemptClaim,
@@ -314,16 +315,13 @@ class StateCommands:
                 execution_tx = group.transaction(self._execution.state_store)
                 recovery_tx = group.transaction(approvals.state_store)
                 if producer_generation is not None:
-                    current_execution, _ = await self._execution.require_execution_producer_in_transaction(
+                    await self._execution.require_execution_producer_in_transaction(
                         execution_tx, execution_id,
                         expected_producer_generation=producer_generation, allow_cancelling=False,
                     )
-                else:
-                    current_execution = await self._execution.get_in_transaction(
-                        execution_tx,
-                        execution_id,
-                        tenant_id=tenant_id,
-                    )
+                current_execution = await self._execution.get_in_transaction(
+                    execution_tx, execution_id, tenant_id=tenant_id,
+                )
                 current_checkpoint = current_execution
                 if (
                     current_execution is None
@@ -1880,7 +1878,7 @@ class StateCommands:
                         return observed
                 await asyncio.sleep(0)
 
-    def _tool_budget_repository(self, execution: ExecutionRecord) -> BudgetRepository | None:
+    def _tool_budget_repository(self, execution: ExecutionControlRecord | ExecutionRecord) -> BudgetRepository | None:
         if execution.budget_scope_id is None:
             return None
         if self._budgets is None:

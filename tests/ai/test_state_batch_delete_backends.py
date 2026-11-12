@@ -235,7 +235,7 @@ async def test_sql_batch_delete_statement_count_does_not_grow_per_owner(tmp_path
                 _parameters: Sequence[object] | Mapping[str, object],
                 _context: object, _executemany: bool,
             ) -> None:
-                if "ai_state_" in statement:
+                if "ai_state_" in statement or "ai_tool_operation_aliases" in statement:
                     statements.append(statement)
                     parameter_counts.append(len(_parameters))
 

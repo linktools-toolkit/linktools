@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
-from ..execution import (TaskExecutionService, ExecutionReleaseCallback as _ExecutionReleaseCallback,
+from ..execution import (ExecutionResultRecord, TaskExecutionService, ExecutionReleaseCallback as _ExecutionReleaseCallback,
     LocalExecutionWaiter as _LocalExecutionWaiter, overlay_execution_correlation as _overlay_execution_correlation,
     consumed_terminal_query, observed_query as _observed_query)
 from ..persistence.commands import StoredExecutionManagementAdapter
@@ -336,6 +336,18 @@ class _ExecutionManagementAdapter(StoredExecutionManagementAdapter):
         self._service = service
         super().__init__(service._state, service._object_store,
             object_key_factory=service._object_key_factory, object_reader=service._object_reader)
+
+    async def read_result_record(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | ExecutionResultRecord | None:
+        service = self._service
+        pending = await service._runtime_bridge.pending_turns.read_execution(execution_id, tenant_id=tenant_id)
+        if pending is not None:
+            return pending
+        record = await super().read_result_record(execution_id, tenant_id=tenant_id)
+        if record is not None:
+            return record
+        pending = await service._runtime_bridge.pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
+        record = await super().read_result_record(execution_id, tenant_id=tenant_id)
+        return record if record is not None else pending
 
     async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self._service.load_execution(execution_id, tenant_id=tenant_id)
@@ -2383,18 +2395,18 @@ class DefaultExecutionService(TaskExecutionService):
         if timeout_seconds is not None and timeout_seconds < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        async def load_confirmed_terminal() -> ExecutionRecord:
+        async def load_confirmed_terminal() -> ExecutionRecord | ExecutionResultRecord:
             publication = (None if self._retained_publication is None else
                 self._retained_publication(execution_id, tenant_id=principal.tenant_id))
             if publication is None:
-                return await self.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+                return await self.manager.load_result_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
             await self.authorize_loaded_execution(
                 publication.execution, principal, AuthorizationAction.EXECUTION_READ, owner_principal_id=None,
             )
             return publication.execution
 
         async def wait_once() -> ExecutionResult:
-            execution = await self.load_authorized(
+            execution = await self.manager.load_result_authorized(
                 execution_id,
                 principal,
                 AuthorizationAction.EXECUTION_READ,

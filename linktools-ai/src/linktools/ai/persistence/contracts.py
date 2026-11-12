@@ -24,6 +24,7 @@ from ..execution import (
 
     StoredUserInput,
     ExecutionRecord,
+    ExecutionControlRecord,
     ExecutionStartClaim,
     ExecutionStartUnknownCommit,
     ExecutionCancelRequestCommit,
@@ -40,7 +41,7 @@ from ..execution import (
 import binascii
 import json
 from ..session import SessionRepository as SessionRepositoryContract
-from ..execution import ExecutionTimelineRecord, ExecutionView
+from ..execution import ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
 from ..session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -1654,13 +1655,17 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         against current dependency holds; an unknown outcome is not confirmation.
         """
         ...
+    async def get_result_record(self, execution_id: str, *, tenant_id: str,
+                                fresh: bool = False) -> ExecutionResultRecord | None: ...
+    async def get_retention_in_transaction(self, transaction: StateTransaction, execution_id: str,
+                                          *, tenant_id: str) -> ExecutionRetentionRecord | None: ...
     async def close_retention_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> tuple[bool, ExecutionRecord | None]:
+    ) -> tuple[bool, ExecutionRetentionRecord | None]:
         """Close retention and return the same transaction's execution receipt.
 
         The publication requirements of close_retention also apply here. The
@@ -1670,10 +1675,10 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def require_execution_producer_in_transaction(
         self, transaction: StateTransaction, execution_id: str, *,
         expected_producer_generation: int, allow_cancelling: bool = True,
-    ) -> tuple[ExecutionRecord, StoredRecord]: ...
+    ) -> tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord]: ...
     async def require_execution_history_write_in_transaction(
         self, transaction: StateTransaction, execution_id: str,
-    ) -> tuple[ExecutionRecord, StoredRecord]: ...
+    ) -> tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord]: ...
     async def put_history_seal_in_transaction(
         self,
         transaction: StateTransaction,

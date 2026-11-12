@@ -95,7 +95,7 @@ async def test_retention_failure_does_not_start_cleanup(
                 if failure == "cancel":
                     raise asyncio.CancelledError()
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            monkeypatch.setattr(repository, "get_in_transaction", fail)
+            monkeypatch.setattr(repository, "get_retention_in_transaction", fail)
         elif failure == "cas":
             from linktools.ai.persistence._sql import _SqlTransaction
             async def fail(*args, **kwargs):
@@ -356,3 +356,45 @@ async def test_terminal_handoff_reuses_one_source_closure_read(tmp_path: Path) -
         assert releases == [(PersistenceDomain.TRACE, "execution:execution")]
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("corruption", ("holds", "phase_null", "unprepared", "prepared", "pending"))
+async def test_retention_projection_rejects_invalid_closure_authority(corruption: str) -> None:
+    from copy import deepcopy
+    from linktools.ai.execution import ExecutionRecoveryDetail, RecoveryHandoffPhase
+    from linktools.ai.persistence.codec import encode_domain
+    from linktools.ai.persistence import PersistenceStorage
+
+    async with Persistence.open(_NAMESPACE, storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
+        repository = state.execution.executions
+        await repository.create_execution(replace(_execution(), status=ExecutionStatus.SUCCEEDED))
+
+        async def corrupt(transaction):
+            key = repository.execution_record_key("execution")
+            record = await transaction.get_record(key)
+            data = deepcopy(dict(record.data))
+            fields = data["value"]["payload"]["fields"]
+            if corruption == "holds":
+                fields["dependency_hold_ids"] = encode_domain(("hold", "hold"))
+            else:
+                recovery = encode_domain(ExecutionRecoveryDetail())
+                fields["recovery"] = recovery
+                detail = recovery["fields"]
+                if corruption == "phase_null":
+                    detail["handoff_phase"] = None
+                elif corruption == "unprepared":
+                    detail["terminal_handoff"] = {}
+                elif corruption == "prepared":
+                    detail["handoff_phase"] = encode_domain(RecoveryHandoffPhase.PREPARED)
+                else:
+                    detail["handoff_phase"] = encode_domain(RecoveryHandoffPhase.COMPLETED)
+                    detail["pending_tools"] = {}
+            await transaction.delete_record(key)
+            await transaction.insert_record(replace(record, data=data))
+
+        await repository.state_store.mutate(corrupt)
+        calls = []
+        with pytest.raises(AIError) as invalid:
+            await _controller(repository, calls).release_execution_handoff("execution", tenant_id="tenant")
+        assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert calls == []

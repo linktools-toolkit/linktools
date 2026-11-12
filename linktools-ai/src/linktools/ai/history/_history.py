@@ -98,7 +98,7 @@ from ..persistence.contracts import (
     SessionRepository,
     TaskRepository,
 )
-from ..execution import ExecutionRecord
+from ..execution import ExecutionMetadataRecord, ExecutionRecord, ExecutionResultRecord
 from ..session import SessionRecord
 
 @dataclass(frozen=True, slots=True)
@@ -224,10 +224,23 @@ def _project_session_view(record: SessionRecord) -> SessionView:
 
 
 def _project_execution_info(
-    record: ExecutionRecord,
+    record: ExecutionRecord | ExecutionMetadataRecord,
     *,
     usage: UsageSummary | None = None,
 ) -> ExecutionInfo:
+    if isinstance(record, ExecutionMetadataRecord):
+        view = record.view
+        return ExecutionInfo(
+            execution_id=view.execution_id, binding_kind=view.binding_kind,
+            agent_id=view.agent_id, task_id=view.task_id, status=view.status,
+            lineage_kind=view.lineage_kind, parent_execution_id=view.parent_execution_id,
+            root_execution_id=view.root_execution_id, parent_invocation_id=view.parent_invocation_id,
+            session_id=view.session_id, created_at=view.created_at, updated_at=record.updated_at,
+            started_at=view.started_at, terminal_at=view.terminal_at,
+            binding_digest=record.binding_digest, capability_refs=record.capability_refs,
+            event_seq=view.event_seq, error_code=record.error_code,
+            safe_error_details=record.safe_error_details, usage=usage,
+        )
     result = record.result
     binding = record.binding
     capability_refs = None
@@ -385,7 +398,7 @@ class History:
         *,
         principal: Principal,
     ) -> ExecutionResult:
-        record = await self._authorized_record(execution_id, principal, committed=True)
+        record = await self._authorized_record(execution_id, principal, committed=True, result_only=True)
         return await self._result_from_record(record, principal=principal)
 
     async def execution_detail(
@@ -411,7 +424,7 @@ class History:
                 or header.id != session_id or header.tenant_id != principal.tenant_id):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
-        record = await self._authorized_record(execution_id, principal, refresh_terminal=True)
+        record = await self._authorized_record(execution_id, principal, refresh_terminal=True, metadata_only=True)
         session = await sessions.get(session_id, tenant_id=principal.tenant_id)
         if (
             session is None
@@ -421,7 +434,7 @@ class History:
         ):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         result = (
-            await self._result_from_record(record, principal=principal)
+            await self._result_from_record(record.result_record if isinstance(record, ExecutionMetadataRecord) else record, principal=principal)
             if record.status in {
                 ExecutionStatus.SUCCEEDED,
                 ExecutionStatus.FAILED,
@@ -433,7 +446,7 @@ class History:
 
     async def _result_from_record(
         self,
-        record: ExecutionRecord,
+        record: ExecutionRecord | ExecutionResultRecord,
         *,
         principal: Principal,
     ) -> ExecutionResult:
@@ -1600,8 +1613,8 @@ class History:
         self,
         execution_id: str,
         principal: Principal,
-        *, committed: bool = False, refresh_terminal: bool = False,
-    ) -> ExecutionRecord:
+        *, committed: bool = False, refresh_terminal: bool = False, result_only: bool = False, metadata_only: bool = False,
+    ) -> ExecutionRecord | ExecutionResultRecord | ExecutionMetadataRecord:
         executions, authorization = self._require_direct_reader()
         pending = (None if self._pending_execution is None else
                    await self._pending_execution(execution_id, tenant_id=principal.tenant_id))
@@ -1617,20 +1630,32 @@ class History:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
         source_read = committed or pending is not None and isinstance(executions, ExecutionRepositoryImpl)
-        record = (
-            await executions.state_store.read(
+        async def read_source() -> ExecutionRecord | ExecutionResultRecord | ExecutionMetadataRecord | None:
+            if metadata_only and type(executions) is ExecutionRepositoryImpl:
+                return await executions.get_metadata_record(execution_id, tenant_id=principal.tenant_id, fresh=True)
+            if result_only and type(executions) is ExecutionRepositoryImpl:
+                return await executions.get_result_record(execution_id, tenant_id=principal.tenant_id, fresh=True)
+            if isinstance(executions, ExecutionRepositoryImpl):
+                return await executions.read_content(
+                    lambda _group: executions.get(execution_id, tenant_id=principal.tenant_id)
+                )
+            return await executions.state_store.read(
                 lambda _transaction: executions.get(execution_id, tenant_id=principal.tenant_id)
             )
-            if source_read
-            else await executions.get(execution_id, tenant_id=principal.tenant_id)
-        )
+
+        if source_read:
+            record = await read_source()
+        elif metadata_only and type(executions) is ExecutionRepositoryImpl:
+            record = await executions.get_metadata_record(execution_id, tenant_id=principal.tenant_id)
+        elif result_only and type(executions) is ExecutionRepositoryImpl:
+            record = await executions.get_result_record(execution_id, tenant_id=principal.tenant_id)
+        else:
+            record = await executions.get(execution_id, tenant_id=principal.tenant_id)
         if (refresh_terminal and not source_read and record is not None
                 and record.status in {
                     ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
                 }):
-            record = await executions.state_store.read(
-                lambda _transaction: executions.get(execution_id, tenant_id=principal.tenant_id)
-            )
+            record = await read_source()
         if record is not None:
             if header.owner_principal_id is not None and record.principal_id != header.owner_principal_id:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)

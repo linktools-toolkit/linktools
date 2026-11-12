@@ -28,7 +28,7 @@ from ._management import (
     ExecutionManager,
     execution_recovery_error as _execution_recovery_error,
 )
-from ._records import (ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation,
+from ._records import (ExecutionResultRecord, ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation,
     ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord, StoredUserInput)
 
 if TYPE_CHECKING:
@@ -208,18 +208,13 @@ class TaskExecutionService:
         async def wait_once() -> ExecutionResult:
             backoff = 1.0
             while True:
-                view = await self._manager.load_view_authorized(
+                execution = await self._manager.load_result_authorized(
                     execution_id, principal, AuthorizationAction.EXECUTION_READ,
                 )
-                if view.status in {ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.SUCCEEDED,
-                                   ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                    execution = await self.load_authorized(
-                        execution_id, principal, AuthorizationAction.EXECUTION_READ,
-                    )
-                    if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
-                        raise _execution_recovery_error(execution)
-                    if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                        return await self.consume_result_from_execution(execution, tenant_id=principal.tenant_id)
+                if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+                    raise _execution_recovery_error(execution)
+                if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                    return await self.consume_result_from_execution(execution, tenant_id=principal.tenant_id)
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 2)
 
@@ -1276,13 +1271,13 @@ class TaskExecutionService:
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult:
-        execution = await self.load_authorized(
+        execution = await self._manager.load_result_authorized(
             execution_id, principal, AuthorizationAction.EXECUTION_READ
         )
         return await self.consume_result_from_execution(execution, tenant_id=principal.tenant_id)
 
     async def consume_result_from_execution(
-        self, execution: ExecutionRecord, *, tenant_id: str
+        self, execution: ExecutionRecord | ExecutionResultRecord, *, tenant_id: str
     ) -> ExecutionResult:
         result = await self._result_from_execution(execution, tenant_id=tenant_id)
         await self._require_retained_turn(execution)
@@ -1298,7 +1293,7 @@ class TaskExecutionService:
             )
         return result
 
-    async def _require_retained_turn(self, execution: ExecutionRecord) -> None:
+    async def _require_retained_turn(self, execution: ExecutionRecord | ExecutionResultRecord) -> None:
         if self._retained_turn_confirmed is not None and self._retained_turn_confirmed(execution):
             return
         if (not execution.retention_closed and execution.conversation
@@ -1311,14 +1306,14 @@ class TaskExecutionService:
                 )
             )
 
-    async def _result_from_execution(self, execution: ExecutionRecord, *, tenant_id: str) -> ExecutionResult:
+    async def _result_from_execution(self, execution: ExecutionRecord | ExecutionResultRecord, *, tenant_id: str) -> ExecutionResult:
         return await self._manager.result_from_execution(execution, tenant_id=tenant_id)
 
     @consumed_terminal_query
     async def result_payload_size(
         self, execution_id: str, *, principal: Principal
     ) -> int:
-        execution = await self.load_authorized(
+        execution = await self._manager.load_result_authorized(
             execution_id,
             principal,
             AuthorizationAction.EXECUTION_READ,

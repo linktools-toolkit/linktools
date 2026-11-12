@@ -329,8 +329,9 @@ class ExecutionContent:
         return encode_execution_content(value, encoded_payloads, binding=encoded_binding)
 
     async def read_payloads(self, records: Sequence[StoredRecord], *,
-                            reserve: Callable[[int], None] | None = None) -> dict[tuple[str, str, str], StoredPayload | StoredUserInput]:
-        references = [reference for record in records for _, payload in _payloads(record)
+                            reserve: Callable[[int], None] | None = None, result_only: bool = False) -> dict[tuple[str, str, str], StoredPayload | StoredUserInput]:
+        references = [reference for record in records for path, payload in _payloads(record)
+                      if (not result_only or path == ("result", "fields", "output"))
                       if (reference := payload_reference(payload)) is not None]
         if not references:
             return {}

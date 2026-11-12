@@ -192,4 +192,8 @@ async def test_snapshot_keeps_checkpoint_controls_without_a_capability(tmp_path:
         roundtrip = await restored.export_snapshot(object_store=archive, limits=LIMITS)
     finally:
         await restored.close()
-    assert roundtrip == reference
+    from linktools.ai.persistence.snapshots import snapshot_manifest_identity
+    roundtrip_manifest = json.loads(await read_object(archive, roundtrip.key,
+        expected_digest=roundtrip.digest, expected_size=roundtrip.size))
+    # Restore relocates archive scopes; compare the complete portable closure.
+    assert snapshot_manifest_identity(roundtrip_manifest) == snapshot_manifest_identity(manifest)

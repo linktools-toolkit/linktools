@@ -405,6 +405,7 @@ async def test_cancelled_client_preparation_leaves_no_owner_or_binary_rows(
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         contents = await archive.transcript_repository.content_archive(create=True)
         append = contents.prepare_append
+        before = await contents.store.read(lambda tx: tx.scan_records())
 
         async def prepare_then_cancel(*args, **kwargs):
             await append(*args, **kwargs)
@@ -416,7 +417,7 @@ async def test_cancelled_client_preparation_leaves_no_owner_or_binary_rows(
                 await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}", prepared=prepared)
         assert await archive.list_model_interactions(agent_run_id="run") == []
         rows = await contents.store.read(lambda tx: tx.scan_records())
-        assert not any(record.kind == "archive_content" for record in rows)
+        assert rows == before
         retry = PreparedArchive()
         requests = _requests(large=True)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=retry)

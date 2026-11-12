@@ -319,7 +319,7 @@ class SqlStateStorageGroup:
 
     async def _initialize_archive_scope(
         self, session: "AsyncSession", clock: "_SqlTransactionClock",
-    ) -> None:
+    ) -> tuple[str, bool]:
         """Establish resource identity in the first owner mutation's commit."""
         metadata_key = STATE_GROUP_METADATA_KEY
         key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
@@ -331,7 +331,7 @@ class SqlStateStorageGroup:
             scope = record.data.get("archive_scope_id")
             if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return
+            return scope, True
         archive = _SqlTransaction(
             session, self._metadata, self._context,
             STATE_GROUP_ARCHIVE_KEY, clock=clock,
@@ -346,7 +346,7 @@ class SqlStateStorageGroup:
             scope = None if record is None else record.data.get("archive_scope_id")
             if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return
+            return scope, True
         record = StoredRecord(
             key=key, scope_key=None, parent_key=None,
             kind="archive_scope", sort_key=b"archive_scope", state=None,
@@ -360,6 +360,15 @@ class SqlStateStorageGroup:
             values={**_record_values(record), "store_key": metadata_key},
             index_elements=("store_key", "key_locator"),
         ))
+
+        # A competing first writer can win after our initial absence read.
+        # Expose only its committed identity, never our rollback-prone candidate.
+        metadata = _SqlTransaction(session, self._metadata, self._context, metadata_key, clock=clock)
+        winner = await metadata.get_record(key)
+        scope = None if winner is None else winner.data.get("archive_scope_id")
+        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return scope, scope != record.data["archive_scope_id"]
 
     async def _open_partition(self, key: bytes) -> "SqlStateStore":
         store = self._members.get(key)
@@ -490,11 +499,16 @@ class SqlStateStorageGroup:
     ) -> ValueT:
         if self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
-        members = tuple(dict.fromkeys((*stores, *((self._archive_member,) if self._archive_member else ()))))
         if not stores:
             raise ValueError("StateStorageGroup mutation requires a store")
-        for store in members:
+        for store in stores:
             self._ensure_member(store)
+        # Enlist the logical archive before the callback. Its existing identity
+        # is discovered inside the mutation snapshot, including a competing
+        # writer's first publication; mutation callbacks are never replayed.
+        if active_state_scope() is None and self._archive_on_mutation and self._archive_member is None:
+            self._archive_member = await self._open_partition(STATE_GROUP_ARCHIVE_KEY)
+        members = tuple(dict.fromkeys((*stores, *((self._archive_member,) if self._archive_member else ()))))
         active = active_state_transaction(members[0], writable=True)
         if active is not None:
             return await fn(active_state_group_transaction(self, members))
@@ -504,18 +518,21 @@ class SqlStateStorageGroup:
         capture_tokens: dict[SqlStateStore, object] = {}
         changed: set[SqlStateStore] = set()
         confirmed = False
+        pending_archive_scope: str | None = None
         observers: list[Callable[[bool], None]] = []
         aborted_observers: list[Callable[[bool], None]] = []
 
         async def execute(session: "AsyncSession") -> ValueT:
-            nonlocal captured_at, captures, capture_tokens, changed
+            nonlocal captured_at, captures, capture_tokens, changed, pending_archive_scope
             aborted_observers.extend(observers)
             observers.clear()
             captured_at = time()
             capture_tokens = {store: store._reads.capture_token for store in members}
             clock = _SqlTransactionClock(session, self._context)
             if self._archive_on_mutation and not self._archive_scope_initialized:
-                await self._initialize_archive_scope(session, clock)
+                pending_archive_scope, already_committed = await self._initialize_archive_scope(session, clock)
+                if already_committed:
+                    self._opened_archive = pending_archive_scope, self._archive_member
             transactions = self._create_transactions(members, session, clock, observers)
             group_transaction = _SqlGroupTransaction(self, transactions)
             token = bind_state_scope(self, transactions, record_reader=group_transaction)
@@ -550,6 +567,8 @@ class SqlStateStorageGroup:
             from ._native_content_index import maintain_native_content, run_native_mutation
             result, maintenance = await run_native_mutation(self._context, execute, domain="runtime.state.group")
             confirmed = True
+            if pending_archive_scope is not None:
+                self._opened_archive = pending_archive_scope, self._archive_member
             if self._archive_on_mutation:
                 self._archive_scope_initialized = True
             if maintenance and self._native_partitions:

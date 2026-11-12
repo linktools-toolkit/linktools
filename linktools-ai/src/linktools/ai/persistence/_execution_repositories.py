@@ -21,8 +21,8 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
-from ..execution import ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
+from .codec import decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -235,6 +235,48 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         for record, value in zip(records, values, strict=True):
             self._validate_record_identity(record, value)
         return values
+
+    async def get_metadata_record(self, execution_id: str, *, tenant_id: str,
+                                  fresh: bool = False) -> ExecutionMetadataRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (execution_id,))
+        async def read():
+            record = ((await self._refresh_records((key,))).get(key) if fresh else
+                      await self._store.read_record(key))
+            if record is None:
+                return None
+            self._decode_header(record, execution_id)
+            metadata = decode_execution_metadata(record.data, tenant_id=tenant_id)
+            if fresh and metadata.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                payloads = await self._execution_content.read_payloads((record,), result_only=True)
+                metadata = replace(metadata, result_record=decode_execution_content(record.data, payloads, result=True))
+            return metadata
+        return await self.read_content(lambda _group: read()) if fresh else await read()
+
+    async def get_result_record(self, execution_id: str, *, tenant_id: str,
+                                fresh: bool = False) -> ExecutionResultRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (execution_id,))
+        async def read(_transactions):
+            record = ((await self._refresh_records((key,))).get(key) if fresh else
+                      await self._store.read_record(key))
+            if record is None:
+                return None
+            self._decode_header(record, execution_id)
+            payloads = await self._execution_content.read_payloads((record,), result_only=True)
+            return decode_execution_content(record.data, payloads, result=True)
+        return await self.read_content(read)
+
+    async def get_retention_in_transaction(self, transaction: StateTransaction, execution_id: str,
+                                          *, tenant_id: str) -> ExecutionRetentionRecord | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._key("execution", (execution_id,)))
+        if record is None:
+            return None
+        self._decode_header(record, execution_id)
+        return decode_execution_retention(record.data)
 
     async def get_header(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
         if tenant_id != self._tenant_id:
@@ -1966,25 +2008,27 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         observed: Observed[ExecutionRecord] | None = None,
-    ) -> tuple[bool, ExecutionRecord | None]:
+    ) -> tuple[bool, ExecutionRetentionRecord | None]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         key = self._key("execution", (execution_id,))
         if observed is None:
             stored = await transaction.get_record(key)
             if stored is None:
                 return True, None
-            current = await self._decode(stored, ExecutionRecord)
+            self._decode_header(stored, execution_id)
+            current = decode_execution_retention(stored.data)
         else:
             current = observed.value
             if current.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             stored = replace(await self._stored_content("execution", (execution_id,), current, state=current.status.value, previous_value=current),
                              storage_revision=observed.storage_revision)
+            current = decode_execution_retention(stored.data)
         if current.status not in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
-        } or current.dependency_hold_ids or current.recovery_state is ExecutionRecoveryState.HANDOFF:
+        } or current.dependency_hold_ids or current.recovery_handoff:
             return False, current
         if current.retention_closed:
             return True, current
@@ -1994,11 +2038,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             revision=current.revision + 1,
             updated_at=await transaction.now(),
         )
-        await _replace_checked(
-            transaction,
-            await self._projected_content(stored, next_value),
-            stored.storage_revision,
-        )
+        envelope = decode_envelope(stored.data)
+        payload = envelope.value["payload"]
+        data = encode_envelope({**envelope.value, "payload": {**payload, "fields": {
+            **payload["fields"], "retention_closed": True, "revision": next_value.revision,
+            "updated_at": encode_domain(next_value.updated_at),
+        }}})
+        await _replace_checked(transaction, replace(stored, data=data,
+            storage_revision=stored.storage_revision + 1), stored.storage_revision)
         return True, next_value
 
     async def require_active_producer(
@@ -2083,7 +2130,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def require_execution_producer_in_transaction(
         self, transaction: StateTransaction, execution_id: str, *,
         expected_producer_generation: int, allow_cancelling: bool = True,
-    ) -> tuple[ExecutionRecord, StoredRecord]:
+    ) -> tuple[ExecutionControlRecord, StoredRecord]:
         """Fence publication against the sole execution control owner."""
         if (isinstance(expected_producer_generation, bool)
                 or not isinstance(expected_producer_generation, int)
@@ -2093,7 +2140,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         record = await transaction.get_record(key)
         if record is None or record.kind != "execution":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution = await self._decode(record, ExecutionRecord)
+        execution = decode_execution_control(record.data)
         if execution.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.producer_generation != expected_producer_generation:
@@ -2113,12 +2160,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
     async def require_execution_history_write_in_transaction(
         self, transaction: StateTransaction, execution_id: str,
-    ) -> tuple[ExecutionRecord, StoredRecord]:
+    ) -> tuple[ExecutionControlRecord, StoredRecord]:
         key = self._key("execution", (execution_id,))
         record = await transaction.get_record(key)
         if record is None or record.kind != "execution":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution = await self._decode(record, ExecutionRecord)
+        execution = decode_execution_control(record.data)
         if execution.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.history_seal_digest is not None or execution.status in {

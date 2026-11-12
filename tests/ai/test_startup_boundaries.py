@@ -292,7 +292,17 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
         with monkeypatch.context() as patch:
             if fault == 'archive':
                 from linktools.ai.persistence._archive import ContentArchive
-                patch.setattr(ContentArchive, 'prepare_content', fail)
+                from linktools.ai.persistence._execution_content import BINDING_CODEC
+                prepare_content = ContentArchive.prepare_content
+
+                async def fail_input_preparation(self, values, prepared):
+                    # Admission now publishes the immutable execution contract too.
+                    # This fault targets subsequent input preparation, not admission.
+                    if all(codec == BINDING_CODEC for codec, _raw in values):
+                        return await prepare_content(self, values, prepared)
+                    return await fail(self, values, prepared)
+
+                patch.setattr(ContentArchive, 'prepare_content', fail_input_preparation)
             elif fault == 'context':
                 patch.setattr(LocalExecutionBackend, 'load_input_context', fail)
             else:

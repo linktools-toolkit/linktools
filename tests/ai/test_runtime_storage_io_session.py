@@ -132,7 +132,7 @@ async def test_session_list_skips_generation_probe_but_page_keeps_it(
         values = await state.conversation.sessions.list(tenant_id="tenant")
         assert tuple(value.session_id for value in values) == ("session",)
         assert not any(
-            "AI_STATE_SEQUENCES" in statement.upper()
+            "AI_STATE_COUNTERS" in statement.upper()
             for statement, _parameters in statements
         )
 
@@ -146,7 +146,7 @@ async def test_session_list_skips_generation_probe_but_page_keeps_it(
         assert generation >= 1
         assert tuple(value.session_id for value in page.items) == ("session",)
         assert any(
-            "AI_STATE_SEQUENCES" in statement.upper()
+            "AI_STATE_COUNTERS" in statement.upper()
             for statement, _parameters in statements
         )
     finally:

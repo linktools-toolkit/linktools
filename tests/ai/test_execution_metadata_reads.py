@@ -127,7 +127,7 @@ async def test_task_wait_polls_metadata_without_loading_active_payloads(
 
 
 @pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
-async def test_cold_children_snapshot_opens_existing_binding_archive_without_payload_reads(
+async def test_cold_children_snapshot_uses_summary_without_content_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     state = Persistence(_storage(backend, tmp_path))
@@ -145,19 +145,13 @@ async def test_cold_children_snapshot_opens_existing_binding_archive_without_pay
     reader = Persistence(_storage(backend, tmp_path))
     await reader.initialize(namespace="cold-metadata", tenant_id="tenant", read_only=True)
     try:
-        read_contents = ContentArchive.read_contents
-        binding_reads = []
+        async def reject_content(*args, **kwargs):
+            raise AssertionError("metadata must not hydrate binding or payload bodies")
 
-        async def binding_only(self, identities, *, codec, **kwargs):
-            assert codec == "execution-binding"
-            binding_reads.extend(identities)
-            return await read_contents(self, identities, codec=codec, **kwargs)
-
-        monkeypatch.setattr(ContentArchive, "read_contents", binding_only)
+        monkeypatch.setattr(ContentArchive, "read_contents", reject_content)
         assert await _service(reader).list_children("execution", principal=_PRINCIPAL) == (
             project_execution_view(child),
         )
-        assert binding_reads
     finally:
         await reader.close()
 

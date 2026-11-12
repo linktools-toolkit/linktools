@@ -316,16 +316,25 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
         else:
             fresh = None
 
-        async def get(execution_id, *, tenant_id):
+        cached_metadata = await repository.get_metadata_record("execution", tenant_id="tenant")
+        read_metadata = repository.get_metadata_record
+        if fresh is None:
+            await repository.state_store.mutate(lambda tx: tx.delete_record(repository.execution_record_key("execution")))
+        else:
+            await repository.compare_and_swap("execution", tenant_id="tenant", expected_revision=original.revision,
+                                              next_record=replace(fresh, revision=original.revision + 1))
+
+        async def get_metadata(execution_id, *, tenant_id, fresh=False):
             assert (execution_id, tenant_id) == ("execution", "tenant")
-            return fresh if active_state_transaction(repository.state_store) is not None else original
+            return (await read_metadata(execution_id, tenant_id=tenant_id, fresh=True)
+                    if fresh else cached_metadata)
 
         async def get_owned_header(execution_id, *, tenant_id):
             assert (execution_id, tenant_id) == ("execution", "tenant")
             return replace(header, owner_principal_id=original.principal_id)
 
         with monkeypatch.context() as patch:
-            patch.setattr(repository, "get", get)
+            patch.setattr(repository, "get_metadata_record", get_metadata)
             if source == "different_owner":
                 # Custom execution headers can impose an owner beyond tenant scope.
                 patch.setattr(repository, "get_header", get_owned_header)

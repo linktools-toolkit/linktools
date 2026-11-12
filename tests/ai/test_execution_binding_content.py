@@ -524,7 +524,8 @@ async def test_archived_binding_views_do_not_read_contract_bodies(tmp_path: Path
 
 
 @pytest.mark.parametrize("field,value", (("id", "other"), ("revision", 2),
-    ("kind", "task"), ("max_attempts", 3)))
+    ("kind", "task"), ("max_attempts", 3), ("binding_digest", "f" * 64),
+    ("capability_refs", [{"invalid": True}])))
 def test_binding_recovery_rejects_inconsistent_view_summary(field: str, value: object) -> None:
     import json
 
@@ -547,10 +548,10 @@ def test_archived_binding_view_rejects_invalid_declared_identity(kind: str, iden
 
     _, _, compact, _, _ = _shared_record()
     data = json.loads(canonical_json_bytes(compact.data))
-    data["value"]["payload"]["fields"]["binding"]["summary"] = {
-        "kind": kind, "id": identity, "revision": revision,
-        "max_attempts": None if kind == "agent" else 3,
-    }
+    summary = data["value"]["payload"]["fields"]["binding"]["summary"]
+    summary.update({"kind": kind, "id": identity, "revision": revision,
+                    "max_attempts": None if kind == "agent" else 3,
+                    "capability_refs": summary["capability_refs"] if kind == "agent" else None})
     with pytest.raises(AIError) as error:
         decode_execution_view(data, tenant_id="tenant")
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

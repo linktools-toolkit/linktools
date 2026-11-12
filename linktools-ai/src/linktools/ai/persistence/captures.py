@@ -387,7 +387,7 @@ async def prepare_task_binding_value(store: StateStore, manifest: Mapping[str, J
     if not manifest["tasks"] and not manifest["expanders"]:
         return dict(manifest)
     raw = canonical_json_bytes({"tasks": manifest["tasks"], "expanders": manifest["expanders"]})
-    opened = await store.storage_group.open_archive(create=True)
+    opened = store.storage_group.opened_archive or await store.storage_group.open_archive(create=True)
     if opened is None:
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
     scope, content_store = opened
@@ -404,7 +404,7 @@ async def read_task_binding_value(store: StateStore, value: JsonValue, *,
     reference = task_binding_content_reference(value.get("declarations")) if isinstance(value, Mapping) else None
     if reference is None:
         return value
-    opened = await store.storage_group.open_archive()
+    opened = store.storage_group.opened_archive or await store.storage_group.open_archive()
     if opened is None or reference[:2] != (opened[0], archive_content_scope(namespace, tenant_id)):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     archive = ContentArchive(opened[1], opened[0], namespace=namespace, tenant_id=tenant_id, object_store=None)

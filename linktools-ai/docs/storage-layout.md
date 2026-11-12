@@ -432,7 +432,9 @@ physical archive scopes on restore, and verify the same typed attachment closure
 Offline collection keeps content while its Execution owner is retained.
 
 Archived execution bindings carry a derived view summary (kind, declared ID and
-revision, and the Task attempt limit) beside their scoped content address. State
+revision, Task attempt limit, binding digest and Agent capability references)
+beside their scoped content address. These small fields serve diagnostic metadata
+without copying capability configuration. State
 views read this projection without opening or decoding the immutable contract;
 recovery and snapshot expansion still load the complete bytes, verify their
 content identity, and compare the summary with the decoded contract. The summary
@@ -521,4 +523,127 @@ for the Runtime handle and explicit-ID APIs.
 | Hot state query cost | Execution views use a derived binding summary, not full configuration bytes | Agent/Task and child-view regressions reject contract-body reads |
 | Input/result/message bodies | Existing large-body archive, Native messages, and handoff/result references retain their owners | Existing attachment, snapshot, recovery and cleanup coverage; no deletion of effect or user facts |
 | No historical baggage | Current writer/reader/schema evolve together; no legacy migration or new config registry | Current-shape round trips and explicit malformed-data rejection |
-| Space and I/O trade-off | Reuse removes repeated contract bodies and shrinks hot rows; initial publication and cold recovery still cost reads | Byte-accounting regressions are not executed measurements or a MySQL/PostgreSQL latency claim |
+| Space and I/O trade-off | Reuse removes repeated contract bodies and shrinks hot rows; initial publication and cold recovery still cost reads | Matched SQLite synthetic measurements below; formal regression gates and MySQL/PostgreSQL latency remain separate |
+
+
+## Matched SQLite measurement (2026-11-12)
+
+This is a synthetic workload, not a production database or a complete inventory
+of every records kind. Fresh databases each contain 20 Agent executions, 20 Task
+executions, and 20 graph binding captures using repeated approximately 1 KiB
+configuration. Each execution receives two hot CAS updates, two warm views, two
+cold views after reopening, and one cold full read. Each capture receives one
+cold load. No providers, tools, or formal test suite were run.
+
+The four columns below are baseline `c99c687d`, sharing `a9fa3e38` (measured
+identical local tree at `20418a62`), and capture transaction optimization
+`d2be6c58`, followed by final measured code head
+`63defe409822c727a6807e73fc43c03d7f04eb1c` (tree
+`a98b781388b4fb5d20f1ddb46cf1c034eb624d78`). The final code includes execution
+metadata/result projections and the first-writer archive-scope race fix. Later
+evidence-only documentation changes do not change that measured code tree.
+
+The standalone diagnostic [helper](../../tests/ai/_measure_shared_records.py) selects each source
+with PYTHONPATH, checks its exact clean Git revision, and records imported module
+paths. Script SHA-256:
+`087f9bfb1044b458cea5f496cf76bc607d9698b2ed165ffe1a7f56ef4737ffce`.
+Input SHA-256:
+`db06aa6d773aad468007229c3e347f67fdf5ebb7100b41153a5e5aebd99b54a7`.
+The committed [compact evidence](measurements/shared-records-sqlite-summary.json)
+contains each of the four source SHA/tree pairs, input, dependencies, per-phase SQL counters,
+all-column and per-kind records bytes, and final physical sizes. Source/import
+paths are checkout-relative. Full intermediate table snapshots and elapsed
+measurements are omitted; original raw-result hashes are retained for provenance.
+The annotated helper was rerun against the first three clean source revisions: inputs,
+SQL counters and every storage snapshot match the preceding standalone run.
+The fourth run uses the identical helper and input on the final code head.
+
+From a checkout with the recorded dependencies installed, invoke the helper once
+per clean source tree with a fresh output/database path:
+
+```bash
+python tests/ai/_measure_shared_records.py \
+  --source-root <clean-source-checkout> --expected-sha <source-sha> \
+  --database <new-database.sqlite> --output <new-result.json> --label <label>
+```
+
+This is a manually invoked diagnostic, not a task runner or collected test.
+It rejects mismatched or dirty source revisions and existing output files.
+All four use the same interpreter/dependencies,
+including SQLAlchemy 2.0.51, aiosqlite 0.22.1, and SQLite 3.53.1.
+
+### Retained space
+
+“All column bytes” sums `length(CAST(column AS BLOB))` for every SQL column,
+including keys, timestamps and binary payloads, with NULL counted as zero. Numeric
+values therefore use their text rendering, not SQLite's on-disk integer encoding.
+This is a reproducible value-size metric, separate from physical `dbstat` pages.
+
+| Record kind | Rows: baseline / sharing / capture / final | All column bytes: baseline / sharing / capture / final |
+| --- | --- | --- |
+| `execution` | 40 / 40 / 40 / 40 | 150012 / 104733 / 104733 / 109473 |
+| `task_graph_binding_capture` | 20 / 20 / 20 / 20 | 45140 / 25360 / 25360 / 25360 |
+| `archive_content` | 0 / 3 / 3 / 3 | 0 / 6216 / 6216 / 6216 |
+| `archive_scope` | 1 / 1 / 1 / 1 | 281 / 281 / 281 / 281 |
+
+| Total metric | Baseline | Sharing | Capture optimized | Final code |
+| --- | ---: | ---: | ---: | ---: |
+| Records all column bytes | 195433 | 136590 | 136590 | 141330 |
+| Records JSON bytes | 170901 | 106376 | 106376 | 111116 |
+| Records binary bytes | 0 | 4020 | 4020 | 4020 |
+| Records table + indexes pages | 77 | 67 | 67 | 67 |
+| Records table + indexes page bytes | 315392 | 274432 | 274432 | 274432 |
+| Records table + indexes payload bytes | 223728 | 166682 | 166682 | 171422 |
+| Closed database file bytes | 610304 | 569344 | 569344 | 569344 |
+
+Pages are 4096 bytes. Closed WAL/SHM sizes are zero; no VACUUM was requested.
+Other business tables have no rows in this workload, so all-business-table value
+bytes equal the records total. Shared archive rows are included: records values
+fall 27.7% at the final code head, records table/index allocation 13.0%, and
+the full SQLite file 6.7%. The final metadata summary adds 4740 bytes to the
+40 execution rows compared with the capture-only measurement.
+These results do not establish savings for tiny single-use contracts, other
+record mixtures, pre-existing databases, or other SQL backends.
+
+### SQL operations and transaction boundaries
+
+Entries below are SELECT / DML / commit events. Counts use SQLAlchemy events;
+DML includes immutable INSERT/upserts even when the body already exists. They
+are not network round trips, fsync counts, scanned bytes, or latency. Measurement
+inspection itself uses a separate read-only SQLite connection and is excluded.
+
+| Phase | Baseline | Sharing | Capture optimized | Final code |
+| --- | --- | --- | --- | --- |
+| initialize | 0 / 0 / 1 | 0 / 0 / 1 | 0 / 0 / 1 | 0 / 0 / 1 |
+| agent_create | 22 / 21 / 20 | 45 / 41 / 23 | 45 / 41 / 23 | 46 / 41 / 23 |
+| task_create | 20 / 20 / 20 | 40 / 40 / 20 | 40 / 40 / 20 | 40 / 40 / 20 |
+| capture_create | 20 / 20 / 40 | 100 / 40 / 140 | 40 / 40 / 40 | 40 / 40 / 40 |
+| agent_hot_cas | 40 / 40 / 40 | 40 / 40 / 40 | 40 / 40 / 40 | 40 / 40 / 40 |
+| agent_warm_view | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 |
+| task_hot_cas | 40 / 40 / 40 | 40 / 40 / 40 | 40 / 40 / 40 | 40 / 40 / 40 |
+| task_warm_view | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 |
+| reopen | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| agent_cold_view | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 |
+| task_cold_view | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 |
+| agent_cold_full_read | 20 / 0 / 20 | 41 / 0 / 41 | 41 / 0 / 41 | 41 / 0 / 41 |
+| task_cold_full_read | 20 / 0 / 20 | 40 / 0 / 40 | 40 / 0 / 40 | 40 / 0 / 40 |
+| capture_cold_read | 20 / 0 / 20 | 60 / 0 / 60 | 40 / 0 / 20 | 40 / 0 / 20 |
+| All phases | 362 / 141 / 381 | 566 / 201 / 565 | 486 / 201 / 425 | 487 / 201 / 425 |
+
+Initialization separately executes 88 statements (30 PRAGMA, 58 CREATE), with
+one commit and one rollback in each run. Reopening executes two PRAGMAs and one
+rollback. All-phase statement totals, including BEGIN/DDL/PRAGMA, are
+973 / 1421 / 1201 / 1202. The final first-writer identity check adds one
+startup SELECT; hot CAS and warm/cold view counts are unchanged.
+
+Capture publication now retains a read-only existing-owner replay, then publishes
+new immutable content and its owner within the existing same-owner mutation
+scope. Owner and contract recovery share one read scope; an already opened
+archive is reused without another scope lookup. This reduces capture creation
+from 100 SELECT/140 commits to 40/40, and cold loading from 60/60 to 40/20.
+Atomic rollback and read-scope regression coverage accompany the change.
+Compared with the inline baseline, the remaining content-integrity read and
+immutable publication still add work: all-phase SELECT rises from 362 to 487
+and DML from 141 to 201. This is a measured space/read trade-off, not an overall
+SQL reduction. The final code head is measured here; formal CI and complete runtime workloads
+remain separate verification requirements.

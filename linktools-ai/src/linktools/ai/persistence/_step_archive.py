@@ -40,6 +40,7 @@ from .codec import (
     encode_record,
     decode_record,
 )
+from ..execution import ExecutionControlRecord
 from .contracts import (
     ArchivedContextBlock,
     ContextProjection,
@@ -2471,12 +2472,12 @@ class StateStepArchive(AgentRunStore):
         self,
         transaction: StateTransaction,
         execution_id: str | None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None,
         producer_generation: int | None = None,
         *,
         allow_cancelling: bool = True,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
-    ) -> tuple[ExecutionRecord, StoredRecord] | None:
+    ) -> tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None:
         if self._execution_repository is None:
             if self._runtime_domain is PersistenceDomain.TRACE:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2647,7 +2648,7 @@ class StateStepArchive(AgentRunStore):
         observation: PreparedTranscriptObservation | None = None,
         producer_generation: int | None = None,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
         prefetch_keys: Sequence[bytes] = (),
     ) -> bool:
@@ -2815,7 +2816,7 @@ class StateStepArchive(AgentRunStore):
         checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
     ) -> int:
         if not isinstance(checkpoint, PreparedAgentRunCheckpoint):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2881,7 +2882,7 @@ class StateStepArchive(AgentRunStore):
         checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
     ) -> int | None:
         """Materialize and return its exact position; legacy overrides may return None."""
         require_no_run_history_lock(
@@ -2906,7 +2907,7 @@ class StateStepArchive(AgentRunStore):
         observation: PreparedTranscriptObservation | None = None,
         producer_generation: int | None = None,
         execution_id: str | None = None,
-        execution_guard: tuple[ExecutionRecord, StoredRecord] | None = None,
+        execution_guard: tuple[ExecutionControlRecord | ExecutionRecord, StoredRecord] | None = None,
         inserted_terminal: ExecutionInsertionReceipt | None = None,
         archive: PreparedArchive | None = None,
     ) -> None:
