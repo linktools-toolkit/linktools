@@ -1326,6 +1326,7 @@ class SqlStepStore:
 
     async def capture_message_roots(
         self, roots: Sequence[NativeMessageRoot], *, transaction: SqlStateRowReader | None = None,
+        reserve: Callable[[int], None] | None = None,
     ) -> Callable[[], Awaitable[tuple[tuple[bytes, ...], ...]]]:
         """Capture SQL rows with their owners; decode objects after the read scope."""
         from .state import active_state_transaction
@@ -1348,6 +1349,19 @@ class SqlStepStore:
                     rows = tuple(dict(row) for row in (await self._context.run_statement(
                         session.execute(query.statement),
                     )).mappings())
+
+        if reserve is not None:
+            # Structural ancestors carry NULL bodies. Only physical message
+            # bodies consume decompression memory, once per distinct identity.
+            sizes = {}
+            for row in rows:
+                if row.get("message") is None and row.get("payload_json") is None:
+                    continue
+                size = row.get("raw_size")
+                if type(size) is not int or size < 0:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                sizes[row["message_sha256"]] = size
+            reserve(sum(sizes.values()))
 
         async def hydrate() -> tuple[tuple[bytes, ...], ...]:
             try:

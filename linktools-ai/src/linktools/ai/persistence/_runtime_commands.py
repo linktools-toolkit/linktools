@@ -27,7 +27,11 @@ from ..core import (
     agent_run_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import PayloadPolicy, StoredPayload
+from ..steps import native_store_key
+from pydantic_ai.messages import ModelResponse, TextPart
+from ._message_root import NativeMessageRoot, NativeTextReference
+from .contracts import ArchivedContextBlock
 from ._archive import ContentArchive, PreparedArchive
 from ..session import SessionTurnRef
 from ..execution import ExecutionControlRecord
@@ -2984,6 +2988,31 @@ class StateCommands:
             )
         return relocated, prepared, history
 
+    def _native_terminal_text(
+        self, output: StoredPayload | None, checkpoints: Sequence[PreparedAgentRunCheckpoint],
+    ) -> NativeTextReference | None:
+        """Select only an equal, immutable text from this terminal publication."""
+        if (output is None or output.kind != "inline" or output.encoding != "json"
+                or output.size <= PayloadPolicy().inline_limit_bytes or not checkpoints):
+            return None
+        text = output.decode()
+        prepared = checkpoints[-1]
+        messages = prepared.context_messages
+        if not isinstance(text, str) or not messages or len(prepared.projection.items) != 1:
+            return None
+        message = messages[-1]
+        block = prepared.projection.items[0]
+        if (not isinstance(message, ModelResponse) or len(message.parts) != 1
+                or not isinstance(message.parts[0], TextPart) or message.parts[0].content != text
+                or not isinstance(block, ArchivedContextBlock) or not isinstance(block.root, NativeMessageRoot)
+                or block.root.count != len(messages)):
+            return None
+        opened = self._execution.state_store.storage_group.opened_archive
+        if (opened is None or block.root.group_id != opened[0]
+                or block.root.store_key != native_store_key(self._namespace, self._tenant_id)):
+            return None
+        return NativeTextReference(block.root.slice(len(messages) - 1, len(messages)), output.digest, output.size)
+
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,
@@ -3202,6 +3231,11 @@ class StateCommands:
                         session_id, start_turn_seq=session_turn.turn_seq, end_turn_seq=session_turn.turn_seq + 1,
                     ))
             try:
+                result_checkpoints = (tuple(prepared_conversation) or tuple(prepared_execution)
+                                      or tuple(checkpoint for projection in terminal_projections for checkpoint in projection.checkpoints))
+                result_source = (self._native_terminal_text(commit.result.output, result_checkpoints)
+                                 if shared_archive is not None and type(self._execution) is ExecutionRepositoryImpl else None)
+
                 async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                     nonlocal effective_commit, next_cursor
                     if fresh_record_keys and isinstance(group, GroupRecordReader):
@@ -3336,16 +3370,21 @@ class StateCommands:
                             )
                     if prepared is not None:
                         await prepared.apply(group)
-                    if closed_result is None:
-                        if seal is not None:
-                            await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
-                        closed_result = await self._execution.commit_terminal_in_transaction(
-                            execution_transaction, effective_commit, pending_events=audit_events,
-                        )
                     if shared_archive is not None:
                         await terminal_archives[0].transcript_repository.publish_native_archive(
                             group.transaction(terminal_archives[0].state_store), shared_archive, owner_written=True,
                         )
+                    if closed_result is None:
+                        if seal is not None:
+                            await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
+                        if result_source is None:
+                            closed_result = await self._execution.commit_terminal_in_transaction(
+                                execution_transaction, effective_commit, pending_events=audit_events,
+                            )
+                        else:
+                            closed_result = await self._execution.commit_terminal_in_transaction(
+                                execution_transaction, effective_commit, pending_events=audit_events, result_source=result_source,
+                            )
                     if closed_result.execution.recovery_state is ExecutionRecoveryState.HANDOFF:
                         return closed_result
                     observed = await self._execution.get_observed_in_transaction(

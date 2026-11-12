@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from ._tool_operation_content import expand_tool_content, tool_content_size
-from ._execution_content import ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size
+from ._execution_content import (ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size,
+    expand_native_execution_content, restore_native_text_payload)
+from .codec import decode_envelope, execution_payload_slots, native_text_reference, binding_reference
 
 from ..core import (
     JsonValue,
@@ -249,9 +251,12 @@ class _SnapshotCaptureBudget:
     def page_size(self, requested: int) -> int:
         return min(requested, max(1, self.limits.max_entries - self.entries))
 
-    def reserve_bytes(self, size: int) -> None:
+    def check_bytes(self, size: int) -> None:
         if self.byte_size + size > self.limits.max_bytes:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+    def reserve_bytes(self, size: int) -> None:
+        self.check_bytes(size)
         self.byte_size += size
 
     def accept(self, value: object) -> None:
@@ -521,7 +526,8 @@ class RuntimeSnapshotOperations:
                                               if record.kind == "execution")
                     for offset in range(0, len(execution_records), 1000):
                         for semantic_record in await execution_bindings.expand_many(
-                                execution_records[offset:offset + 1000], reserve=capture_budget.reserve_bytes):
+                                execution_records[offset:offset + 1000], reserve=capture_budget.reserve_bytes,
+                                reserve_native=capture_budget.check_bytes):
                             execution = _decode_enveloped_domain(semantic_record.data, ExecutionRecord)
                             if not isinstance(execution.binding, AgentBindingContract) or not execution.restart_checkpoints:
                                 continue
@@ -789,7 +795,10 @@ async def _export_snapshot(
             if not page:
                 break
             for value in page:
-                semantic_value = _expand_run_reference(value, source.run_registrations or {})
+                semantic_value = _expand_snapshot_native_text(value,
+                    {group: (rows[1], rows[2]) for group, rows in (source.native_rows or {}).items()},
+                    source.native_payloads or {}, namespace=source.namespace, tenant_id=source.tenant_id)
+                semantic_value = _expand_run_reference(semantic_value, source.run_registrations or {})
                 semantic_value = expand_snapshot_execution_content(semantic_value, binding_contents,
                     namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
                 semantic_value = expand_tool_content(semantic_value, binding_contents,
@@ -1106,6 +1115,62 @@ async def restore_snapshot(
         ],
     ] = {}
 
+    actual_objects: set[tuple[str, str, str, int]] = set()
+    decoded_objects: list[tuple[PersistenceDomain, ObjectRef, ObjectRef]] = []
+    decoded_by_identity: dict[
+        tuple[str, str, str, int],
+        tuple[PersistenceDomain, ObjectRef, ObjectRef],
+    ] = {}
+    for raw_object in raw_objects:
+        if not isinstance(raw_object, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            domain = PersistenceDomain(raw_object["domain"])
+            source = _object_ref_from_payload(raw_object["source"])
+            content_ref = _object_ref_from_payload(raw_object["content"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if source.digest != content_ref.digest or source.size != content_ref.size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        identity = (domain.value, source.key, source.digest, source.size)
+        if identity in actual_objects:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        actual_objects.add(identity)
+        decoded = (domain, source, content_ref)
+        decoded_objects.append(decoded)
+        decoded_by_identity[identity] = decoded
+        object_bytes += content_ref.size
+        if len(payload) + object_bytes > limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+    native_encoded_payloads = {}
+    for group_id, entry in native_entries.items():
+        checkpoint_payloads = {}
+        native_encoded_payloads[group_id] = {}
+        closure = native_closures[group_id]
+        for row in entry["messages"]:
+            content = validate_native_message_content(row, group_id=group_id,
+                content_scope=archive_content_scope(namespace, tenant_id))
+            async def resolve(reference: ObjectRef) -> bytes:
+                identity = entry["domain"], reference.key, reference.digest, reference.size
+                expected_objects.add(identity)
+                decoded = decoded_by_identity.get(identity)
+                if decoded is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                content_ref = decoded[2]
+                return await read_object(object_store, content_ref.key,
+                                         expected_digest=content_ref.digest, expected_size=content_ref.size)
+            encoded = await _read_content_payload(content, resolve)
+            _validate_archive_content(content, encoded)
+            native_encoded_payloads[group_id][(row["store_key"], row["sha256"])] = encoded
+            if group_id in native_checkpoints:
+                raw = decode_payload_bytes(encoded, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
+                decode_model_message_payloads((raw,))
+                checkpoint_payloads[(row["store_key"], row["sha256"])] = raw
+        if group_id in native_checkpoints:
+            _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
+
     semantic_domains = {}
     binding_contents = {key: content for closure in archive_closures.values()
                         for key, content in closure.binding_contents().items()}
@@ -1157,7 +1222,9 @@ async def restore_snapshot(
 
         records = tuple(decode_record(value) for value in raw_records)
         semantic_records = tuple(expand_snapshot_capture(expand_snapshot_execution_content(
-            _expand_run_reference(record, run_registrations), binding_contents,
+            _expand_run_reference(_expand_snapshot_native_text(record,
+                {group: (entry["sequences"], entry["messages"]) for group, entry in native_entries.items()},
+                native_encoded_payloads, namespace=namespace, tenant_id=tenant_id), run_registrations), binding_contents,
             namespace=namespace, tenant_id=tenant_id), binding_contents,
             namespace=namespace, tenant_id=tenant_id) for record in records)
         semantic_records = tuple(expand_tool_content(record, binding_contents,
@@ -1263,34 +1330,6 @@ async def restore_snapshot(
                     or validator.validate(visible, raw.data) != raw):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             native_fact_projections[key] = raw
-    actual_objects: set[tuple[str, str, str, int]] = set()
-    decoded_objects: list[tuple[PersistenceDomain, ObjectRef, ObjectRef]] = []
-    decoded_by_identity: dict[
-        tuple[str, str, str, int],
-        tuple[PersistenceDomain, ObjectRef, ObjectRef],
-    ] = {}
-    for raw_object in raw_objects:
-        if not isinstance(raw_object, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            domain = PersistenceDomain(raw_object["domain"])
-            source = _object_ref_from_payload(raw_object["source"])
-            content_ref = _object_ref_from_payload(raw_object["content"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if source.digest != content_ref.digest or source.size != content_ref.size:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        identity = (domain.value, source.key, source.digest, source.size)
-        if identity in actual_objects:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        actual_objects.add(identity)
-        decoded = (domain, source, content_ref)
-        decoded_objects.append(decoded)
-        decoded_by_identity[identity] = decoded
-        object_bytes += content_ref.size
-        if len(payload) + object_bytes > limits.max_bytes:
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-
     pending_objects = list(expected_objects)
     while pending_objects:
         identity = pending_objects.pop()
@@ -1345,35 +1384,12 @@ async def restore_snapshot(
             _validate_archive_content(content, encoded)
 
     for group_id, entry in native_entries.items():
-        checkpoint_payloads = {}
         closure = native_closures[group_id]
         sequence_keys = [(row["store_key"], row["sha256"]) for row in entry["sequences"]]
-        message_keys = []
-        for row in entry["messages"]:
-            content = validate_native_message_content(row, group_id=group_id,
-                content_scope=archive_content_scope(namespace, tenant_id))
-            message_keys.append((row["store_key"], row["sha256"]))
-            async def resolve(reference: ObjectRef) -> bytes:
-                identity = entry["domain"], reference.key, reference.digest, reference.size
-                expected_objects.add(identity)
-                decoded = decoded_by_identity.get(identity)
-                if decoded is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                content_ref = decoded[2]
-                return await read_object(object_store, content_ref.key,
-                                         expected_digest=content_ref.digest, expected_size=content_ref.size)
-            encoded = await _read_content_payload(content, resolve)
-            _validate_archive_content(content, encoded)
-            if group_id in native_checkpoints:
-                raw = decode_payload_bytes(encoded, codec=content.compression,
-                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
-                decode_model_message_payloads((raw,))
-                checkpoint_payloads[(row["store_key"], row["sha256"])] = raw
+        message_keys = [(row["store_key"], row["sha256"]) for row in entry["messages"]]
         if (len(sequence_keys) != len(set(sequence_keys)) or len(message_keys) != len(set(message_keys))
                 or set(sequence_keys) != closure.retained_sequences or set(message_keys) != closure.retained_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if group_id in native_checkpoints:
-            _validate_native_checkpoint_payloads(native_checkpoints[group_id], closure, checkpoint_payloads)
 
     async def read_capture_attachment(reference: ObjectRef) -> bytes:
         identity = PersistenceDomain.TASK.value, reference.key, reference.digest, reference.size
@@ -1879,6 +1895,45 @@ def _validate_native_checkpoint_payloads(
         SqlStepStore.validate_backup_payloads(backup, closure, payloads)
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _expand_snapshot_native_text(
+    record: StoredRecord,
+    rows: Mapping[str, tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]],
+    payloads: Mapping[str, Mapping[tuple[bytes, str], bytes]], *, namespace: str, tenant_id: str,
+) -> StoredRecord:
+    if record.kind != "execution":
+        return record
+    value = decode_envelope(record.data).value["payload"]
+    restored = {}
+    for _path, payload in execution_payload_slots(value):
+        reference = native_text_reference(payload)
+        if reference is None or reference in restored:
+            continue
+        root = reference.root
+        binding = binding_reference(value["fields"].get("binding"))
+        if binding is None or binding[0] != root.group_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        _validate_native_partition(root.store_key, namespace, tenant_id)
+        owner = rows.get(root.group_id)
+        if owner is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        identities = NativeMessageClosure(owner[0]).message_identities(root.store_key, root.slices)
+        if len(identities) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = root.store_key, identities[0]
+        bodies = {(row["store_key"], row["sha256"]): row for row in owner[1]}
+        row = bodies.get(key)
+        encoded = payloads.get(root.group_id, {}).get(key)
+        if row is None or encoded is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        content = validate_native_message_content(row, group_id=root.group_id,
+            content_scope=archive_content_scope(namespace, tenant_id))
+        _validate_archive_content(content, encoded)
+        raw = decode_payload_bytes(encoded, codec=content.compression,
+            raw_digest=content.raw_digest, raw_size=content.raw_size)
+        restored[reference] = restore_native_text_payload(reference, raw)
+    return expand_native_execution_content(record, restored)
 
 
 async def _capture_native_payloads(

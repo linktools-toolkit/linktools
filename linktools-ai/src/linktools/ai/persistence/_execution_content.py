@@ -18,8 +18,13 @@ from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
 from ._archive import archive_content_scope, archive_content_identity, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
+from ._message_root import NativeTextReference
+from ..steps import native_store_key
+from ._step_store import SqlStepStore
+from ..model.messages import decode_model_messages
+from pydantic_ai.messages import ModelResponse, TextPart
 from .codec import (_execution_binding_summary, binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
-    encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, map_execution_payload_slots)
+    encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
 BINDING_CODEC = "execution-binding"
@@ -149,6 +154,35 @@ def _expand_execution_content(record: StoredRecord, contents: Mapping[tuple[str,
     def expand(payload: Mapping) -> JsonValue:
         reference = payload_reference(payload)
         return payload if reference is None else _encode_persisted_domain(_decode_payload(decoded[reference], reference[2]))
+    return _map_payloads(record, expand)
+
+
+def restore_native_text_payload(reference: NativeTextReference, raw: bytes) -> StoredPayload:
+    """Rebuild and authenticate the exact JSON result from a fixed message."""
+    try:
+        messages = decode_model_messages(raw)
+        if (len(messages) != 1 or not isinstance(messages[0], ModelResponse)
+                or len(messages[0].parts) != 1 or not isinstance(messages[0].parts[0], TextPart)):
+            raise ValueError("native result source is not one response text")
+        payload = StoredPayload.inline_json(messages[0].parts[0].content)
+        if (payload.digest, payload.size) != (reference.digest, reference.size):
+            raise ValueError("native result digest differs from admitted result")
+        return payload
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def expand_native_execution_content(
+    record: StoredRecord, payloads: Mapping[NativeTextReference, StoredPayload],
+) -> StoredRecord:
+    if record.kind != "execution":
+        return record
+    def expand(payload: Mapping) -> JsonValue:
+        reference = native_text_reference(payload)
+        if reference is None:
+            return payload
+        restored = payloads.get(reference)
+        return _encode_persisted_domain(validate_native_text_payload(reference, restored))
     return _map_payloads(record, expand)
 
 
@@ -319,11 +353,28 @@ class ExecutionContent:
         if self._share_content:
             await self.initialize(create=True)
 
-    async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None) -> JsonValue:
+    async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
+                     result_source: NativeTextReference | None = None) -> JsonValue:
         """Publish new immutable bodies with the same transaction as their owner."""
         if not self._share_content:
             return _encode_persisted_domain(value)
-        selected = [(payload, self._encoding(payload)) for payload in self.payload_values(value)]
+        output = None if value.result is None else value.result.output
+        if result_source is None and previous is not None and output is not None:
+            for path, payload in _payloads(previous):
+                if path == ("result", "fields", "output"):
+                    previous_source = native_text_reference(payload)
+                    if previous_source is not None and (output.digest, output.size) == (previous_source.digest, previous_source.size):
+                        result_source = previous_source
+        if result_source is not None:
+            opened = self._store.storage_group.opened_archive
+            if (output is None or output.kind != "inline" or output.encoding != "json"
+                    or not isinstance(output.decode(), str)
+                    or (output.digest, output.size) != (result_source.digest, result_source.size)
+                    or opened is None or result_source.root.group_id != opened[0]
+                    or result_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        selected = [(payload, self._encoding(payload)) for payload in self.payload_values(value)
+                    if result_source is None or payload is not output]
         selected = [(payload, encoded) for payload, encoded in selected if encoded is not None]
         binding = self._binding_encoding(value.binding)
         active = active_state_scope()
@@ -339,7 +390,8 @@ class ExecutionContent:
         if previous_binding is not None and previous_binding[:2] != (archive.scope_id, archive.content_scope):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         prepared = PreparedArchive()
-        encoded_payloads = {}
+        encoded_payloads = {} if result_source is None else {id(output): {
+            "$dataclass": "stored_payload", "schema": 1, "fields": {"content": result_source.to_json()}}}
         missing = []
         for payload, (identity, raw) in selected:
             reference = archive.scope_id, archive.content_scope, identity
@@ -359,13 +411,59 @@ class ExecutionContent:
             await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
         return encode_execution_content(value, encoded_payloads, binding=encoded_binding)
 
+    async def verify_result_source(self, source: NativeTextReference, output: StoredPayload | None) -> None:
+        """Authenticate stored source bytes inside the owner's write transaction."""
+        validate_native_text_payload(source, output)
+        archive = await self._archive()
+        if (source.root.group_id != archive.scope_id
+                or source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        active = active_state_scope()
+        native = SqlStepStore.for_state_store(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+        transaction = None if active is None or not active.writable else active.transactions.get(self._store)
+        if native is None or transaction is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        native.bind_message_archive(archive)
+        messages, = await (await native.capture_message_roots((source.root,), transaction=transaction))()
+        if len(messages) != 1 or restore_native_text_payload(source, messages[0]) != output:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     async def read_payloads(self, records: Sequence[StoredRecord], *,
-                            reserve: Callable[[int], None] | None = None, result_only: bool = False) -> dict[tuple[str, str, str], StoredPayload | StoredUserInput]:
+                            reserve: Callable[[int], None] | None = None, result_only: bool = False,
+                            reserve_native: Callable[[int], None] | None = None) -> dict[tuple[str, str, str] | NativeTextReference, StoredPayload | StoredUserInput]:
+        native_references = []
+        for record in records:
+            for path, payload in _payloads(record):
+                reference = native_text_reference(payload)
+                if reference is not None:
+                    if path != ("result", "fields", "output"):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    native_references.append(reference)
+        native_values = {}
+        if native_references:
+            archive = await self._archive()
+            references_unique = tuple(dict.fromkeys(native_references))
+            if any(source.root.group_id != archive.scope_id or source.root.store_key != native_store_key(
+                    self._namespace, self._tenant_id) for source in references_unique):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            native = SqlStepStore.for_state_store(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+            active = active_state_scope()
+            transaction = None if active is None else active.transactions.get(self._store)
+            if native is None or transaction is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            native.bind_message_archive(archive)
+            batches = await (await native.capture_message_roots(
+                tuple(source.root for source in references_unique), transaction=transaction, reserve=reserve_native or reserve))()
+            for source, raw_messages in zip(references_unique, batches, strict=True):
+                if len(raw_messages) != 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                payload = restore_native_text_payload(source, raw_messages[0])
+                native_values[source] = payload
         references = [reference for record in records for path, payload in _payloads(record)
                       if (not result_only or path == ("result", "fields", "output"))
                       if (reference := payload_reference(payload)) is not None]
         if not references:
-            return {}
+            return native_values
         archive = await self._archive()
         if any(reference[:2] != (archive.scope_id, archive.content_scope) for reference in references):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -376,7 +474,7 @@ class ExecutionContent:
                 reserve(counts[identity] * size)
         raws = await archive.read_contents(identities, codec=PAYLOAD_CODEC,
             reserve=reserve_content if reserve is not None else None)
-        values = {}
+        values = dict(native_values)
         for identity, raw in zip(identities, raws, strict=True):
             value = _decode_payload(raw, identity)
             key = id(value)
@@ -388,9 +486,9 @@ class ExecutionContent:
         values = {("stored_user_input",): value.stored_user_input,
                   ("result", "fields", "output"): None if value.result is None else value.result.output}
         decoded = {reference: values[path] for path, payload in _payloads(candidate)
-                   if path in values and (reference := payload_reference(payload)) is not None}
+                   if path in values and (reference := native_text_reference(payload) or payload_reference(payload)) is not None}
         if any(reference not in decoded for path, payload in _payloads(current)
-               if path in values and (reference := payload_reference(payload)) is not None):
+               if path in values and (reference := native_text_reference(payload) or payload_reference(payload)) is not None):
             return False
         previous = decode_execution_content(current.data, decoded, timeline=True)
         return previous.completed_at is None or previous.terminal_matches(value)
@@ -411,14 +509,15 @@ class ExecutionContent:
         return tuple(values)
 
     async def expand_many(self, records: Sequence[StoredRecord], *,
-                          reserve: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
-        payloads = await self.read_payloads(records, reserve=reserve)
+                          reserve: Callable[[int], None] | None = None,
+                          reserve_native: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
+        payloads = await self.read_payloads(records, reserve=reserve, reserve_native=reserve_native)
         records = await self._expand_bindings(records, reserve=reserve)
         def expand(payload: Mapping) -> JsonValue:
-            reference = payload_reference(payload)
+            reference = native_text_reference(payload) or payload_reference(payload)
             return payload if reference is None else _encode_persisted_domain(payloads[reference])
         return tuple(_map_payloads(record, expand) for record in records)
 
 
-__all__ = ["ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
+__all__ = ["restore_native_text_payload", "expand_native_execution_content", "ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
            ]

@@ -24,6 +24,7 @@ from ..errors import AIError, ErrorCode
 from ..evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
 from ..task import TaskGraphView, TaskNodeView
 from .contracts import ToolOperationRecord
+from ._message_root import NativeTextReference
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -183,10 +184,10 @@ class _RepositoryBase:
             return record
         return self._stored(kind, identity, value, scope=scope, parent=parent, state=state)
 
-    async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
+    async def _projected_content(self, current: StoredRecord, value: object, *, result_source: NativeTextReference | None = None) -> StoredRecord:
         if isinstance(value, ExecutionRecord):
             _require_tenant(value, self._tenant_id)
-            encoded = await self._execution_content.encode(value, previous=current)
+            encoded = await self._execution_content.encode(value, previous=current, result_source=result_source)
             record = project_record(namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
                 kind=current.kind, identity=(value.execution_id,), value=value, state=_record_state(value),
                 storage_revision=current.storage_revision + 1, encoded=encoded)

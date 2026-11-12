@@ -26,7 +26,7 @@ from .codec import (
 )
 from .state import StoredRecord, record_key
 from .captures import task_binding_content_reference
-from .codec import execution_payload_slots, payload_reference, map_execution_payload_slots
+from .codec import execution_payload_slots, payload_reference, map_execution_payload_slots, native_text_reference
 
 
 def _context_payload(value: Mapping[str, object]) -> tuple[Mapping[str, object], StoredPayload] | None:
@@ -165,6 +165,10 @@ def iter_native_message_roots(value: object) -> Iterator[NativeMessageRoot]:
             root = _context_history(context[1].decode())
             if isinstance(root, NativeMessageRoot):
                 yield root
+        for _path, payload in execution_payload_slots(value):
+            reference = native_text_reference(payload)
+            if reference is not None:
+                yield reference.root
         if kind in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
             return
         if kind in _NATIVE_ROOT_SLOTS:
@@ -615,6 +619,16 @@ def rekey_native_message_roots(
             encoded = _encode_persisted_domain(root) if "schema" in wire else encode_domain(root)
             return {**value, "fields": {**fields, slot: encoded}}
         context = _context_payload(value)
+        if kind == "execution_record":
+            def rekey_payload(payload: Mapping) -> JsonValue:
+                reference = native_text_reference(payload)
+                if reference is None:
+                    return payload
+                content = payload["fields"]["content"]
+                return {**payload, "fields": {"content": {
+                    **content, "$native_text": rewrite(reference.root).to_json(),
+                }}}
+            value = map_execution_payload_slots(value, rekey_payload)
         result = {key: rekey_native_message_roots(item, groups, stores) for key, item in value.items()}
         if context is not None:
             wire, payload = context

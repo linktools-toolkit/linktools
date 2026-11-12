@@ -295,9 +295,13 @@ async def _purge_unreferenced_objects(
         for nested_domain, nested in iter_runtime_object_dependencies(reference, payload, default_domain=domain):
             await visit(nested, nested_domain)
 
-    async def collect(value: JsonValue, domain: PersistenceDomain, *, archive_owner: bool = True) -> None:
+    async def collect(value: JsonValue, domain: PersistenceDomain, *, archive_owner: bool = True,
+                      owner_group: object = None) -> None:
         require_known_retention(value)
         for root in iter_native_message_roots(value) if archive_owner else ():
+            owner = native_groups.get(owner_group)
+            if owner_group is not None and (owner is None or owner[3] != root.group_id):
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             closure = native_closures.get(root.group_id)
             if closure is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -333,10 +337,10 @@ async def _purge_unreferenced_objects(
                         semantic = expand_snapshot_capture(record, binding_contents,
                             namespace=scope_namespace, tenant_id=scope_tenant)
                         if record.kind == "task_graph_binding_capture":
-                            await collect(capture_retention_value(record), domain)
+                            await collect(capture_retention_value(record), domain, owner_group=store.storage_group)
                         await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
                 elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
-                    await collect(dict(record.data), domain)
+                    await collect(dict(record.data), domain, owner_group=store.storage_group)
                     if record.kind in {"execution", "tool_operation"}:
                         semantic = expand_tool_content(expand_retained_execution_content(record, binding_contents), binding_contents)
                         await collect(dict(semantic.data), domain, archive_owner=False)
@@ -348,7 +352,7 @@ async def _purge_unreferenced_objects(
             facts = await store.read(lambda tx: tx.scan_facts_page(after=fact_cursor, limit=1000))
             for fact in facts:
                 require_known_retention(fact.data, state=fact.state)
-                await collect(dict(fact.data), domain)
+                await collect(dict(fact.data), domain, owner_group=store.storage_group)
             if len(facts) < 1000:
                 break
             fact_cursor = FactScanCursor(facts[-1].stream_key, facts[-1].sequence)
@@ -357,7 +361,7 @@ async def _purge_unreferenced_objects(
             operations = await store.read(lambda tx: tx.scan_operations_page(after=operation_cursor, limit=1000))
             for operation in operations:
                 require_known_retention(operation.data, state=operation.state)
-                await collect(dict(operation.data), domain)
+                await collect(dict(operation.data), domain, owner_group=store.storage_group)
             if len(operations) < 1000:
                 break
             operation_cursor = OperationScanCursor(operations[-1].key)

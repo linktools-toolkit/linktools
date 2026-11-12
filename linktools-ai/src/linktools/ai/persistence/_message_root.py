@@ -156,4 +156,27 @@ class NativeMessageRoot:
         return NativeMessageRoot(self.group_id, self.store_key, _slice_ranges(self.slices, start, end))
 
 
-__all__ = ["NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]
+@dataclass(frozen=True, slots=True)
+class NativeTextReference:
+    """One immutable response text projected into a canonical JSON result."""
+    root: NativeMessageRoot
+    digest: str
+    size: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
+            raise ValueError("native text reference requires one message")
+        _digest(self.digest)
+        _count(self.size)
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"$native_text": self.root.to_json(), "digest": self.digest, "size": self.size}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeTextReference":
+        if not isinstance(value, Mapping) or set(value) != {"$native_text", "digest", "size"}:
+            raise ValueError("native text reference wire is invalid")
+        return cls(NativeMessageRoot.from_json(value["$native_text"]), value["digest"], value["size"])
+
+
+__all__ = ["NativeTextReference", "NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]

@@ -4,7 +4,7 @@
 
 from ..storage import StorageRetentionMode
 from ._archive import ArchiveRoot, ArchiveSlice, decode_archive_scope, validate_archive_content_identity, validate_archive_group_id
-from ._message_root import NativeMessageRoot, NativeMessageSlice
+from ._message_root import NativeMessageRoot, NativeMessageSlice, NativeTextReference
 
 import base64
 import binascii
@@ -1928,8 +1928,35 @@ def execution_payload_slots(value: object) -> tuple[tuple[tuple[str, ...], Mappi
         if item is not None:
             if not isinstance(item, Mapping) or item.get("$dataclass") != ("stored_user_input" if path == _PAYLOAD_PATHS[0] else "stored_payload"):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if native_text_reference(item) is not None and path != ("result", "fields", "output"):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((path, item))
     return tuple(result)
+
+
+def native_text_reference(value: Mapping) -> NativeTextReference | None:
+    """Recognize a projection only inside its declared result payload slot."""
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = fields.get("content")
+    if not isinstance(content, Mapping) or "$native_text" not in content:
+        return None
+    _validate_dataclass_wrapper(value, StoredPayload, _CURRENT_CODEC, persisted=True)
+    if set(fields) != {"content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return NativeTextReference.from_json(content)
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def validate_native_text_payload(reference: NativeTextReference, payload: object) -> StoredPayload:
+    if (not isinstance(payload, StoredPayload) or payload.kind != "inline" or payload.encoding != "json"
+            or not isinstance(payload.decode(), str)
+            or (payload.digest, payload.size) != (reference.digest, reference.size)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return payload
 
 
 def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
@@ -1940,6 +1967,8 @@ def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
         return None
     target = StoredUserInput if value.get("$dataclass") == "stored_user_input" else StoredPayload
     _validate_dataclass_wrapper(value, target, _CURRENT_CODEC, persisted=True)
+    if native_text_reference(value) is not None:
+        return None
     reference = execution_payload_reference(fields["content"])
     if reference is None or set(fields) != {"content"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1990,7 +2019,7 @@ def execution_payload_reference(value: object) -> tuple[str, str, str] | None:
 
 
 def decode_execution_content(
-    value: Mapping[str, JsonValue], payloads: Mapping[tuple[str, str, str], StoredPayload | StoredUserInput],
+    value: Mapping[str, JsonValue], payloads: Mapping[tuple[str, str, str] | NativeTextReference, StoredPayload | StoredUserInput],
     *, timeline: bool = False, result: bool = False,
 ) -> ExecutionRecord | ExecutionTimelineRecord | ExecutionResultRecord:
     """Inject verified immutable bodies without encoding or decoding them again."""
@@ -2000,12 +2029,22 @@ def decode_execution_content(
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     def decoder(original: DataclassDecoder) -> DataclassDecoder:
         def decode_payload(raw: Mapping[str, object], current: _VersionCodec, persisted: bool) -> object:
-            reference = execution_payload_reference(raw.get("content"))
+            content = raw.get("content")
+            if isinstance(content, Mapping) and "$native_text" in content:
+                if original is not _decode_v1_stored_payload:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    reference = NativeTextReference.from_json(content)
+                except (TypeError, ValueError, KeyError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            else:
+                reference = execution_payload_reference(content)
             if reference is None:
                 return original(raw, current, persisted)
             if set(raw) != {"content"} or reference not in payloads:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return payloads[reference]
+            selected = payloads[reference]
+            return validate_native_text_payload(reference, selected) if isinstance(reference, NativeTextReference) else selected
         return decode_payload
     current = replace(codec, dataclass_decoders={**codec.dataclass_decoders,
         "stored_payload": decoder(_decode_v1_stored_payload),
@@ -2303,7 +2342,7 @@ def _iter_runtime_object_refs(
             if not isinstance(fields_value, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             def skip_content(payload: Mapping) -> JsonValue:
-                return None if payload_reference(payload) is not None else payload
+                return None if payload_reference(payload) is not None or native_text_reference(payload) is not None else payload
             fields_value = map_execution_payload_slots(value, skip_content)["fields"]
             for key, item in fields_value.items():
                 if (
@@ -3071,4 +3110,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

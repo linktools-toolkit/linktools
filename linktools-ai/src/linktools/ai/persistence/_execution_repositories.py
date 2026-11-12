@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import TypeVar
+from ._message_root import NativeTextReference
 from linktools.core import environ
 from ..core import (
     ExecutionEventType,
@@ -230,6 +231,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         await self._execution_content.initialize(create=False, share_content=False)
         return await group.read_many(members, capture)
 
+    async def get(self, identity: str, *, tenant_id: str) -> ExecutionRecord | None:
+        return await self.read_content(lambda _group: super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id))
+
+    async def get_fresh(self, identity: str, *, tenant_id: str) -> ExecutionRecord | None:
+        return await self.read_content(lambda _group: super(ExecutionRepositoryImpl, self).get_fresh(identity, tenant_id=tenant_id))
+
     async def _decode_many(self, records: Sequence[StoredRecord]) -> tuple[ExecutionRecord, ...]:
         values = await self._execution_content.decode_many(records)
         for record, value in zip(records, values, strict=True):
@@ -358,8 +365,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             views.append(view)
         return owner, tuple(views)
 
-    async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
-        candidate = await super()._projected_content(current, value)
+    async def _projected_content(self, current: StoredRecord, value: object, *,
+                                 result_source: NativeTextReference | None = None) -> StoredRecord:
+        candidate = await super()._projected_content(current, value, result_source=result_source)
         if current.state in {ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value,
                              ExecutionStatus.CANCELLED.value, "execution_handoff"}:
             if not isinstance(value, ExecutionRecord) or not self._execution_content.terminal_matches(current, candidate, value):
@@ -369,25 +377,27 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionTimelineRecord]:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        if isinstance(execution_ids, (str, bytes)):
-            raise TypeError("execution_ids must be a sequence of strings")
-        ordered = tuple(dict.fromkeys(execution_ids))
-        if any(not isinstance(value, str) or not value for value in ordered):
-            raise ValueError("execution_ids must contain non-empty strings")
-        keys = {value: self._key("execution", (value,)) for value in ordered}
-        records = await self._store.read_records(tuple(keys.values())) if keys else {}
-        payloads = await self._execution_content.read_payloads(tuple(records.values()))
-        values: dict[str, ExecutionTimelineRecord] = {}
-        for execution_id, key in keys.items():
-            record = records.get(key)
-            if record is None:
-                continue
-            value = decode_execution_content(record.data, payloads, timeline=True)
-            if record.kind != "execution" or record.key != key or value.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values[execution_id] = value
-        return values
+        async def read(_group):
+            _require_repository_tenant(tenant_id, self._tenant_id)
+            if isinstance(execution_ids, (str, bytes)):
+                raise TypeError("execution_ids must be a sequence of strings")
+            ordered = tuple(dict.fromkeys(execution_ids))
+            if any(not isinstance(value, str) or not value for value in ordered):
+                raise ValueError("execution_ids must contain non-empty strings")
+            keys = {value: self._key("execution", (value,)) for value in ordered}
+            records = await self._store.read_records(tuple(keys.values())) if keys else {}
+            payloads = await self._execution_content.read_payloads(tuple(records.values()))
+            values: dict[str, ExecutionTimelineRecord] = {}
+            for execution_id, key in keys.items():
+                record = records.get(key)
+                if record is None:
+                    continue
+                value = decode_execution_content(record.data, payloads, timeline=True)
+                if record.kind != "execution" or record.key != key or value.execution_id != execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[execution_id] = value
+            return values
+        return await self.read_content(read)
 
     async def get_recovery(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         execution = await self.get(execution_id, tenant_id=tenant_id)
@@ -400,9 +410,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return execution if execution is not None and execution.recovery is not None else None
 
     async def get_observed(self, execution_id: str, *, tenant_id: str) -> Observed[ExecutionRecord] | None:
-        _require_repository_tenant(tenant_id, self._tenant_id)
-        record = await self._record(self._key("execution", (execution_id,)))
-        return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
+        async def read(_group):
+            _require_repository_tenant(tenant_id, self._tenant_id)
+            record = await self._record(self._key("execution", (execution_id,)))
+            return None if record is None else Observed(await self._decode(record, ExecutionRecord), record.storage_revision)
+        return await self.read_content(read)
 
     async def get_observed_in_transaction(
         self, transaction: StateTransaction, execution_id: str, *, tenant_id: str,
@@ -414,28 +426,30 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def list_recoverable_page(
         self, *, tenant_id: str, cursor: str | None, limit: int,
     ) -> Page[ExecutionRecord]:
-        if tenant_id != self._tenant_id:
-            return Page(())
-        _validate_page_limit(limit)
-        states = frozenset(status.value for status in (
-            ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
-            ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING, ExecutionStatus.WAITING_DEFERRED,
-        )) | {"execution_handoff"}
-        selected: list[tuple[StoredRecord, ExecutionRecord]] = []
-        next_cursor = cursor
-        while len(selected) <= limit:
-            records = await self._records("execution", states=states, cursor=next_cursor, limit=limit + 1)
-            if not records:
-                break
-            for record, value in zip(records, await self._decode_many(records), strict=True):
-                next_cursor = _record_cursor(record)
-                if value.recovery is not None and value.recovery_state is not ExecutionRecoveryState.COMPLETED:
-                    selected.append((record, value))
-                    if len(selected) > limit:
-                        return Page(tuple(item[1] for item in selected[:limit]), _record_cursor(selected[limit - 1][0]))
-            if len(records) < limit + 1:
-                break
-        return Page(tuple(item[1] for item in selected))
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return Page(())
+            _validate_page_limit(limit)
+            states = frozenset(status.value for status in (
+                ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.RECOVERY_REQUIRED,
+                ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING, ExecutionStatus.WAITING_DEFERRED,
+            )) | {"execution_handoff"}
+            selected: list[tuple[StoredRecord, ExecutionRecord]] = []
+            next_cursor = cursor
+            while len(selected) <= limit:
+                records = await self._records("execution", states=states, cursor=next_cursor, limit=limit + 1)
+                if not records:
+                    break
+                for record, value in zip(records, await self._decode_many(records), strict=True):
+                    next_cursor = _record_cursor(record)
+                    if value.recovery is not None and value.recovery_state is not ExecutionRecoveryState.COMPLETED:
+                        selected.append((record, value))
+                        if len(selected) > limit:
+                            return Page(tuple(item[1] for item in selected[:limit]), _record_cursor(selected[limit - 1][0]))
+                if len(records) < limit + 1:
+                    break
+            return Page(tuple(item[1] for item in selected))
+        return await self.read_content(read)
 
     async def compare_and_swap(
         self, execution_id: str, *, tenant_id: str,
@@ -510,34 +524,36 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def _get_many(
         self, execution_ids: Sequence[str], *, tenant_id: str, refresh: bool,
     ) -> Mapping[str, ExecutionRecord]:
-        if tenant_id != self._tenant_id:
-            return {}
-        if isinstance(execution_ids, (str, bytes)):
-            raise TypeError("execution_ids must be a sequence of strings")
-        ordered = tuple(dict.fromkeys(execution_ids))
-        if any(not isinstance(execution_id, str) or not execution_id for execution_id in ordered):
-            raise ValueError("execution_ids must contain non-empty strings")
-        if not ordered:
-            return {}
-        keys = {
-            execution_id: self._key("execution", (execution_id,))
-            for execution_id in ordered
-        }
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return {}
+            if isinstance(execution_ids, (str, bytes)):
+                raise TypeError("execution_ids must be a sequence of strings")
+            ordered = tuple(dict.fromkeys(execution_ids))
+            if any(not isinstance(execution_id, str) or not execution_id for execution_id in ordered):
+                raise ValueError("execution_ids must contain non-empty strings")
+            if not ordered:
+                return {}
+            keys = {
+                execution_id: self._key("execution", (execution_id,))
+                for execution_id in ordered
+            }
 
-        records = (await self._refresh_records(tuple(keys.values())) if refresh else
-                   await self._store.read_records(tuple(keys.values())))
-        decoded = {record.key: value for record, value in zip(records.values(),
-            await self._decode_many(tuple(records.values())), strict=True)}
-        values: dict[str, ExecutionRecord] = {}
-        for execution_id, key in keys.items():
-            record = records.get(key)
-            if record is None:
-                continue
-            value = decoded[key]
-            if value.execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values[execution_id] = value
-        return values
+            records = (await self._refresh_records(tuple(keys.values())) if refresh else
+                       await self._store.read_records(tuple(keys.values())))
+            decoded = {record.key: value for record, value in zip(records.values(),
+                await self._decode_many(tuple(records.values())), strict=True)}
+            values: dict[str, ExecutionRecord] = {}
+            for execution_id, key in keys.items():
+                record = records.get(key)
+                if record is None:
+                    continue
+                value = decoded[key]
+                if value.execution_id != execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[execution_id] = value
+            return values
+        return await self.read_content(read)
 
     def execution_record_key(self, execution_id: str) -> bytes:
         """Identify the canonical record for a transaction-local read receipt."""
@@ -596,28 +612,32 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         tenant_id: str,
         statuses: frozenset[ExecutionStatus] | None = None,
     ) -> tuple[ExecutionRecord, ...]:
-        if tenant_id != self._tenant_id:
-            return ()
-        records = await self._records(
-            "execution",
-            scope=self._scope("execution", "session", (session_id,)),
-            states=None
-            if statuses is None
-            else frozenset(status.value for status in statuses) | {"execution_handoff"},
-        )
-        values = await self._decode_many(records)
-        return tuple(value for value in values if statuses is None or value.status in statuses)
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return ()
+            records = await self._records(
+                "execution",
+                scope=self._scope("execution", "session", (session_id,)),
+                states=None
+                if statuses is None
+                else frozenset(status.value for status in statuses) | {"execution_handoff"},
+            )
+            values = await self._decode_many(records)
+            return tuple(value for value in values if statuses is None or value.status in statuses)
+        return await self.read_content(read)
 
     async def list_children(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ExecutionRecord, ...]:
-        if tenant_id != self._tenant_id:
-            return ()
-        records = await self._records(
-            "execution",
-            parent=self._parent("execution", "execution", (execution_id,)),
-        )
-        return await self._decode_many(records)
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return ()
+            records = await self._records(
+                "execution",
+                parent=self._parent("execution", "execution", (execution_id,)),
+            )
+            return await self._decode_many(records)
+        return await self.read_content(read)
 
     async def list_candidates(
         self,
@@ -628,52 +648,54 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         cursor: str | None,
         limit: int,
     ) -> ExecutionCandidatePage:
-        if tenant_id != self._tenant_id:
-            return ExecutionCandidatePage((), False)
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= 1000
-        ):
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        scope = (
-            None
-            if session_id is None or parent_execution_id is not None
-            else self._scope("execution", "session", (session_id,))
-        )
-        parent = (
-            None
-            if parent_execution_id is None
-            else self._parent("execution", "execution", (parent_execution_id,))
-        )
-        records = await self._records(
-            "execution",
-            scope=scope,
-            parent=parent,
-            cursor=cursor,
-            limit=limit,
-        )
-        selected = records[:limit]
-        candidates: list[ExecutionCandidate] = []
-        for record, value in zip(selected, await self._decode_many(selected), strict=True):
-            candidates.append(
-                ExecutionCandidate(
-                    value,
-                    _record_cursor(record),
-                )
+        async def read(_group):
+            if tenant_id != self._tenant_id:
+                return ExecutionCandidatePage((), False)
+            if (
+                isinstance(limit, bool)
+                or not isinstance(limit, int)
+                or not 1 <= limit <= 1000
+            ):
+                raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+            scope = (
+                None
+                if session_id is None or parent_execution_id is not None
+                else self._scope("execution", "session", (session_id,))
             )
-        has_more = False
-        if len(records) == limit:
-            has_more = await self._has_records(
+            parent = (
+                None
+                if parent_execution_id is None
+                else self._parent("execution", "execution", (parent_execution_id,))
+            )
+            records = await self._records(
                 "execution",
                 scope=scope,
                 parent=parent,
-                cursor=_record_cursor(records[-1]),
+                cursor=cursor,
+                limit=limit,
             )
-        return ExecutionCandidatePage(
-            tuple(candidates),
-            has_more,
-        )
+            selected = records[:limit]
+            candidates: list[ExecutionCandidate] = []
+            for record, value in zip(selected, await self._decode_many(selected), strict=True):
+                candidates.append(
+                    ExecutionCandidate(
+                        value,
+                        _record_cursor(record),
+                    )
+                )
+            has_more = False
+            if len(records) == limit:
+                has_more = await self._has_records(
+                    "execution",
+                    scope=scope,
+                    parent=parent,
+                    cursor=_record_cursor(records[-1]),
+                )
+            return ExecutionCandidatePage(
+                tuple(candidates),
+                has_more,
+            )
+        return await self.read_content(read)
 
     async def get_in_transaction(
         self,
@@ -1610,6 +1632,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
         transaction: StateTransaction | None = None,
+        result_source: NativeTextReference | None = None,
     ) -> ExecutionTerminalCommitResult:
         key = self._key("execution", (commit.execution.execution_id,))
         stream = stream_key(
@@ -1694,9 +1717,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 event_seq=stored_value.event_seq + len(pending_events) + 1,
                 result=commit.result,
             ).finalize_terminal(commit.result)
+            if result_source is not None:
+                await self._execution_content.verify_result_source(result_source, commit.result.output)
             replacements = [
                 RecordReplacement(
-                    await self._projected_content(stored, next_execution),
+                    (await self._projected_content(stored, next_execution) if result_source is None else
+                     await self._projected_content(stored, next_execution, result_source=result_source)),
                     stored.storage_revision,
                 )
             ]
@@ -1789,11 +1815,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         commit: ExecutionTerminalCommit,
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        result_source: NativeTextReference | None = None,
     ) -> ExecutionTerminalCommitResult:
         return await self._commit_terminal(
             commit,
             pending_events=pending_events,
-            transaction=transaction,
+            transaction=transaction, result_source=result_source,
         )
 
     async def commit_closed_terminal_in_transaction(
@@ -1802,10 +1829,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         commit: ExecutionTerminalCommit,
         *,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        result_source: NativeTextReference | None = None,
     ) -> ExecutionTerminalCommitResult:
         if commit.execution.durable_trace:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await self._commit_terminal(commit, pending_events=pending_events, transaction=transaction)
+        return await self._commit_terminal(commit, pending_events=pending_events, transaction=transaction, result_source=result_source)
 
     async def pending_turn_result_in_transaction(
         self, transaction: StateTransaction, reservation: ExecutionStartReservation,
