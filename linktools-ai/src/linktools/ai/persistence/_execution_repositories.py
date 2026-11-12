@@ -431,11 +431,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         async def read(_group: object) -> tuple[ResourceRef, ExecutionView] | None:
             await self._execution_content.prefetch_projection_owners((key,), bindings=True, result=True)
             record = ((await self._refresh_records((key,))).get(key) if fresh else await self._store.read_record(key))
-            if record is not None and active_state_scope() is None and any(
-                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
-                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
-            ):
-                return await self.read_content(read)
             return None if record is None else await self._decode_view(record, execution_id)
         from ._sql import SqlStateStore
         source_scope = fresh or isinstance(self._store, SqlStateStore) and not self._store.record_cache_enabled
