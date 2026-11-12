@@ -2784,7 +2784,7 @@ class DefaultExecutionService(TaskExecutionService):
         principal: Principal,
         idempotency_key: str | None = None,
     ) -> ExecutionHandle:
-        execution = await self.load_authorized(
+        execution = await self.manager.load_view_authorized(
             execution_id,
             principal,
             AuthorizationAction.EXECUTION_RECOVER,
