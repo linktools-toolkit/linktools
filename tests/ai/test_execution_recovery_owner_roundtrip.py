@@ -8,7 +8,7 @@ from dataclasses import replace
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from linktools.ai.core import ExecutionStatus,ExecutionEventType,StopReason,UsageMetrics,ToolOperationStatus
-from linktools.ai.errors import ErrorCode
+from linktools.ai.errors import ErrorCode,ErrorDiagnostics
 from linktools.ai.execution import ExecutionRecoveryDetail,PendingToolContinuation,PendingDeferredCall,RecoveryTerminalOutcome,RecoveryTerminalHandoff,RecoveryHandoffPhase
 from linktools.ai.persistence import Persistence,PersistenceStorage
 from linktools.ai.persistence.contracts import ToolOperationRecord
@@ -31,9 +31,9 @@ async def test_recovery_templates_share_leaf_owners_and_restore(tmp_path: Path, 
         pending=PendingToolContinuation('run',approvals=(PendingDeferredCall('call','tool',args),))
         current=replace(current,status=ExecutionStatus.WAITING_DEFERRED,recovery=ExecutionRecoveryDetail(agent_run_id='run',pending_tools=pending))
     else:
-        details={'reason':'shared diagnostics'}
-        outcome=RecoveryTerminalOutcome(ExecutionStatus.FAILED,ErrorCode.EXECUTION_FAILED.value,details,StopReason.ERROR,None,None,UsageMetrics(),ExecutionEventType.EXECUTION_FAILED,{},current.updated_at)
-        current=replace(current,status=ExecutionStatus.FAILED,error_code=ErrorCode.EXECUTION_FAILED.value,safe_error_details=details,recovery=ExecutionRecoveryDetail(agent_run_id='run',handoff_phase=RecoveryHandoffPhase.PREPARED,terminal_handoff=RecoveryTerminalHandoff(outcome,'run',None)))
+        details={'reason':'shared diagnostics'};diagnostics=ErrorDiagnostics('RuntimeError','shared detail','a'*64,traceback='synthetic frame')
+        outcome=RecoveryTerminalOutcome(ExecutionStatus.FAILED,ErrorCode.EXECUTION_FAILED.value,details,StopReason.ERROR,None,None,UsageMetrics(),ExecutionEventType.EXECUTION_FAILED,{},current.updated_at,error_diagnostics=diagnostics)
+        current=replace(current,status=ExecutionStatus.FAILED,error_code=ErrorCode.EXECUTION_FAILED.value,safe_error_details=details,error_diagnostics=diagnostics,recovery=ExecutionRecoveryDetail(agent_run_id='run',handoff_phase=RecoveryHandoffPhase.PREPARED,terminal_handoff=RecoveryTerminalHandoff(outcome,'run',None)))
     async with Persistence.open('native-result',tenant_id='tenant',storage=storage) as state:
         repo=state.execution.executions;await repo.create_execution(current)
         raw=await repo.state_store.read_record(repo.execution_record_key('execution'));fields=decode_envelope(raw.data).value['payload']['fields']
