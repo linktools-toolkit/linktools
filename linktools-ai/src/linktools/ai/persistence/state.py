@@ -783,12 +783,15 @@ class SqlStateRecordReader(Protocol):
 
     Results retain the physical record separately from joined columns. Raw
     scans and transaction caches continue to expose the persisted record.
+    Optional sequence keys populate the existing transaction counter view from
+    the same statement, including absent counters as zero.
     """
 
     def cached_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord | None]: ...
 
     async def read_joined_records(
         self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+        sequence_keys: Sequence[bytes] = (),
     ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]: ...
 
 
@@ -858,10 +861,11 @@ class _ReadOnlyStateTransaction(StateTransaction):
 
     async def read_joined_records(
         self, context: "SqlStorageContext", statement: "Select", *, keys: Sequence[bytes] = (),
+        sequence_keys: Sequence[bytes] = (),
     ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]:
         if not isinstance(self._transaction, SqlStateRecordReader):
             raise StateTransactionNestingError("joined record reads require SQL storage")
-        return await self._transaction.read_joined_records(context, statement, keys=keys)
+        return await self._transaction.read_joined_records(context, statement, keys=keys, sequence_keys=sequence_keys)
 
     async def read_joined_facts(
         self, context: "SqlStorageContext", statement: "Select",

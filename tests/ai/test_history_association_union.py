@@ -107,6 +107,11 @@ async def test_history_associations_join_counter_and_dependency_keys(
         assert "ai_state_counters" in str(statements[0])
         statements.clear()
         assert await archive.read_history_associations(
+            agent_run_id=run_id, message_seqs=(2, *range(100, 164)),
+            tool_call_ids=("call", "unknown"), event_high_water=4) == events
+        assert len(statements) == 3
+        statements.clear()
+        assert await archive.read_history_associations(
             agent_run_id=run_id, message_seqs=(999,), tool_call_ids=(), event_high_water=5) == []
         assert len(statements) == 1
         with pytest.raises(AIError) as raised:

@@ -1363,12 +1363,13 @@ class StateStepArchive(AgentRunStore):
     async def read_run_records(
         self, transaction: StateTransaction, keys: Sequence[bytes], *,
         registrations: Mapping[str, RunRecord] | None = None,
+        sequence_keys: Sequence[bytes] = (),
     ) -> Mapping[bytes, StoredRecord]:
         """Read DTO projections without replacing the transaction's raw records."""
         if self._native_runs is None:
             records = await transaction.get_records(keys)
             return {record.key: record for record in await self._project_run_records(tuple(records.values()), registrations=registrations)}
-        return {record.key: record for record in await self._native_runs.read(transaction, keys=keys)}
+        return {record.key: record for record in await self._native_runs.read(transaction, keys=keys, sequence_keys=sequence_keys)}
 
     @property
     def runtime_domain(self) -> PersistenceDomain:
@@ -3990,7 +3991,12 @@ class StateStepArchive(AgentRunStore):
         pending_loaders = {}
 
         async def read(transaction: StateTransaction) -> Mapping[str, AgentRunHistoryCapture]:
-            records = await self.read_run_records(transaction, keys, registrations=registrations)
+            records: dict[bytes, StoredRecord] = {}
+            for offset in range(0, len(run_ids), 64):
+                records.update(await self.read_run_records(
+                    transaction, keys[offset * 2:(offset + 64) * 2], registrations=registrations,
+                    sequence_keys=sequence_keys[offset * 2:(offset + 64) * 2],
+                ))
             sequences = await transaction.get_sequences(sequence_keys)
             captured: dict[str, AgentRunHistoryCapture] = {}
             for run_id in run_ids:

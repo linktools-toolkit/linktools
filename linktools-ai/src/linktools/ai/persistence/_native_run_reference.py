@@ -198,6 +198,7 @@ class NativeRunReferences:
         expected_start: NativeStepEvent | None = None,
         expected_terminal: NativeStepEvent | None = None,
         expected_run: RunRecord | None = None,
+        sequence_keys: Sequence[bytes] = (),
     ) -> tuple[StoredRecord, ...]:
         expected = expected_start if expected_start is not None else expected_terminal
         if (expected is None) != (expected_run is None):
@@ -240,7 +241,7 @@ class NativeRunReferences:
             compiled = probe.compile(dialect=self._state.context.engine.dialect,
                                      compile_kwargs={"render_postcompile": True})
             count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
-            batch_size = 1 + (999 - count) // 2
+            batch_size = 1 + (999 - count - (len(set(sequence_keys)) + 1 if sequence_keys else 0)) // 2
             if batch_size < 1:
                 raise ValueError("native record read exceeds the SQL parameter budget")
             batches = tuple(missing[offset:offset + batch_size] for offset in range(0, len(missing), batch_size))
@@ -248,7 +249,7 @@ class NativeRunReferences:
         for batch in batches:
             rows.extend(await transaction.read_joined_records(
                 self._state.context, self.statement(keys=batch, query=query, scan=scan, expected_start=expected_start,
-                    expected_terminal=expected_terminal), keys=batch or (),
+                    expected_terminal=expected_terminal), keys=batch or (), sequence_keys=sequence_keys,
             ))
         ordered: list[StoredRecord] = []
         for record, row in rows:

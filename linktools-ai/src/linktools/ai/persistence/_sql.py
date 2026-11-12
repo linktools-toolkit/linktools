@@ -1207,6 +1207,7 @@ class _SqlTransaction:
 
     async def read_joined_records(
         self, context: SqlStorageContext, statement: "Select", *, keys: Sequence[bytes] = (),
+        sequence_keys: Sequence[bytes] = (),
     ) -> tuple[tuple[StoredRecord, Mapping[str, object]], ...]:
         from sqlalchemy.sql import Select, visitors
         from sqlalchemy.sql.dml import UpdateBase
@@ -1218,9 +1219,46 @@ class _SqlTransaction:
                 or any(isinstance(node, (UpdateBase, TextClause, ForUpdateArg))
                        for node in visitors.iterate(statement))):
             raise StateTransactionNestingError("joined records require a read-only SQL plan in their active boundary")
+        missing_sequences = tuple(dict.fromkeys(
+            key for key in map(validate_stream_key, sequence_keys) if key not in self._sequence_cache
+        ))
+        if missing_sequences:
+            from sqlalchemy import String, cast, literal_column, null, select, union_all
+            owners = statement.subquery()
+            counters = self._table("ai_state_counters")
+            sequence_columns = ("stream_key", "stream_locator", "value")
+
+            def empty(column: "ColumnElement") -> "ColumnElement":
+                kind = String(column.type.length) if isinstance(column.type, String) else column.type
+                return cast(null(), kind)
+
+            owner_rows = select(*owners.c, literal_column("0").label("joined_sequence_row"), *(
+                empty(counters.c[name]).label("joined_sequence_" + name) for name in sequence_columns
+            ))
+            counter_rows = select(*(
+                (counters.c.store_key if column.name == "store_key" else empty(column)).label(column.name)
+                for column in owners.c
+            ), literal_column("1").label("joined_sequence_row"), *(
+                counters.c[name].label("joined_sequence_" + name) for name in sequence_columns
+            )).where(counters.c.store_key == self._store_key,
+                     counters.c.stream_locator.in_(tuple(_key_locator(key) for key in missing_sequences)))
+            statement = select(union_all(owner_rows, counter_rows).subquery())
+            compiled = statement.compile(dialect=self._context.engine.dialect,
+                                         compile_kwargs={"render_postcompile": True})
+            count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
+            if count > 999:
+                raise ValueError("joined record and counter read exceeds the SQL parameter budget")
         rows = (await self._execute(statement)).mappings().all()
         result: list[tuple[StoredRecord, Mapping[str, object]]] = []
+        sequences: dict[bytes, int] = {}
         for row in rows:
+            if missing_sequences and row["joined_sequence_row"] == 1:
+                counter = {name: row["joined_sequence_" + name] for name in ("stream_key", "stream_locator", "value")}
+                if row["store_key"] != self._store_key or counter["stream_key"] not in missing_sequences:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                _validate_locators(counter, "stream_key")
+                sequences[_row_stream_key(counter["stream_key"])] = _row_nonnegative_int(counter["value"])
+                continue
             if "key" not in row and {"store_key", "sha256", "message", "compression", "raw_size", "gc_revision"}.issubset(row):
                 from ._step_payload_owner import payload_record_from_row
                 if self._store_key != STATE_GROUP_ARCHIVE_KEY:
@@ -1232,6 +1270,7 @@ class _SqlTransaction:
                 record = _record_from_row(row)
             self._record_cache[record.key] = record
             result.append((record, row))
+        self._sequence_cache.update({key: sequences.get(key, 0) for key in missing_sequences})
         for key in keys:
             self._record_cache.setdefault(key, None)
         return tuple(result)
