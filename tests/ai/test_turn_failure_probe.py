@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import os
 import sqlite3
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,12 @@ async def test_volatile_turn_replacement_does_not_publish_the_stale_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interference: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.storage import _cache as cache_owner
+
+    # Exercise real background renewal without waiting for the production cadence.
+    # The lease deadline and fault/owner-closed barriers remain unchanged.
+    monkeypatch.setattr(cache_owner, 'RenewingTurnScope',
+                        partial(cache_owner.RenewingTurnScope, renew_seconds=.01))
 
     database, effects = tmp_path / 'state.db', tmp_path / 'effects.db'
     cache = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
