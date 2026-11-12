@@ -338,24 +338,32 @@ async def test_current_reads_preserve_frozen_trial_and_score_pages(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ("evidence", "source", "owner"))
-async def test_current_reads_enforce_selected_evidence_authorization(
-    tmp_path: Path, boundary: str,
-) -> None:
+async def test_current_reads_enforce_selected_evidence_authorization(tmp_path: Path) -> None:
     async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         first = next(item for item in record.evidence
                      if item.trial.trial_id == record.manifest.trials[0].trial_id)
-        policy.reject = lambda action, resource: action is AuthorizationAction.EVALUATION_EVIDENCE_READ and (
-            boundary == "evidence" and resource.id == first.evidence_ref.evidence_id
-            or boundary == "source" and resource.id == run.experiment_id and resource.owner_principal_id is None
-            or boundary == "owner" and resource.id == run.experiment_id and resource.owner_principal_id == PRINCIPAL.principal_id)
-        for read in (lambda: run.current_trials(limit=1), lambda: run.read_trial(first.trial.trial_id)):
-            with pytest.raises(AIError) as caught:
-                await read()
-            assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
-        assert await report_count(storage) == 0
+        for boundary in ("evidence", "source", "owner"):
+            policy.reject = lambda action, resource, boundary=boundary: (
+                action is AuthorizationAction.EVALUATION_EVIDENCE_READ and (
+                    boundary == "evidence" and resource.id == first.evidence_ref.evidence_id
+                    or boundary == "source" and resource.id == run.experiment_id
+                    and resource.owner_principal_id is None
+                    or boundary == "owner" and resource.id == run.experiment_id
+                    and resource.owner_principal_id == PRINCIPAL.principal_id
+                )
+            )
+            for read_name, read in (
+                ("current_trials", lambda: run.current_trials(limit=1)),
+                ("read_trial", lambda: run.read_trial(first.trial.trial_id)),
+            ):
+                policy.calls.clear()
+                with pytest.raises(AIError) as caught:
+                    await read()
+                assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED, (boundary, read_name)
+                assert any(policy.reject(action, resource) for action, resource in policy.calls), (boundary, read_name)
+            assert await report_count(storage) == 0
 
 
 @pytest.mark.asyncio
