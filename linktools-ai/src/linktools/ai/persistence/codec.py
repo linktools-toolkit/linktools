@@ -2001,10 +2001,10 @@ def native_user_input_reference(value: Mapping) -> NativeUserInputReference | No
 
 
 def validate_native_user_input(reference: NativeUserInputReference, value: object) -> StoredUserInput:
-    if (not isinstance(value, StoredUserInput) or value.codec != "text" or value.view is not None
-            or value.payload.kind != "inline" or value.payload.encoding != "utf-8"
-            or not isinstance(value.payload.decode(), str)
-            or not isinstance(reference, NativeUserInputReference)):
+    from ..model import plain_text_input_content
+
+    if (not isinstance(reference, NativeUserInputReference) or not isinstance(value, StoredUserInput)
+            or plain_text_input_content(value) is None):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
@@ -2028,8 +2028,13 @@ def native_text_reference(value: Mapping) -> NativeTextReference | None:
 
 def validate_native_text_payload(reference: NativeTextReference, payload: object) -> StoredPayload:
     if (not isinstance(payload, StoredPayload) or payload.kind != "inline" or payload.encoding != "json"
-            or not isinstance(payload.decode(), str)
             or not isinstance(reference, NativeTextReference)):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    value = payload.decode()
+    if ((reference.projection == "text" and not isinstance(value, str))
+            or (reference.projection == "assistant-text-output" and
+                (not isinstance(value, dict) or set(value) != {"text"} or not isinstance(value["text"], str)))
+            or (reference.projection == "tool-call-output" and not isinstance(value, dict))):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return payload
 

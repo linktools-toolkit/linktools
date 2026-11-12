@@ -27,6 +27,7 @@ from ..model.attachments import read_attachment_payload, store_attachment_payloa
 from ..model.messages import binary_attachment_text, input_attachment_views, is_binary_attachment_text
 from ..persistence import PersistenceDomain
 from ..model import (
+    capture_plain_text_input,
     ReferencedContent,
     CanonicalUserInput,
     MaterializedUserContent,
@@ -451,7 +452,9 @@ class ExecutionInputMaterializer:
 
         canonical = validate_user_input(value)
         if isinstance(canonical, str):
-            return StoredUserInput(_TEXT_CODEC, StoredPayload.inline_text(canonical))
+            return capture_plain_text_input(canonical)
+        if not isinstance(value, MaterializedUserContent) and all(isinstance(item, str) for item in canonical):
+            return capture_plain_text_input(canonical)
         view = (
             dict(value.view)
             if isinstance(value, MaterializedUserContent)

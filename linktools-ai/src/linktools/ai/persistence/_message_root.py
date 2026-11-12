@@ -158,21 +158,42 @@ class NativeMessageRoot:
 
 @dataclass(frozen=True, slots=True)
 class NativeTextReference:
-    """One immutable response text projected into a canonical JSON result."""
+    """A fixed response part projected into the exact accepted JSON output."""
     root: NativeMessageRoot
+    projection: str = "text"
+    part_index: int = 0
+    tool_name: str | None = None
+    tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
-            raise ValueError("native text reference requires one message")
+            raise ValueError("native output reference requires one message")
+        _count(self.part_index)
+        if self.projection not in {"text", "assistant-text-output", "tool-call-output"}:
+            raise ValueError("unknown native output projection")
+        if self.projection == "tool-call-output":
+            if any(not isinstance(value, str) or not value for value in (self.tool_name, self.tool_call_id)):
+                raise ValueError("native output tool identity is required")
+        elif self.tool_name is not None or self.tool_call_id is not None:
+            raise ValueError("text projection cannot carry tool identity")
 
     def to_json(self) -> dict[str, JsonValue]:
-        return {"$native_text": self.root.to_json()}
+        result = {"$native_text": self.root.to_json()}
+        if self.projection != "text":
+            result["projection"] = self.projection
+        if self.part_index:
+            result["part_index"] = self.part_index
+        if self.tool_name is not None:
+            result.update(tool_name=self.tool_name, tool_call_id=self.tool_call_id)
+        return result
 
     @classmethod
     def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeTextReference":
-        if not isinstance(value, Mapping) or set(value) != {"$native_text"}:
-            raise ValueError("native text reference wire is invalid")
-        return cls(NativeMessageRoot.from_json(value["$native_text"]))
+        if (not isinstance(value, Mapping) or "$native_text" not in value
+                or set(value) - {"$native_text", "projection", "part_index", "tool_name", "tool_call_id"}):
+            raise ValueError("native output reference wire is invalid")
+        return cls(NativeMessageRoot.from_json(value["$native_text"]), value.get("projection", "text"),
+                   value.get("part_index", 0), value.get("tool_name"), value.get("tool_call_id"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +269,7 @@ class NativeToolArgumentsReference:
 
 @dataclass(frozen=True, slots=True)
 class NativeUserInputReference:
-    """One immutable prompt part reconstructing an accepted plain-text input."""
+    """One immutable prompt part reconstructing a canonical text or text-list input."""
     root: NativeMessageRoot
     part_index: int
 

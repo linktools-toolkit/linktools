@@ -13,7 +13,7 @@ from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..execution import ExecutionRecord, ExecutionTimelineRecord, PendingToolContinuation, RecoveryTerminalHandoff, ResultRecord
-from ..model import StoredUserInput
+from ..model import StoredUserInput, capture_plain_text_input, plain_text_input_content
 from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
 from ._archive_read import ContentReferenceReader
@@ -23,7 +23,7 @@ from ._message_root import NativeTextReference, NativeUserInputReference, Native
 from ..steps import native_store_key
 from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
-from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
+from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart, ToolCallPart
 from .codec import (decode_execution_terminal_details,  binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
     encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import GroupRecordReader, StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
@@ -169,29 +169,38 @@ def _expand_execution_content(record: StoredRecord, contents: Mapping[tuple[str,
 
 
 def restore_native_text_payload(reference: NativeTextReference, raw: bytes) -> StoredPayload:
-    """Rebuild and authenticate the exact JSON result from a fixed message."""
+    """Rebuild exact output semantics from an authenticated fixed response part."""
     try:
         messages = decode_model_messages(raw)
         if (len(messages) != 1 or not isinstance(messages[0], ModelResponse)
-                or len(messages[0].parts) != 1 or not isinstance(messages[0].parts[0], TextPart)):
-            raise ValueError("native result source is not one response text")
-        payload = StoredPayload.inline_json(messages[0].parts[0].content)
-        return payload
-    except (TypeError, ValueError, KeyError) as error:
+                or not 0 <= reference.part_index < len(messages[0].parts)):
+            raise ValueError("native output source is not a response part")
+        part = messages[0].parts[reference.part_index]
+        if reference.projection == "tool-call-output":
+            if (not isinstance(part, ToolCallPart) or part.tool_name != reference.tool_name
+                    or part.tool_call_id != reference.tool_call_id):
+                raise ValueError("native output tool identity mismatch")
+            value = part.args_as_dict()
+        else:
+            if not isinstance(part, TextPart):
+                raise ValueError("native output source is not text")
+            value = part.content if reference.projection == "text" else {"text": part.content}
+        return validate_native_text_payload(reference, StoredPayload.inline_json(value))
+    except (TypeError, ValueError, KeyError, IndexError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def restore_native_user_input(reference: NativeUserInputReference, raw: bytes) -> StoredUserInput:
-    """Authenticate the original plain-text accepted input from a fixed prompt."""
+    """Authenticate a canonical text or ordered-text capture from a fixed prompt."""
     try:
         messages = decode_model_messages(raw)
         if (len(messages) != 1 or not isinstance(messages[0], ModelRequest)
                 or reference.part_index >= len(messages[0].parts)):
             raise ValueError("native input source is not a request part")
         part = messages[0].parts[reference.part_index]
-        if not isinstance(part, UserPromptPart) or not isinstance(part.content, str):
+        if not isinstance(part, UserPromptPart):
             raise ValueError("native input source is not ordinary prompt text")
-        return validate_native_user_input(reference, StoredUserInput("text", StoredPayload.inline_text(part.content)))
+        return validate_native_user_input(reference, capture_plain_text_input(part.content))
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -526,12 +535,12 @@ class ExecutionContent:
             for path, payload in _payloads(previous):
                 if path == ("result", "fields", "output"):
                     previous_source = native_text_reference(payload)
-                    if previous_source is not None and previous_native.get(previous_source) == output:
+                    if (previous_source is not None and previous_native.get(previous_source) is not None
+                            and canonical_json_bytes(previous_native[previous_source].to_json()) == canonical_json_bytes(output.to_json())):
                         result_source = previous_source
         if result_source is not None:
             opened = self._store.storage_group.opened_archive
             if (output is None or output.kind != "inline" or output.encoding != "json"
-                    or not isinstance(output.decode(), str)
                     or opened is None or result_source.root.group_id != opened[0]
                     or result_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -646,7 +655,9 @@ class ExecutionContent:
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
                 for message in decode_model_messages(raw):
                     if isinstance(message, ModelRequest) and any(isinstance(part, UserPromptPart)
-                            and isinstance(part.content, str) for part in message.parts):
+                            and (isinstance(part.content, str) or isinstance(part.content, (list, tuple))
+                                 and bool(part.content) and all(isinstance(item, str) for item in part.content))
+                            for part in message.parts):
                         return True
         return False
 
@@ -673,8 +684,8 @@ class ExecutionContent:
             from .codec import encode_domain
             if raw != canonical_json_bytes(encode_domain(original)):
                 return None
-        if (not isinstance(original, StoredUserInput) or original.codec != "text" or original.view is not None
-                or original.payload.kind != "inline" or original.payload.encoding != "utf-8"):
+        prompt = plain_text_input_content(original) if isinstance(original, StoredUserInput) else None
+        if prompt is None:
             return None
         if any(root.group_id != archive.scope_id or root.store_key != native_store_key(self._namespace, self._tenant_id)
                for root in roots):
@@ -692,10 +703,11 @@ class ExecutionContent:
                 if len(decoded) != 1 or not isinstance(decoded[0], ModelRequest):
                     continue
                 for part_index, part in enumerate(decoded[0].parts):
-                    if not isinstance(part, UserPromptPart) or part.content != original.payload.decode():
+                    if not isinstance(part, UserPromptPart) or part.content != prompt:
                         continue
                     source = NativeUserInputReference(root.slice(message_index, message_index + 1), part_index)
-                    if restore_native_user_input(source, raw) != original:
+                    if (canonical_json_bytes(_encode_persisted_domain(restore_native_user_input(source, raw)))
+                            != canonical_json_bytes(_encode_persisted_domain(original))):
                         continue
                     replacement = {"$dataclass": "stored_user_input", "schema": 1,
                                    "fields": {"content": source.to_json()}}
@@ -719,7 +731,8 @@ class ExecutionContent:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         native.bind_message_archive(archive)
         messages, = await (await native.capture_message_roots((source.root,), transaction=transaction))()
-        if len(messages) != 1 or restore_native_text_payload(source, messages[0]) != output:
+        if (len(messages) != 1 or canonical_json_bytes(restore_native_text_payload(source, messages[0]).to_json())
+                != canonical_json_bytes(output.to_json())):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def read_payloads(self, records: Sequence[StoredRecord], *,

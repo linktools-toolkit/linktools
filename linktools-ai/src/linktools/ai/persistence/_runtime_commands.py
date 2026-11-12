@@ -24,12 +24,15 @@ from ..core import (
     SessionStatus,
     ToolOperationStatus,
     canonical_sha256,
+    canonical_json_bytes,
     agent_run_id,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..steps import native_store_key
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from ..model.messages import encode_model_messages
+from ._execution_content import restore_native_text_payload
 from ._message_root import NativeMessageRoot, NativeTextReference
 from .contracts import ArchivedContextBlock
 from ._archive import ContentArchive, PreparedArchive, archive_content_scope
@@ -2991,27 +2994,56 @@ class StateCommands:
     def _native_terminal_text(
         self, output: StoredPayload | None, checkpoints: Sequence[PreparedAgentRunCheckpoint],
     ) -> NativeTextReference | None:
-        """Select only an equal, immutable text from this terminal publication."""
-        if (output is None or output.kind != "inline" or output.encoding != "json"
-                or not checkpoints):
+        """Select one exact output part from this terminal publication's final response."""
+        if (output is None or output.kind != "inline" or output.encoding != "json" or not checkpoints):
             return None
-        text = output.decode()
         prepared = checkpoints[-1]
         messages = prepared.context_messages
-        if not isinstance(text, str) or not messages or len(prepared.projection.items) != 1:
+        if not messages or len(prepared.projection.items) != 1:
             return None
-        message = messages[-1]
+        response_index = next((index for index in range(len(messages) - 1, -1, -1)
+                               if isinstance(messages[index], ModelResponse)), None)
+        if response_index is None:
+            return None
+        message = messages[response_index]
+        trailing = messages[response_index + 1:]
         block = prepared.projection.items[0]
-        if (not isinstance(message, ModelResponse) or len(message.parts) != 1
-                or not isinstance(message.parts[0], TextPart) or message.parts[0].content != text
-                or not isinstance(block, ArchivedContextBlock) or not isinstance(block.root, NativeMessageRoot)
-                or block.root.count != len(messages)):
+        if (not isinstance(block, ArchivedContextBlock)
+                or not isinstance(block.root, NativeMessageRoot) or block.root.count != len(messages)):
             return None
         opened = self._execution.state_store.storage_group.opened_archive
         if (opened is None or block.root.group_id != opened[0]
                 or block.root.store_key != native_store_key(self._namespace, self._tenant_id)):
             return None
-        return NativeTextReference(block.root.slice(len(messages) - 1, len(messages)))
+        root = block.root.slice(response_index, response_index + 1)
+        raw = encode_model_messages((message,))
+        expected = canonical_json_bytes(output.to_json())
+        matches = []
+        for index, part in enumerate(message.parts):
+            if isinstance(part, TextPart):
+                if trailing:
+                    continue
+                projections = tuple(NativeTextReference(root, projection, index)
+                                    for projection in ("text", "assistant-text-output"))
+            elif isinstance(part, ToolCallPart):
+                # Output-tool completion may append its acknowledgement. Never
+                # walk back across a retry, a new response or unrelated effects.
+                if any(not isinstance(item, ModelRequest) or not item.parts
+                       or any(not isinstance(reply, ToolReturnPart)
+                              or reply.tool_call_id != part.tool_call_id or reply.tool_name != part.tool_name
+                              for reply in item.parts) for item in trailing):
+                    continue
+                projections = (NativeTextReference(root, "tool-call-output", index, part.tool_name, part.tool_call_id),)
+            else:
+                continue
+            for reference in projections:
+                try:
+                    value = restore_native_text_payload(reference, raw)
+                except AIError:
+                    continue
+                if canonical_json_bytes(value.to_json()) == expected:
+                    matches.append(reference)
+        return matches[0] if len(matches) == 1 else None
 
     async def commit_terminal_checkpoint(
         self,

@@ -23,6 +23,7 @@ from ..core import (
     JsonValue,
     WorkspaceFileInput,
     canonical_sha256,
+    canonical_json_bytes,
     normalize_json_value,
     validate_user_prompt,
 )
@@ -155,6 +156,8 @@ def validate_user_content(
 
 
 __all__ = [
+    "capture_plain_text_input",
+    "plain_text_input_content",
     "CanonicalUserInput",
     "MaterializedUserContent",
     "append_user_input_text",
@@ -194,3 +197,41 @@ class StoredUserInput:
                 "payload_size": self.payload.size,
             }
         )
+
+
+def capture_plain_text_input(content: str | Sequence[str]) -> StoredUserInput:
+    """Capture only text or an ordered text-only prompt with its derived view."""
+    if isinstance(content, str):
+        return StoredUserInput("text", StoredPayload.inline_text(content))
+    if (not isinstance(content, (list, tuple)) or not content
+            or any(not isinstance(item, str) for item in content)):
+        raise ValueError("plain text input requires a nonempty ordered text sequence")
+    items = [{"kind": "text", "text": item} for item in content]
+    return StoredUserInput("user-content-v1", StoredPayload.inline_json({"items": items}),
+                           {"version": 1, "prompt": {"kind": "items", "items": items},
+                            "files": [], "attachments": []})
+
+
+def plain_text_input_content(value: StoredUserInput) -> str | list[str] | None:
+    """Select only a complete canonical capture, never infer attachment provenance."""
+    if not isinstance(value, StoredUserInput) or value.payload.kind != "inline":
+        return None
+    decoded = value.payload.decode()
+    if value.codec == "text":
+        content = decoded if isinstance(decoded, str) else None
+    elif (value.codec == "user-content-v1" and isinstance(decoded, Mapping)
+          and set(decoded) == {"items"} and isinstance(decoded["items"], (list, tuple))):
+        items = decoded["items"]
+        if not items or any(not isinstance(item, Mapping) or set(item) != {"kind", "text"}
+                            or item["kind"] != "text" or not isinstance(item["text"], str) for item in items):
+            return None
+        content = [item["text"] for item in items]
+    else:
+        return None
+    if content is None:
+        return None
+    expected = capture_plain_text_input(content)
+    def wire(item: StoredUserInput) -> bytes:
+        return canonical_json_bytes(normalize_json_value(
+            {"codec": item.codec, "payload": item.payload.to_json(), "view": None if item.view is None else dict(item.view)}))
+    return content if wire(value) == wire(expected) else None
