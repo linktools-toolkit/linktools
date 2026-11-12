@@ -111,6 +111,7 @@ class PreparedStep:
     messages: PreparedNativeMessages | None
     event_keys: tuple[bytes, ...]
     managed_start: bool = False
+    fixed_error_sources: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,14 +478,17 @@ class SqlStepStore:
             self._confirm_run(_RunFields.from_row(row, engine=self._context.engine))
         return sorted(records, key=lambda r: r.started_at)
 
-    async def append_event(self, event: StepEvent) -> None:
+    async def append_event(self, event: StepEvent, *, fixed_error_source: bool = False) -> None:
+        if type(fixed_error_source) is not bool or fixed_error_source and (
+                event.kind != "tool_call_failed" or event.idempotency_key is None):
+            raise ValueError("fixed error sources require keyed tool failure events")
         await self.initialize()
         replay_keys = {id(event): encode_native_replay_key(event.idempotency_key)}
 
         async def write(session: "AsyncSession") -> _RunFields | None:
             if isinstance(event, NativeLifecycleEvent):
                 return await self._write_lifecycle_event(session, event, source=self._confirmed_runs.get(event.run_id))
-            await self._write_events(session, (event,), replay_keys=replay_keys)
+            await self._write_events(session, (event,), replay_keys=replay_keys, fixed_error_sources=fixed_error_source)
             return None
 
         source = await self._context.run_mutation(write, domain="steps.event")
@@ -494,17 +498,25 @@ class SqlStepStore:
     async def _write_events(
         self, session: "AsyncSession", events: Sequence[StepEvent], *, source: _RunFields | None = None,
         started: StepEvent | None = None, replay_keys: Mapping[int, bytes] | None = None,
+        fixed_error_sources: bool = False,
     ) -> None:
         for (keyed, managed), group in groupby(
             events, key=lambda event: (event.idempotency_key is not None, event is started),
         ):
             rows = []
             for event in group:
-                row = self._run_values(event.run_id) | self._event_values(event)
+                values = self._event_values(event)
+                row = self._run_values(event.run_id) | values
                 known = source if source is not None and source.run_id == event.run_id else self._confirmed_runs.get(event.run_id)
-                if event is started or event.kind == "tool_call_failed" and event.idempotency_key is not None:
+                if event is started:
                     row["body_sha256"] = _digest(self._started_body(event))
                     row["fields_sha256"] = _digest(self._started_fields_body(event))
+                elif fixed_error_sources:
+                    if event.kind != "tool_call_failed" or event.idempotency_key is None:
+                        raise ValueError("fixed error sources require keyed tool failure events")
+                    row["body_sha256"] = _digest(json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+                    row["fields_sha256"] = _digest(json.dumps({key: value for key, value in values.items() if key != "metadata"},
+                                                             ensure_ascii=False, sort_keys=True, separators=(",", ":")))
                 row["run_fields"] = 0
                 if known is not None:
                     for bit, (name, value) in enumerate(zip(_EVENT_RUN_FIELDS, known.values)):
@@ -533,19 +545,12 @@ class SqlStepStore:
                     table = self._table("events")
                     identities = or_(*((table.c.run_id == row["run_id"])
                                       & (table.c.idempotency_key == row["idempotency_key"]) for row in batch))
-                    found = (await session.execute(select(table.c.run_id, table.c.idempotency_key, table.c.store_key,
-                                                          table.c.body_sha256, table.c.fields_sha256).where(
+                    found = (await session.execute(select(table.c.run_id, table.c.idempotency_key, table.c.store_key).where(
                         table.c.store_locator == self._store_locator, identities,
                     ))).all()
                     expected = {(row["run_id"], row["idempotency_key"]) for row in batch}
                     if ({(row.run_id, row.idempotency_key) for row in found} != expected
                             or any(row.store_key != self._store_key for row in found)):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    proofs = {(row["run_id"], row["idempotency_key"]):
-                              (row["body_sha256"], row["fields_sha256"])
-                              for row in batch if row.get("body_sha256") is not None}
-                    if any((row.body_sha256, row.fields_sha256) != proofs[(row.run_id, row.idempotency_key)]
-                           for row in found if (row.run_id, row.idempotency_key) in proofs):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _write_lifecycle_event(
@@ -1424,10 +1429,14 @@ class SqlStepStore:
     async def prepare_step(
         self, *, run: RunRecord | None = None, events: Sequence[StepEvent] = (),
         snapshot: ContinuableSnapshot | None = None, managed_start: bool = False,
+        fixed_error_sources: bool = False,
     ) -> PreparedStep:
-        """Capture native records; only an explicitly owned start mints source proof."""
+        """Capture native records; fixed source proofs require explicit ownership."""
         if type(managed_start) is not bool:
             raise ValueError("managed_start must be a bool")
+        if type(fixed_error_sources) is not bool or fixed_error_sources and (
+                not events or any(event.kind != "tool_call_failed" or event.idempotency_key is None for event in events)):
+            raise ValueError("fixed error sources require keyed tool failure events")
         if managed_start:
             starts = [event for event in events if event.kind == "run_started"]
             if (run is None or len(starts) != 1 or starts[0].idempotency_key is None
@@ -1442,7 +1451,7 @@ class SqlStepStore:
             snapshot = replace(snapshot, messages=self._frozen_messages.snapshot(snapshot.messages))
         values, messages = (None, None) if snapshot is None else await self._prepare_snapshot(snapshot)
         return PreparedStep(run, events, snapshot, values, messages,
-                            tuple(encode_native_replay_key(event.idempotency_key) for event in events), managed_start)
+                            tuple(encode_native_replay_key(event.idempotency_key) for event in events), managed_start, fixed_error_sources)
 
     async def write_prepared_step(
         self, transaction: StateTransaction, prepared: PreparedStep, *,
@@ -1514,7 +1523,8 @@ class SqlStepStore:
                 for event in batch:
                     source = await self._write_lifecycle_event(session, event, source=source)
             else:
-                await self._write_events(session, batch, source=source, started=fresh, replay_keys=replay_keys)
+                await self._write_events(session, batch, source=source, started=fresh, replay_keys=replay_keys,
+                                         fixed_error_sources=prepared.fixed_error_sources)
                 if fresh is not None and any(event is fresh for event in batch) and source is not None:
                     source = self._with_started(source, fresh)
                     fresh = None

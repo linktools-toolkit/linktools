@@ -23,7 +23,7 @@ from .test_tool_execution_boundary import _admit, _commands
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("split", (False, True))
-@pytest.mark.parametrize("failure", ("failed", "retry", "noncanonical"))
+@pytest.mark.parametrize("failure", ("failed", "retry", "noncanonical", "mismatch"))
 async def test_fixed_tool_error_reconstructs_original_receipt(
     tmp_path: Path, split: bool, failure: str,
 ) -> None:
@@ -42,15 +42,15 @@ async def test_fixed_tool_error_reconstructs_original_receipt(
         reference = NativeToolErrorReference(scope, native.store_key, event.run_id, event.idempotency_key)
         code = ErrorCode.TOOL_RETRY_REQUIRED if failure == "retry" else ErrorCode.TOOL_EXECUTION_FAILED
         raw = canonical_json_bytes({"version": 1, "kind": "tool_call_rejected" if failure == "retry"
-                                    else "tool_call_failed", "message": event.error})
+                                    else "tool_call_failed", "message": "different receipt" if failure == "mismatch" else event.error})
         payload = StoredPayload.inline_bytes(raw + (b"\n" if failure == "noncanonical" else b""))
         if split:
             await tools.fail_payload("operation", tenant_id="tenant", owner="worker", fence=1,
                                      error_code=code.value, error_payload=payload)
-            await native.append_event(event)
+            await native.append_event(event, fixed_error_source=True)
             await tools.share_published_error("operation", tenant_id="tenant", source=reference)
         else:
-            prepared = await native.prepare_step(events=(event,))
+            prepared = await native.prepare_step(events=(event,), fixed_error_sources=True)
 
             async def write(group: StateGroupTransaction) -> None:
                 await native.write_prepared_step(group.transaction(tools.state_store), prepared)
@@ -61,11 +61,11 @@ async def test_fixed_tool_error_reconstructs_original_receipt(
         records = await tools.state_store.read(lambda transaction: transaction.scan_records())
         stored = next(record for record in records if record.kind == "tool_operation")
         actual = native_tool_error_reference(decode_envelope(stored.data).value["payload"]["fields"]["error_payload"])
-        assert actual == (None if failure == "noncanonical" else reference)
+        assert actual == (None if failure in {"noncanonical", "mismatch"} else reference)
         assert (await tools.get_operation("operation", tenant_id="tenant")).error_payload == payload
-        with pytest.raises(AIError) as conflict:
-            await native.append_event(replace(event, error="different source"))
-        assert conflict.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        await native.append_event(replace(event, error="different source"), fixed_error_source=True)
+        assert await native.list_events(run_id=event.run_id) == [event]
+        assert (await tools.get_operation("operation", tenant_id="tenant")).error_payload == payload
     async with Persistence.open("tool-boundary", tenant_id="tenant", storage=config, read_only=True) as cold:
         assert (await cold.checkpoint.tools.get_operation("operation", tenant_id="tenant")).error_payload == payload
         assert (await cold.checkpoint.tools.get_operations(("operation",), tenant_id="tenant"))[0].error_payload == payload
@@ -89,7 +89,7 @@ async def test_fixed_error_read_rejects_corrupt_source_metadata(tmp_path: Path) 
             {"version": 1, "kind": "tool_call_failed", "message": event.error}))
         await tools.fail_payload("operation", tenant_id="tenant", owner="worker", fence=1,
                                 error_code=ErrorCode.TOOL_EXECUTION_FAILED.value, error_payload=payload)
-        await native.append_event(event)
+        await native.append_event(event, fixed_error_source=True)
         await tools.share_published_error("operation", tenant_id="tenant", source=NativeToolErrorReference(
             scope, native.store_key, event.run_id, event.idempotency_key))
         # The error text still matches. Complete source integrity must reject

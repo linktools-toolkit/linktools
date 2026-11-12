@@ -223,7 +223,8 @@ class _SqlGroupTransaction:
             statement = content_reference_statement(
                 self._group.metadata, dialect=dialect, owner_store_key=owner._store_key, owner_keys=batch,
                 content_store_key=content._store_key, content_scope_key=content_scope_key, content_paths=paths,
-                typed_payloads=content._store_key == STATE_GROUP_ARCHIVE_KEY,
+                typed_payloads=(content._store_key == STATE_GROUP_ARCHIVE_KEY
+                    and any(path[-1] == "$execution_payload" for path in paths)),
                 additional_records={self.transaction(store)._store_key: requested for store, requested in extras.items()} if offset == 0 else None,
             )
             for row in (await owner._execute(statement)).mappings():

@@ -23,7 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -48,7 +48,7 @@ from .contracts import (
     IdempotencyTerminalUpdate,
     ResultRecord,
 )
-from .contracts import RuntimePayloadRef
+from .contracts import RuntimePayloadRef, ExecutionMembershipRecord
 from ._plan import PersistenceDomain
 from .state import (
     FactQuery,
@@ -237,7 +237,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         Inline-only captures do not discover or open archive storage.
         """
         group = self._store.storage_group
-        members = tuple(dict.fromkeys((self._store, *stores, *self._execution_content.pending_operation_stores)))
+        members = tuple(dict.fromkeys((self._store, *stores)))
         if active_state_scope() is not None:
             # Reuse only the stores enlisted by the caller. Another task may
             # have discovered the archive since this snapshot began; its body
@@ -468,6 +468,26 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         return candidate
 
+    async def get_membership_many(self, execution_ids: Sequence[str], *,
+                                  tenant_id: str) -> Mapping[str, ExecutionMembershipRecord]:
+        """Read current session membership without hydrating presentation bodies."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if isinstance(execution_ids, (str, bytes)):
+            raise TypeError("execution_ids must be a sequence")
+        keys = {identity: self.execution_record_key(identity) for identity in dict.fromkeys(execution_ids)}
+        async def read(_group: object) -> Mapping[str, ExecutionMembershipRecord]:
+            await self._execution_content.prefetch_projection_owners(tuple(keys.values()))
+            rows = await self._store.read_records(tuple(keys.values())) if keys else {}
+            expanded = await self._execution_content.expand_policies(tuple(rows.values()))
+            values = {}
+            for row in expanded:
+                value = decode_execution_membership(row.data)
+                if row.kind != "execution" or keys.get(value.execution_id) != row.key:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[value.execution_id] = value
+            return values
+        return await self.read_content(read)
+
     async def prefetch_timeline_records(self, execution_ids: Sequence[str], *,
                                         additional_records: Mapping[StateStore, Sequence[bytes]]) -> None:
         """Capture timeline owners, immutable content and sibling membership together."""
@@ -652,6 +672,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
             records = (await self._refresh_records(tuple(keys.values())) if refresh else
                        await self._store.read_records(tuple(keys.values())))
+            if not records:
+                # This source read already proves the complete requested batch
+                # absent; there is no content owner to reopen or hydrate.
+                return {}
             if active_state_scope() is None and (refresh or any(
                 native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
                 for record in records.values()

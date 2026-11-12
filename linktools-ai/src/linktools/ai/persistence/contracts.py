@@ -1007,6 +1007,20 @@ class MemoryRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionMembershipRecord:
+    """Current session membership without input, result or recovery bodies."""
+
+    execution_id: str
+    session_id: str | None
+    parent_execution_id: str | None
+    principal_id: str
+    principal_kind: str
+    status: ExecutionStatus
+    created_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class PendingOperationSource:
     """Immutable admission projection, independent of the later effect outcome."""
 

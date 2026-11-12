@@ -234,10 +234,6 @@ class ExecutionContent:
         self._projections: dict[int, tuple[ref, StoredRecord]] = {}
         self._binding_reads: WeakKeyDictionary[StateTransaction, dict[str, tuple[ContentRecord, bytes]]] = WeakKeyDictionary()
 
-    @property
-    def pending_operation_stores(self) -> tuple[StateStore, ...]:
-        return () if self._pending_source is self._store else (self._pending_source,)
-
     def bind_pending_operation_source(self, source: StateStore) -> None:
         if source.storage_group is not self._store.storage_group:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

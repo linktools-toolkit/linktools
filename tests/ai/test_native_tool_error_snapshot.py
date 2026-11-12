@@ -34,10 +34,10 @@ async def test_fixed_error_survives_readonly_snapshot_and_gc(tmp_path: Path) -> 
    payload=StoredPayload.inline_bytes(canonical_json_bytes({'version':1,'kind':'tool_call_failed','message':'failure'}))
    if split:
     await tools.fail_payload('operation',tenant_id='tenant',owner='worker',fence=1,error_code=ErrorCode.TOOL_EXECUTION_FAILED.value,error_payload=payload)
-    await native.append_event(event)
+    await native.append_event(event, fixed_error_source=True)
     await tools.share_published_error('operation',tenant_id='tenant',source=ref)
    else:
-    prepared=await native.prepare_step(events=(event,))
+    prepared=await native.prepare_step(events=(event,), fixed_error_sources=True)
     async def write(group: object) -> None:
      await native.write_prepared_step(group.transaction(tools.state_store),prepared)
     settled=await _commands(state).commit_tool_terminal_boundary('operation',tenant_id='tenant',owner='worker',fence=1,execution=receipt.execution,observed=receipt.operation,error_code=ErrorCode.TOOL_EXECUTION_FAILED.value,error_payload=payload,error_source=ref,write=write,stores=(tools.state_store,))

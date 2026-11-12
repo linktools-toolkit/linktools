@@ -5628,7 +5628,7 @@ class LocalExecutionBackend:
         initial_observed = owner.observed
 
         async def event_writer(event):
-            prepared = await native.prepare_step(events=(event,))
+            prepared = await native.prepare_step(events=(event,), fixed_error_sources=event.kind == "tool_call_failed")
             async def write(group):
                 await native.write_prepared_step(group.transaction(state), prepared)
             async def readback():

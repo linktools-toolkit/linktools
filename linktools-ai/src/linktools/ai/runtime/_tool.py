@@ -399,7 +399,7 @@ class RuntimeToolOperationBridge:
             if receipt is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             cancelled = False
-        await self._publish_native_event(event)
+        await self._publish_native_event(event, fixed_error_source=error_payload is not None)
         native = self._native_step_store
         source = native.backup_source if isinstance(native, SqlStepStore) else None
         if error_payload is not None and source is not None:
@@ -411,14 +411,19 @@ class RuntimeToolOperationBridge:
             receipt = current
         return receipt, cancelled
 
-    async def _publish_native_event(self, event: StepEvent, *, readback: bool = False) -> None:
+    async def _publish_native_event(
+        self, event: StepEvent, *, readback: bool = False, fixed_error_source: bool = False,
+    ) -> None:
         store = self._native_step_store
         if store is None:
             return
         if readback and any(candidate.idempotency_key == event.idempotency_key
                             for candidate in await store.list_events(run_id=event.run_id)):
             return
-        await store.append_event(event)
+        if fixed_error_source and isinstance(store, SqlStepStore):
+            await store.append_event(event, fixed_error_source=True)
+        else:
+            await store.append_event(event)
 
     def bind_boundaries(
         self, *, admission: ToolAdmissionBoundary, terminal: ToolTerminalBoundary,
@@ -1278,7 +1283,7 @@ class RuntimeToolOperationBridge:
                         decision, failed=expected_status is ToolOperationStatus.FAILED,
                         error=(None if expected_status is ToolOperationStatus.COMPLETED else
                                decode_tool_operation_failure(observed.error_code, observed.error_payload)),
-                    ), readback=True)
+                    ), readback=True, fixed_error_source=expected_status is ToolOperationStatus.FAILED)
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
                     value=receipt,
