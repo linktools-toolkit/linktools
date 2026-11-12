@@ -96,16 +96,27 @@ class _Traffic:
         lookups: Counter[str] = Counter()
         identities: Counter[str] = Counter()
         for statement, parameters in self.reads[start:]:
-            projection = " ".join(statement.split("FROM", 1)[0].split()).replace('"', '').replace('`', '')
-            for table in ("ai_step_sequences", "ai_step_messages"):
-                if projection == f"SELECT {table}.sha256, {table}.id":
-                    assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[:2] == (native_store_locator(store_key), store_key) and 0 < len(parameters) - 2 <= 128
-                    lookups[table] += 1
-                    identities[table] += len(parameters) - 2
-                    break
-            else:
-                raise AssertionError(f"unexpected online publication read: {statement}")
+            branches = " ".join(statement.split()).replace('"', '').replace('`', '').split(" UNION ALL ")
+            assert 1 <= len(branches) <= 2
+            offset = 0
+            for branch in branches:
+                matched = re.fullmatch(
+                    r"SELECT \? AS anon_[0-9]+, (ai_step_sequences|ai_step_messages)\.sha256, \1\.id "
+                    r"FROM \1 WHERE \1\.store_locator = \? AND \1\.store_key = \? AND \1\.sha256 IN \([?, ]+\)",
+                    branch,
+                )
+                assert matched is not None, f"unexpected online publication read: {statement}"
+                table = matched.group(1)
+                count = branch.count("?")
+                bound = parameters[offset:offset + count]
+                assert bound[:3] == ("sequence" if table == "ai_step_sequences" else "message",
+                                     native_store_locator(store_key), store_key)
+                assert 0 < len(bound) - 3 <= 128
+                lookups[table] += 1
+                identities[table] += len(bound) - 3
+                offset += count
+            assert offset == len(parameters)
+        assert len(self.reads[start:]) == max((node_ids + 127) // 128, (message_ids + 127) // 128)
         # Collection is exclusively offline; publication only resolves bounded IDs.
         for table, bound in (("ai_step_sequences", node_ids), ("ai_step_messages", message_ids)):
             assert 0 < identities[table] <= bound
@@ -642,7 +653,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         # separately from the zero-encode frozen projection/context reuse path.
         assert phase_encodings['mutable_snapshot_freeze'] <= turns * (turns + 1) // 2
         assert phase_encodings['frozen_projection'] == phase_encodings['confirmed_context'] == 0
-        assert phase_reads == {'snapshot': 2 * turns, 'archive': 4 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
+        assert phase_reads == {'snapshot': turns, 'archive': 4 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
         assert writer_traffic.statements['SELECT'] == sum(phase_reads.values())
         assert reader_traffic.statements['SELECT'] == turns
         assert 0 < writer_traffic.preparations <= 2 * turns

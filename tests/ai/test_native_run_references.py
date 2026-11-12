@@ -456,10 +456,9 @@ async def test_checkpoint_projection_reuses_its_run_read_for_terminal_head(tmp_p
             assert head.checkpoint_count == 1
             assert head.transcript_message_count == 1
             assert await archive.get_agent_run(agent_run_id="run") == run
-            # The untouched interaction sequence is the only remaining read;
-            # run/head/projection records must all reuse the write transaction.
-            assert len(statements) == 1 and "ai_step_run_admissions" in statements[0]
-            assert "interaction_high_water" in statements[0] and "payload_json" not in statements[0]
+            # Admission prefetch includes its untouched interaction counter;
+            # all head inputs reuse this write transaction's current values.
+            assert not statements
 
         engine = archive.state_store.context.engine
         event.listen(engine.sync_engine, "before_cursor_execute", capture)

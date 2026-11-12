@@ -15,7 +15,7 @@ from ..errors import AIError, ErrorCode
 from ..steps import native_store_locator, encode_native_replay_key
 from ._run_registration import RunRegistrationReference
 from ._record_owner import record_owner_rows
-from ._run_counters import run_counter_address
+from ._run_counters import run_counter_address, run_counter_streams
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStore
@@ -114,7 +114,13 @@ class NativeRunReferences:
 
     async def read_physical(self, transaction: StateTransaction, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         """Resolve existing sources in the write prefetch, retaining physical CAS records."""
-        await self.read(transaction, keys=keys)
+        sequence_keys = tuple(stream for key in keys for stream in
+                              run_counter_streams(key, store_key=self._state.store_key))
+        await self.read(transaction, keys=keys, sequence_keys=sequence_keys)
+        # A previously cached admission may not have captured its counters.
+        # The existing sequence reader fills only those still absent.
+        if sequence_keys:
+            await transaction.get_sequences(sequence_keys)
         assert isinstance(transaction, SqlStateRecordReader)
         return {key: record for key, record in transaction.cached_records(keys).items() if record is not None}
 
