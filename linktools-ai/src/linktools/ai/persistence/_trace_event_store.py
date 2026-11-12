@@ -244,7 +244,7 @@ class SqlTraceEventStore:
                      after_timestamp: datetime | None = None, after_sequence: int = 0, limit: int | None = None,
                      model_request_seq: int | None = None, step_index: int | None = None,
                      tool_call_id: str | None = None) -> tuple[StoredFact, ...]:
-        from sqlalchemy import and_, or_, select
+        from sqlalchemy import and_, or_, select, union_all
         t = self.table.c
         statement = select(self.table).where(t.store_key == self.state.store_key, t.run_id == _identity(run_id),
                                              t.sequence <= high_water)
@@ -256,24 +256,25 @@ class SqlTraceEventStore:
             found: dict[int, StoredFact] = {}
             # Each branch seeks one correlation index. Sorting their bounded
             # union avoids a cross-index OR competing with the run sequence scan.
-            for offset in range(0, len(identities), 32):
+            for offset in range(0, max(len(identities), len(messages)), 32):
+                queries = []
                 batch = identities[offset:offset + 32]
-                request_batch = tuple(value for value in batch if value in requests)
-                tool_batch = tuple(value for value in batch if value in tools)
-                roles = []
-                if request_batch:
-                    roles.append(and_(t.kind.in_(_REQUEST_KINDS), t.history_identity.in_(request_batch)))
-                if tool_batch:
-                    roles.append(and_(t.kind.in_(_TOOL_KINDS), t.history_identity.in_(tool_batch),
-                        or_(t.kind != "TOOL_CALL_FAILED", t.error_code.is_(None),
-                            t.error_code != ErrorCode.TOOL_EFFECT_UNKNOWN.value.encode("utf-8"))))
-                query = statement.where(t.history_identity.in_(batch), or_(*roles))
-                for row in await self._rows(transaction, query):
-                    fact = self.row_to_fact(row)
-                    found[fact.sequence] = fact
-            for offset in range(0, len(messages), 32):
-                query = statement.where(t.kind == "MODEL_REQUEST_SUCCEEDED",
-                                        t.message_identity.in_(messages[offset:offset + 32]))
+                if batch:
+                    request_batch = tuple(value for value in batch if value in requests)
+                    tool_batch = tuple(value for value in batch if value in tools)
+                    roles = []
+                    if request_batch:
+                        roles.append(and_(t.kind.in_(_REQUEST_KINDS), t.history_identity.in_(request_batch)))
+                    if tool_batch:
+                        roles.append(and_(t.kind.in_(_TOOL_KINDS), t.history_identity.in_(tool_batch),
+                            or_(t.kind != "TOOL_CALL_FAILED", t.error_code.is_(None),
+                                t.error_code != ErrorCode.TOOL_EFFECT_UNKNOWN.value.encode("utf-8"))))
+                    queries.append(statement.where(t.history_identity.in_(batch), or_(*roles)))
+                message_batch = messages[offset:offset + 32]
+                if message_batch:
+                    queries.append(statement.where(t.kind == "MODEL_REQUEST_SUCCEEDED",
+                                                   t.message_identity.in_(message_batch)))
+                query = queries[0] if len(queries) == 1 else select(union_all(*queries).subquery())
                 for row in await self._rows(transaction, query):
                     fact = self.row_to_fact(row)
                     found[fact.sequence] = fact
