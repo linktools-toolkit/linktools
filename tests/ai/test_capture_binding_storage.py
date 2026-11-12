@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Capture bindings own their archive independently of execution retention."""
 
+import sqlite3
+
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -151,8 +153,21 @@ async def test_capture_binding_reference_never_falls_back_to_execution_or_latest
                 pointer["summary"] = {"id": "another-agent"}
             changed = capture_record("binding-integrity", "tenant", capture_record_key(row), value,
                 storage_revision=row.storage_revision + 1, source_digest=capture_record_digest(row))
-            assert await state.task.tasks.state_store.mutate(lambda tx: tx.replace_record(
-                changed, expected_storage_revision=row.storage_revision))
+            if corruption == "summary":
+                with pytest.raises(AIError) as rejected_write:
+                    await state.task.tasks.state_store.mutate(lambda tx: tx.replace_record(
+                        changed, expected_storage_revision=row.storage_revision))
+                assert rejected_write.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+                # Bypass the validated writer to exercise an actually corrupt source.
+                with sqlite3.connect(tmp_path / "execution.db") as connection:
+                    updated = connection.execute(
+                        "UPDATE ai_state_records SET payload_json = ? WHERE kind = ? AND storage_revision = ?",
+                        (canonical_json_bytes(changed.data).decode("utf-8"), "input_capture", row.storage_revision),
+                    )
+                    assert updated.rowcount == 1
+            else:
+                assert await state.task.tasks.state_store.mutate(lambda tx: tx.replace_record(
+                    changed, expected_storage_revision=row.storage_revision))
         with pytest.raises(AIError) as failure:
             await service.read_agent(reference, principal=_PRINCIPAL)
         assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
