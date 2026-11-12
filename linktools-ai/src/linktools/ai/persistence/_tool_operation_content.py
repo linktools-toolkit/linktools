@@ -4,7 +4,7 @@
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import ObjectRef, StoredPayload
 from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity
 from ._payload import decode_payload_bytes
 from ._message_root import NativeMessageRoot, NativeToolResultReference, NativeToolArgumentsReference
@@ -113,6 +113,11 @@ def expand_native_tool_content(
 class ToolOperationContent:
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         self.store, self.namespace, self.tenant_id = store, namespace, tenant_id
+        self._archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None
+
+    def bind_archive_object_reader(self, reader: Callable[[ObjectRef], Awaitable[bytes]]) -> None:
+        """Bind verified file reads through the owning physical archive route."""
+        self._archive_object_reader = reader
 
     async def _archive(self) -> ContentArchive:
         group = self.store.storage_group
@@ -124,7 +129,8 @@ class ToolOperationContent:
             raise ToolContentReadRequired()
         if opened is None or active is not None and (active.group is not group or opened[1] not in active.transactions):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return ContentArchive(opened[1], opened[0], namespace=self.namespace, tenant_id=self.tenant_id, object_store=None)
+        return ContentArchive(opened[1], opened[0], namespace=self.namespace, tenant_id=self.tenant_id, object_store=None,
+                              object_reader=self._archive_object_reader)
 
     async def encode(
         self, record: StoredRecord, *, previous: StoredRecord | None = None,
@@ -162,7 +168,9 @@ class ToolOperationContent:
                 retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
                                          "fields": {"content": reference.to_json()}}
                 continue
-            if (reference is not None and fields.get("kind") == "inline" and fields.get("encoding") == "base64"
+            if (reference is not None
+                    and (not isinstance(reference, NativeToolResultReference) or reference.attachment_format is None)
+                    and fields.get("kind") == "inline" and fields.get("encoding") == "base64"
                     and (fields.get("digest"), fields.get("size")) == (reference.digest, reference.size)):
                 retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
                                          "fields": {"content": reference.to_json()}}

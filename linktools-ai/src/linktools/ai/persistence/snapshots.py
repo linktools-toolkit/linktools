@@ -15,6 +15,7 @@ from ._tool_operation_content import expand_tool_content, tool_content_size, exp
 from ._native_tool_result import restore_native_tool_result_payload
 from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._native_tool_error import restore_native_tool_error_payload
+from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size,
     expand_native_execution_content, restore_native_text_payload, restore_native_user_input)
 from .codec import (decode_envelope, execution_payload_slots, native_text_reference, binding_reference,
@@ -806,7 +807,11 @@ async def _export_snapshot(
         ):
             await copy_reference(source_domain, reference)
 
-    for domain in sorted(source.readers, key=lambda item: item.value):
+    # Decode the checkpoint owner before its execution references. Reuse the
+    # normal inventory pass rather than scanning and hydrating every store twice.
+    pending_owners = {}
+
+    for domain in sorted(source.readers, key=lambda item: (item is not PersistenceDomain.CHECKPOINT, item.value)):
         store = source.readers[domain]
         raw_domain: dict[str, list[object]] = {
             "records": [],
@@ -832,7 +837,8 @@ async def _export_snapshot(
                     event_backups=source.native_checkpoints or {})
                 semantic_value = _expand_run_reference(semantic_value, source.run_registrations or {})
                 semantic_value = expand_snapshot_execution_content(semantic_value, binding_contents,
-                    namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes)
+                    namespace=source.namespace, tenant_id=source.tenant_id, reserve=binding_budget.reserve_bytes,
+                    operations=pending_operation_values(value, pending_owners, namespace=source.namespace, tenant_id=source.tenant_id))
                 semantic_value = expand_tool_content(semantic_value, binding_contents,
                     content_scope=archive_content_scope(source.namespace, source.tenant_id), reserve=binding_budget.reserve_bytes)
                 semantic_value = expand_snapshot_capture(semantic_value, binding_contents,
@@ -851,6 +857,8 @@ async def _export_snapshot(
                             "Native StepPersistence executions require a consistent database and StepStore backup; "
                             "portable snapshots do not include the external StepStore.",
                         )
+                if domain is PersistenceDomain.CHECKPOINT and value.kind == "tool_operation":
+                    pending_owners[value.key] = semantic_value
                 domain_records.append(semantic_value)
                 encoded = encode_record(value)
                 raw_domain["records"].append(accept(encoded))
@@ -1193,7 +1201,9 @@ async def restore_snapshot(
     semantic_domains = {}
     binding_contents = {key: content for closure in archive_closures.values()
                         for key, content in closure.binding_contents().items()}
-    for domain_name, raw_domain in raw_domains.items():
+    pending_owners = {}
+    for domain_name in sorted(raw_domains, key=lambda name: (name != PersistenceDomain.CHECKPOINT.value, str(name))):
+        raw_domain = raw_domains[domain_name]
         try:
             domain = PersistenceDomain(domain_name)
         except (TypeError, ValueError) as error:
@@ -1241,10 +1251,13 @@ async def restore_snapshot(
                 {group: (entry["sequences"], entry["messages"]) for group, entry in native_entries.items()},
                 native_encoded_payloads, namespace=namespace, tenant_id=tenant_id,
                 event_backups=native_checkpoints), run_registrations), binding_contents,
-            namespace=namespace, tenant_id=tenant_id), binding_contents,
+            namespace=namespace, tenant_id=tenant_id,
+            operations=pending_operation_values(record, pending_owners, namespace=namespace, tenant_id=tenant_id)), binding_contents,
             namespace=namespace, tenant_id=tenant_id) for record in records)
         semantic_records = tuple(expand_tool_content(record, binding_contents,
             content_scope=archive_content_scope(namespace, tenant_id)) for record in semantic_records)
+        if domain is PersistenceDomain.CHECKPOINT:
+            pending_owners.update({record.key: record for record in semantic_records if record.kind == "tool_operation"})
         semantic_domains[domain] = semantic_records
         facts = tuple(decode_fact(value) for value in raw_facts)
         operations = tuple(decode_operation(value) for value in raw_operations)
@@ -1429,6 +1442,15 @@ async def restore_snapshot(
     if target.exists() and any(target.iterdir()):
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     async with open_target(target, namespace, tenant_id) as resources:
+        from .codec import pending_operation_reference
+        pending_references = any(pending_operation_reference(payload) is not None
+            for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
+            if record.kind == "execution"
+            for _, payload in execution_payload_slots(decode_envelope(record.data).value["payload"]))
+        if (pending_references and resources.stores.get(PersistenceDomain.EXECUTION)
+                is not resources.stores.get(PersistenceDomain.CHECKPOINT)):
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
+                          "Pending admission references require their original shared execution and checkpoint owner")
         if run_registrations:
             if resources.run_registrations is None:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)

@@ -30,6 +30,7 @@ from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._native_tool_error import restore_native_tool_error_payload
 from ._archive import archive_content_scope
 from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
+from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
                                  restore_native_text_payload, restore_native_user_input)
 from ._sql import SqlStateStorageGroup
@@ -449,7 +450,20 @@ async def _purge_unreferenced_objects(
                     await collect(dict(record.data), domain, owner_group=store.storage_group)
                     if record.kind in {"execution", "tool_operation"}:
                         native_expanded = await expand_native_templates(record, store)
-                        semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents), binding_contents)
+                        from .codec import pending_operation_reference
+                        from .state import record_key
+                        parts = decode_key_components(record.key, maximum=RECORD_KEY_MAX_BYTES)
+                        identities = tuple(identity for _, payload in execution_payload_slots(
+                            decode_envelope(record.data).value.get("payload"))
+                            if (identity := pending_operation_reference(payload)) is not None)
+                        keys = tuple(record_key(parts[1], parts[2], "checkpoint", "tool_operation", (identity,)) for identity in identities)
+                        rows = await store.read(lambda tx: tx.get_records(keys)) if keys else {}
+                        owners = {}
+                        for key, row in rows.items():
+                            owners[key] = expand_tool_content(await expand_native_templates(row, store), binding_contents)
+                        operations = pending_operation_values(record, owners, namespace=parts[1], tenant_id=parts[2])
+                        semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents,
+                            operations=operations), binding_contents)
                         await collect(dict(semantic.data), domain, archive_owner=False)
             if len(records) < 1000:
                 break

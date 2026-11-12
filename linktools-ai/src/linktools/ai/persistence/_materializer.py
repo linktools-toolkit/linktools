@@ -33,6 +33,7 @@ from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import PersistenceDomain, PersistencePlan, runtime_domain_uses_object_store
 from .repositories import (
     OperationLedgerRepositoryImpl,
+    ToolRepositoryImpl,
     RepositoryBase,
     build_repository_bundle,
 )
@@ -246,6 +247,9 @@ async def materialize_runtime_storage(
         namespace=namespace, tenant_id=tenant_id,
     )
     register_cleanup((objects.drain_reads, objects.preflight_close))
+    tools = repositories.checkpoint.tools
+    if type(tools) is ToolRepositoryImpl:
+        tools.bind_archive_object_reader(partial(objects.read_archive_object, PersistenceDomain.CHECKPOINT))
     run_store = build_runtime_agent_run_store(
         plan,
         stores,

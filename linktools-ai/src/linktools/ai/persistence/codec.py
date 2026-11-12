@@ -1969,6 +1969,8 @@ def execution_payload_slots(value: object) -> tuple[tuple[tuple[str, ...], Mappi
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if native_user_input_reference(item) is not None and path != ("stored_user_input",):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if pending_operation_reference(item) is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((path, item))
             if path == ("recovery", "fields", "pending_tools") and "content" in item["fields"]:
                 arguments = item["fields"].get("arguments")
@@ -2040,6 +2042,20 @@ def validate_native_text_payload(reference: NativeTextReference, payload: object
     return payload
 
 
+def pending_operation_reference(value: Mapping) -> str | None:
+    """Recognize an admitted operation only in a pending argument owner slot."""
+    fields = value.get("fields")
+    content = fields.get("content") if isinstance(fields, Mapping) else None
+    if not isinstance(content, Mapping) or "$pending_operation" not in content:
+        return None
+    _validate_dataclass_wrapper(value, StoredPayload, _CURRENT_CODEC, persisted=True)
+    identity = content["$pending_operation"]
+    if (set(fields) != {"content"} or set(content) != {"$pending_operation"}
+            or not isinstance(identity, str) or not identity):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return identity
+
+
 def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
     fields = value.get("fields")
     if not isinstance(fields, Mapping):
@@ -2052,7 +2068,8 @@ def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
     if target is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _validate_dataclass_wrapper(value, target, _CURRENT_CODEC, persisted=True)
-    if native_user_input_reference(value) is not None or native_text_reference(value) is not None:
+    if (native_user_input_reference(value) is not None or native_text_reference(value) is not None
+            or pending_operation_reference(value) is not None):
         return None
     reference = execution_payload_reference(fields["content"])
     expected = ({"content", "output", "terminal_details"} if target is RecoveryTerminalHandoff else
@@ -2150,7 +2167,7 @@ def execution_payload_reference(value: object) -> tuple[str, str, str] | None:
     return _execution_content_reference(value, "$execution_payload")
 
 
-def _restore_pending_arguments(template: Mapping, arguments: Mapping) -> dict:
+def _restore_pending_arguments(template: Mapping, arguments: Mapping, operations: Mapping = {}) -> dict:
     if not isinstance(arguments, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     fields_value = dict(template["fields"])
@@ -2163,7 +2180,23 @@ def _restore_pending_arguments(template: Mapping, arguments: Mapping) -> dict:
         for call in sequence["$tuple"]:
             if not isinstance(call, Mapping) or call.get("$dataclass") != "pending_deferred_call" or str(index) not in arguments:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            restored.append({**call, "fields": {**call["fields"], "arguments_payload": arguments[str(index)]}})
+            argument = arguments[str(index)]
+            identity = pending_operation_reference(argument)
+            if identity is None:
+                restored.append({**call, "fields": {**call["fields"], "arguments_payload": argument}})
+            else:
+                source = operations.get(("pending-operation", identity))
+                fields = call.get("fields")
+                if (not isinstance(source, ToolOperationRecord) or source.arguments_payload is None
+                        or not isinstance(fields, Mapping) or set(fields) != {"operation_id", "metadata"}
+                        or fields["operation_id"] != identity or source.tool_operation_id != identity):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                restored.append({**call, "fields": {
+                    "operation_id": identity, "metadata": fields["metadata"],
+                    "tool_call_id": source.tool_call_id, "tool_name": source.tool_name,
+                    "capability_ref": _encode_persisted_domain(source.capability_ref),
+                    "arguments_payload": _encode_persisted_domain(source.arguments_payload),
+                }})
             index += 1
         fields_value[name] = {"$tuple": restored}
     if set(arguments) != {str(position) for position in range(index)}:
@@ -2199,7 +2232,7 @@ def _execution_payload_codec(codec: _VersionCodec, payloads: Mapping) -> _Versio
             if isinstance(selected, Mapping) and selected.get("$dataclass") == "pending_tool_continuation":
                 if set(raw) != {"content", "arguments"}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                restored = _restore_pending_arguments(selected, raw["arguments"])
+                restored = _restore_pending_arguments(selected, raw["arguments"], payloads)
                 return _decode_domain(restored, PendingToolContinuation, current, persisted=True)
             if isinstance(selected, Mapping) and selected.get("$dataclass") in {"result_record", "recovery_terminal_handoff"}:
                 expected = {"content", "output", "terminal_details"} if selected["$dataclass"] == "recovery_terminal_handoff" else {"content", "output"}
@@ -2588,7 +2621,7 @@ def _iter_runtime_object_refs(
             if not isinstance(fields_value, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             def skip_content(payload: Mapping) -> JsonValue:
-                return None if payload_reference(payload) is not None or native_text_reference(payload) is not None or native_user_input_reference(payload) is not None else payload
+                return None if payload_reference(payload) is not None or native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None else payload
             fields_value = map_execution_payload_slots(value, skip_content)["fields"]
             for key, item in fields_value.items():
                 if (
@@ -3347,4 +3380,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["native_tool_error_reference", "native_tool_arguments_reference", "decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["pending_operation_reference", "native_tool_error_reference", "native_tool_arguments_reference", "decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

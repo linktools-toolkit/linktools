@@ -25,7 +25,7 @@ from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart, ToolCallPart
 from .codec import (decode_execution_terminal_details,  binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
-    encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
+    pending_operation_reference, encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import GroupRecordReader, StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
 from ._execution_policy_content import (POLICY_CODEC, policy_reference, policy_values, encode_policy, decode_policy, expand_policy)
@@ -131,19 +131,20 @@ def snapshot_execution_content_size(record: StoredRecord, contents: Mapping[tupl
 
 def expand_snapshot_execution_content(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord],
                                      *, namespace: str, tenant_id: str,
-                                     reserve: Callable[[int], None] | None = None) -> StoredRecord:
+                                     reserve: Callable[[int], None] | None = None,
+                                     operations: Mapping = {}) -> StoredRecord:
     return _expand_execution_content(record, contents, content_scope=archive_content_scope(namespace, tenant_id),
-                                     reserve=reserve)
+                                     reserve=reserve, operations=operations)
 
 
-def expand_retained_execution_content(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord]) -> StoredRecord:
+def expand_retained_execution_content(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord], *, operations: Mapping = {}) -> StoredRecord:
     """Resolve retained owners across all scopes in one offline physical store."""
-    return _expand_execution_content(record, contents, content_scope=None)
+    return _expand_execution_content(record, contents, content_scope=None, operations=operations)
 
 
 def _expand_execution_content(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord],
                               *, content_scope: str | None,
-                              reserve: Callable[[int], None] | None = None) -> StoredRecord:
+                              reserve: Callable[[int], None] | None = None, operations: Mapping = {}) -> StoredRecord:
     if record.kind != "execution":
         return record
     decoded = {}
@@ -162,6 +163,7 @@ def _expand_execution_content(record: StoredRecord, contents: Mapping[tuple[str,
         record = expand_binding(record, decoded[binding])
     values = {reference: _decode_payload(raw, reference[2]) for reference, raw in decoded.items()
               if reference != binding and reference != policy}
+    values.update(operations)
     def expand(payload: Mapping) -> JsonValue:
         reference = payload_reference(payload)
         return payload if reference is None else _encode_persisted_domain(decode_execution_payload(payload, values))
@@ -470,6 +472,61 @@ class ExecutionContent:
         self._binding_encodings[key] = (ref(binding, lambda _value: self._binding_encodings.pop(key, None)), identity, raw)
         return identity, raw
 
+    async def pending_operations(self, records: Sequence[StoredRecord]) -> dict:
+        from ._pending_operation_reference import read_pending_operations
+        references = {identity: record for record in records for _, payload in _payloads(record)
+                      if (identity := pending_operation_reference(payload)) is not None}
+        if not references:
+            return {}
+        values = await read_pending_operations(self._store, tuple(references), namespace=self._namespace, tenant_id=self._tenant_id)
+        result = {}
+        for value in values:
+            fields = decode_envelope(references[value.tool_operation_id].data).value["payload"]["fields"]
+            if value.execution_id != fields["execution_id"] or value.arguments_payload is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result[("pending-operation", value.tool_operation_id)] = value
+        if len(result) != len(references):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for record in records:
+            execution_id = decode_envelope(record.data).value["payload"]["fields"]["execution_id"]
+            for _, payload in _payloads(record):
+                identity = pending_operation_reference(payload)
+                if identity is not None and result[("pending-operation", identity)].execution_id != execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result
+
+    async def admitted_pending_operations(self, value: ExecutionRecord) -> dict:
+        from ._pending_operation_reference import read_pending_operations
+        pending = None if value.recovery is None else value.recovery.pending_tools
+        active = active_state_scope()
+        if pending is None or active is None or not active.writable or self._store not in active.transactions:
+            return {}
+        calls = (*pending.approvals, *pending.calls)
+        sources = {source.tool_operation_id: source for source in
+                   await read_pending_operations(self._store, tuple(call.operation_id for call in calls),
+                                                 namespace=self._namespace, tenant_id=self._tenant_id)}
+        result = {}
+        occurrences = Counter(id(call.arguments_payload) for call in calls)
+        other_payloads = {id(value.stored_user_input.payload)}
+        if value.result is not None and value.result.output is not None:
+            other_payloads.add(id(value.result.output))
+        if value.recovery.terminal_handoff is not None and value.recovery.terminal_handoff.outcome.output is not None:
+            other_payloads.add(id(value.recovery.terminal_handoff.outcome.output))
+        for call in calls:
+            # Object identity indexes encoder substitutions, not operation
+            # identity. Shared Python payload objects cannot select two owners.
+            if occurrences[id(call.arguments_payload)] != 1 or id(call.arguments_payload) in other_payloads:
+                continue
+            source = sources.get(call.operation_id)
+            if (source is not None and source.execution_id == value.execution_id
+                    and source.tool_call_id == call.tool_call_id and source.tool_name == call.tool_name
+                    and canonical_json_bytes(_encode_persisted_domain(source.capability_ref))
+                    == canonical_json_bytes(_encode_persisted_domain(call.capability_ref))
+                    and canonical_json_bytes(_encode_persisted_domain(source.arguments_payload))
+                    == canonical_json_bytes(_encode_persisted_domain(call.arguments_payload))):
+                result[id(call.arguments_payload)] = call.operation_id
+        return result
+
     async def prepare_value(self, value: ExecutionRecord) -> None:
         if self._share_content:
             await self.initialize(create=True)
@@ -566,10 +623,24 @@ class ExecutionContent:
                 "error_diagnostics": _encode_persisted_domain(handoff.outcome.error_diagnostics),
             }))
         details_values = tuple(item for item in (terminal_details, handoff_details) if item is not None)
+        admitted = await self.admitted_pending_operations(value)
         selected = [(payload, self._encoding(payload)) for payload in (*details_values, *self.payload_values(value))
                     if (result_source is None or payload is not output)
                     and (input_source is None or payload is not value.stored_user_input)]
-        selected = [(payload, encoded) for payload, encoded in selected if encoded is not None]
+        selected = [(payload, encoded) for payload, encoded in selected if encoded is not None and id(payload) not in admitted]
+        if admitted:
+            compact = []
+            for payload, encoded in selected:
+                if isinstance(payload, PendingToolContinuation):
+                    wire = json.loads(encoded[1])
+                    for name in ("approvals", "calls"):
+                        for call, entry in zip(getattr(payload, name), wire["fields"][name]["$tuple"], strict=True):
+                            if id(call.arguments_payload) in admitted:
+                                entry["fields"] = {key: entry["fields"][key] for key in ("operation_id", "metadata")}
+                    raw = canonical_json_bytes(wire)
+                    encoded = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()), raw
+                compact.append((payload, encoded))
+            selected = compact
         binding = self._binding_encoding(value.binding)
         active = active_state_scope()
         opened = self._store.storage_group.opened_archive
@@ -590,6 +661,8 @@ class ExecutionContent:
         if input_source is not None:
             encoded_payloads[id(value.stored_user_input)] = {"$dataclass": "stored_user_input", "schema": 1,
                                                            "fields": {"content": input_source.to_json()}}
+        encoded_payloads.update({key: {"$dataclass": "stored_payload", "schema": 1,
+            "fields": {"content": {"$pending_operation": identity}}} for key, identity in admitted.items()})
         missing = []
         for payload, (identity, raw) in selected:
             reference = archive.scope_id, archive.content_scope, identity
@@ -770,6 +843,8 @@ class ExecutionContent:
         references = [reference for record in records for path, payload in _payloads(record)
                       if (not result_only or path in {("result",), ("result", "fields", "output")})
                       if (reference := payload_reference(payload)) is not None]
+        if not result_only:
+            native_values.update(await self.pending_operations(records))
         if not references:
             return native_values
         archive = await self._archive()
@@ -825,6 +900,7 @@ class ExecutionContent:
             ordered = tuple(references)
             raws = await archive.read_contents(tuple(reference[2] for reference in ordered), codec=PAYLOAD_CODEC)
             decoded = {reference: _decode_payload(raw, reference[2]) for reference, raw in zip(ordered, raws, strict=True)}
+        operations = await self.pending_operations(records) if recovery else {}
         values = []
         for record in records:
             envelope = decode_envelope(record.data)
@@ -851,7 +927,7 @@ class ExecutionContent:
                 expanded = dict(value) if isinstance(value, Mapping) else _encode_persisted_domain(value)
                 if wrapper["$dataclass"] == "pending_tool_continuation":
                     from .codec import _restore_pending_arguments
-                    expanded = _restore_pending_arguments(expanded, wrapper["fields"]["arguments"])
+                    expanded = _restore_pending_arguments(expanded, wrapper["fields"]["arguments"], operations)
                 if wrapper["$dataclass"] in {"result_record", "recovery_terminal_handoff"}:
                     expanded_fields = dict(expanded["fields"])
                     if wrapper["$dataclass"] == "result_record":

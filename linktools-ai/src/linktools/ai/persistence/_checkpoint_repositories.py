@@ -22,7 +22,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
+from ..storage import ObjectRef, StoredPayload
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from ._message_root import NativeMessageRoot
@@ -329,6 +329,10 @@ class ToolRepositoryImpl(_RepositoryBase):
             domain=PersistenceDomain.CHECKPOINT,
         )
         self._tool_content = ToolOperationContent(store, namespace=namespace, tenant_id=tenant_id)
+
+    def bind_archive_object_reader(self, reader: Callable[[ObjectRef], Awaitable[bytes]]) -> None:
+        """Resolve Native receipt files through the repository's archive owner."""
+        self._tool_content.bind_archive_object_reader(reader)
 
     async def _mutate_content(self, operation: Callable[[StateTransaction], Awaitable[_ToolValue]]) -> _ToolValue:
         if active_state_scope() is None:
