@@ -92,7 +92,7 @@ async def test_known_new_admission_and_result_use_no_select_or_alias(tmp_path: P
         finally:
             event.remove(engine, "after_cursor_execute", executed)
         assert not [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
-        assert not [sql for sql in statements if "ai_state_aliases" in sql]
+        assert not [sql for sql in statements if "ai_tool_operation_aliases" in sql]
         assert len([sql for sql in statements if sql.lstrip().upper().startswith("UPDATE")]) == 2
         assert settled.execution == receipt.execution
         assert receipt.execution.value == initial

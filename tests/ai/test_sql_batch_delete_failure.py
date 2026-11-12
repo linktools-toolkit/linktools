@@ -37,7 +37,7 @@ async def _assert_caught_failure(
     async def interrupt(transaction, statement, parameters=None):
         if (transaction._store_key == store.store_key
                 and getattr(statement, "is_delete", False)
-                and statement.table.name == "ai_state_aliases"):
+                and statement.table.name == "ai_tool_operation_aliases"):
             if failure == "cancel":
                 entered.set()
                 await release.wait()
@@ -157,7 +157,7 @@ async def test_caught_delete_failures_retain_first_error(tmp_path: Path, monkeyp
     execute = _SqlTransaction._execute
 
     async def fail(transaction, statement, parameters=None):
-        if getattr(statement, "is_delete", False) and statement.table.name == "ai_state_aliases":
+        if getattr(statement, "is_delete", False) and statement.table.name == "ai_tool_operation_aliases":
             raise next(errors)
         return await execute(transaction, statement, parameters)
 
@@ -182,7 +182,7 @@ async def test_caught_delete_failures_retain_first_error(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_before", ("ai_state_aliases", "ai_state_facts"))
+@pytest.mark.parametrize("cancel_before", ("ai_tool_operation_aliases", "ai_state_facts"))
 async def test_caught_scalar_delete_cancel_preserves_owner_and_children(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel_before: str,
 ) -> None:
@@ -214,7 +214,7 @@ async def test_caught_scalar_delete_cancel_preserves_owner_and_children(
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 task.cancel()
-                if cancel_before == "ai_state_aliases":
+                if cancel_before == "ai_tool_operation_aliases":
                     await task
                 else:
                     with pytest.raises(asyncio.CancelledError):
@@ -223,7 +223,7 @@ async def test_caught_scalar_delete_cancel_preserves_owner_and_children(
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
         assert len(await store.read(lambda tx: tx.scan_records())) == (
-            2 if cancel_before == "ai_state_aliases" else 1
+            2 if cancel_before == "ai_tool_operation_aliases" else 1
         )
         assert len(await store.read(lambda tx: tx.scan_aliases())) == 1
         assert len(await store.read(lambda tx: tx.scan_facts())) == 1

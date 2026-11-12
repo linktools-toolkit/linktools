@@ -100,16 +100,16 @@ async def test_mysql_single_sequence_validates_identity_before_caching_result(
         compiled = statements[0].compile(dialect=mysql.dialect())
         assert (
             "ON DUPLICATE KEY UPDATE value = CASE WHEN "
-            "(ai_state_sequences.stream_key <=> VALUES(stream_key)) "
-            "THEN ai_state_sequences.value + %s ELSE ai_state_sequences.value END"
+            "(ai_state_counters.stream_key <=> VALUES(stream_key)) "
+            "THEN ai_state_counters.value + %s ELSE ai_state_counters.value END"
         ) in str(compiled)
         assert compiled.params[compiled.positiontup[-1]] == 5
         assert compiled.params["value"] == 5
         assert compiled.params["stream_key"] == key
         readback = statements[1].compile(dialect=mysql.dialect())
         assert (
-            "WHERE ai_state_sequences.store_key = %s AND "
-            "ai_state_sequences.stream_locator = %s AND ai_state_sequences.stream_key = %s"
+            "WHERE ai_state_counters.store_key = %s AND "
+            "ai_state_counters.stream_locator = %s AND ai_state_counters.stream_key = %s"
         ) in str(readback)
         assert tuple(readback.params[name] for name in readback.positiontup) == (
             b"s" * 32, sha256(key).hexdigest(), key,

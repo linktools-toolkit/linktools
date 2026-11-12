@@ -184,7 +184,7 @@ async def test_sql_alias_reads_reject_invalid_persisted_addresses(tmp_path: Path
             await tx.insert_alias(StoredAlias(b"valid", _key("record")))
         await store.mutate(seed)
         async with store.storage_group.context.engine.begin() as connection:
-            await connection.exec_driver_sql("UPDATE ai_state_aliases SET alias_key = ?", (raw,))
+            await connection.exec_driver_sql("UPDATE ai_tool_operation_aliases SET alias_key = ?", (raw,))
         for read in (lambda: store.read(lambda tx: tx.scan_aliases()), store.validate_integrity):
             with pytest.raises(AIError) as rejected:
                 await read()

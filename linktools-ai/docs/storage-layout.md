@@ -37,9 +37,9 @@ production DBA approval or a deployed migration.
 | Table | Owner and retained representation |
 | --- | --- |
 | `ai_state_records` | Domain state, CAS/leases and query projections stay structured. Archive content alone can carry a binary body. |
-| `ai_state_aliases` | Secondary identities only; no body to compress. |
+| `ai_tool_operation_aliases` | Checkpoint tool-call and recovery identities pointing to their tool operation; no duplicate result body. |
 | `ai_state_facts` | Ordered facts, native references and query projections stay JSON. Transcript bodies already have archive/native owners; no unused binary column is added. |
-| `ai_state_sequences` | Monotonic counters only. |
+| `ai_state_counters` | Monotonic counters shared by execution, task, conversation and trace domains; not message sequences. |
 | `ai_state_operations` | Replay/control ledger and references stay JSON. No separate compressed copy. |
 | `ai_asset_heads` | Namespace revision only. |
 | `ai_asset_entries` | Current Asset metadata and file reference, never inline file bytes. |

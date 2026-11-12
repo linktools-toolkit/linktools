@@ -129,7 +129,7 @@ async def test_bare_store_stream_scope_family_counters_and_pagination(backend: s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("table", ("ai_state_facts", "ai_state_operations", "ai_state_sequences"))
+@pytest.mark.parametrize("table", ("ai_state_facts", "ai_state_operations", "ai_state_counters"))
 async def test_sql_current_stream_readers_fail_closed_on_oversized_storage(table: str, tmp_path: Path) -> None:
     owner = _record(1)
     key = stream_key("ns", "tenant", "trace", "event", ("owner",))
@@ -144,7 +144,7 @@ async def test_sql_current_stream_readers_fail_closed_on_oversized_storage(table
             await connection.execute(text(f"UPDATE {table} SET stream_key = :key"), {"key": b"x" * (STREAM_KEY_MAX_BYTES + 1)})
         readers = {"ai_state_facts": lambda tx: tx.scan_facts(),
                    "ai_state_operations": lambda tx: tx.scan_operations(),
-                   "ai_state_sequences": lambda tx: tx.scan_sequences()}
+                   "ai_state_counters": lambda tx: tx.scan_sequences()}
         with pytest.raises(AIError) as caught:
             await store.read(readers[table])
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

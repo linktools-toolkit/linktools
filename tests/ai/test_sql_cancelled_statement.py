@@ -39,7 +39,7 @@ async def test_cancelled_statement_failure_does_not_retry_or_commit_mutation(
         if (
             not executing.is_set()
             and sql.startswith("SELECT")
-            and "ai_state_sequences" in sql
+            and "ai_state_counters" in sql
         ):
             executing.set()
             await release.wait()

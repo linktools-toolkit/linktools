@@ -104,13 +104,13 @@ async def test_colliding_sequence_reservation_rolls_back_without_incrementing_an
     ("ai_state_records", "scope_locator"),
     ("ai_state_records", "parent_locator"),
     ("ai_state_records", "sort_prefix"),
-    ("ai_state_aliases", "alias_locator"),
-    ("ai_state_aliases", "record_locator"),
+    ("ai_tool_operation_aliases", "alias_locator"),
+    ("ai_tool_operation_aliases", "record_locator"),
     ("ai_state_facts", "stream_locator"),
     ("ai_state_facts", "owner_locator"),
     ("ai_state_operations", "operation_locator"),
     ("ai_state_operations", "stream_locator"),
-    ("ai_state_sequences", "stream_locator"),
+    ("ai_state_counters", "stream_locator"),
 ))
 async def test_integrity_scan_rejects_tampered_state_lookup_projections(
     tmp_path: Path, table: str, column: str,

@@ -33,7 +33,7 @@ CREATE TABLE ai_state_records (
 	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
 )ENGINE=InnoDB COMMENT='Current durable state for runtime and step resources persisted as versioned records.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_state_aliases (
+CREATE TABLE ai_tool_operation_aliases (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	alias_key VARBINARY(768) NOT NULL COMMENT 'Binary secondary lookup address with a maximum of 768 bytes.',
@@ -47,7 +47,7 @@ CREATE TABLE ai_state_aliases (
 	KEY ix_store_key_record_locator (store_key, record_locator),
 	KEY ix_updated_at (updated_at),
 	UNIQUE KEY uk_store_key_alias_locator (store_key, alias_locator)
-)ENGINE=InnoDB COMMENT='Secondary unique lookup identities that resolve to canonical runtime records.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
+)ENGINE=InnoDB COMMENT='Tool-call and recovery lookup identities that resolve to canonical tool operations.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
 CREATE TABLE ai_state_facts (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
@@ -71,7 +71,7 @@ CREATE TABLE ai_state_facts (
 	UNIQUE KEY uk_store_key_stream_locator_sequence (store_key, stream_locator, sequence)
 )ENGINE=InnoDB COMMENT='Immutable ordered runtime facts including events, checkpoints, and effects.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_state_sequences (
+CREATE TABLE ai_state_counters (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
 	stream_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the monotonic sequence counter.',

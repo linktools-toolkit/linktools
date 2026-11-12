@@ -478,9 +478,9 @@ def test_complete_sql_schema_includes_metrics_tables() -> None:
         "ai_metric_observations",
         "ai_object_chunks",
         "ai_objects",
-        "ai_state_aliases",
+        "ai_tool_operation_aliases",
         "ai_state_facts",
         "ai_state_operations",
         "ai_state_records",
-        "ai_state_sequences",
+        "ai_state_counters",
     }.issubset(metadata.tables)

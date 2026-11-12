@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 _RECORD_COMMENT = "Current durable state for runtime and step resources persisted as versioned records."
 _ALIAS_COMMENT = (
-    "Secondary unique lookup identities that resolve to canonical runtime records."
+    "Tool-call and recovery lookup identities that resolve to canonical tool operations."
 )
 _FACT_COMMENT = (
     "Immutable ordered runtime facts including events, checkpoints, and effects."
@@ -181,7 +181,7 @@ def build_runtime_sql_metadata(
     sql_audit_indexes(records)
 
     aliases = Table(
-        "ai_state_aliases",
+        "ai_tool_operation_aliases",
         metadata,
         sql_id_column(),
         Column(
@@ -280,7 +280,7 @@ def build_runtime_sql_metadata(
     sql_audit_indexes(facts)
 
     sequences = Table(
-        "ai_state_sequences",
+        "ai_state_counters",
         metadata,
         sql_id_column(),
         Column(
@@ -379,9 +379,9 @@ def required_runtime_sql_tables(plan: PersistencePlan) -> frozenset[str]:
         return frozenset()
     tables = {
         "ai_state_records",
-        "ai_state_aliases",
+        "ai_tool_operation_aliases",
         "ai_state_facts",
-        "ai_state_sequences",
+        "ai_state_counters",
         "ai_state_operations",
     }
     if plan.route(PersistenceDomain.TRACE).retention.value == "durable":

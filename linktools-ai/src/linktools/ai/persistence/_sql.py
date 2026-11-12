@@ -253,8 +253,8 @@ class SqlStateStorageGroup:
                 select(self._metadata.tables[name].c.store_key).where(
                     self._metadata.tables[name].c.store_key == key,
                 )
-                for name in ("ai_state_records", "ai_state_aliases", "ai_state_facts",
-                             "ai_state_sequences", "ai_state_operations")
+                for name in ("ai_state_records", "ai_tool_operation_aliases", "ai_state_facts",
+                             "ai_state_counters", "ai_state_operations")
             ]
             async with self._session() as session:
                 result = await self._context.run_statement(session.execute(union(*statements).limit(1)))
@@ -380,8 +380,8 @@ class SqlStateStorageGroup:
         await self.initialize()
         statements = [
             select(self._metadata.tables[name].c.store_key)
-            for name in ("ai_state_records", "ai_state_aliases", "ai_state_facts",
-                         "ai_state_sequences", "ai_state_operations")
+            for name in ("ai_state_records", "ai_tool_operation_aliases", "ai_state_facts",
+                         "ai_state_counters", "ai_state_operations")
         ]
         async with self._session() as session:
             result = await self._context.run_statement(session.execute(union(*statements)))
@@ -787,9 +787,9 @@ class SqlStateStore:
             from sqlalchemy import and_, select
 
             records = transaction._table("ai_state_records")
-            aliases = transaction._table("ai_state_aliases")
+            aliases = transaction._table("ai_tool_operation_aliases")
             facts = transaction._table("ai_state_facts")
-            sequences = transaction._table("ai_state_sequences")
+            sequences = transaction._table("ai_state_counters")
             sequence_rows = (
                 (
                     await transaction._execute(
@@ -1645,7 +1645,7 @@ class _SqlTransaction:
         from sqlalchemy import delete, tuple_, update
 
         table = self._table("ai_state_records")
-        aliases = self._table("ai_state_aliases")
+        aliases = self._table("ai_tool_operation_aliases")
         facts = self._table("ai_state_facts")
         deleted_keys: set[bytes] = set()
         statement_count = 0
@@ -1749,9 +1749,9 @@ class _SqlTransaction:
             await self._retire_native_rows("record", table,
                 table.c.store_key == self._store_key, _key_matches(table.c.key, validate_record_key(key)))
             await self._execute(
-                delete(self._table("ai_state_aliases")).where(
-                    self._table("ai_state_aliases").c.store_key == self._store_key,
-                    _key_matches(self._table("ai_state_aliases").c.record_key, validate_record_key(key)),
+                delete(self._table("ai_tool_operation_aliases")).where(
+                    self._table("ai_tool_operation_aliases").c.store_key == self._store_key,
+                    _key_matches(self._table("ai_tool_operation_aliases").c.record_key, validate_record_key(key)),
                 )
             )
             children_changed = True
@@ -1871,7 +1871,7 @@ class _SqlTransaction:
         if missing:
             from sqlalchemy import and_, select
 
-            table = self._table("ai_state_aliases")
+            table = self._table("ai_tool_operation_aliases")
             records = self._table("ai_state_records")
             rows = (
                 (
@@ -1925,7 +1925,7 @@ class _SqlTransaction:
     async def scan_aliases(self) -> tuple[StoredAlias, ...]:
         from sqlalchemy import select
 
-        table = self._table("ai_state_aliases")
+        table = self._table("ai_tool_operation_aliases")
         rows = (
             await self._execute(
                 select(table)
@@ -1953,7 +1953,7 @@ class _SqlTransaction:
         _require_scan_limit(limit)
         from sqlalchemy import select
 
-        table = self._table("ai_state_aliases")
+        table = self._table("ai_tool_operation_aliases")
         statement = select(table).where(table.c.store_key == self._store_key)
         if after is not None:
             statement = statement.where(table.c.alias_key > validate_alias_key(after))
@@ -2016,7 +2016,7 @@ class _SqlTransaction:
             from sqlalchemy import insert
 
             await self._execute(
-                insert(self._table("ai_state_aliases")).values(rows)
+                insert(self._table("ai_tool_operation_aliases")).values(rows)
             )
         self._log_batch("insert_aliases", len(values), 1 if rows else 0)
         for alias in values:
@@ -2036,7 +2036,7 @@ class _SqlTransaction:
 
         unique_keys = tuple(dict.fromkeys(validate_stream_key(key) for key in keys))
         missing = tuple(key for key in unique_keys if key not in self._sequence_cache)
-        table = self._table("ai_state_sequences")
+        table = self._table("ai_state_counters")
         if missing:
             rows = (
                 (
@@ -2067,7 +2067,7 @@ class _SqlTransaction:
     async def scan_sequences(self) -> Mapping[bytes, int]:
         from sqlalchemy import select
 
-        table = self._table("ai_state_sequences")
+        table = self._table("ai_state_counters")
         rows = (
             await self._execute(
                 select(table)
@@ -2092,7 +2092,7 @@ class _SqlTransaction:
         _require_scan_limit(limit)
         from sqlalchemy import select
 
-        table = self._table("ai_state_sequences")
+        table = self._table("ai_state_counters")
         statement = select(table).where(table.c.store_key == self._store_key)
         if after is not None:
             statement = statement.where(table.c.stream_key > validate_stream_key(after))
@@ -2130,7 +2130,7 @@ class _SqlTransaction:
             raise
 
     async def _reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
-        table = self._table("ai_state_sequences")
+        table = self._table("ai_state_counters")
         if len(requests) == 1:
             key, count = next(iter(requests.items()))
             value = await self._context.run_statement(
@@ -2178,7 +2178,7 @@ class _SqlTransaction:
             raise ValueError("expected sequence must be a non-negative integer")
         from sqlalchemy import func, update
 
-        table = self._table("ai_state_sequences")
+        table = self._table("ai_state_counters")
         result = await self._execute(
             update(table)
             .where(
@@ -2202,7 +2202,7 @@ class _SqlTransaction:
             return
         from sqlalchemy import delete
 
-        table = self._table("ai_state_sequences")
+        table = self._table("ai_state_counters")
         for offset in range(0, len(values), _RAW_KEY_BATCH_SIZE):
             batch = values[offset:offset + _RAW_KEY_BATCH_SIZE]
             await self._execute(delete(table).where(
