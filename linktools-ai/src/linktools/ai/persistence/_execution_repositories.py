@@ -23,7 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import decode_execution_event_control, decode_execution_membership, pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -2518,26 +2518,24 @@ class EventRepositoryImpl(_RepositoryBase):
         current = await transaction.get_record(key)
         if current is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        execution = await self._decode(current, ExecutionRecord)
-        if (
-            expected_event_seq is not None
-            and execution.event_seq != expected_event_seq
-        ):
+        identity, event_seq, revision = decode_execution_event_control(current.data)
+        if current.kind != "execution" or identity != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if expected_event_seq is not None and event_seq != expected_event_seq:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         now = await transaction.now()
-        first_sequence = execution.event_seq + 1
-        last_sequence = execution.event_seq + len(events)
-        next_execution = replace(
-            execution,
-            event_seq=last_sequence,
-            revision=execution.revision + len(events),
-            updated_at=now,
-        )
-        await _replace_checked(
-            transaction,
-            await self._projected_content(current, next_execution),
-            current.storage_revision,
-        )
+        first_sequence = event_seq + 1
+        last_sequence = event_seq + len(events)
+        # Audit publication changes no execution facts or content owners. Keep
+        # their original wire representation, including all terminal fields.
+        envelope = decode_envelope(current.data)
+        payload = envelope.value["payload"]
+        data = encode_envelope({**envelope.value, "payload": {**payload, "fields": {
+            **payload["fields"], "event_seq": last_sequence,
+            "revision": revision + len(events), "updated_at": encode_domain(now),
+        }}})
+        await _replace_checked(transaction, replace(current, data=data,
+            storage_revision=current.storage_revision + 1), current.storage_revision)
         facts = tuple(
             StoredFact(
                 stream,
