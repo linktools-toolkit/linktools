@@ -903,13 +903,11 @@ class ExecutionContent:
             "runtime_policy", "runtime_overrides",
         )
         if (previous_fields.get("completed_at") is not None
-                and not any(native_user_input_reference(payload) is not None
-                            or native_text_reference(payload) is not None for _, payload in _payloads(current))
                 and canonical_json_bytes({name: previous_fields[name] for name in terminal_fields if name in previous_fields})
                 == canonical_json_bytes({name: candidate_fields[name] for name in terminal_fields if name in candidate_fields})):
-            # A control update retains precisely the same content-addressed
-            # terminal facts. It neither consumes nor republishes their bodies;
-            # their next reader still authenticates the original source.
+            # An unchanged terminal representation retains the same immutable
+            # content or Native slice owners. Control-only changes neither
+            # consume nor republish bodies; readers still validate their sources.
             return True
         current, = await self.expand_policies((current,))
         payloads = await self.read_payloads((current,))
