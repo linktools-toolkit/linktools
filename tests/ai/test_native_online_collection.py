@@ -395,7 +395,7 @@ async def test_scoped_offline_collection_leaves_other_namespace_content(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_multiple_stale_candidates_each_rebuild_once_before_atomic_publication(tmp_path: Path) -> None:
+async def test_offline_invalidation_requires_fresh_candidates_before_atomic_publication(tmp_path: Path) -> None:
     from linktools.ai.persistence._archive import PreparedArchive
     from linktools.ai.persistence.contracts import ContextProjection
 
@@ -418,8 +418,17 @@ async def test_multiple_stale_candidates_each_rebuild_once_before_atomic_publica
             await tx.insert_record(record)
             await native.publish_archived_messages(tx, prepared)
 
+        with pytest.raises(AIError) as stale:
+            await state.mutate(publish)
+        assert stale.value.code is ErrorCode.INTERNAL_ERROR
+        assert await state.read(lambda tx: tx.get_record(record.key)) is None
+        # Offline exclusion expires this adapter's prepared proofs. Re-prepare
+        # from the original bytes; never republish an invalidated proof.
+        prepared = PreparedArchive()
+        refreshed = tuple([await native.prepare_archived_messages(snapshot.messages, prepared) for snapshot in originals])
+        assert refreshed == roots
         await state.mutate(publish)
-        assert attempts == 3, "each newly encountered stale candidate permits only one cold retry"
+        assert attempts == 2, "one rejected stale publication and one fresh atomic publication"
         assert await state.read(lambda tx: tx.get_record(record.key)) == record
         assert await _count(engine, "ai_step_messages") == before + 2
         assert all(await native.read_message_roots(roots))

@@ -74,7 +74,7 @@ async def test_terminal_text_reuses_only_equal_published_message(tmp_path: Path,
         try:
             actual = await repository.get_result_record("execution", tenant_id="tenant", fresh=True)
             assert actual.result == commit.result
-            assert counts["SELECT"] == (1 if case == "small_equal" else 2)
+            assert counts["SELECT"] == (2 if any(references) else 1)
         finally:
             event.remove(engine, "before_cursor_execute", sql)
     # A genuinely cold owner reopens its archive itself, without fake warming.
