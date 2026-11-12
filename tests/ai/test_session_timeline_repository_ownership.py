@@ -192,6 +192,12 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
         statements, begins = [], []
 
         def statement(_connection, _cursor, sql, _parameters, _context, _many):
+            if "ai_step_messages" in sql:
+                from linktools.ai.persistence._step_payload_owner import payload_store_key
+                from linktools.ai.steps import native_store_key
+                assert payload_store_key("timeline-owner", "tenant") in _parameters
+                assert native_store_key("timeline-owner", "tenant") not in _parameters
+                assert "ai_step_messages.store_key =" in sql
             statements.append(sql)
 
         def begin(connection):
@@ -210,6 +216,8 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
         selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
         # Execution and conversation records may share one metadata batch.
         assert len(selects) <= 6
-        assert not any("ai_step_messages" in sql or "ai_object_chunks" in sql for sql in selects)
+        assert not any("ai_object_chunks" in sql for sql in selects)
+        # ai_step_messages also owns typed execution templates/input. The SQL
+        # hook above requires their exact partition; Native hydration stays forbidden.
     finally:
         await state.close()

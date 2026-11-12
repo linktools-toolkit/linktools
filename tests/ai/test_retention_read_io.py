@@ -398,3 +398,25 @@ async def test_retention_projection_rejects_invalid_closure_authority(corruption
             await _controller(repository, calls).release_execution_handoff("execution", tenant_id="tenant")
         assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert calls == []
+
+
+@pytest.mark.parametrize("schema,expected", (
+    (True, ErrorCode.STORAGE_INTEGRITY_ERROR),
+    (2, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+    (None, ErrorCode.STORAGE_INTEGRITY_ERROR),
+))
+async def test_retention_recovery_wrapper_uses_strict_persisted_schema(schema, expected) -> None:
+    from linktools.ai.execution import ExecutionRecoveryDetail
+    from linktools.ai.persistence.codec import decode_execution_retention, encode_execution_content, encode_envelope
+
+    payload = encode_execution_content(replace(_execution(), recovery=ExecutionRecoveryDetail()), {})
+    envelope = encode_envelope({"type": "execution_record", "payload": payload})
+    assert not decode_execution_retention(envelope).recovery_handoff
+    recovery = payload["fields"]["recovery"]
+    if schema is None:
+        del recovery["schema"]
+    else:
+        recovery["schema"] = schema
+    with pytest.raises(AIError) as invalid:
+        decode_execution_retention(encode_envelope({"type": "execution_record", "payload": payload}))
+    assert invalid.value.code is expected

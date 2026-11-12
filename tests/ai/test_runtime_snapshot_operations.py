@@ -26,9 +26,10 @@ from linktools.ai.storage import InMemoryObjectStore, ObjectRef, read_object
 LIMITS = SnapshotLimits(max_entries=100, max_bytes=100_000)
 
 
-def resources(*, read_only: bool = True) -> SnapshotResources:
+def resources(*, read_only: bool = True, checkpoint: bool = False) -> SnapshotResources:
     objects = InMemoryObjectStore()
-    domains = frozenset({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE})
+    domains = frozenset({PersistenceDomain.EXECUTION, PersistenceDomain.TRACE}
+                        | ({PersistenceDomain.CHECKPOINT} if checkpoint else set()))
     return SnapshotResources(
         namespace="snapshot-operations", tenant_id="tenant",
         durable_domains=domains,
@@ -50,10 +51,11 @@ class Offline:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("write_failure", (False, True))
+@pytest.mark.parametrize("checkpoint", (False, True))
 async def test_snapshot_preserves_every_durable_domain_and_closes_restore_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_failure: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_failure: bool, checkpoint: bool,
 ) -> None:
-    source = resources()
+    source = resources(checkpoint=checkpoint)
     for store in source.stores.values():
         await store.initialize()
     archive = InMemoryObjectStore()
@@ -61,10 +63,10 @@ async def test_snapshot_preserves_every_durable_domain_and_closes_restore_scope(
         object_store=archive, limits=LIMITS,
     )
     manifest = json.loads(await read_object(archive, ref.key, expected_digest=ref.digest, expected_size=ref.size))
-    assert set(manifest["domains"]) == {"execution", "trace"}
+    assert set(manifest["domains"]) == {domain.value for domain in source.durable_domains}
     assert manifest["format_version"] == 1
     assert not {"native_messages", "native_checkpoints", "native_projections"}.intersection(manifest)
-    restored = resources(read_only=False)
+    restored = resources(read_only=False, checkpoint=checkpoint)
     for store in restored.stores.values():
         await store.initialize()
     closed = False
@@ -197,3 +199,78 @@ async def test_snapshot_keeps_checkpoint_controls_without_a_capability(tmp_path:
         expected_digest=roundtrip.digest, expected_size=roundtrip.size))
     # Restore relocates archive scopes; compare the complete portable closure.
     assert snapshot_manifest_identity(roundtrip_manifest) == snapshot_manifest_identity(manifest)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ("missing-export", "foreign-export", "missing-restore"))
+async def test_pending_snapshot_requires_its_declared_checkpoint_owner(tmp_path: Path, route: str) -> None:
+    from linktools.ai.core import ExecutionStatus, ToolOperationStatus
+    from linktools.ai.execution import ExecutionRecoveryDetail, PendingDeferredCall, PendingToolContinuation
+    from linktools.ai.persistence import Persistence, PersistenceStorage
+    from linktools.ai.persistence.codec import decode_envelope, pending_operation_reference
+    from linktools.ai.persistence.contracts import ToolOperationRecord
+    from linktools.ai.storage import StoredPayload
+    from .test_step_projection import _execution
+
+    limits = SnapshotLimits(10000, 20_000_000)
+    storage = PersistenceStorage.sqlite(tmp_path / "pending.db")
+    arguments = StoredPayload.inline_json({"argument": True})
+    current = _execution()
+    pending = PendingToolContinuation("run", approvals=(
+        PendingDeferredCall("call", "tool", arguments, operation_id="operation"),))
+    current = replace(current, status=ExecutionStatus.WAITING_DEFERRED,
+        recovery=ExecutionRecoveryDetail(agent_run_id="run", pending_tools=pending))
+    operation = ToolOperationRecord("operation", "execution", "run", "call", "tool", arguments.digest,
+        "binding", True, ToolOperationStatus.PENDING, None, 0, None,
+        current.created_at, current.updated_at, arguments_payload=arguments)
+    async with Persistence.open("native-result", tenant_id="tenant", storage=storage) as state:
+        await state.checkpoint.tools.reserve(operation)
+        await state.execution.executions.create_execution(current)
+        repository = state.execution.executions
+        record = await repository.state_store.read_record(repository.execution_record_key("execution"))
+        assert record is not None
+        fields = decode_envelope(record.data).value["payload"]["fields"]
+        argument = fields["recovery"]["fields"]["pending_tools"]["fields"]["arguments"]["0"]
+        assert pending_operation_reference(argument) == "operation"
+
+    archive = InMemoryObjectStore()
+    async with Persistence.open("native-result", tenant_id="tenant", storage=storage, read_only=True) as state:
+        if route != "missing-restore":
+            stores = {PersistenceDomain.EXECUTION: state.execution.executions.state_store}
+            foreign = InMemoryStateStore() if route == "foreign-export" else None
+            if foreign is not None:
+                await foreign.initialize()
+                stores[PersistenceDomain.CHECKPOINT] = foreign
+            source = SnapshotResources("native-result", "tenant", frozenset(stores), stores,
+                {domain: state.object_store(domain) for domain in stores}, read_only=True)
+            try:
+                with pytest.raises(AIError) as missing:
+                    await RuntimeSnapshotOperations(source, require_ready=ready).export_snapshot(
+                        object_store=archive, limits=limits)
+                assert missing.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
+            finally:
+                if foreign is not None:
+                    await foreign.close()
+            return
+        snapshot = await state.export_snapshot(object_store=archive, limits=limits)
+
+    closed = False
+
+    @asynccontextmanager
+    async def open_target(root: Path, namespace: str, tenant_id: str) -> AsyncIterator[SnapshotResources]:
+        nonlocal closed
+        target = replace(resources(read_only=False), namespace=namespace, tenant_id=tenant_id)
+        for store in target.stores.values():
+            await store.initialize()
+        try:
+            yield target
+        finally:
+            closed = True
+            for store in target.stores.values():
+                await store.close()
+
+    with pytest.raises(AIError) as missing:
+        await restore_snapshot(snapshot, object_store=archive, root=tmp_path / "restored",
+                               limits=limits, open_target=open_target)
+    assert missing.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
+    assert closed

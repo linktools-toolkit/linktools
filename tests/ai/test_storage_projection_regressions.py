@@ -74,20 +74,21 @@ async def test_session_admission_reuses_verified_history_root(tmp_path: Path, mo
     from linktools.ai.inputs import ExecutionContextArchive
     from linktools.ai.persistence._archive import ContentArchive
     prepared = []
-    active = []
+    from contextvars import ContextVar
+    active = ContextVar("input_prepare_active", default=False)
     body_reads = []
     original = ExecutionContextArchive.prepare
     original_read = ContentArchive._read_content
     async def observe(self, context, **kwargs):
-        active.append(True)
+        token = active.set(True)
         try:
             result = await original(self, context, **kwargs)
         finally:
-            active.pop()
+            active.reset(token)
         prepared.append((len(context.model_messages()), kwargs.get('history_root'), len(result.records.records)))
         return result
     async def read(self, content):
-        if active:
+        if active.get():
             body_reads.append(content.codec)
         return await original_read(self, content)
     monkeypatch.setattr(ExecutionContextArchive, 'prepare', observe)

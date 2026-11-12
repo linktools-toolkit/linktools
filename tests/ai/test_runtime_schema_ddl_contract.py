@@ -433,18 +433,23 @@ def test_mysql_all_table_columns_and_comments_match_reviewed_ddl() -> None:
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
 def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: str) -> None:
     from sqlalchemy import BigInteger, Integer, LargeBinary, String
+    from linktools.ai.persistence.state import STORE_KEY_MAX_BYTES
+    from linktools.ai.persistence._step_schema import build_step_sql_metadata
+    from linktools.ai.steps import NATIVE_STORE_KEY_MAX_BYTES
     from sqlalchemy.dialects import postgresql, sqlite
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
+    native_tables = set(build_step_sql_metadata().tables)
     maxima = {}
     for table in metadata.tables.values():
-        assert table.c.store_key.type.length == 128
+        capacity = NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES
+        assert table.c.store_key.type.length == capacity
         assert table.c.store_key.type.compile(dialect=dialect) == {
-            "mysql": "VARBINARY(128)", "postgresql": "BYTEA", "sqlite": "BLOB",
+            "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
         }[dialect_name]
         for index in table.indexes:
             assert len(index.columns) <= 3
-            if "store_key" not in index.columns:
+            if "store_key" not in index.columns and "store_locator" not in index.columns:
                 continue
             size = 0
             for column in index.columns:
@@ -461,6 +466,8 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
     assert maxima[("store_key", "key_locator")] == 384
     assert maxima[("store_key", "operation_locator")] == 384
     assert maxima[("store_key", "stream_locator", "sequence")] == 392
+
+    assert maxima[("store_locator", "sha256")] == 512
 
 
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))

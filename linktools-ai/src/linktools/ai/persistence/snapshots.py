@@ -18,7 +18,7 @@ from ._native_tool_error import restore_native_tool_error_payload
 from ._pending_operation_reference import pending_operation_values
 from ._execution_content import (ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size,
     expand_native_execution_content, restore_native_text_payload, restore_native_user_input)
-from .codec import (decode_envelope, execution_payload_slots, native_text_reference, binding_reference,
+from .codec import (decode_envelope, execution_payload_slots, pending_operation_reference, native_text_reference, binding_reference,
     tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_user_input_reference, native_tool_error_reference)
 
 from ..core import (
@@ -507,7 +507,11 @@ class RuntimeSnapshotOperations:
             if PersistenceDomain.EXECUTION in {domain for domain, _ in members}:
                 execution_bindings = ExecutionContent(self._resources.stores[PersistenceDomain.EXECUTION],
                     namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
-                execution_bindings.bind_pending_operation_source(self._resources.stores[PersistenceDomain.CHECKPOINT])
+                checkpoint_store = self._resources.stores.get(PersistenceDomain.CHECKPOINT)
+                pending_source_available = (PersistenceDomain.CHECKPOINT in self._resources.durable_domains
+                    and checkpoint_store is not None and checkpoint_store.storage_group is group)
+                if pending_source_available:
+                    execution_bindings.bind_pending_operation_source(checkpoint_store)
                 await execution_bindings.initialize(create=False)
 
             async def capture_group(transaction: object) -> None:
@@ -531,6 +535,11 @@ class RuntimeSnapshotOperations:
 
                     execution_records = tuple(record for record in readers[PersistenceDomain.EXECUTION].records
                                               if record.kind == "execution")
+                    if not pending_source_available and any(pending_operation_reference(payload) is not None
+                            for record in execution_records
+                            for _, payload in execution_payload_slots(decode_envelope(record.data).value["payload"])):
+                        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
+                                      "Pending admission references require their durable checkpoint source")
                     for offset in range(0, len(execution_records), 1000):
                         for semantic_record in await execution_bindings.expand_many(
                                 execution_records[offset:offset + 1000], reserve=capture_budget.reserve_bytes,
@@ -1443,16 +1452,16 @@ async def restore_snapshot(
     if target.exists() and any(target.iterdir()):
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     async with open_target(target, namespace, tenant_id) as resources:
-        from .codec import pending_operation_reference
         pending_references = any(pending_operation_reference(payload) is not None
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
             if record.kind == "execution"
             for _, payload in execution_payload_slots(decode_envelope(record.data).value["payload"]))
         if pending_references:
             from .state import StateContentDependencies
-            execution_store = resources.stores[PersistenceDomain.EXECUTION]
-            checkpoint_store = resources.stores[PersistenceDomain.CHECKPOINT]
-            if execution_store.storage_group is not checkpoint_store.storage_group:
+            execution_store = resources.stores.get(PersistenceDomain.EXECUTION)
+            checkpoint_store = resources.stores.get(PersistenceDomain.CHECKPOINT)
+            if (execution_store is None or checkpoint_store is None
+                    or execution_store.storage_group is not checkpoint_store.storage_group):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
                               "Execution and checkpoint must retain their shared transaction group")
             if execution_store is not checkpoint_store:

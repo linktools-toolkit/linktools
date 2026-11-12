@@ -1765,10 +1765,9 @@ def decode_execution_retention(value: Mapping[str, JsonValue]) -> ExecutionReten
         recovery = source.get("recovery")
         handoff = False
         if recovery is not None:
-            if (not isinstance(recovery, Mapping) or recovery.get("$dataclass") != "execution_recovery_detail"
-                    or recovery.get("schema") != 1 or not isinstance(recovery.get("fields"), Mapping)):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            raw = recovery["fields"]
+            _wire_id, raw = _validate_dataclass_wrapper(
+                recovery, ExecutionRecoveryDetail, codec, persisted=True,
+            )
             declaration = next(field for field in fields(ExecutionRecoveryDetail) if field.name == "handoff_phase")
             phase = (_decode_domain(raw["handoff_phase"], RecoveryHandoffPhase, codec, persisted=True)
                      if "handoff_phase" in raw else declaration.default)
