@@ -1049,8 +1049,14 @@ def _encode_v1_execution_record(
     if (persisted and value.result is not None and handoff is not None
             and handoff.outcome.object_source_domain in {None, PersistenceDomain.EXECUTION}):
         outcome = _execution_outcome_fields(encoded)
+        # Whole templates already share fixed output/diagnostic owners. This
+        # older inline projection is valid only when both inline sources exist;
+        # a Result reference intentionally has no stop_reason/usage fields.
+        result_fields = encoded["result"]["fields"]
+        if outcome is None or "content" in result_fields:
+            return cast(Mapping[str, JsonValue], encoded)
         source = _execution_outcome_source(encoded)
-        if outcome is not None and all(
+        if all(
             canonical_json_bytes(outcome.get(name)) == canonical_json_bytes(item)
             for name, item in source.items()
         ):
