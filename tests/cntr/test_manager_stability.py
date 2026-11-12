@@ -278,13 +278,13 @@ def test_containers_property_does_not_recurse(fresh_manager, monkeypatch):
 
     def counting_load_names():
         calls.append(1)
-        assert "discovered_containers" not in fresh_manager.__dict__, (
+        assert "containers" not in fresh_manager.loader.__dict__, (
             "Container discovery must not re-enter itself"
         )
         return real_load_names()
 
     monkeypatch.setattr(fresh_manager.installed_state, "load_names", counting_load_names)
-    fresh_manager.__dict__.pop("discovered_containers", None)
-    containers = fresh_manager.discovered_containers
+    fresh_manager.loader.__dict__.pop("containers", None)
+    containers = fresh_manager.loader.containers
     assert isinstance(containers, dict) and containers
     assert calls == [1]

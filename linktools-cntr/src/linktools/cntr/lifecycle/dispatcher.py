@@ -37,14 +37,14 @@ class LifecycleDispatcher:
             return callback()
         return callback(context)
 
-    def initialize(self) -> None:
+    def initialize(self, containers: "Iterable[BaseContainer]") -> None:
         """Initialize all containers after discovery has completed."""
         if self._initialization_error is not None:
             raise self._initialization_error
         if self._initialized:
             return
         try:
-            for container in self.manager.discovered_containers.values():
+            for container in containers:
                 container.on_init()
         except Exception as error:
             self._initialization_error = error

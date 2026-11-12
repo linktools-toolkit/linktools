@@ -88,7 +88,7 @@ class InstalledStateStore:
     def load_names(self) -> "list[str]":
         """Return the raw persisted installed-container names, unresolved.
 
-        Used directly by manager.discovered_containers -- resolving these
+        Used directly by container discovery -- resolving these
         names to container objects here would recurse into discovery.
         """
         return list(self.manager.settings.get(_INSTALLED_KEY, []) or [])

@@ -37,19 +37,6 @@ if TYPE_CHECKING:
     from .execution.planner import ExecutionPlanner
 
 
-def describe_origin(container: "BaseContainer") -> str:
-    """Safe, credential-free description of where a container came from --
-    ``builtin`` or a repository's ``repo_name`` (never its URL, which may
-    embed a Git credential), plus its filesystem root_path. Used to
-    identify the two sides of a duplicate-container-name error."""
-    context = container.repo_context
-    if context is None:
-        return "container:%s" % id(container.config)
-    origin = "builtin" if context.builtin else (context.repo_name or "repo")
-    root_path = context.root_path
-    return f"{origin} ({root_path})" if root_path else origin
-
-
 class ContainerManager:
 
     def __init__(self, environ: "Environ", name: str = "aio"):  # all_in_one
@@ -200,34 +187,10 @@ class ContainerManager:
         return self.environ.cache.namespace("cntr")
 
     @cached_property
-    def discovered_containers(self) -> "dict[str, BaseContainer]":
-        result = dict()
-        load_result = self.loader.load_all()
-        for container in load_result.containers:
-            existing = result.get(container.name)
-            if existing is not None:
-                raise ContainerError(
-                    "Duplicate container name %r: %s and %s"
-                    % (container.name, describe_origin(existing), describe_origin(container)))
-            result[container.name] = container
-
-        installed_names = self.installed_state.load_names()
-        self.container_load_errors = load_result.errors
-        errors_by_name = {e.expected_name: e for e in load_result.errors if e.expected_name}
-        for name in installed_names:
-            if name not in result:
-                error = errors_by_name.get(name)
-                if error is not None:
-                    self.logger.warning(
-                        f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
-                else:
-                    self.logger.warning(f"Not found installed container `{name}`, skip.")
-        return result
-
-    @cached_property
     def containers(self) -> "dict[str, BaseContainer]":
-        self.lifecycle.initialize()
-        return self.discovered_containers
+        containers = self.loader.containers
+        self.lifecycle.initialize(containers.values())
+        return containers
 
     @cached_property
     def hooks(self) -> "HookRegistry":
