@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
+from typing import cast
 from ..errors import AIError, ErrorCode
 from .contracts import (
     ExecutionRecord,
@@ -26,6 +27,7 @@ from .state import (
     RecordReplacement,
     StateStore,
     StateTransaction,
+    SqlStateRowReader,
     StoredRecord,
     record_key,
     require_no_run_history_lock,
@@ -113,6 +115,12 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         registrations = await self.read_run_registrations((agent_run_id,)) if include_run else None
 
         async def read(transaction: StateTransaction) -> tuple[AgentRunRecord | None, list[object]]:
+            from ._sql import SqlStateStore
+            from ._run_counters import run_counter_address
+            if (not include_run and limit is not None and isinstance(self._store, SqlStateStore)
+                    and isinstance(transaction, SqlStateRowReader)
+                    and run_counter_address(sequence_key, store_key=self._store.store_key) is not None):
+                return None, await self._read_sql_interaction_page(transaction, agent_run_id, start, limit)
             high_water = (await transaction.get_sequences((sequence_key,))).get(sequence_key, 0)
             end = high_water + 1 if limit is None else min(high_water + 1, start + limit)
             keys = tuple(self._interaction_key(agent_run_id, seq) for seq in range(start, end))
@@ -134,6 +142,53 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             return run, result
 
         return await self._store.read(read)
+
+    async def _read_sql_interaction_page(
+        self, transaction: SqlStateRowReader, agent_run_id: str, start: int, limit: int,
+    ) -> list[object]:
+        """Capture the run watermark and its bounded page in one snapshot query."""
+        from sqlalchemy import and_, literal, select
+        from ._sql import SqlStateStore, SqlStateStorageGroup, _key_matches, _record_from_row, _row_nonnegative_int
+        from ._run_counters import run_counter_address
+
+        assert isinstance(self._store, SqlStateStore)
+        address = run_counter_address(self._stream(agent_run_id, "interaction"), store_key=self._store.store_key)
+        if address is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        owner, column = address
+        metadata = cast(SqlStateStorageGroup, self._store.storage_group).metadata
+        admissions = metadata.tables["ai_step_run_admissions"]
+        records = metadata.tables["ai_state_records"]
+        page = select(records).where(
+            records.c.store_key == self._store.store_key,
+            _key_matches(records.c.parent_key, owner),
+            records.c.kind == "model_interaction",
+            records.c.sort_prefix >= _interaction_sort_key(start),
+            records.c.sort_prefix < _interaction_sort_key(start + limit),
+            records.c.sort_key >= _interaction_sort_key(start),
+            records.c.sort_key < _interaction_sort_key(start + limit),
+        ).order_by(records.c.sort_prefix).limit(limit).subquery("interaction_page")
+        anchor = select(literal(1).label("present")).subquery("interaction_anchor")
+        joined = anchor.outerjoin(admissions, and_(
+            admissions.c.store_key == self._store.store_key,
+            _key_matches(admissions.c.key, owner),
+        )).outerjoin(page, admissions.c.key.is_not(None))
+        statement = select(admissions.c[column].label("interaction_watermark"), *page.c).select_from(joined).order_by(page.c.sort_key)
+        rows = await transaction.read_sql_rows(self._store.context, statement)
+        raw_watermark = rows[0]["interaction_watermark"]
+        high_water = 0 if raw_watermark is None else _row_nonnegative_int(raw_watermark)
+        end = min(high_water + 1, start + limit)
+        expected = tuple(self._interaction_key(agent_run_id, seq) for seq in range(start, end))
+        result: list[object] = []
+        # Rows beyond the captured watermark are not part of the public page.
+        for index, key in enumerate(expected):
+            if index >= len(rows) or rows[index]["key"] != key:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            row = rows[index]
+            if row["store_key"] != self._store.store_key:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result.append(self._decode_interaction_record(_record_from_row(row)))
+        return result
 
     def _stored_interaction(self, value: ModelInteractionRecord) -> StoredRecord:
         value.validate_storage_domain(self.runtime_domain)

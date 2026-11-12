@@ -9,8 +9,8 @@ from ..storage import StoredPayload
 from ..spec import CapabilityRef
 
 from ..errors import AIError, ErrorCode
-from .contracts import PendingOperationSource
-from .codec import decode_domain, encode_envelope, decode_envelope, execution_payload_slots, pending_operation_reference
+from .contracts import PendingOperationSource, ToolOperationRecord
+from .codec import _CURRENT_CODEC, _validate_dataclass_wrapper, decode_domain, encode_envelope, decode_envelope, execution_payload_slots, pending_operation_reference
 from .state import StateStore, StoredRecord, record_key
 from ._tool_operation_content import ToolOperationContent
 
@@ -45,9 +45,10 @@ def decode_pending_operation(record: StoredRecord, *, namespace: str, tenant_id:
 
 def _arguments_only(record: StoredRecord) -> StoredRecord:
     envelope = decode_envelope(record.data)
-    payload = envelope.value["payload"]
+    payload = envelope.value.get("payload")
+    _, fields = _validate_dataclass_wrapper(payload, ToolOperationRecord, _CURRENT_CODEC, persisted=True)
     return replace(record, data=encode_envelope({**envelope.value, "payload": {**payload,
-        "fields": {**payload["fields"], "result_payload": None, "error_payload": None}}}))
+        "fields": {**fields, "result_payload": None, "error_payload": None}}}))
 
 
 async def read_pending_operations(store: StateStore, identities: Sequence[str], *,

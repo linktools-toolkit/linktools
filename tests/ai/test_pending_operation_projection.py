@@ -85,3 +85,58 @@ async def test_pending_owner_survives_split_partition_cold_snapshot(tmp_path: Pa
                                 storage=PersistenceStorage.from_root(tmp_path / "restored")) as state:
         assert await state.execution.executions.get_recovery("execution", tenant_id="tenant") == current
         await state.purge_unreferenced_objects((), exclusive=Guard())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ("missing_fields", "non_mapping_fields", "future_schema"))
+async def test_pending_source_wrapper_errors_keep_storage_codes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str,
+) -> None:
+    from dataclasses import replace
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence.codec import decode_envelope, encode_envelope
+    from linktools.ai.persistence.state import record_key
+
+    execution = _execution()
+    arguments = StoredPayload.inline_json({"argument": True})
+    operation = ToolOperationRecord("operation", "execution", "run", "call", "tool", arguments.digest,
+        "binding", True, ToolOperationStatus.COMPLETED, None, 1, None,
+        execution.created_at, execution.updated_at, arguments_payload=arguments,
+        result_payload=StoredPayload.inline_json({"unrelated": "must not be read"}))
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with Persistence.open("native-result", tenant_id="tenant", storage=storage) as state:
+        await state.checkpoint.tools.reserve(operation)
+        store = state.checkpoint.tools.state_store
+        key = record_key("native-result", "tenant", "checkpoint", "tool_operation", ("operation",))
+        async def corrupt(transaction):
+            record = await transaction.get_record(key)
+            envelope = decode_envelope(record.data)
+            payload = dict(envelope.value["payload"])
+            if corruption == "missing_fields":
+                payload.pop("fields")
+            elif corruption == "non_mapping_fields":
+                payload["fields"] = []
+            else:
+                payload["schema"] = 999
+            changed = replace(record, storage_revision=record.storage_revision + 1,
+                data=encode_envelope({**envelope.value, "payload": payload}))
+            return changed
+        changed = await store.read(corrupt)
+        # A normal writer rejects malformed wrappers before publication.
+        # Inject damaged persisted bytes directly to exercise the cold reader.
+        from sqlalchemy import update
+        from linktools.ai.persistence._sql import _record_values
+        table = store.storage_group.metadata.tables["ai_step_tool_operations"]
+        async with store.context.engine.begin() as connection:
+            await connection.execute(update(table).where(table.c.store_key == store.store_key, table.c.key == key)
+                                     .values(payload_json=_record_values(changed)["payload_json"]))
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("malformed pending wrapper must fail before content hydration")
+    monkeypatch.setattr(ContentArchive, "read_contents", forbidden)
+    async with Persistence.open("native-result", tenant_id="tenant", storage=storage, read_only=True) as state:
+        with pytest.raises(AIError) as raised:
+            await read_pending_operations(state.checkpoint.tools.state_store, ("operation",),
+                                          namespace="native-result", tenant_id="tenant")
+        expected = (ErrorCode.STORAGE_VERSION_UNSUPPORTED if corruption == "future_schema"
+                    else ErrorCode.STORAGE_INTEGRITY_ERROR)
+        assert raised.value.code is expected

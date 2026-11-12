@@ -1314,7 +1314,11 @@ class DefaultExecutionService(TaskExecutionService):
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
         )
-        pending_turn = await self._runtime_bridge.pending_turns.lookup(
+        pending_turns = self._runtime_bridge.pending_turns
+        pending_before_lookup = pending_turns.peek_request(
+            tenant_id=request.principal.tenant_id, scope=scope, idempotency_key=idempotency_key,
+        )
+        pending_turn = await pending_turns.lookup(
             tenant_id=request.principal.tenant_id, scope=scope,
             idempotency_key=idempotency_key, request_digest=request_digest,
         )
@@ -1325,7 +1329,8 @@ class DefaultExecutionService(TaskExecutionService):
                 budget_scope_id=budget_scope_id,
             )
             return ExecutionHandle(pending_turn.execution.execution_id)
-        if existing is None:
+        if existing is None and pending_before_lookup is not None:
+            # Settling a local pending turn can publish its durable identity.
             existing = await self._state.idempotency.get(
                 scope,
                 idempotency_key,
