@@ -18,13 +18,13 @@ from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
 from ._archive import archive_content_scope, archive_content_identity, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
-from ._message_root import NativeTextReference
+from ._message_root import NativeTextReference, NativeUserInputReference, NativeMessageRoot
 from ..steps import native_store_key
 from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
-from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
 from .codec import (_execution_binding_summary, binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
-    encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
+    encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
 BINDING_CODEC = "execution-binding"
@@ -172,17 +172,33 @@ def restore_native_text_payload(reference: NativeTextReference, raw: bytes) -> S
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+def restore_native_user_input(reference: NativeUserInputReference, raw: bytes) -> StoredUserInput:
+    """Authenticate the original plain-text accepted input from a fixed prompt."""
+    try:
+        messages = decode_model_messages(raw)
+        if (len(messages) != 1 or not isinstance(messages[0], ModelRequest)
+                or reference.part_index >= len(messages[0].parts)):
+            raise ValueError("native input source is not a request part")
+        part = messages[0].parts[reference.part_index]
+        if not isinstance(part, UserPromptPart) or not isinstance(part.content, str):
+            raise ValueError("native input source is not ordinary prompt text")
+        return validate_native_user_input(reference, StoredUserInput("text", StoredPayload.inline_text(part.content)))
+    except (TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 def expand_native_execution_content(
-    record: StoredRecord, payloads: Mapping[NativeTextReference, StoredPayload],
+    record: StoredRecord, payloads: Mapping[NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput],
 ) -> StoredRecord:
     if record.kind != "execution":
         return record
     def expand(payload: Mapping) -> JsonValue:
-        reference = native_text_reference(payload)
+        reference = native_user_input_reference(payload) or native_text_reference(payload)
         if reference is None:
             return payload
         restored = payloads.get(reference)
-        return _encode_persisted_domain(validate_native_text_payload(reference, restored))
+        return _encode_persisted_domain(validate_native_user_input(reference, restored) if isinstance(reference, NativeUserInputReference)
+                                        else validate_native_text_payload(reference, restored))
     return _map_payloads(record, expand)
 
 
@@ -373,8 +389,17 @@ class ExecutionContent:
                     or opened is None or result_source.root.group_id != opened[0]
                     or result_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        input_source = None
+        if previous is not None:
+            for path, payload in _payloads(previous):
+                if path == ("stored_user_input",):
+                    source = native_user_input_reference(payload)
+                    if source is not None:
+                        validate_native_user_input(source, value.stored_user_input)
+                        input_source = source
         selected = [(payload, self._encoding(payload)) for payload in self.payload_values(value)
-                    if result_source is None or payload is not output]
+                    if (result_source is None or payload is not output)
+                    and (input_source is None or payload is not value.stored_user_input)]
         selected = [(payload, encoded) for payload, encoded in selected if encoded is not None]
         binding = self._binding_encoding(value.binding)
         active = active_state_scope()
@@ -392,6 +417,9 @@ class ExecutionContent:
         prepared = PreparedArchive()
         encoded_payloads = {} if result_source is None else {id(output): {
             "$dataclass": "stored_payload", "schema": 1, "fields": {"content": result_source.to_json()}}}
+        if input_source is not None:
+            encoded_payloads[id(value.stored_user_input)] = {"$dataclass": "stored_user_input", "schema": 1,
+                                                           "fields": {"content": input_source.to_json()}}
         missing = []
         for payload, (identity, raw) in selected:
             reference = archive.scope_id, archive.content_scope, identity
@@ -410,6 +438,79 @@ class ExecutionContent:
             await archive.prepare_content(tuple(missing), prepared)
             await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
         return encode_execution_content(value, encoded_payloads, binding=encoded_binding)
+
+    @staticmethod
+    def has_native_input_candidate(prepared: PreparedArchive) -> bool:
+        """Inspect new prepared bodies only; small boundaries add no SQL."""
+        for sequence in prepared.native_messages.values():
+            for _identity, content in sequence.messages:
+                if content.payload is not None or content.raw_size <= PayloadPolicy().inline_limit_bytes:
+                    continue
+                raw = decode_payload_bytes(content.body, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
+                for message in decode_model_messages(raw):
+                    if isinstance(message, ModelRequest) and any(isinstance(part, UserPromptPart)
+                            and isinstance(part.content, str)
+                            and len(part.content.encode("utf-8")) > PayloadPolicy().inline_limit_bytes for part in message.parts):
+                        return True
+        return False
+
+    async def project_user_input(self, record: StoredRecord, roots: Sequence[NativeMessageRoot]) -> StoredRecord | None:
+        """Authenticate published source bytes before replacing an accepted input."""
+        wrapper = next(payload for path, payload in _payloads(record) if path == ("stored_user_input",))
+        if native_user_input_reference(wrapper) is not None:
+            return None
+        reference = payload_reference(wrapper)
+        # Additive wrapper metadata remains legal to read, but must not be lost
+        # when choosing a different storage representation.
+        if set(wrapper) != {"$dataclass", "schema", "fields"}:
+            return None
+        archive = await self._archive()
+        if reference is None:
+            original = decode_domain(wrapper, StoredUserInput)
+            if wrapper != _encode_persisted_domain(original):
+                return None
+        else:
+            if reference[:2] != (archive.scope_id, archive.content_scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raw, = await archive.read_contents((reference[2],), codec=PAYLOAD_CODEC)
+            original = _decode_payload(raw, reference[2])
+            from .codec import encode_domain
+            if raw != canonical_json_bytes(encode_domain(original)):
+                return None
+        if (not isinstance(original, StoredUserInput) or original.codec != "text" or original.view is not None
+                or original.payload.kind != "inline" or original.payload.encoding != "utf-8"
+                or original.payload.size <= PayloadPolicy().inline_limit_bytes):
+            return None
+        if any(root.group_id != archive.scope_id or root.store_key != native_store_key(self._namespace, self._tenant_id)
+               for root in roots):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        native = SqlStepStore.for_state_store(self._store, namespace=self._namespace, tenant_id=self._tenant_id)
+        active = active_state_scope()
+        transaction = None if active is None or not active.writable else active.transactions.get(self._store)
+        if native is None or transaction is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        native.bind_message_archive(archive)
+        batches = await (await native.capture_message_roots(roots, transaction=transaction))()
+        for root, messages in zip(roots, batches, strict=True):
+            for message_index, raw in enumerate(messages):
+                decoded = decode_model_messages(raw)
+                if len(decoded) != 1 or not isinstance(decoded[0], ModelRequest):
+                    continue
+                for part_index, part in enumerate(decoded[0].parts):
+                    if not isinstance(part, UserPromptPart) or part.content != original.payload.decode():
+                        continue
+                    source = NativeUserInputReference(root.slice(message_index, message_index + 1), part_index,
+                                                      original.payload.digest, original.payload.size)
+                    if restore_native_user_input(source, raw) != original:
+                        continue
+                    replacement = {"$dataclass": "stored_user_input", "schema": 1,
+                                   "fields": {"content": source.to_json()}}
+                    envelope = decode_envelope(record.data)
+                    payload = envelope.value["payload"]
+                    return replace(record, storage_revision=record.storage_revision + 1, data=encode_envelope({
+                        **envelope.value, "payload": {**payload, "fields": {**payload["fields"], "stored_user_input": replacement}}}))
+        return None
 
     async def verify_result_source(self, source: NativeTextReference, output: StoredPayload | None) -> None:
         """Authenticate stored source bytes inside the owner's write transaction."""
@@ -430,14 +531,14 @@ class ExecutionContent:
 
     async def read_payloads(self, records: Sequence[StoredRecord], *,
                             reserve: Callable[[int], None] | None = None, result_only: bool = False,
-                            reserve_native: Callable[[int], None] | None = None) -> dict[tuple[str, str, str] | NativeTextReference, StoredPayload | StoredUserInput]:
+                            reserve_native: Callable[[int], None] | None = None) -> dict[tuple[str, str, str] | NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput]:
         native_references = []
         for record in records:
             for path, payload in _payloads(record):
-                reference = native_text_reference(payload)
+                if result_only and path != ("result", "fields", "output"):
+                    continue
+                reference = native_user_input_reference(payload) or native_text_reference(payload)
                 if reference is not None:
-                    if path != ("result", "fields", "output"):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     native_references.append(reference)
         native_values = {}
         if native_references:
@@ -457,7 +558,8 @@ class ExecutionContent:
             for source, raw_messages in zip(references_unique, batches, strict=True):
                 if len(raw_messages) != 1:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                payload = restore_native_text_payload(source, raw_messages[0])
+                payload = (restore_native_user_input(source, raw_messages[0]) if isinstance(source, NativeUserInputReference)
+                           else restore_native_text_payload(source, raw_messages[0]))
                 native_values[source] = payload
         references = [reference for record in records for path, payload in _payloads(record)
                       if (not result_only or path == ("result", "fields", "output"))
@@ -486,9 +588,9 @@ class ExecutionContent:
         values = {("stored_user_input",): value.stored_user_input,
                   ("result", "fields", "output"): None if value.result is None else value.result.output}
         decoded = {reference: values[path] for path, payload in _payloads(candidate)
-                   if path in values and (reference := native_text_reference(payload) or payload_reference(payload)) is not None}
+                   if path in values and (reference := native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)) is not None}
         if any(reference not in decoded for path, payload in _payloads(current)
-               if path in values and (reference := native_text_reference(payload) or payload_reference(payload)) is not None):
+               if path in values and (reference := native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)) is not None):
             return False
         previous = decode_execution_content(current.data, decoded, timeline=True)
         return previous.completed_at is None or previous.terminal_matches(value)
@@ -514,10 +616,10 @@ class ExecutionContent:
         payloads = await self.read_payloads(records, reserve=reserve, reserve_native=reserve_native)
         records = await self._expand_bindings(records, reserve=reserve)
         def expand(payload: Mapping) -> JsonValue:
-            reference = native_text_reference(payload) or payload_reference(payload)
+            reference = native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)
             return payload if reference is None else _encode_persisted_domain(payloads[reference])
         return tuple(_map_payloads(record, expand) for record in records)
 
 
-__all__ = ["restore_native_text_payload", "expand_native_execution_content", "ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
+__all__ = ["restore_native_user_input", "restore_native_text_payload", "expand_native_execution_content", "ExecutionContent", "expand_snapshot_execution_content", "expand_retained_execution_content", "snapshot_execution_content_size",
            ]

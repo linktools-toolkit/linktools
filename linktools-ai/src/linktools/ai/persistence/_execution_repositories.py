@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import TypeVar
-from ._message_root import NativeTextReference
+from ._message_root import NativeTextReference, NativeMessageRoot
 from linktools.core import environ
 from ..core import (
     ExecutionEventType,
@@ -23,7 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import execution_payload_slots, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -213,6 +213,20 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             domain=PersistenceDomain.EXECUTION,
         )
 
+    async def share_published_user_input(
+        self, *, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
+    ) -> None:
+        if not roots or not self._execution_content.has_native_input_candidate(archive):
+            return
+        async def update(transaction: StateTransaction) -> None:
+            stored = await transaction.get_record(self.execution_record_key(execution_id))
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            candidate = await self._execution_content.project_user_input(stored, roots)
+            if candidate is not None:
+                await _replace_checked(transaction, candidate, stored.storage_revision)
+        await self._store.mutate(update)
+
     async def read_content(
         self, capture: StateGroupCallback[_ContentValueT], *, stores: Sequence[StateStore] = (),
     ) -> _ContentValueT:
@@ -256,7 +270,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if record is None:
             return None
         payload = decode_envelope(record.data).value.get("payload")
-        if any(native_text_reference(item) is not None for _, item in execution_payload_slots(payload)):
+        if any(native_text_reference(item) is not None or native_user_input_reference(item) is not None
+               for _, item in execution_payload_slots(payload)):
             # The observation only selects this path. Never hydrate its old owner
             # in a later snapshot: reread owner and Native source together, so GC
             # or a concurrent owner change cannot leave a dangling source read.
@@ -414,6 +429,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise ValueError("execution_ids must contain non-empty strings")
             keys = {value: self._key("execution", (value,)) for value in ordered}
             records = await self._store.read_records(tuple(keys.values())) if keys else {}
+            if active_state_scope() is None and any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                for record in records.values()
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            ):
+                # Cached observations only select the Native path. Rebuild the
+                # whole batch in one owner/source snapshot before hydration.
+                return await self.read_content(read)
             payloads = await self._execution_content.read_payloads(tuple(records.values()))
             values: dict[str, ExecutionTimelineRecord] = {}
             for execution_id, key in keys.items():
@@ -425,7 +448,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[execution_id] = value
             return values
-        return await self.read_content(read)
+        return await read(None)
 
     async def get_recovery(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         execution = await self.get(execution_id, tenant_id=tenant_id)
@@ -569,6 +592,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
             records = (await self._refresh_records(tuple(keys.values())) if refresh else
                        await self._store.read_records(tuple(keys.values())))
+            if active_state_scope() is None and any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                for record in records.values()
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            ):
+                return await self.read_content(read)
             decoded = {record.key: value for record, value in zip(records.values(),
                 await self._decode_many(tuple(records.values())), strict=True)}
             values: dict[str, ExecutionRecord] = {}
@@ -581,7 +610,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[execution_id] = value
             return values
-        return await self.read_content(read)
+        return await read(None)
 
     def execution_record_key(self, execution_id: str) -> bytes:
         """Identify the canonical record for a transaction-local read receipt."""

@@ -3376,13 +3376,13 @@ class StateCommands:
                         )
                         if self._execution_run_store is not None:
                             for projection in terminal_projections:
-                                await self._execution_run_store.share_published_tool_results(
+                                await self._execution_run_store.share_published_content(
                                     projection.run, execution_id=commit.execution.execution_id,
                                     checkpoints=projection.checkpoints, observation=projection.observation,
                                     archive=shared_archive,
                                 )
                             if not terminal_projections and execution_run is not None:
-                                await self._execution_run_store.share_published_tool_results(
+                                await self._execution_run_store.share_published_content(
                                     execution_run, execution_id=commit.execution.execution_id,
                                     checkpoints=tuple(prepared_execution), observation=None, archive=shared_archive,
                                 )

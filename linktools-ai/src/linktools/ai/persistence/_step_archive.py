@@ -1212,13 +1212,13 @@ class StateStepArchive(AgentRunStore):
         if repository.state_store.storage_group is self._store.storage_group:
             self._tool_repository = repository
 
-    async def share_published_tool_results(
+    async def share_published_content(
         self, run: AgentRunRecord, *, execution_id: str | None,
         checkpoints: Sequence[PreparedAgentRunCheckpoint],
         observation: PreparedTranscriptObservation | None, archive: PreparedArchive,
     ) -> None:
         repository = self._tool_repository
-        if repository is None or execution_id is None:
+        if execution_id is None:
             return
         chunks = tuple(chunk for checkpoint in checkpoints for chunk in checkpoint.chunks)
         if observation is not None:
@@ -1226,8 +1226,11 @@ class StateStepArchive(AgentRunStore):
         roots = tuple(dict.fromkeys(chunk.content for chunk in chunks if isinstance(chunk.content, NativeMessageRoot)))
         combined = PreparedArchive.combine((archive, *(checkpoint.archive for checkpoint in checkpoints),
                                             *((observation.archive,) if observation is not None else ())))
-        await repository.share_published_results(agent_run_id=run.agent_run_id, execution_id=execution_id,
-                                                roots=roots, archive=combined)
+        if repository is not None:
+            await repository.share_published_results(agent_run_id=run.agent_run_id, execution_id=execution_id,
+                                                    roots=roots, archive=combined)
+        if type(self._execution_repository) is ExecutionRepositoryImpl:
+            await self._execution_repository.share_published_user_input(execution_id=execution_id, roots=roots, archive=combined)
 
     def bind_native_run_store(self, native: SqlStepStore) -> None:
         if (type(native) is SqlStepStore and isinstance(self._store, SqlStateStore)
@@ -2606,7 +2609,7 @@ class StateStepArchive(AgentRunStore):
             )
             if archive is not None:
                 await self._history.publish_native_archive(transaction, archive, owner_written=True)
-            await self.share_published_tool_results(run, execution_id=execution_id, checkpoints=prepared.checkpoints,
+            await self.share_published_content(run, execution_id=execution_id, checkpoints=prepared.checkpoints,
                                                    observation=None, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
@@ -2666,7 +2669,7 @@ class StateStepArchive(AgentRunStore):
             )
             if archive is not None:
                 await self._history.publish_native_archive(transaction, archive, owner_written=True)
-            await self.share_published_tool_results(run, execution_id=execution_id, checkpoints=values,
+            await self.share_published_content(run, execution_id=execution_id, checkpoints=values,
                                                    observation=observation, archive=archive or PreparedArchive())
         await self._mutate(commit)
 
@@ -2963,7 +2966,7 @@ class StateStepArchive(AgentRunStore):
         )
         if archive is not None:
             await self._history.publish_native_archive(transaction, archive, owner_written=True)
-        await self.share_published_tool_results(run, execution_id=execution_id, checkpoints=checkpoints,
+        await self.share_published_content(run, execution_id=execution_id, checkpoints=checkpoints,
                                                observation=observation, archive=archive or PreparedArchive())
 
     async def _ensure_run_with_head_in_transaction(

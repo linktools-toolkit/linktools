@@ -215,4 +215,30 @@ class NativeToolResultReference:
                    value["tool_name"], value["tool_call_id"], value["template"], value["digest"], value["size"])
 
 
-__all__ = ["NativeToolResultReference", "NativeTextReference", "NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]
+@dataclass(frozen=True, slots=True)
+class NativeUserInputReference:
+    """One immutable prompt part reconstructing an accepted plain-text input."""
+    root: NativeMessageRoot
+    part_index: int
+    digest: str
+    size: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
+            raise ValueError("native input reference requires one message")
+        _count(self.part_index)
+        _digest(self.digest)
+        _count(self.size)
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {"$native_user_input": self.root.to_json(), "part_index": self.part_index,
+                "digest": self.digest, "size": self.size}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeUserInputReference":
+        if not isinstance(value, Mapping) or set(value) != {"$native_user_input", "part_index", "digest", "size"}:
+            raise ValueError("native user input wire is invalid")
+        return cls(NativeMessageRoot.from_json(value["$native_user_input"]), value["part_index"], value["digest"], value["size"])
+
+
+__all__ = ["NativeUserInputReference", "NativeToolResultReference", "NativeTextReference", "NativeMessageRoot", "NativeMessageSequence", "NativeMessageSlice"]
