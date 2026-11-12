@@ -756,7 +756,9 @@ class ExecutionContent:
                         return True
         return False
 
-    async def project_user_input(self, record: StoredRecord, roots: Sequence[NativeMessageRoot]) -> StoredRecord | None:
+    async def project_user_input(
+        self, record: StoredRecord, roots: Sequence[NativeMessageRoot], *, source_archive: ContentArchive,
+    ) -> StoredRecord | None:
         """Authenticate published source bytes before replacing an accepted input."""
         wrapper = next(payload for path, payload in _payloads(record) if path == ("stored_user_input",))
         if native_user_input_reference(wrapper) is not None:
@@ -790,7 +792,11 @@ class ExecutionContent:
         transaction = None if active is None or not active.writable else active.transactions.get(self._store)
         if native is None or transaction is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        native.bind_message_archive(archive)
+        if (source_archive.store.storage_group is not self._store.storage_group
+                or source_archive.scope_id != archive.scope_id
+                or source_archive.content_scope != archive.content_scope):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        native.bind_message_archive(source_archive)
         batches = await (await native.capture_message_roots(roots, transaction=transaction))()
         for root, messages in zip(roots, batches, strict=True):
             for message_index, raw in enumerate(messages):

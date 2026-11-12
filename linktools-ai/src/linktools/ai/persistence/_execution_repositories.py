@@ -215,6 +215,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
     async def share_published_user_input(
         self, *, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
+        source_archive: ContentArchive,
     ) -> None:
         if not roots or not self._execution_content.has_native_input_candidate(archive):
             return
@@ -222,7 +223,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             stored = await transaction.get_record(self.execution_record_key(execution_id))
             if stored is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            candidate = await self._execution_content.project_user_input(stored, roots)
+            candidate = await self._execution_content.project_user_input(stored, roots, source_archive=source_archive)
             if candidate is not None:
                 await _replace_checked(transaction, candidate, stored.storage_revision)
         await self._store.mutate(update)

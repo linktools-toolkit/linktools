@@ -32,19 +32,6 @@ from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from .test_step_content_cleanup import _Offline, _snapshot
 
-@pytest.fixture(autouse=True)
-def _exercise_explicit_offline_collection(monkeypatch: pytest.MonkeyPatch) -> None:
-    from linktools.ai.persistence import _native_content_index
-
-    async def defer(_context, **kwargs) -> None:
-        pass
-
-    # These tests deliberately accumulate orphans for the explicit offline
-    # collector. Automatic collection has its own owner/concurrency coverage.
-    monkeypatch.setattr(_native_content_index, "maintain_native_content", defer)
-
-
-
 def _row(node: ImmutableSequenceNode, scope: bytes = native_store_key("a", "tenant")) -> dict[str, object]:
     return dict(store_key=scope, sha256=node.identity, message_sha256=node.content_id,
                 tree_count=node.tree_count, left_sha256=node.left, right_sha256=node.right,
@@ -149,6 +136,10 @@ async def test_cross_owner_message_roots_outlive_native_snapshot_pruning(tmp_pat
             assert protected.retained == ((PersistenceDomain.TRACE, reference),)
             assert await objects.stat(reference.key) is not None
         await state.mutate(lambda tx: tx.delete_record(key))
+        # Owner retirement never reclaims shared bodies online. Only the
+        # complete closure under offline exclusion may remove this orphan.
+        async with engine.connect() as connection:
+            assert len((await connection.execute(select(messages.c.sha256))).scalars().all()) == 2
         result = await native.purge_unreferenced_content(exclusive=_Offline())
         assert result.deleted_messages == 1
         assert result.retained_messages == 1

@@ -1230,7 +1230,9 @@ class StateStepArchive(AgentRunStore):
             await repository.share_published_results(agent_run_id=run.agent_run_id, execution_id=execution_id,
                                                     roots=roots, archive=combined)
         if type(self._execution_repository) is ExecutionRepositoryImpl:
-            await self._execution_repository.share_published_user_input(execution_id=execution_id, roots=roots, archive=combined)
+            await self._execution_repository.share_published_user_input(
+                execution_id=execution_id, roots=roots, archive=combined,
+                source_archive=await self._history.content_archive())
 
     def bind_native_run_store(self, native: SqlStepStore) -> None:
         if (type(native) is SqlStepStore and isinstance(self._store, SqlStateStore)

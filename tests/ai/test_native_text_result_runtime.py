@@ -22,6 +22,7 @@ from linktools.ai.persistence.contracts import ExecutionEventAppend, ExecutionRe
 from linktools.ai.persistence.state import StateTransaction, StoredRecord
 from linktools.ai.persistence._message_root import NativeTextReference
 from linktools.ai.storage import StoredPayload
+from linktools.ai.steps import native_store_key
 
 from .test_step_projection import _execution
 
@@ -125,7 +126,8 @@ async def test_native_message_and_result_owner_rollback_together(tmp_path: Path,
             result = await original(transaction, candidate, pending_events=pending_events, result_source=result_source)
             assert result.execution.status is ExecutionStatus.SUCCEEDED
             async def count_messages(session: AsyncSession) -> int:
-                return (await session.execute(sql_text("SELECT count(*) FROM ai_step_messages"))).scalar_one()
+                return (await session.execute(sql_text("SELECT count(*) FROM ai_step_messages WHERE store_key=:store"),
+                    {"store": native_store_key("native-result", "tenant")})).scalar_one()
             assert await transaction.run_sql(repository.state_store.storage_group.context, count_messages) == 1
             failed += 1
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -136,7 +138,8 @@ async def test_native_message_and_result_owner_rollback_together(tmp_path: Path,
         assert failed == 1
         assert (await repository.get("execution", tenant_id="tenant")).status is ExecutionStatus.STARTED
         async with repository.state_store.storage_group.context.engine.connect() as connection:
-            assert (await connection.execute(sql_text("SELECT count(*) FROM ai_step_messages"))).scalar_one() == 0
+            assert (await connection.execute(sql_text("SELECT count(*) FROM ai_step_messages WHERE store_key=:store"),
+                {"store": native_store_key("native-result", "tenant")})).scalar_one() == 0
 
 
 def test_native_payload_mapping_rejects_digest_equal_different_encoding() -> None:
