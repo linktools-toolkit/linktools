@@ -1932,6 +1932,7 @@ _PAYLOAD_PATHS = (
     ("recovery", "fields", "pending_tools"),
     ("recovery", "fields", "terminal_handoff"),
     ("recovery", "fields", "terminal_handoff", "fields", "output"),
+    ("recovery", "fields", "terminal_handoff", "fields", "terminal_details"),
 )
 
 
@@ -1957,6 +1958,17 @@ def execution_payload_slots(value: object) -> tuple[tuple[tuple[str, ...], Mappi
             if native_user_input_reference(item) is not None and path != ("stored_user_input",):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((path, item))
+            if path == ("recovery", "fields", "pending_tools") and "content" in item["fields"]:
+                arguments = item["fields"].get("arguments")
+                if not isinstance(arguments, Mapping) or set(arguments) != {str(index) for index in range(len(arguments))}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for index in range(len(arguments)):
+                    argument = arguments[str(index)]
+                    if not isinstance(argument, Mapping) or argument.get("$dataclass") != "stored_payload":
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if native_text_reference(argument) is not None or native_user_input_reference(argument) is not None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    result.append(((*path, "fields", "arguments", str(index)), argument))
     return tuple(result)
 
 
@@ -2026,7 +2038,10 @@ def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
     if native_user_input_reference(value) is not None or native_text_reference(value) is not None:
         return None
     reference = execution_payload_reference(fields["content"])
-    if reference is None or set(fields) != ({"content", "output"} if target in {ResultRecord, RecoveryTerminalHandoff} else {"content"}):
+    expected = ({"content", "output", "terminal_details"} if target is RecoveryTerminalHandoff else
+                {"content", "output"} if target is ResultRecord else
+                {"content", "arguments"} if target is PendingToolContinuation else {"content"})
+    if reference is None or set(fields) != expected:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return reference
 
@@ -2119,6 +2134,27 @@ def execution_payload_reference(value: object) -> tuple[str, str, str] | None:
     return _execution_content_reference(value, "$execution_payload")
 
 
+def _restore_pending_arguments(template: Mapping, arguments: Mapping) -> dict:
+    if not isinstance(arguments, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    fields_value = dict(template["fields"])
+    index = 0
+    for name in ("approvals", "calls"):
+        sequence = fields_value.get(name)
+        if not isinstance(sequence, Mapping) or set(sequence) != {"$tuple"} or not isinstance(sequence["$tuple"], list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        restored = []
+        for call in sequence["$tuple"]:
+            if not isinstance(call, Mapping) or call.get("$dataclass") != "pending_deferred_call" or str(index) not in arguments:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            restored.append({**call, "fields": {**call["fields"], "arguments_payload": arguments[str(index)]}})
+            index += 1
+        fields_value[name] = {"$tuple": restored}
+    if set(arguments) != {str(position) for position in range(index)}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return {**template, "fields": fields_value}
+
+
 def _execution_payload_codec(codec: _VersionCodec, payloads: Mapping) -> _VersionCodec:
     def decoder(original: DataclassDecoder) -> DataclassDecoder:
         def decode_payload(raw: Mapping[str, object], current: _VersionCodec, persisted: bool) -> object:
@@ -2141,11 +2177,17 @@ def _execution_payload_codec(codec: _VersionCodec, payloads: Mapping) -> _Versio
                 reference = execution_payload_reference(content)
             if reference is None:
                 return original(raw, current, persisted)
-            if set(raw) not in ({"content"}, {"content", "output"}) or reference not in payloads:
+            if set(raw) not in ({"content"}, {"content", "output"}, {"content", "arguments"}, {"content", "output", "terminal_details"}) or reference not in payloads:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             selected = payloads[reference]
+            if isinstance(selected, Mapping) and selected.get("$dataclass") == "pending_tool_continuation":
+                if set(raw) != {"content", "arguments"}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                restored = _restore_pending_arguments(selected, raw["arguments"])
+                return _decode_domain(restored, PendingToolContinuation, current, persisted=True)
             if isinstance(selected, Mapping) and selected.get("$dataclass") in {"result_record", "recovery_terminal_handoff"}:
-                if set(raw) != {"content", "output"}:
+                expected = {"content", "output", "terminal_details"} if selected["$dataclass"] == "recovery_terminal_handoff" else {"content", "output"}
+                if set(raw) != expected:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 output = _decode_domain(raw["output"], StoredPayload | None, current, persisted=True)
                 restored = dict(selected)
@@ -2155,7 +2197,11 @@ def _execution_payload_codec(codec: _VersionCodec, payloads: Mapping) -> _Versio
                     target = ResultRecord
                 else:
                     outcome = dict(fields_value["outcome"])
-                    outcome["fields"] = {**outcome["fields"], "output": _encode_domain(output, current, persisted=True)}
+                    details_payload = _decode_domain(raw["terminal_details"], StoredPayload, current, persisted=True)
+                    details = details_payload.decode()
+                    if details_payload.kind != "inline" or details_payload.encoding != "json" or not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    outcome["fields"] = {**outcome["fields"], **details, "output": _encode_domain(output, current, persisted=True)}
                     fields_value["outcome"] = outcome
                     target = RecoveryTerminalHandoff
                 restored["fields"] = fields_value

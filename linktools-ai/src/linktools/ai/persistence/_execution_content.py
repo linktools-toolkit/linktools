@@ -78,7 +78,7 @@ def _decode_payload(raw: bytes, identity: str) -> StoredPayload | StoredUserInpu
                   "recovery_terminal_handoff": RecoveryTerminalHandoff, "result_record": ResultRecord}.get(value.get("$dataclass"))
         if target is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value if target in {RecoveryTerminalHandoff, ResultRecord} else decode_domain(value, target)
+        return value if target in {PendingToolContinuation, RecoveryTerminalHandoff, ResultRecord} else decode_domain(value, target)
     except (UnicodeError, ValueError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -362,6 +362,7 @@ class ExecutionContent:
         recovery = value.recovery
         handoff = None if recovery is None else recovery.terminal_handoff
         if recovery is not None and recovery.pending_tools is not None:
+            values.extend(call.arguments_payload for call in (*recovery.pending_tools.approvals, *recovery.pending_tools.calls))
             values.append(recovery.pending_tools)
         if handoff is not None and handoff.outcome.output is not None:
             values.append(handoff.outcome.output)
@@ -377,13 +378,21 @@ class ExecutionContent:
         if cached is not None and cached[0]() is payload:
             return cached[1:]
         from .codec import encode_domain
-        wire = (_encode_persisted_domain(payload) if isinstance(payload, (ResultRecord, RecoveryTerminalHandoff))
+        wire = (_encode_persisted_domain(payload) if isinstance(payload, (PendingToolContinuation, ResultRecord, RecoveryTerminalHandoff))
                 else encode_domain(payload))
         if isinstance(payload, ResultRecord):
             wire = {**wire, "fields": {**wire["fields"], "output": None}}
+        elif isinstance(payload, PendingToolContinuation):
+            fields_value = dict(wire["fields"])
+            for name in ("approvals", "calls"):
+                fields_value[name] = {"$tuple": [{**call, "fields": {**call["fields"], "arguments_payload": None}}
+                    for call in fields_value[name]["$tuple"]]}
+            wire = {**wire, "fields": fields_value}
         elif isinstance(payload, RecoveryTerminalHandoff):
             outcome = wire["fields"]["outcome"]
-            outcome = {**outcome, "fields": {**outcome["fields"], "output": None}}
+            outcome_fields = {name: item for name, item in outcome["fields"].items()
+                              if name not in {"safe_error_details", "error_diagnostics"}}
+            outcome = {**outcome, "fields": {**outcome_fields, "output": None}}
             wire = {**wire, "fields": {**wire["fields"], "outcome": outcome}}
         raw = canonical_json_bytes(wire)
         identity = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
@@ -441,7 +450,13 @@ class ExecutionContent:
             "safe_error_details": _encode_persisted_domain(value.safe_error_details),
             "error_diagnostics": _encode_persisted_domain(value.error_diagnostics),
         })
-        selected = [(payload, self._encoding(payload)) for payload in (*self.payload_values(value), terminal_details)
+        handoff = None if value.recovery is None else value.recovery.terminal_handoff
+        handoff_details = (None if handoff is None else StoredPayload.inline_json({
+            "safe_error_details": _encode_persisted_domain(handoff.outcome.safe_error_details),
+            "error_diagnostics": _encode_persisted_domain(handoff.outcome.error_diagnostics),
+        }))
+        details_values = (terminal_details,) if handoff_details is None else (terminal_details, handoff_details)
+        selected = [(payload, self._encoding(payload)) for payload in (*details_values, *self.payload_values(value))
                     if (result_source is None or payload is not output)
                     and (input_source is None or payload is not value.stored_user_input)]
         selected = [(payload, encoded) for payload, encoded in selected if encoded is not None]
@@ -476,6 +491,12 @@ class ExecutionContent:
             encoded_payloads[id(payload)] = {"$dataclass": wire, "schema": 1,
                 "fields": {"content": {"$execution_payload": identity,
                     "archive_scope": archive.scope_id, "content_scope": archive.content_scope}}}
+            if isinstance(payload, PendingToolContinuation):
+                encoded_payloads[id(payload)]["fields"]["arguments"] = {
+                    str(index): encoded_payloads[id(call.arguments_payload)]
+                    for index, call in enumerate((*payload.approvals, *payload.calls))}
+            if isinstance(payload, RecoveryTerminalHandoff):
+                encoded_payloads[id(payload)]["fields"]["terminal_details"] = encoded_payloads[id(handoff_details)]
             if isinstance(payload, (ResultRecord, RecoveryTerminalHandoff)):
                 body = payload.output if isinstance(payload, ResultRecord) else payload.outcome.output
                 encoded_payloads[id(payload)]["fields"]["output"] = None if body is None else encoded_payloads[id(body)]
@@ -678,7 +699,8 @@ class ExecutionContent:
             paths.add(("result",))
         if recovery:
             paths.update({("recovery", "fields", "pending_tools"),
-                          ("recovery", "fields", "terminal_handoff")})
+                          ("recovery", "fields", "terminal_handoff"),
+                          ("recovery", "fields", "terminal_handoff", "fields", "terminal_details")})
         if terminal_details:
             paths.add(("terminal_details",))
         references = {reference for record in records for path, payload in _payloads(record)
@@ -697,6 +719,8 @@ class ExecutionContent:
             payload = envelope.value["payload"]
             fields_value = dict(payload["fields"])
             for path, wrapper in _payloads(record):
+                if path == ("recovery", "fields", "terminal_handoff", "fields", "terminal_details"):
+                    continue
                 if path not in paths or (reference := payload_reference(wrapper)) is None:
                     continue
                 value = decoded[reference]
@@ -712,13 +736,23 @@ class ExecutionContent:
                     fields_value.update(details)
                     continue
                 expanded = dict(value) if isinstance(value, Mapping) else _encode_persisted_domain(value)
+                if wrapper["$dataclass"] == "pending_tool_continuation":
+                    from .codec import _restore_pending_arguments
+                    expanded = _restore_pending_arguments(expanded, wrapper["fields"]["arguments"])
                 if wrapper["$dataclass"] in {"result_record", "recovery_terminal_handoff"}:
                     expanded_fields = dict(expanded["fields"])
                     if wrapper["$dataclass"] == "result_record":
                         expanded_fields["output"] = wrapper["fields"]["output"]
                     else:
                         outcome = expanded_fields["outcome"]
-                        expanded_fields["outcome"] = {**outcome, "fields": {**outcome["fields"],
+                        details_reference = payload_reference(wrapper["fields"]["terminal_details"])
+                        details_payload = decoded[details_reference]
+                        if not isinstance(details_payload, StoredPayload) or details_payload.kind != "inline" or details_payload.encoding != "json":
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        details = details_payload.decode()
+                        if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        expanded_fields["outcome"] = {**outcome, "fields": {**outcome["fields"], **details,
                             "output": wrapper["fields"]["output"]}}
                     expanded["fields"] = expanded_fields
                 current = fields_value
