@@ -16,7 +16,7 @@ from linktools.ai.persistence import Persistence, PersistenceDomain, Persistence
 from linktools.ai.persistence._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from linktools.ai.persistence.codec import decode_record, encode_record
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import RecordQuery, StateTransaction, StoredAlias, alias_key, record_key
+from linktools.ai.persistence.state import RecordQuery, StateTransaction, StoredAlias, active_state_scope, alias_key, record_key
 from linktools.ai.persistence.repositories import ToolRepositoryImpl
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore
 
@@ -87,7 +87,10 @@ async def test_exact_tool_lookup_bounds_materialized_payloads(tmp_path: Path, mo
             return original_row(row)
 
         async def read(callback):
-            counters["read_transactions"] += 1
+            # A nested repository read reuses the active snapshot rather than
+            # opening another transaction. Count actual outer read boundaries.
+            if active_state_scope() is None:
+                counters["read_transactions"] += 1
             return await original_read(callback)
 
         def capture(_connection, _cursor, statement, _parameters, _context, _many):

@@ -12,7 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive_closure import iter_archive_content_refs
 from linktools.ai.persistence._snapshot import SnapshotLimits
-from linktools.ai.persistence.state import StoredRecord
+from linktools.ai.persistence.state import StateTransaction, StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from .test_tool_execution_boundary import _request
@@ -52,19 +52,33 @@ async def test_tool_payload_publication_rolls_back_with_owner(tmp_path: Path, mo
         tools = state.checkpoint.tools
         _, archive = await tools.state_store.storage_group.open_archive(create=True)
         operation = await tools.admit(_request())
-        async def transaction_type(tx):
+        async def transaction_type(tx: StateTransaction) -> type[StateTransaction]:
             return type(tx)
-        transaction = await tools.state_store.read(transaction_type)
+        # Read transactions are read-only proxies, not the writable class.
+        transaction = await tools.state_store.mutate(transaction_type)
         original = transaction.replace_record
-        async def fail_owner(tx, record, **kwargs):
+        failed_writes = 0
+
+        async def fail_owner(
+            tx: StateTransaction, record: StoredRecord, *, expected_storage_revision: int,
+        ) -> bool:
+            nonlocal failed_writes
+            replaced = await original(tx, record, expected_storage_revision=expected_storage_revision)
             if record.kind == "tool_operation":
+                assert replaced
+                assert await tx.get_record(record.key) == record
+                # Prove content and its new owner both existed before aborting.
+                contents = await archive.read(lambda current: current.scan_records())
+                assert len(contents) == 1 and contents[0].payload_bytes is not None
+                failed_writes += 1
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await original(tx, record, **kwargs)
+            return replaced
         with monkeypatch.context() as patch:
             patch.setattr(transaction, "replace_record", fail_owner)
             with pytest.raises(AIError):
                 await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
                     fence=operation.fence, result_payload=StoredPayload.inline_bytes(b"large" * 20000))
+        assert failed_writes == 1
         assert await archive.read(lambda tx: tx.scan_records()) == ()
         assert await tools.get_operation(operation.tool_operation_id, tenant_id="tenant") == operation
 
