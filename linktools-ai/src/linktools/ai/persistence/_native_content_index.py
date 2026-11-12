@@ -141,12 +141,32 @@ async def index_nodes(
 ) -> dict[str, int]:
     if not rows:
         return {}
-    sequences = await resolve_targets(session, "sequence", store, tuple(
+    from sqlalchemy import literal, select, union_all
+
+    sequence_table, message_table = _tables()
+    sequence_ids = tuple(sorted({
         identity for row in rows for identity in (row["sha256"], row["left_sha256"], row["right_sha256"], row["next_sha256"])
         if identity is not None
-    ), required=not partial_restore)
-    await resolve_targets(session, "message", store, tuple(row["message_sha256"] for row in rows),
-                          required=not partial_restore)
+    }))
+    message_ids = tuple(sorted({row["message_sha256"] for row in rows}))
+    locator = native_store_locator(store)
+    sequences: dict[str, int] = {}
+    messages: dict[str, int] = {}
+    for offset in range(0, max(len(sequence_ids), len(message_ids)), 128):
+        statements = []
+        for kind, table, identities in (("sequence", sequence_table, sequence_ids),
+                                         ("message", message_table, message_ids)):
+            batch = identities[offset:offset + 128]
+            if batch:
+                statements.append(select(literal(kind), table.c.sha256, table.c.id).where(
+                    table.c.store_locator == locator, table.c.store_key == store,
+                    table.c.sha256.in_(batch),
+                ))
+        statement = statements[0] if len(statements) == 1 else union_all(*statements)
+        for kind, identity, target in (await session.execute(statement)).all():
+            (sequences if kind == "sequence" else messages)[identity] = target
+    if not partial_restore and (len(sequences) != len(sequence_ids) or len(messages) != len(message_ids)):
+        raise NativeContentUnavailable()
     # Portable slices may omit unretained descendants, never their own nodes.
     if any(row["sha256"] not in sequences for row in rows):
         raise NativeContentUnavailable()
