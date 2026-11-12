@@ -1007,6 +1007,18 @@ class MemoryRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingOperationSource:
+    """Immutable admission projection, independent of the later effect outcome."""
+
+    tool_operation_id: str
+    execution_id: str
+    tool_call_id: str
+    tool_name: str
+    arguments_payload: StoredPayload
+    capability_ref: CapabilityRef | None
+
+
+@dataclass(frozen=True, slots=True)
 class ToolOperationRecord:
     """One authorized effect fact and its replay-safe terminal outcome."""
 

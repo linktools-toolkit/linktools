@@ -214,7 +214,8 @@ def capture_plain_text_input(content: str | Sequence[str]) -> StoredUserInput:
 
 def plain_text_input_content(value: StoredUserInput) -> str | list[str] | None:
     """Select only a complete canonical capture, never infer attachment provenance."""
-    if not isinstance(value, StoredUserInput) or value.payload.kind != "inline":
+    if (not isinstance(value, StoredUserInput) or value.payload.kind != "inline"
+            or value.payload.encoding not in {"utf-8", "json"}):
         return None
     decoded = value.payload.decode()
     if value.codec == "text":

@@ -3,6 +3,7 @@
 """Native receipts retain original attachment manifests and file ownership."""
 
 import hashlib
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,12 +11,11 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, ToolReturnPart
 
 from linktools.ai.core import canonical_json_bytes
-from linktools.ai.errors import AIError
 from linktools.ai.model.attachments import read_attachment_payload, store_attachment_payload
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence._archive import archive_content_scope
-from linktools.ai.persistence._native_tool_result import restore_native_tool_result_payload
+from linktools.ai.persistence._archive_closure import iter_native_message_roots
 from linktools.ai.persistence.codec import decode_envelope, iter_runtime_object_refs, native_tool_result_reference
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StoredPayload
@@ -39,7 +39,7 @@ async def _publish_attached(state: Persistence, *, archive_file: bool) -> tuple[
         digest = hashlib.sha256(body).hexdigest()
         key = (f"v1/archive/{scope}/{archive_content_scope('native-result', 'tenant')}/{digest}" if archive_file
                else f"v1/runtime/receipt-file/{digest}")
-        async def chunks():
+        async def chunks() -> AsyncIterator[bytes]:
             yield body
         await objects.put(key, chunks(), expected_size=len(body), expected_digest=digest)
         return ObjectRef(objects.store_id, key, digest, len(body))
@@ -88,3 +88,29 @@ async def test_attached_native_receipt_preserves_format_and_portable_file_owner(
             return b"".join([chunk async for chunk in store.open(ref.key)])
         assert await read_attachment_payload(result, read_object=read) == raw
         await state.purge_unreferenced_objects((), exclusive=Guard())
+        # With transcript/fact owners retired, the receipt alone retains both
+        # the fixed Native source and the original attachment file identities.
+        store = state.checkpoint.tools.state_store
+        for partition in await store.storage_group.scan_stores():
+            rows = await partition.read(lambda tx: tx.scan_records_page(after=None, limit=1000))
+            keys = tuple(row.key for row in rows if row.kind != "tool_operation"
+                         and tuple(iter_native_message_roots(row.data)))
+            if keys:
+                await partition.mutate(lambda tx: tx.delete_records(keys))
+            facts = await partition.read(lambda tx: tx.scan_facts_page(after=None, limit=1000))
+            owners = {fact.owner_key for fact in facts if tuple(iter_native_message_roots(fact.data))}
+            for owner in owners:
+                await partition.mutate(lambda tx: tx.delete_fact_streams(owner))
+        await state.purge_unreferenced_objects(
+            tuple((PersistenceDomain.CHECKPOINT, ref) for ref in result.object_refs()), exclusive=Guard())
+        assert (await state.checkpoint.tools.get_operation(operation_id, tenant_id="tenant")).result_payload == result
+        assert await read_attachment_payload(result, read_object=read) == raw
+        rows = await store.read(lambda tx: tx.scan_records())
+        keys = tuple(row.key for row in rows if row.kind == "tool_operation")
+        await store.mutate(lambda tx: tx.delete_records(keys))
+        await state.purge_unreferenced_objects(
+            tuple((PersistenceDomain.CHECKPOINT, ref) for ref in result.object_refs()), exclusive=Guard())
+        for reference in result.object_refs():
+            objects = (state.archive_object_store(PersistenceDomain.CHECKPOINT)
+                       if reference.key.startswith("v1/archive/") else state.object_store(PersistenceDomain.CHECKPOINT))
+            assert await objects.stat(reference.key) is None

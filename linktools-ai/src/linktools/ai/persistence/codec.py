@@ -201,6 +201,7 @@ from .contracts import (
     TaskPreparedInputRecord,
     ToolOperationAdmission,
     ToolOperationRecord,
+    PendingOperationSource,
     TranscriptChunk,
     TranscriptHeadRecord,
     TranscriptMessageRef,
@@ -2187,7 +2188,7 @@ def _restore_pending_arguments(template: Mapping, arguments: Mapping, operations
             else:
                 source = operations.get(("pending-operation", identity))
                 fields = call.get("fields")
-                if (not isinstance(source, ToolOperationRecord) or source.arguments_payload is None
+                if (not isinstance(source, (ToolOperationRecord, PendingOperationSource)) or source.arguments_payload is None
                         or not isinstance(fields, Mapping) or set(fields) != {"operation_id", "metadata"}
                         or fields["operation_id"] != identity or source.tool_operation_id != identity):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

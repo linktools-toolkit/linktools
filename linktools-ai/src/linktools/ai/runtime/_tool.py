@@ -684,6 +684,8 @@ class RuntimeToolOperationBridge:
         receipt = await self._repository.get_operation(identity, tenant_id=self._tenant_id)
         if receipt is not None and (receipt.execution_id != self._execution_id or receipt.tool_call_id != tool_call_id):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if receipt is not None and run_id != self._agent_run_id and receipt.agent_run_id != run_id:
+            return None
         return None if receipt is None else receipt.to_tool_effect(run_id)
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
@@ -694,7 +696,9 @@ class RuntimeToolOperationBridge:
         values = await self._repository.get_operations(tuple(self._operation_ids.values()), tenant_id=self._tenant_id)
         if any(value.execution_id != self._execution_id for value in values):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        return [effect for value in values if (effect := value.to_tool_effect(run_id)).status == "started"]
+        return [effect for value in values
+                if (run_id == self._agent_run_id or value.agent_run_id == run_id)
+                and (effect := value.to_tool_effect(run_id)).status == "started"]
 
     async def existing_call_ids(self, tool_call_ids: Sequence[str]) -> frozenset[str]:
         staged = None if self._pending_tools is None else self._pending_tools.pending_tool_operations()

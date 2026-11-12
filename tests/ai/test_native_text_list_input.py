@@ -80,3 +80,28 @@ async def test_text_list_input_readonly_snapshot_restores_and_rejects_missing_so
         with pytest.raises(AIError) as missing:
             await state.execution.executions.get_fresh("execution", tenant_id="tenant")
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_attachment_input_is_not_a_plain_text_projection_candidate() -> None:
+    import hashlib
+    from pydantic_ai.messages import BinaryContent
+    from linktools.ai.core import canonical_json_bytes
+    from linktools.ai.inputs import encode_user_content
+    from linktools.ai.model import StoredUserInput, plain_text_input_content
+    from linktools.ai.model.attachments import store_attachment_payload
+    from linktools.ai.storage import ObjectRef
+
+    raw = canonical_json_bytes(encode_user_content(("read", BinaryContent(b"accepted file", media_type="text/plain"))))
+
+    async def write(data: bytes) -> ObjectRef:
+        digest = hashlib.sha256(data).hexdigest()
+        return ObjectRef("files", digest, digest, len(data))
+
+    payload = await store_attachment_payload(raw, format="user-content", write_object=write)
+    assert payload is not None
+    original = StoredUserInput("user-content-v1", payload)
+    before = payload.to_json()
+    assert plain_text_input_content(original) is None
+    assert payload.to_json() == before
+    assert original.payload.object_refs() == payload.object_refs()

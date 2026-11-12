@@ -64,6 +64,15 @@ def build_runtime_sql_metadata(
     if trace_selected:
         from ._trace_schema import build_trace_sql_metadata
         build_trace_sql_metadata(metadata=metadata)
+    # Every State group can own archived typed content, even when no Native
+    # runtime domain is selected. Provision its canonical shared message table
+    # with the group rather than waiting for a later route to add Step tables.
+    if "ai_step_messages" not in metadata.tables:
+        from ._step_schema import build_step_sql_metadata
+        existing = set(metadata.tables)
+        build_step_sql_metadata(metadata=metadata)
+        for name in set(metadata.tables) - existing - {"ai_step_messages"}:
+            metadata.remove(metadata.tables[name])
     if "ai_state_records" in metadata.tables:
         return metadata
     if isinstance(plan, frozenset) and not plan:
