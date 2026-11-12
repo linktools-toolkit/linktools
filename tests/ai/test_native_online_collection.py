@@ -63,7 +63,7 @@ async def _count(engine, table: str) -> int:
 @pytest.mark.parametrize("owner", ("record", "fact", "operation"))
 @pytest.mark.parametrize("status", ("UNKNOWN", "DONE"))
 async def test_offline_collection_preserves_all_committed_root_owners_including_unknown(
-    tmp_path: Path, owner: str, status: str = "UNKNOWN",
+    tmp_path: Path, owner: str, status: str,
 ) -> None:
     async with _shared(tmp_path / "owners.db") as (engine, state, native, root):
         payload = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))
