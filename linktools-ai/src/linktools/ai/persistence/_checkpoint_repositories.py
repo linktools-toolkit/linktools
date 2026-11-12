@@ -570,7 +570,9 @@ class ToolRepositoryImpl(_RepositoryBase):
         async def read(_transaction):
             if tenant_id != self._tenant_id:
                 return None
-            record = await self._record(self._tool_key(tool_operation_id))
+            key = self._tool_key(tool_operation_id)
+            await self._tool_content.prefetch_owners((key,))
+            record = await self._record(key)
             value = None if record is None else await self._decode(record, ToolOperationRecord)
             return value
         return await self._read_content(read)
@@ -798,6 +800,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             return ()
         keys = tuple(self._tool_key(validate_resource_id(identity)) for identity in ordered)
         async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
+            await self._tool_content.prefetch_owners(keys)
             records = await transaction.get_records(keys)
             expanded = await self._tool_content.expand_many(tuple(records[key] for key in keys if key in records))
             values = tuple([await self._decode(record, ToolOperationRecord) for record in expanded])

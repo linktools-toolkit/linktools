@@ -14,7 +14,8 @@ if TYPE_CHECKING:
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, StoredPayload
-from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity
+from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity, archive_scope_key
+from ._archive_read import ContentReferenceReader
 from ._payload import decode_payload_bytes
 from ._message_root import NativeMessageRoot, NativeToolResultReference, NativeToolArgumentsReference
 from ._native_tool_error import NativeToolErrorReference, prepare_native_tool_error, restore_native_tool_error_payload
@@ -133,6 +134,22 @@ class ToolOperationContent:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return ContentArchive(opened[1], opened[0], namespace=self.namespace, tenant_id=self.tenant_id, object_store=None,
                               object_reader=self._archive_object_reader)
+
+    async def prefetch_owners(self, keys: Sequence[bytes]) -> None:
+        """Capture fixed payload slots with keyed owners in the current snapshot."""
+        active = active_state_scope()
+        if (not keys or active is None or active.writable
+                or active.group is not self.store.storage_group
+                or not isinstance(active.record_reader, ContentReferenceReader)
+                or self.store.storage_group.opened_archive is None):
+            return
+        archive = await self._archive()
+        await active.record_reader.read_content_references(
+            owner_store=self.store, owner_keys=keys, content_store=archive.store,
+            content_scope_key=archive_scope_key(self.namespace, self.tenant_id),
+            content_paths=tuple(("value", "payload", "fields", name, "fields", "content", "$execution_payload")
+                                for name in ("arguments_payload", "result_payload", "error_payload")),
+        )
 
     async def encode(
         self, record: StoredRecord, *, previous: StoredRecord | None = None,
