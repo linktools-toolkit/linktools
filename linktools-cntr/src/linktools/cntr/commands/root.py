@@ -113,7 +113,6 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_add(self, names: "list[str]") -> None:
-        _shared.manager.lifecycle.initialize()
         containers = _shared.manager.installed_state.add(*names)
         if not containers:
             raise ContainerError("No container added")
@@ -125,7 +124,6 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
     def on_command_remove(self, names: "list[str]", force: bool = False) -> None:
-        _shared.manager.lifecycle.initialize()
         containers = _shared.manager.installed_state.remove(*names, force=force)
         if not containers:
             raise ContainerError("No container removed")

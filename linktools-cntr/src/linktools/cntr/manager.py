@@ -200,7 +200,7 @@ class ContainerManager:
         return self.environ.cache.namespace("cntr")
 
     @cached_property
-    def containers(self) -> "dict[str, BaseContainer]":
+    def discovered_containers(self) -> "dict[str, BaseContainer]":
         result = dict()
         load_result = self.loader.load_all()
         for container in load_result.containers:
@@ -223,6 +223,11 @@ class ContainerManager:
                 else:
                     self.logger.warning(f"Not found installed container `{name}`, skip.")
         return result
+
+    @cached_property
+    def containers(self) -> "dict[str, BaseContainer]":
+        self.lifecycle.initialize()
+        return self.discovered_containers
 
     @cached_property
     def hooks(self) -> "HookRegistry":
@@ -344,9 +349,9 @@ class ContainerManager:
         Returns ``[]`` when nothing is installed instead of raising -- see
         ``prepare_installed_containers`` for the variant that rejects an empty installed project.
         """
-        self.lifecycle.initialize()
+        all_containers = self.containers
         containers = self.installed_state.get(resolve=True)
-        for container in self.containers.values():
+        for container in all_containers.values():
             container.enable = container in containers
         for container in reversed(containers):
             container.register_fields()

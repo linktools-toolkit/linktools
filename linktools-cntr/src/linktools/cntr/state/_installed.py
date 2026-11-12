@@ -10,6 +10,7 @@ from ..container import ContainerError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Mapping
     from ..container import BaseContainer
     from ..manager import ContainerManager
 
@@ -24,13 +25,15 @@ class InstalledStateStore:
         self.manager = manager
 
     def get(self, resolve: bool = True) -> "list[BaseContainer]":
+        available = self.manager.containers
         with self.manager.environ.locks.process_lock("cntr:settings"):
-            containers = self._load()
+            containers = self._load(available)
         if resolve:
             containers = self.manager.resolver.resolve_dependencies(containers)
         return containers
 
     def add(self, *names: str) -> "list[BaseContainer]":
+        available = self.manager.containers
         with self.manager.environ.locks.process_lock("cntr:settings"):
             # The lock only serializes writers; each process's persistent
             # store still holds whatever it last read, possibly before
@@ -40,23 +43,24 @@ class InstalledStateStore:
             self.manager.settings.reload()
             result = set()
             for name in names:
-                container = self.manager.containers.get(name, None)
+                container = available.get(name, None)
                 if container:
                     result.add(container)
-            containers = self._load()
+            containers = self._load(available)
             containers.extend(result)
-            self._dump(containers)
+            self._dump(containers, available)
             return list(result)
 
     def remove(self, *names: str, force: bool = False) -> "list[BaseContainer]":
+        available = self.manager.containers
         with self.manager.environ.locks.process_lock("cntr:settings"):
             self.manager.settings.reload()
-            containers = self._load()
+            containers = self._load(available)
 
             result = set()
             remove_names = set(names)
             for name in set(names):
-                if name not in self.manager.containers:
+                if name not in available:
                     continue
                 for container in containers:
                     if not container.is_depend_on(name):
@@ -67,40 +71,39 @@ class InstalledStateStore:
                         remove_names.add(container.name)
                     elif container.name not in remove_names:
                         raise ContainerError(
-                            f"{container} depends on {self.manager.containers[name]}, "
-                            f"cannot remove {self.manager.containers[name]}"
+                            f"{container} depends on {available[name]}, "
+                            f"cannot remove {available[name]}"
                         )
 
             for name in remove_names:
-                container = self.manager.containers.get(name, None)
+                container = available.get(name, None)
                 if container and container in containers:
                     result.add(container)
                     containers.remove(container)
 
-            self._dump(containers)
+            self._dump(containers, available)
 
             return list(result)
 
     def load_names(self) -> "list[str]":
         """Return the raw persisted installed-container names, unresolved.
 
-        Used directly by manager.containers -- resolving these names to
-        container objects here (via manager.containers) would recurse back
-        into the property this feeds.
+        Used directly by manager.discovered_containers -- resolving these
+        names to container objects here would recurse into discovery.
         """
         return list(self.manager.settings.get(_INSTALLED_KEY, []) or [])
 
     def _dump_names(self, names: "Iterable[str]") -> None:
         self.manager.settings.set(_INSTALLED_KEY, list(names))
 
-    def _load(self) -> "list[BaseContainer]":
+    def _load(self, available: "Mapping[str, BaseContainer]") -> "list[BaseContainer]":
         result = set()
         for name in self.load_names():
-            if name in self.manager.containers:
-                result.add(self.manager.containers[name])
+            if name in available:
+                result.add(available[name])
         return list(result)
 
-    def _dump(self, containers: "Iterable[BaseContainer]") -> None:
+    def _dump(self, containers: "Iterable[BaseContainer]", available: "Mapping[str, BaseContainer]") -> None:
         # A temporary load/compatibility failure does not uninstall a container.
-        unresolved = set(self.load_names()).difference(self.manager.containers)
+        unresolved = set(self.load_names()).difference(available)
         self._dump_names(unresolved.union(container.name for container in containers))

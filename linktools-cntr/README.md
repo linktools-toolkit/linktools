@@ -203,7 +203,7 @@ cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用�
 
 ### Compose 渲染后 Hook
 
-`manager.containers` 只加载容器实例，不执行 `on_init()`。加载完成后，由 `manager.lifecycle.initialize()` 统一执行一次所有容器的 `on_init()`；常规 CLI 操作会在使用容器前完成此阶段。直接使用 Manager 时可显式调用该方法。`on_init()` 可以通过 `self.containers` 获取其他已构造的容器，但不应依赖其他容器的 `on_init()` 已经完成。任一 `on_init()` 失败将终止本次初始化。
+`manager.discovered_containers` 只负责加载容器实例；访问 `manager.containers` 时会自动通过生命周期执行一次所有容器的 `on_init()`。容器内部的 `self.containers` 直接引用已构造的完整注册表，因此在 `on_init()` 中访问不会递归，但不应依赖其他容器的 `on_init()` 已经完成。初始化期间不应通过 `self.manager.containers` 间接重新进入初始化；任一 `on_init()` 失败将终止本次初始化。
 
 在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook。模板解析及服务、网络默认值补全后，Hook 按 `order`、依赖关系和注册顺序执行；接收渲染后的 Compose 字典，可原地修改。同一准备阶段只在首次渲染时执行；进入新的执行准备阶段会重置框架生成的 Compose、Dockerfile 和服务缓存，保留显式赋值的覆盖。没有 Compose 模板时不执行。
 

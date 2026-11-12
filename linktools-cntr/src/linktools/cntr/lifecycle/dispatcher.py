@@ -44,7 +44,7 @@ class LifecycleDispatcher:
         if self._initialized:
             return
         try:
-            for container in self.manager.containers.values():
+            for container in self.manager.discovered_containers.values():
                 container.on_init()
         except Exception as error:
             self._initialization_error = error
