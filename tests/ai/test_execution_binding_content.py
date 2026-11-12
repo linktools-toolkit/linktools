@@ -300,7 +300,7 @@ def _binding_manifest(copies: int):
         "kind": "runtime-storage-snapshot", "format_version": 1,
         "namespace": "bindings", "tenant_id": "tenant",
         "domains": {"execution": {"records": [encode_record(compact) for _ in range(copies)],
-                                  "facts": [], "operations": [], "aliases": [], "sequences": []}},
+                                  "facts": [], "operations": [], "sequences": []}},
         "archives": [{"scope_id": key[0], "domain": "execution", "records": [encode_record(archive_record)]}],
         "objects": [],
     }

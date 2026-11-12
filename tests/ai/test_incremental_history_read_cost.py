@@ -27,7 +27,7 @@ from linktools.ai.persistence._trace_event_store import SqlTraceEventStore
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._memory_transaction import _MemoryOverlay, _MemoryTransaction
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
-from linktools.ai.persistence.state import FactQuery, StoredAlias, StoredFact, StoredRecord
+from linktools.ai.persistence.state import FactQuery, StoredFact, StoredRecord
 
 from .test_history_request_association import _history
 from .test_history_projection_conformance import _record
@@ -472,13 +472,12 @@ async def test_run_release_scans_owned_cleanup_data_once_per_batch(
         storage = Persistence(PersistenceStorage.in_memory())
         try:
             archive, run_id = await _seed_trace(storage, count)
-            owner, stream, alias = b"o" * 32, b"s" * 32, b"a" * 32
+            owner, stream = b"o" * 32, b"s" * 32
             unrelated = StoredRecord(owner, None, None, "owner", b"owner", None, 0, None, 0, None, {})
             fact = StoredFact(stream, 1, owner, "event", None, None, {"retained": True})
 
             async def seed_unrelated(transaction) -> None:
                 await transaction.insert_record(unrelated)
-                await transaction.insert_alias(StoredAlias(alias, owner))
                 await transaction.insert_fact(fact)
 
             await archive.state_store.mutate(seed_unrelated)
@@ -493,7 +492,6 @@ async def test_run_release_scans_owned_cleanup_data_once_per_batch(
             assert await archive.get_agent_run(agent_run_id=run_id) is None
             assert await archive.list_events(agent_run_id=run_id) == []
             assert await archive.state_store.read(lambda tx: tx.get_record(owner)) == unrelated
-            assert await archive.state_store.read(lambda tx: tx.resolve_alias(alias)) == owner
             assert await archive.state_store.read(lambda tx: tx.get_facts(stream, (1,))) == (fact,)
         finally:
             await storage.close()

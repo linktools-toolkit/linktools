@@ -12,7 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.state import (
     FactQuery, OperationQuery, RecordQuery, StateTransaction,
-    StoredAlias, StoredFact, StoredOperation, StoredRecord,
+    StoredFact, StoredOperation, StoredRecord,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -71,14 +71,13 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
     writer_owner, reader_owner = Persistence(storage), Persistence(storage)
     record = _record("record")
-    alias, stream, sequence, operation_key = map(_key, ("alias", "stream", "seq", "op"))
+    stream, sequence, operation_key = map(_key, ("stream", "seq", "op"))
     operation = StoredOperation(operation_key, stream, 1, "pending", True, {})
     fact = StoredFact(stream, 1, record.key, "event", None, None, {})
 
     async def observe(transaction: StateTransaction) -> tuple[object, ...]:
         return (
             await transaction.get_record(record.key),
-            await transaction.resolve_alias(alias),
             await transaction.get_sequence(sequence),
             await transaction.list_facts(FactQuery(stream)),
             await transaction.get_operation(operation_key),
@@ -90,18 +89,17 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
     writer = writer_owner.execution.executions.state_store
     reader = reader_owner.execution.executions.state_store
     try:
-        assert await reader.read(observe) == (None, None, 0, (), None, ())
+        assert await reader.read(observe) == (None, 0, (), None, ())
 
         async def create(transaction: StateTransaction) -> None:
             await transaction.insert_record(record)
-            await transaction.insert_alias(StoredAlias(alias, record.key))
             await transaction.next_sequence(sequence)
             await transaction.insert_fact(fact)
             await transaction.insert_operation(operation)
 
         await writer.mutate(create)
         assert await reader.read(observe) == (
-            record, record.key, 1, (fact,), operation, (record,),
+            record, 1, (fact,), operation, (record,),
         )
         updated = replace(record, storage_revision=1, data={"value": 1})
         completed = replace(operation, state="done")
@@ -115,7 +113,7 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
 
         await writer.mutate(update)
         assert await reader.read(observe) == (
-            updated, record.key, 2, (fact, next_fact), completed, (updated,),
+            updated, 2, (fact, next_fact), completed, (updated,),
         )
 
         async def delete(transaction: StateTransaction) -> None:
@@ -124,10 +122,10 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
             await transaction.delete_operations(OperationQuery(stream_key=stream))
 
         await writer.mutate(delete)
-        assert await reader.read(observe) == (None, None, 0, (), None, ())
+        assert await reader.read(observe) == (None, 0, (), None, ())
         await writer.mutate(create)
         assert await reader.read(observe) == (
-            record, record.key, 1, (fact,), operation, (record,),
+            record, 1, (fact,), operation, (record,),
         )
     finally:
         await reader_owner.close()

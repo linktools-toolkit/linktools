@@ -14,10 +14,10 @@ from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._record_cache import StateRecordCache
 from linktools.ai.persistence._repository_common import decode_record_cursor, record_cursor
 from linktools.ai.persistence._sql import SqlStateStore
-from linktools.ai.persistence.codec import decode_alias, decode_fact, decode_record, encode_alias, encode_fact, encode_record
+from linktools.ai.persistence.codec import decode_fact, decode_record, encode_fact, encode_record
 from linktools.ai.persistence.state import (
-    RECORD_KEY_MAX_BYTES, RecordQuery, RecordScanCursor, StoredAlias, StoredFact, StoredRecord,
-    alias_key, parent_key, record_key, scope_key, sortable_timestamp,
+    RECORD_KEY_MAX_BYTES, RecordQuery, RecordScanCursor, StoredFact, StoredRecord,
+    parent_key, record_key, scope_key, sortable_timestamp,
 )
 from linktools.ai.storage import InMemoryCacheBackend
 
@@ -51,13 +51,11 @@ def test_raw_record_references_round_trip_at_bounds_without_repr_exposure() -> N
     key = b"sensitive-address:" + b"x" * (RECORD_KEY_MAX_BYTES - 18)
     assert len(key) == RECORD_KEY_MAX_BYTES
     record = replace(_record(key), parent_key=key)
-    alias = StoredAlias(b"lookup", key)
     fact = StoredFact(b"s" * 32, 1, key, "event", None, None, {})
     assert decode_record(encode_record(record)) == record
-    assert decode_alias(encode_alias(alias)) == alias
     assert decode_fact(encode_fact(fact)) == fact
     assert decode_record_cursor(record_cursor(record)) == (key, key)
-    for value in (record, alias, fact, RecordScanCursor("probe", key),
+    for value in (record, fact, RecordScanCursor("probe", key),
                   RecordQuery(kind="probe", parent_key=key, after_sort_key=key, after_key=key)):
         assert "sensitive-address" not in repr(value)
     with pytest.raises(ValueError):

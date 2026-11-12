@@ -156,7 +156,7 @@ def test_sql_constructor_and_complete_current_rows_reject_invalid_store_keys(inv
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("table", ("ai_state_records", "ai_tool_operation_aliases", "ai_state_facts", "ai_state_counters", "ai_state_operations"))
+@pytest.mark.parametrize("table", ("ai_state_records", "ai_state_facts", "ai_state_counters", "ai_state_operations"))
 async def test_partition_enumeration_rejects_corrupt_persisted_store_keys(tmp_path: Path, table: str) -> None:
     async with Persistence.open("scope", storage=PersistenceStorage.sqlite(tmp_path / "state.db")) as persistence:
         group = persistence.execution.executions.state_store.storage_group
@@ -164,10 +164,8 @@ async def test_partition_enumeration_rejects_corrupt_persisted_store_keys(tmp_pa
         assert store is not None
 
         async def seed(tx):
-            from linktools.ai.persistence.state import StoredAlias
             record = _record("saved")
             await tx.insert_record(record)
-            await tx.insert_alias(StoredAlias(b"alias", record.key))
             await tx.insert_fact(StoredFact(b"stream", 1, record.key, "probe", None, None, {}))
             await tx.next_sequence(b"stream")
             await tx.insert_operation(StoredOperation(b"operation", b"stream", 1, "pending", False, {}))

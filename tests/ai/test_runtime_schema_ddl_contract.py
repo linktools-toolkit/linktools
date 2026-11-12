@@ -209,12 +209,6 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_updated_at",
             "ix_created_at",
         },
-        "ai_tool_operation_aliases": {
-            "uk_store_key_alias_locator",
-            "ix_store_key_record_locator",
-            "ix_updated_at",
-            "ix_created_at",
-        },
         "ai_state_facts": {
             "uk_store_key_stream_locator_sequence",
             "ix_owner_locator",
@@ -242,7 +236,6 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_scope_key_state_sort_key",
             "ix_store_key_kind_key_digest",
         },
-        "ai_tool_operation_aliases": {"uk_alias_key", "ix_store_key_alias_key"},
         "ai_state_facts": {
             "uk_stream_key_sequence",
             "ix_store_key_stream_key_sequence",
@@ -277,7 +270,6 @@ def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None
     ).read_text(encoding="utf-8")
 
     for fragment in (
-        "KEY ix_store_key_alias_key ",
         "KEY ix_store_key_stream_key_sequence ",
         "KEY ix_store_key_key_digest ",
     ):
@@ -321,7 +313,7 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     )
     selected = captured[0]
     assert set(selected.tables) == {
-        "ai_state_records", "ai_tool_operation_aliases", "ai_state_facts",
+        "ai_state_records", "ai_state_facts",
         "ai_state_counters", "ai_state_operations", "ai_step_runs", "ai_step_messages", "ai_step_sequences",
         "ai_step_tool_operations", "ai_step_run_admissions",
     } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
@@ -380,19 +372,10 @@ def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(diale
     assert all(len(index.columns) <= 3 for index in table.indexes)
 
 
-def test_runtime_alias_schema_uses_partitioned_binary_indexes() -> None:
-    from sqlalchemy.dialects import postgresql, sqlite
+def test_runtime_schema_has_no_tool_alias_sidecar() -> None:
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CHECKPOINT}))
+    assert "ai_tool_operation_aliases" not in metadata.tables
 
-    table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CHECKPOINT})).tables["ai_tool_operation_aliases"]
-    assert table.c.alias_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(768)"
-    assert table.c.alias_key.type.compile(dialect=postgresql.dialect()) == "BYTEA"
-    assert table.c.alias_key.type.compile(dialect=sqlite.dialect()) == "BLOB"
-    columns = {tuple(column.name for column in index.columns): index.unique for index in table.indexes}
-    assert columns[("store_key", "alias_locator")]
-    assert not columns[("store_key", "record_locator")]
-    assert all(len(index.columns) <= 3 for index in table.indexes)
-    assert table.c.store_key.type.length == 128
-    assert table.c.alias_key.type.length == table.c.record_key.type.length == 768
 
 
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
@@ -476,7 +459,6 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
             maxima[tuple(index.columns.keys())] = size
             assert size + 40 < 2704 < 3072
     assert maxima[("store_key", "key_locator")] == 384
-    assert maxima[("store_key", "alias_locator")] == 384
     assert maxima[("store_key", "operation_locator")] == 384
     assert maxima[("store_key", "stream_locator", "sequence")] == 392
 
@@ -492,7 +474,7 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
     assert set(metadata.tables) == {
         "ai_asset_batch_receipts", "ai_asset_changes", "ai_asset_entries", "ai_asset_heads",
         "ai_metric_definitions", "ai_metric_observations",
-        "ai_object_chunks", "ai_objects", "ai_tool_operation_aliases", "ai_state_facts",
+        "ai_object_chunks", "ai_objects", "ai_state_facts",
         "ai_state_operations", "ai_state_records", "ai_state_counters", "ai_step_events",
         "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots", "ai_trace_events",
         "ai_step_tool_operations", "ai_step_run_admissions",
@@ -524,7 +506,6 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
     metadata = build_sql_schema_metadata()
     state_raw = {
         "ai_state_records": ("key", "scope_key", "parent_key"),
-        "ai_tool_operation_aliases": ("alias_key", "record_key"),
         "ai_state_facts": ("stream_key", "owner_key"),
         "ai_state_counters": ("stream_key",),
         "ai_state_operations": ("operation_key", "stream_key"),
