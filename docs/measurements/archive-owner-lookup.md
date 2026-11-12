@@ -25,3 +25,27 @@ therefore retain both possible content owners. A sequence key alone does not
 identify the content codec; excluding the Step owner there would break valid
 execution-payload sequences. These measurements do not claim a reduction in
 whole-runtime SELECT count or storage size.
+
+## Indirect frontier owner joins
+
+Indirect body lookups now join each physical owner to the bounded identity set
+before combining the results. This avoids materializing the entire normalized
+owner union. The Step branch is gated on the exact `execution-payload:` identity
+prefix; other content codecs cannot visit its rows. LEFT JOIN keeps the small
+identity set as the driving relation, including on an unanalyzed SQLite store.
+A real SQLite archive diagnostic reports the generic target as
+`SEARCH ... (store_key=? AND kind=? AND sort_prefix=?) LEFT-JOIN`, with no scan of
+the physical generic table.
+
+MySQL 5.7 has no CTE support, so the bounded identity subquery is repeated for
+the two possible owners. Batch sizing accounts for those actual repeated binds
+without increasing the 999-bind ceiling: the same 500-node/500-key compilation
+probe reached SQLite 894, MySQL 998, PostgreSQL 712 binds. This may split very
+large indirect requests into more statements; it is not a whole-runtime I/O
+improvement claim. Direct-key and metadata-only requests retain one owner plan.
+
+Known-new tool settlement now checks one immutable Step content batch even when
+its effect owner needs no read. The content can be shared with another effect,
+so a new operation is not proof that its content is absent. The test preserves
+zero effect/alias SELECTs while allowing at most one exact content-key batch;
+existing-content byte integrity checks are retained.

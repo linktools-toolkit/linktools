@@ -35,7 +35,7 @@ def _projection(*, structured: bool = False) -> tuple[StoredRecord, dict, Native
     store = native_store_key("test", "tenant")
     group = "a" * 32
     root = NativeMessageRoot(group, store, (NativeMessageSlice(node.identity, 1, 0, 1),))
-    reference = NativeUserInputReference(root, 1, expected.payload.digest, expected.payload.size)
+    reference = NativeUserInputReference(root, 1)
     record, value, *_ = _terminal_projection()
     del value["fields"]["result"]
     value["fields"]["stored_user_input"] = {"$dataclass": "stored_user_input", "schema": 1,
@@ -65,9 +65,9 @@ def test_native_input_snapshot_rejects_invalid_projection(damage: str) -> None:
     if damage == "bytes":
         payloads[reference.root.group_id][next(iter(payloads[reference.root.group_id]))] = b"[]"
     elif damage == "digest":
-        content["digest"] = "e" * 64
+        rows[reference.root.group_id][0][0]["message_sha256"] = "e" * 64
     elif damage == "part":
-        content["part_index"] = 0
+        content["part_index"] = 2
     elif damage == "missing":
         rows = {}
     elif damage == "group":
@@ -91,3 +91,13 @@ def test_native_input_rekey_ignores_business_payloads() -> None:
     assert rekey_native_message_roots(opaque, {}) == opaque
     with pytest.raises(AIError):
         rekey_native_message_roots(value, {})
+
+
+def test_native_input_fixed_part_selects_its_own_authoritative_text() -> None:
+    record, value, reference, expected, rows, payloads = _projection()
+    content = value["fields"]["stored_user_input"]["fields"]["content"]
+    content["part_index"] = 0
+    record = replace(record, data=encode_envelope({"type": "execution_record", "payload": value}))
+    restored = _expand_snapshot_native_content(record, rows, payloads, namespace="test", tenant_id="tenant")
+    actual = decode_envelope(restored.data).value["payload"]["fields"]["stored_user_input"]
+    assert actual == _encode_persisted_domain(StoredUserInput("text", StoredPayload.inline_text("unrelated")))

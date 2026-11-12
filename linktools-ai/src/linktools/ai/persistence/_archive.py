@@ -1082,6 +1082,24 @@ class ContentArchive:
             decoded[identity] = await self._read_content(content)
         return tuple(decoded[identity] for identity in identities)
 
+    async def capture_content_records(
+        self, identities: Sequence[str],
+    ) -> tuple[tuple[ContentRecord, ...], Callable[[Sequence[str]], Awaitable[tuple[bytes, ...]]]]:
+        """Capture actual owner-scope metadata and bind its later byte loading.
+
+        The caller enlists this archive with its owner before capture. The loader
+        accepts only captured identities, never caller-provided content records.
+        """
+        records = await self.content_records(identities)
+        captured = {content.identity: content for content in records}
+
+        async def load(selected: Sequence[str]) -> tuple[bytes, ...]:
+            if any(identity not in captured for identity in selected):
+                raise _integrity()
+            return tuple([await self._read_content(captured[identity]) for identity in selected])
+
+        return records, load
+
     async def _read_content(self, content: ContentRecord) -> bytes:
         raw = (content.body if content.payload is None else
                await read_attachment_payload(content.payload, read_object=self.read_payload_object))

@@ -111,7 +111,7 @@ async def test_fixed_frontier_returns_only_requested_bodies_and_reuses_transacti
         statements = []
 
         def record_query(connection, cursor, statement, parameters, context, executemany) -> None:
-            if statement.lstrip().upper().startswith("SELECT"):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
                 statements.append((statement, parameters))
 
         event.listen(engine.sync_engine, "before_cursor_execute", record_query)
@@ -182,7 +182,7 @@ async def test_sql_frontier_batches_stay_within_999_parameters(tmp_path: Path) -
         parameter_counts = []
 
         def check_query(connection, cursor, statement, parameters, context, executemany) -> None:
-            if statement.lstrip().upper().startswith("SELECT"):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
                 parameter_counts.append(len(parameters))
                 assert len(parameters) <= 999
 
@@ -237,7 +237,7 @@ async def test_direct_step_content_uses_exact_index_without_sequence_union(tmp_p
         statements = []
 
         def record_query(connection, cursor, statement, parameters, context, executemany) -> None:
-            if statement.lstrip().upper().startswith("SELECT"):
+            if statement.lstrip().upper().startswith(("SELECT", "WITH")):
                 statements.append((statement, parameters))
 
         event.listen(engine.sync_engine, "before_cursor_execute", record_query)

@@ -62,9 +62,48 @@ Small-case payload owners total 12,078 bytes: only 4,145 encoded body bytes, ver
 - Empty terminal diagnostics (`{}` and `None`) consume one 998-byte owner: 277 body bytes + 721 overhead. The two execution references consume 600 logical JSON value bytes, versus 38 bytes for the prior empty values. Omitting a schema-defined empty/default owner can eliminate this without duplicating a nonempty fact or reintroducing a size threshold.
 - Two result metadata templates consume 2,168 bytes, with only 725 body bytes. Input owners consume 1,995 bytes. The two argument owners consume 1,846 bytes for two eleven-byte tool arguments. Typed wrapper and physical owner overhead matter even though ownership is unique.
 - The new fixed Runtime policy owner consumes 909 bytes (184 body + 725 other columns). Records lose inline binding summaries, but add fixed policy references and policy reads. Batch/cache only within the existing verified transaction/source boundaries; do not restore duplicated summaries as a shortcut.
-- The workload retains two non-Native input payload owners despite additional Native source-family reads. Earlier rejection of demonstrably unequal input candidates could avoid unsuccessful discovery, provided publication/root integrity checks for accepted references remain intact.
+- Two input payload rows remain in the pre-GC inventory. These rows alone do not establish that executions still reference them. Subsequent call-stack instrumentation confirmed successful Native input projection; normal GC reclaimed the obsolete initial owners. A negative-candidate prefilter showed no read reduction for this workload and was not integrated.
 - Simplifying physical payload identity/lookup representation may reduce fixed overhead, but this requires a real typed-table/query design and renewed DDL review. Do not delete required audit indexes, add padding columns, or call relocation itself a storage optimization.
 
 The large body is repetitive and compresses strongly: its archived receipt body is roughly 0.9 KiB, not 64 KiB on disk. These two examples do not establish a general large-content compression result. No latency or non-SQLite performance claim is made.
 
 This measurement precedes subsequent fixes and optimizations. Rerun the same workload and full accounting against the final candidate before making improvement claims.
+
+
+## Follow-up: verified call stacks, normal GC and narrow read reuse
+
+The same workload and dependencies were rerun at `fc938608` against baseline
+`6e907b06`. SQL attribution used transaction-local context tags around Native
+root capture, because SQLAlchemy's greenlet stack alone loses the async caller.
+Across both cases, current-only captures included four successful input projections,
+16 `get_observed` reads from Runtime persistence, four each from terminal effective
+commit, terminal decode, terminal encode and postcommit observation, four retention
+encode reads, and eight history execution reads. These are call-stack observations,
+not the earlier table-family hypothesis of failed candidate discovery.
+
+Both sides then ran the same public `purge_unreferenced_objects` under offline
+exclusivity after closing Runtime, followed by reopening and exact result, history,
+Native snapshot, run and tool receipt checks. No owner was deliberately released.
+No vacuum was run.
+
+| Case / revision | All business column bytes before / after GC | DB bytes before / after GC |
+|---|---:|---:|
+| Small baseline | 142,632 / 142,632 | 528,384 / 528,384 |
+| Small fc938608 | 153,290 / 151,295 | 589,824 / 589,824 |
+| Large baseline | 144,562 / 144,562 | 520,192 / 520,192 |
+| Large fc938608 | 153,128 / 151,133 | 589,824 / 589,824 |
+
+Candidate GC removed two obsolete initial input payload rows, 1,995 column bytes,
+leaving eight payload owners. Even after symmetric GC, total candidate business
+bytes remain higher: approximately 6.1% small and 4.5% large. Allocated pages do
+not shrink. This is not a net space-saving claim.
+
+A narrow follow-up at `70c10f72` reuses only the original value just decoded in the
+terminal writer's same-transaction, no-source-write window. The original stored
+projection must match; candidate values are not historical proof. It adds no
+cross-transaction cache and does not skip source validation after publication.
+On each two-turn case, runtime SELECTs fell from 402 to 400; WITH stayed 1, DML
+469, commits 144. Warm/cold reads were unchanged. All workload semantic checks
+passed. Separate bounded probes covered direct/prepared input reuse, publication
+rollback, and eight unknown-commit/corruption outcomes. Formal suites remain CI's
+responsibility.

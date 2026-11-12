@@ -57,7 +57,7 @@ async def test_input_reference_preserves_complete_accepted_value(tmp_path: Path,
         repository = state.execution.executions
         record = await repository.state_store.read_record(repository.execution_record_key("execution"))
         wrapper = decode_envelope(record.data).value["payload"]["fields"]["stored_user_input"]
-        assert (native_user_input_reference(wrapper) is not None) is (case == "large")
+        assert (native_user_input_reference(wrapper) is not None) is (case in {"large", "small"})
         assert (await repository.get_fresh("execution", tenant_id="tenant")).stored_user_input == original
     async with Persistence.open("native-result", tenant_id="tenant", storage=config, read_only=True) as state:
         assert (await state.execution.executions.get_fresh("execution", tenant_id="tenant")).stored_user_input == original
@@ -145,3 +145,41 @@ async def test_native_input_owner_failure_rolls_back_publication(tmp_path: Path,
         assert loaded.status == current.status and loaded.stored_user_input == original_input
         record = await repository.state_store.read_record(repository.execution_record_key("execution"))
         assert native_user_input_reference(decode_envelope(record.data).value["payload"]["fields"]["stored_user_input"]) is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_republication_accepts_verified_native_handoff_output(tmp_path: Path) -> None:
+    from linktools.ai.execution import (
+        ExecutionRecoveryDetail, RecoveryHandoffPhase, RecoveryTerminalHandoff, RecoveryTerminalOutcome,
+    )
+    from linktools.ai.persistence.codec import native_text_reference
+
+    async with Persistence.open("native-result", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "handoff.db")) as state:
+        commands, commit, current, checkpoint = await _prepare_input(
+            state, StoredUserInput("text", StoredPayload.inline_text("input")), "input", "output",
+        )
+        outcome = RecoveryTerminalOutcome(
+            ExecutionStatus.SUCCEEDED, None, {}, commit.result.stop_reason, commit.result.output,
+            None, commit.result.usage, commit.terminal_event_type, commit.terminal_event_payload,
+            commit.result.created_at,
+        )
+        commit = replace(commit, execution=replace(commit.execution, recovery=ExecutionRecoveryDetail(
+            agent_run_id="run", handoff_phase=RecoveryHandoffPhase.PREPARED,
+            terminal_handoff=RecoveryTerminalHandoff(outcome, "run", None),
+        )))
+        await _publish(commands, commit, current, checkpoint)
+        repository = state.execution.executions
+        raw = await repository.state_store.read_record(repository.execution_record_key("execution"))
+        fields = decode_envelope(raw.data).value["payload"]["fields"]
+        source = native_text_reference(fields["result"]["fields"]["output"])
+        assert source is not None
+        assert native_text_reference(fields["recovery"]["fields"]["terminal_handoff"]["fields"]["output"]) == source
+        previous = await repository.get_fresh("execution", tenant_id="tenant")
+        repeated = replace(commit, expected_revision=previous.revision, expected_event_seq=previous.event_seq,
+                           execution=previous, result=previous.result)
+        published = await repository.commit_terminal(repeated)
+        assert published.result == previous.result
+        restored = await repository.get_fresh("execution", tenant_id="tenant")
+        assert restored.recovery.terminal_handoff.outcome == outcome
+        assert restored.result == previous.result

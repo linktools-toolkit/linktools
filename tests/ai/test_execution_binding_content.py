@@ -452,13 +452,13 @@ async def test_small_bindings_share_complete_content_across_executions(
         cold = ExecutionRepositoryImpl(repository.state_store, namespace="bindings", tenant_id="tenant")
 
         body_reads = []
-        original_read = ContentArchive.read_contents
-        async def track_archive(self: ContentArchive, identities: tuple[str, ...], *, codec: str, reserve: object = None) -> tuple[bytes, ...]:
-            body_reads.append(codec)
-            return await original_read(self, identities, codec=codec, reserve=reserve)
+        original_read = ContentArchive._read_content
+        async def track_archive(self: ContentArchive, content: ContentRecord) -> bytes:
+            body_reads.append(content.codec)
+            return await original_read(self, content)
 
         with monkeypatch.context() as patch:
-            patch.setattr(ContentArchive, "read_contents", track_archive)
+            patch.setattr(ContentArchive, "_read_content", track_archive)
             assert (await cold.get_view(executions[0].execution_id, tenant_id="tenant"))[1].binding_kind == kind
         assert "execution-binding" in body_reads
         assert set(body_reads) <= {"execution-binding", "runtime-policy"}
@@ -525,16 +525,16 @@ async def test_archived_binding_views_read_the_fixed_contract_in_the_owner_snaps
         cold = ExecutionRepositoryImpl(repository.state_store, namespace="bindings", tenant_id="tenant")
 
         reads = []
-        original_read = ContentArchive.read_contents
-        async def track_contract_read(self: ContentArchive, identities: tuple[str, ...], *, codec: str, reserve: object = None) -> tuple[bytes, ...]:
+        original_read = ContentArchive._read_content
+        async def track_contract_read(self: ContentArchive, content: ContentRecord) -> bytes:
             scope = active_state_scope()
             assert scope is not None and not scope.writable
             assert repository.state_store in scope.transactions and self.store in scope.transactions
-            reads.append(codec)
-            return await original_read(self, identities, codec=codec, reserve=reserve)
+            reads.append(content.codec)
+            return await original_read(self, content)
 
         with monkeypatch.context() as patch:
-            patch.setattr(ContentArchive, "read_contents", track_contract_read)
+            patch.setattr(ContentArchive, "_read_content", track_contract_read)
             expected = project_execution_view(execution)
             assert (await cold.get_view("execution", tenant_id="tenant"))[1] == expected
             assert (await cold.get_view_fresh("execution", tenant_id="tenant"))[1] == expected
@@ -634,8 +634,9 @@ async def test_binding_body_is_decoded_once_per_transaction(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("corruption", ("missing", "body"))
-async def test_binding_body_reuse_rechecks_current_source(
-    tmp_path: Path, backend: str, corruption: str,
+@pytest.mark.parametrize("codec", ("execution-binding", "runtime-policy"))
+async def test_configuration_body_reuse_rechecks_current_source(
+    tmp_path: Path, backend: str, corruption: str, codec: str,
 ) -> None:
     async with Persistence.open("bindings", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
         repository = state.execution.executions
@@ -648,12 +649,12 @@ async def test_binding_body_reuse_rechecks_current_source(
             await repository.get_in_transaction(owner, "execution", tenant_id="tenant")
             contents = transactions.transaction(archive)
             records = await contents.list_records(RecordQuery(kind="archive_content"))
-            binding = next(record for record in records if record.data["codec"] == "execution-binding")
+            content = next(record for record in records if record.data["codec"] == codec)
             if corruption == "missing":
-                await contents.delete_record(binding.key)
+                await contents.delete_record(content.key)
             else:
-                await contents.replace_record(replace(binding, payload_bytes=b"corrupt",
-                    storage_revision=binding.storage_revision + 1), expected_storage_revision=binding.storage_revision)
+                await contents.replace_record(replace(content, payload_bytes=b"corrupt",
+                    storage_revision=content.storage_revision + 1), expected_storage_revision=content.storage_revision)
             with pytest.raises(AIError) as invalid:
                 await repository.get_in_transaction(owner, "execution", tenant_id="tenant")
             assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

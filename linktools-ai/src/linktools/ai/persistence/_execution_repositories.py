@@ -416,8 +416,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return await self.read_content(read)
 
     async def _projected_content(self, current: StoredRecord, value: object, *,
-                                 result_source: NativeTextReference | None = None) -> StoredRecord:
-        candidate = await super()._projected_content(current, value, result_source=result_source)
+                                 result_source: NativeTextReference | None = None,
+                                 verified_native_previous: ExecutionRecord | None = None) -> StoredRecord:
+        candidate = await super()._projected_content(current, value, result_source=result_source,
+            verified_native_previous=verified_native_previous)
         if current.state in {ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value,
                              ExecutionStatus.CANCELLED.value, "execution_handoff"}:
             if not isinstance(value, ExecutionRecord) or not await self._execution_content.terminal_matches(current, candidate, value):
@@ -1779,8 +1781,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 await self._execution_content.verify_result_source(result_source, commit.result.output)
             replacements = [
                 RecordReplacement(
-                    (await self._projected_content(stored, next_execution) if result_source is None else
-                     await self._projected_content(stored, next_execution, result_source=result_source)),
+                    # stored_value was decoded from stored above in this same
+                    # transaction. Only reads occur before this encode; no
+                    # Native source publication/deletion may enter this window.
+                    await self._projected_content(stored, next_execution, result_source=result_source,
+                                                  verified_native_previous=stored_value),
                     stored.storage_revision,
                 )
             ]

@@ -125,7 +125,10 @@ async def test_call_lookup_rejects_invalid_recovery_sources(tmp_path: Path, back
                 return {}
             key, record = next(iter(records.items()))
             if damage == "kind":
-                return {key: replace(record, kind="external_call")}
+                damaged = replace(record)
+                # Simulate an untrusted backend bypassing typed writer validation.
+                object.__setattr__(damaged, "kind", "external_call")
+                return {key: damaged}
             if damage == "call":
                 return {key: wrong_call}
             return {key: replace(record, data={})}

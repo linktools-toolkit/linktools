@@ -1264,13 +1264,14 @@ class _SqlTransaction:
     def _archive_read_batches(
         cls, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
     ) -> Iterator[tuple[tuple[ArchiveNodeRead, ...], tuple[bytes, ...]]]:
-        available = _ARCHIVE_READ_BIND_BUDGET - _ARCHIVE_READ_FIXED_BINDS
+        owner_count = 2 if any(request.content_slots for request in requests) else 1
+        available = _ARCHIVE_READ_BIND_BUDGET - owner_count * _ARCHIVE_READ_FIXED_BINDS
         nodes: list[ArchiveNodeRead] = []
         contents: list[bytes] = []
         used = 0
         for request in requests:
-            # Each enabled branch contains the input key once, regardless of depth.
-            cost = 2 * (int(request.metadata_slots).bit_count() + int(request.content_slots).bit_count())
+            # Each physical owner lookup repeats the bounded identity query.
+            cost = owner_count * 2 * (int(request.metadata_slots).bit_count() + int(request.content_slots).bit_count())
             if cost > available:
                 raise ValueError("archive read parameter budget cannot fit one node")
             if used + cost > available:
@@ -1343,13 +1344,19 @@ class _SqlTransaction:
         if branches:
             keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
             # Metadata-only frontiers cannot reference payload owners.
-            targets = (record_owner_rows(self._metadata, kind="archive_content")
-                       if any(request.content_slots for request in requests) else table)
-            selections.append(select(targets).select_from(keys.outerjoin(targets, and_(
-                targets.c.store_key == self._store_key, _key_matches(targets.c.scope_key, scope_key),
-                targets.c.kind == keys.c.kind, targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
-                targets.c.sort_key == keys.c.identity,
-            ))))
+            owners = ("ai_state_records", "ai_step_payload_contents") if any(
+                request.content_slots for request in requests) else ("ai_state_records",)
+            for owner in owners:
+                targets = record_owner_rows(self._metadata, owner=owner)
+                lookup = select(targets).select_from(keys.outerjoin(targets, and_(
+                    targets.c.store_key == self._store_key, _key_matches(targets.c.scope_key, scope_key),
+                    targets.c.kind == keys.c.kind, targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
+                    targets.c.sort_key == keys.c.identity,
+                )))
+                if owner == "ai_step_payload_contents":
+                    lookup = lookup.where(keys.c.kind == "archive_content",
+                                          func.substr(keys.c.identity, 1, 18) == b"execution-payload:")
+                selections.append(lookup)
         # Direct content addresses already identify their physical owner. Do not
         # rediscover them through an unindexed content-identity join.
         for owner in dict.fromkeys(record_owner_table(key) for key in content_keys):

@@ -67,9 +67,7 @@ def test_archive_content_identity_retains_codec_and_exact_checksum(codec: str) -
     node = ImmutableSequenceNode(content.identity)
     assert ImmutableSequenceNode.from_json(node.to_json()) == node
     token = archive_content_scope("namespace", "tenant")
-    reference = {"$execution_binding": content.identity, "archive_scope": "group", "content_scope": token,
-                 "summary": {"kind": "agent", "id": "agent", "revision": 1, "max_attempts": None,
-                             "capability_refs": {"$tuple": []}, "binding_digest": digest}}
+    reference = {"$execution_binding": content.identity, "archive_scope": "group", "content_scope": token}
     assert binding_reference(reference) == ("group", token, content.identity)
     for invalid in (digest, codec + ":" + "A" * 64, codec + ":" + "g" * 64):
         with pytest.raises(AIError) as error:

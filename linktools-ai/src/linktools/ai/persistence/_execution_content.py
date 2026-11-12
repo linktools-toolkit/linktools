@@ -271,40 +271,32 @@ class ExecutionContent:
 
     async def expand_policies(self, records: Sequence[StoredRecord], *,
                               reserve: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
-        references = tuple(policy_reference(record) for record in records)
-        if not any(reference is not None for reference in references):
-            return tuple(records)
-        archive = await self._archive()
-        if any(reference is not None and reference[:2] != (archive.scope_id, archive.content_scope)
-               for reference in references):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        counts = Counter(reference[2] for reference in references if reference is not None)
-        def reserve_content(identity: str, size: int) -> None:
-            if reserve is not None:
-                reserve(counts[identity] * size)
-        identities = tuple(counts)
-        contents = dict(zip(identities, await archive.read_contents(identities, codec=POLICY_CODEC,
-                            reserve=reserve_content if reserve is not None else None), strict=True))
-        return tuple(record if reference is None else expand_policy(record, contents[reference[2]])
-                     for record, reference in zip(records, references, strict=True))
+        return await self._expand_configuration(records, bindings=False, policies=True, reserve=reserve)
 
     async def expand_bindings(self, records: Sequence[StoredRecord]) -> tuple[StoredRecord, ...]:
-        return await self._expand_bindings(await self.expand_policies(records))
+        return await self._expand_configuration(records, bindings=True, policies=True)
 
-    async def _expand_bindings(self, records: Sequence[StoredRecord], *,
-                          reserve: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
-        references = tuple(binding_reference(_binding(record)) for record in records)
+    async def _expand_configuration(self, records: Sequence[StoredRecord], *, bindings: bool = True,
+                                    policies: bool = False,
+                                    reserve: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
+        binding_refs = tuple(binding_reference(_binding(record)) if bindings else None for record in records)
+        policy_refs = tuple(policy_reference(record) if policies else None for record in records)
+        references = (*binding_refs, *policy_refs)
         if not any(reference is not None for reference in references):
             return tuple(records)
         archive = await self._archive()
         if any(reference is not None and reference[:2] != (archive.scope_id, archive.content_scope)
                for reference in references):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        identities = tuple(dict.fromkeys(reference[2] for reference in references if reference is not None))
         counts = Counter(reference[2] for reference in references if reference is not None)
-        def reserve_content(identity: str, size: int) -> None:
-            if reserve is not None:
-                reserve(counts[identity] * size)
+        identities = tuple(counts)
+        codecs = {reference[2]: codec for refs, codec in ((binding_refs, BINDING_CODEC), (policy_refs, POLICY_CODEC))
+                  for reference in refs if reference is not None}
+        # Both configuration families belong to the same owner snapshot. Capture
+        # their metadata together, rather than querying each family and then
+        # querying binding metadata again just to load its inline bytes.
+        captured, load = await archive.capture_content_records(identities)
+        records_by_id = dict(zip(identities, captured, strict=True))
         active = active_state_scope()
         transaction = None if active is None else active.transactions.get(archive.store)
         cached = None
@@ -312,34 +304,31 @@ class ExecutionContent:
             try:
                 cached = self._binding_reads.setdefault(transaction, {})
             except TypeError:
-                # Custom transaction objects need not support weak references.
                 pass
-        if cached is None:
-            contents = dict(zip(identities, await archive.read_contents(
-                identities, codec=BINDING_CODEC, reserve=reserve_content if reserve is not None else None,
-            )))
-        else:
-            # Cached bytes never stand in for source existence or integrity.
-            # Recheck current metadata even within a writable transaction, where
-            # an earlier read may precede deletion or replacement of content.
-            records_by_id = dict(zip(identities, await archive.content_records(identities)))
-            contents = {}
-            missing = []
-            for identity, content in records_by_id.items():
-                if content.codec != BINDING_CODEC or content.payload is not None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                reserve_content(identity, content.raw_size)
-                previous = cached.get(identity)
-                if previous is not None and previous[0] == content:
-                    contents[identity] = previous[1]
-                else:
-                    missing.append(identity)
-            raws = await archive.read_contents(missing, codec=BINDING_CODEC) if missing else ()
-            for identity, raw in zip(missing, raws, strict=True):
-                contents[identity] = raw
+        contents, missing = {}, []
+        for identity, content in records_by_id.items():
+            if content.codec != codecs[identity] or content.payload is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if reserve is not None:
+                reserve(counts[identity] * content.raw_size)
+            previous = None if cached is None else cached.get(identity)
+            if previous is not None and previous[0] == content:
+                contents[identity] = previous[1]
+            else:
+                missing.append(identity)
+        raws = await load(missing)
+        for identity, raw in zip(missing, raws, strict=True):
+            contents[identity] = raw
+            if cached is not None:
                 cached[identity] = records_by_id[identity], raw
-        return tuple(record if reference is None else expand_binding(record, contents[reference[2]])
-                     for record, reference in zip(records, references))
+        expanded = []
+        for record, binding, policy in zip(records, binding_refs, policy_refs, strict=True):
+            if policy is not None:
+                record = expand_policy(record, contents[policy[2]])
+            if binding is not None:
+                record = expand_binding(record, contents[binding[2]])
+            expanded.append(record)
+        return tuple(expanded)
 
 
     def remember_projection(self, value: ExecutionRecord, record: StoredRecord) -> None:
@@ -421,7 +410,8 @@ class ExecutionContent:
 
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
                      result_source: NativeTextReference | None = None,
-                     observed_value: ExecutionRecord | None = None) -> JsonValue:
+                     observed_value: ExecutionRecord | None = None,
+                     verified_native_previous: ExecutionRecord | None = None) -> JsonValue:
         """Publish new immutable bodies with the same transaction as their owner."""
         if observed_value is not None and (previous is None or self.projection(observed_value) is not previous):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -429,9 +419,34 @@ class ExecutionContent:
         # Native locations own the value, not a redundant digest in records.
         # Reuse requires comparing the current canonical source, never trusting
         # a proposed in-memory value merely because its type still matches.
-        previous_native = (await self.read_payloads((previous,)) if previous is not None and any(
-            native_user_input_reference(payload) is not None or native_text_reference(payload) is not None
-            for _, payload in _payloads(previous)) else {})
+        if verified_native_previous is not None:
+            # Only the terminal writer supplies this proof: it decoded this
+            # exact projection in its current transaction, and has performed
+            # no source writes since. Other paths must authenticate anew.
+            active = active_state_scope()
+            if (previous is None or self.projection(verified_native_previous) is not previous
+                    or active is None or not active.writable
+                    or self._store not in active.transactions):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous_native = {}
+            for path, payload in _payloads(previous):
+                reference = native_user_input_reference(payload) or native_text_reference(payload)
+                if reference is None:
+                    continue
+                if path == ("stored_user_input",):
+                    previous_native[reference] = verified_native_previous.stored_user_input
+                elif path == ("result", "fields", "output") and verified_native_previous.result is not None:
+                    previous_native[reference] = verified_native_previous.result.output
+                elif (path == ("recovery", "fields", "terminal_handoff", "fields", "output")
+                      and verified_native_previous.recovery is not None
+                      and verified_native_previous.recovery.terminal_handoff is not None):
+                    previous_native[reference] = verified_native_previous.recovery.terminal_handoff.outcome.output
+                else:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        else:
+            previous_native = (await self.read_payloads((previous,)) if previous is not None and any(
+                native_user_input_reference(payload) is not None or native_text_reference(payload) is not None
+                for _, payload in _payloads(previous)) else {})
         if result_source is None and previous is not None and output is not None:
             for path, payload in _payloads(previous):
                 if path == ("result", "fields", "output"):
@@ -798,7 +813,7 @@ class ExecutionContent:
                           reserve_native: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
         payloads = await self.read_payloads(records, reserve=reserve, reserve_native=reserve_native)
         records = await self.expand_policies(records, reserve=reserve)
-        records = await self._expand_bindings(records, reserve=reserve)
+        records = await self._expand_configuration(records, reserve=reserve)
         def expand(payload: Mapping) -> JsonValue:
             reference = native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)
             return payload if reference is None else _encode_persisted_domain(decode_execution_payload(payload, payloads))

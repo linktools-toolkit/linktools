@@ -121,7 +121,7 @@ async def test_capture_binding_and_owner_rollback_together(
         assert (await service.read_agent(reference, principal=_PRINCIPAL)).binding == binding
 
 
-@pytest.mark.parametrize("corruption", ("missing", "scope", "summary"))
+@pytest.mark.parametrize("corruption", ("missing", "body", "scope", "summary"))
 async def test_capture_binding_reference_never_falls_back_to_execution_or_latest(
     tmp_path: Path, corruption: str,
 ) -> None:
@@ -132,16 +132,23 @@ async def test_capture_binding_reference_never_falls_back_to_execution_or_latest
         row, = await _capture_rows(state)
         value = capture_record_value(row)
         pointer = value["payload"]["binding"]
-        if corruption == "missing":
+        assert set(pointer) == {"$execution_binding", "archive_scope", "content_scope"}
+        if corruption in {"missing", "body"}:
             archive_store = state.task.tasks.state_store.storage_group.opened_archive[1]
             rows = await archive_store.read(lambda tx: tx.scan_records())
-            await archive_store.mutate(lambda tx: tx.delete_records(tuple(item.key for item in rows
-                if item.kind == "archive_content" and item.data.get("codec") == "execution-binding")))
+            owner = next(item for item in rows if item.kind == "archive_content"
+                         and item.data.get("codec") == "execution-binding")
+            if corruption == "missing":
+                await archive_store.mutate(lambda tx: tx.delete_records((owner.key,)))
+            else:
+                assert await archive_store.mutate(lambda tx: tx.replace_record(
+                    replace(owner, payload_bytes=b"corrupt", storage_revision=owner.storage_revision + 1),
+                    expected_storage_revision=owner.storage_revision))
         else:
             if corruption == "scope":
                 pointer["content_scope"] = archive_content_scope("binding-integrity", "another-tenant")
             else:
-                pointer["summary"]["id"] = "another-agent"
+                pointer["summary"] = {"id": "another-agent"}
             changed = capture_record("binding-integrity", "tenant", capture_record_key(row), value,
                 storage_revision=row.storage_revision + 1, source_digest=capture_record_digest(row))
             assert await state.task.tasks.state_store.mutate(lambda tx: tx.replace_record(

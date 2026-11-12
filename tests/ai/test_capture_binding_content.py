@@ -50,10 +50,14 @@ async def test_capture_contract_shares_execution_bytes_and_distinguishes_same_re
         assert len(canonical_json_bytes(projected[0])) < len(canonical_json_bytes(values[0])) // 10
         for actual, expected in zip(projected, values, strict=True):
             assert await restore_capture_bindings(key, actual, archive) == expected
+        assert set(projected[0]["payload"]["binding"]) == {
+            "$execution_binding", "archive_scope", "content_scope"}
         corrupt = deepcopy(projected[0])
-        corrupt["payload"]["binding"]["summary"]["id"] = "another"
+        corrupt["payload"]["binding"]["summary"] = {"id": "another"}
         with pytest.raises(AIError):
             expand_capture_bindings(key, corrupt, {refs[0]: raw})
+        with pytest.raises(AIError):
+            expand_capture_bindings(key, projected[0], {refs[0]: encode_agent_binding_content(other)})
         with pytest.raises(AIError):
             expand_capture_bindings(key, projected[0], {})
 

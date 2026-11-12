@@ -56,11 +56,13 @@ def record_owner_names(*, keys: Sequence[bytes] | None = None, kind: str | None 
 
 
 def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = None,
-                      kind: str | None = None) -> "FromClause":
+                      kind: str | None = None, owner: str | None = None) -> "FromClause":
     """Read a bounded owner set as one SQL statement, preserving global ordering."""
     from sqlalchemy import literal, select, union_all
 
-    names = record_owner_names(keys=keys, kind=kind)
+    if owner is not None and owner not in RECORD_OWNER_TABLES:
+        raise ValueError("unknown record owner")
+    names = (owner,) if owner is not None else record_owner_names(keys=keys, kind=kind)
     if names == ("ai_state_records",):
         return metadata.tables[names[0]]
     canonical = metadata.tables["ai_state_records"]

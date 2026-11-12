@@ -34,13 +34,11 @@ def _projection() -> tuple[StoredRecord, dict, NativeTextReference, StoredPayloa
     group = "a" * 32
     root = NativeMessageRoot(group, store, (NativeMessageSlice(node.identity, 1, 0, 1),))
     expected = StoredPayload.inline_json(text)
-    reference = NativeTextReference(root, expected.digest, expected.size)
+    reference = NativeTextReference(root)
     binding = {"$execution_binding": "execution-binding:" + "b" * 64,
-        "archive_scope": group, "content_scope": archive_content_scope("test", "tenant"),
-        "summary": {"kind": "task", "id": "task", "revision": 1, "max_attempts": 1,
-                    "capability_refs": None, "binding_digest": "c" * 64}}
+        "archive_scope": group, "content_scope": archive_content_scope("test", "tenant")}
     value = {"$dataclass": "execution_record", "schema": 1, "fields": {
-        "binding": binding, "result": {"fields": {"output": {
+        "binding": binding, "result": {"$dataclass": "result_record", "schema": 1, "fields": {"output": {
             "$dataclass": "stored_payload", "schema": 1, "fields": {"content": reference.to_json()},
         }}}}}
     record = StoredRecord(b"execution", None, None, "execution", b"execution", None, 1, None, 0, None,
@@ -74,7 +72,7 @@ def test_native_text_snapshot_rejects_corrupt_or_foreign_sources(damage: str) ->
         content = value["fields"]["result"]["fields"]["output"]["fields"]["content"]
         content["$native_text"] = replace(reference.root, store_key=native_store_key("test", "other")).to_json()
     else:
-        value["fields"]["result"]["fields"]["output"]["fields"]["content"]["digest"] = "e" * 64
+        rows[reference.root.group_id][0][0]["message_sha256"] = "e" * 64
     record = replace(record, data=encode_envelope({"type": "execution_record", "payload": value}))
     with pytest.raises(AIError):
         _expand_snapshot_native_content(record, rows, payloads, namespace="test", tenant_id="tenant")

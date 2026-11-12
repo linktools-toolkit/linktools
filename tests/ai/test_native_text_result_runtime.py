@@ -53,7 +53,7 @@ async def _publish(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ("large_equal", "small_equal", "different"))
-async def test_terminal_text_reuses_only_equal_large_published_message(tmp_path: Path, case: str) -> None:
+async def test_terminal_text_reuses_only_equal_published_message(tmp_path: Path, case: str) -> None:
     body = "large text " * 10000 if case != "small_equal" else "small"
     output = body if case != "different" else body + " transformed"
     config = PersistenceStorage.sqlite(tmp_path / "results.db")
@@ -63,7 +63,7 @@ async def test_terminal_text_reuses_only_equal_large_published_message(tmp_path:
         repository = state.execution.executions
         raw = await repository.state_store.read_record(repository.execution_record_key("execution"))
         references = [native_text_reference(payload) for _, payload in execution_payload_slots(decode_envelope(raw.data).value["payload"])]
-        assert any(references) is (case == "large_equal")
+        assert any(references) is (case in {"large_equal", "small_equal"})
         counts: Counter[str] = Counter()
 
         def sql(_connection: object, _cursor: object, statement: str, _parameters: object, _context: object, _many: bool) -> None:
@@ -97,7 +97,7 @@ async def test_terminal_writer_rejects_unverified_native_source(tmp_path: Path, 
         other = replace(current, execution_id="other", root_execution_id="other")
         await repository.create_execution(other)
         output = StoredPayload.inline_json("different " * 12000)
-        forged = replace(reference, digest=output.digest, size=output.size)
+        forged = reference
         if missing:
             forged = replace(forged, root=replace(forged.root,
                 slices=(replace(forged.root.slices[0], first="f" * 64),)))

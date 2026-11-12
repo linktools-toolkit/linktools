@@ -18,7 +18,7 @@ async def test_execution_payload_content_has_one_step_owner(tmp_path: Path, back
     storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
     async with Persistence.open("payload-owner", tenant_id="tenant", storage=storage) as state:
         group = state.execution.executions.state_store.storage_group
-        scope, store = await group.open_archive()
+        scope, store = await group.open_archive(create=True)
         archive = ContentArchive(store, scope, namespace="payload-owner", tenant_id="tenant", object_store=None)
         raw = b"accepted input" * 10000
         prepared = PreparedArchive()
