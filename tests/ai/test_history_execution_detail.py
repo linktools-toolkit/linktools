@@ -303,7 +303,7 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
     await state.initialize(namespace="execution-detail", tenant_id="tenant")
     try:
         from linktools.ai.core import ResourceKind, ResourceRef
-        from linktools.ai.persistence.codec import decode_execution_metadata, encode_domain, encode_envelope
+        from linktools.ai.persistence.codec import decode_execution_metadata, encode_execution_content, encode_envelope
 
         original = _execution("execution", status=ExecutionStatus.SUCCEEDED, prompt="question")
         original = replace(original, started_at=original.created_at)
@@ -312,7 +312,7 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
         header = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
         # The stale observation is independent of the source writer's immutable terminal state.
         cached_metadata = decode_execution_metadata(encode_envelope({
-            "type": "execution_record", "payload": encode_domain(original),
+            "type": "execution_record", "payload": encode_execution_content(original, {}),
         }), tenant_id="tenant")
         if source == "changed_output":
             fresh = replace(original, result=replace(

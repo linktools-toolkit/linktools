@@ -47,6 +47,7 @@ class _Traffic:
         self.statements: Counter[str] = Counter()
         self.reads: list[tuple[str, tuple[object, ...]]] = []
         self.writes: list[tuple[str, str]] = []
+        self.record_inserts: Counter[str] = Counter()
         self.rows = 0
         self.native_insert_statements = 0
         self.returned_body_bytes = 0
@@ -67,6 +68,11 @@ class _Traffic:
             target = re.match(r"(?:INSERT INTO|UPDATE|DELETE FROM) (\w+)", statement.lstrip())
             assert target is not None
             self.writes.append((operation, target.group(1)))
+        if operation == 'INSERT' and statement.lstrip().startswith('INSERT INTO ai_state_records '):
+            columns = statement.split('(', 1)[1].split(')', 1)[0].split(', ')
+            kind_index = columns.index('kind')
+            batches = parameters if many else (parameters,)
+            self.record_inserts.update(batch[kind_index] for batch in batches)
         if operation == 'INSERT' and any(statement.lstrip().startswith('INSERT INTO ' + table)
                 for table in ('ai_step_messages', 'ai_step_sequences')):
             self.native_insert_statements += 1
@@ -113,19 +119,21 @@ class _Traffic:
 
     def assert_owner_metadata(
         self, start: int, *, store_key: bytes, record_store: bytes, root: str,
-        collecting: bool, replacing: bool = False,
+        collecting: bool, replacing: bool = False, binding_store: bytes | None = None,
     ) -> None:
         kinds: Counter[str] = Counter()
         for statement, parameters in self.reads[start:]:
             projection = " ".join(statement.split("FROM", 1)[0].split()).replace('"', '').replace('`', '')
             if projection.startswith("SELECT ai_state_records.id,"):
                 identifiers = statement.replace('"', '').replace('`', '')
-                assert "ai_state_records.store_key =" in identifiers and "ai_state_records.key_locator =" in identifiers
+                assert "ai_state_records.store_key =" in identifiers
+                assert re.search(r"ai_state_records\.key_locator (?:= \?|IN \(\?\))", identifiers)
                 # The lookup returns the complete raw identity for owner validation.
                 assert "ai_state_records.key," in projection and "ai_state_records.key_locator," in projection
-                assert parameters[0] == record_store and len(parameters) == 2
+                assert len(parameters) == 2
+                assert parameters[0] in (record_store,) + (() if binding_store is None else (binding_store,))
                 assert isinstance(parameters[1], str) and re.fullmatch(r"[0-9a-f]{64}", parameters[1])
-                kinds['owner'] += 1
+                kinds['owner' if parameters[0] == record_store else 'binding'] += 1
             elif projection == "SELECT ai_step_sequences.sha256, ai_step_sequences.id":
                 assert "ai_step_sequences.sha256 IN" in statement
                 assert parameters == (native_store_locator(store_key), store_key, root)
@@ -144,6 +152,8 @@ class _Traffic:
                 assert "WHERE ai_step_sequences.id =" in statement and len(parameters) == 1
                 kinds['retired_target'] += 1
         expected = Counter(owner=1, root=1)
+        if binding_store is not None:
+            expected['binding'] = 1
         if collecting:
             expected['collector'] = 2 if replacing else 1
         if replacing:
@@ -372,8 +382,12 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
         before = traffic.statements['SELECT']
         execution = await cold.execution.executions.get('execution', tenant_id=tenant)
         assert execution is not None and execution.input_context is not None
-        assert await cold_service.load(execution.input_context) == context
+        # Full execution restoration reads its owner and shared binding. Neither
+        # query materializes a native message; keep this cost separate.
         assert traffic.statements['SELECT'] == before + 2
+        before = traffic.statements['SELECT']
+        assert await cold_service.load(execution.input_context) == context
+        assert traffic.statements['SELECT'] == before + 1
         assert traffic.rows == 4 * size
         assert traffic.returned_body_bytes == 4 * stored_bytes
         assert not any(traffic.statements[op] for op in ('INSERT', 'UPDATE', 'DELETE'))
@@ -601,14 +615,21 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                 )
 
             write_start = len(writer_traffic.writes)
+            record_inserts = writer_traffic.record_inserts.copy()
             await store.mutate(admit)
+            assert writer_traffic.record_inserts - record_inserts == Counter(execution=1, archive_content=1)
             writer_traffic.assert_owner_metadata(
                 reads, store_key=native.store_key, record_store=store.store_key,
                 root=roots[0].slices[0].first, collecting=False,
+                binding_store=store.storage_group.opened_archive[1].store_key,
             )
-            phase_reads['context'] += writer_traffic.statements['SELECT'] - reads
+            # One bounded content-identity read belongs to the shared binding,
+            # not the native context owner/root pair. Keep it visible separately.
+            phase_reads['binding'] += 1
+            phase_reads['context'] += writer_traffic.statements['SELECT'] - reads - 1
             budgeted_writes += writer_traffic.assert_writes(write_start, {
-                ('INSERT', 'ai_state_records'): 1, ('UPDATE', 'ai_step_sequences'): 1,
+                # Owner insert plus content-addressed binding insert-or-verify.
+                ('INSERT', 'ai_state_records'): 2, ('UPDATE', 'ai_step_sequences'): 1,
                 ('INSERT', 'ai_native_content_edges'): 2, ('DELETE', 'ai_native_content_edges'): 1,
             })
             assert writer_traffic.rows == body_rows
@@ -635,7 +656,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         # separately from the zero-encode frozen projection/context reuse path.
         assert phase_encodings['mutable_snapshot_freeze'] <= turns * (turns + 1) // 2
         assert phase_encodings['frozen_projection'] == phase_encodings['confirmed_context'] == 0
-        assert phase_reads == {'snapshot': 3 * turns, 'archive': 2 * (3 + 5 * (turns - 1)), 'context': 2 * turns}
+        assert phase_reads == {'snapshot': 3 * turns, 'archive': 2 * (3 + 5 * (turns - 1)), 'context': 2 * turns, 'binding': turns}
         assert writer_traffic.statements['SELECT'] == sum(phase_reads.values())
         assert reader_traffic.statements['SELECT'] == turns
         assert 0 < writer_traffic.preparations <= 2 * turns
