@@ -59,6 +59,7 @@ class _Components:
     input_captures = None
     history = None
     memory_scope = None
+    asset_sources = {}
 
     def __init__(self, close_callback) -> None:
         self.close_callback = close_callback

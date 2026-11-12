@@ -615,8 +615,8 @@ class InputCaptures:
     async def _capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         principal = request.principal
         repository = self._execution_repositories.executions
-        record = await repository.state_store.read(
-            lambda _transaction: repository.get(execution_id, tenant_id=principal.tenant_id)
+        record = await repository.read_content(
+            lambda _group: repository.get(execution_id, tenant_id=principal.tenant_id)
         )
         if record is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)

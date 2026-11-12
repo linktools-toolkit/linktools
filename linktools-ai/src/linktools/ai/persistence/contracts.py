@@ -123,7 +123,7 @@ from ._plan import PersistenceDomain
 
 if TYPE_CHECKING:
     from ._archive import ContentArchive, PreparedArchive
-    from .state import Observed, StateStore, StateTransaction, StoredRecord
+    from .state import Observed, StateGroupTransaction, StateStore, StateTransaction, StoredRecord
 
 
 def _validate_transcript_index(value: int, *, positive: bool = False) -> None:
@@ -1390,7 +1390,17 @@ class ConversationHistoryRepository(RuntimeRepository, Protocol):
     ) -> tuple[ConversationHistoryIndexNodeRecord, ...]: ...
 
 
+_ContentValueT = TypeVar("_ContentValueT")
+
+
 class ExecutionRepository(RuntimeRepository, Protocol):
+    async def read_content(
+        self, capture: Callable[[StateGroupTransaction], Awaitable[_ContentValueT]],
+        *, stores: Sequence[StateStore] = (),
+    ) -> _ContentValueT:
+        """Read owners and content together, retrying cold dependencies read-only."""
+        ...
+
     async def get_view(
         self, execution_id: str, *, tenant_id: str,
     ) -> tuple[ResourceRef, ExecutionView] | None: ...

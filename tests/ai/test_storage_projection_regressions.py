@@ -130,7 +130,7 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
     features.capability(ExecutionCapability(retain_history=True))
     features.agent("default", model="default", allow_tools=())
     rule = AssetKey("rule", "current.md")
-    expected = RepositoryInstructions((RepositoryInstructionDocument("rule:current", ".", "Rule added after startup"),))
+    expected = None
     try:
         async with Persistence.open("current-instructions", storage=PersistenceStorage.sqlite(tmp_path / "rules.db")) as persistence, Runtime.attach(
             persistence=persistence, features=model_features(_Models(_UsageFunctionModel(model)), features),
@@ -140,6 +140,11 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
             for index in range(3):
                 if index == 1:
                     await assets.put(rule, b"Rule added after startup")
+                    accepted_version, = await assets.resolve_versions((rule,))
+                    expected = RepositoryInstructions((RepositoryInstructionDocument(
+                        "rule:current", ".", "Rule added after startup",
+                        asset_source_id="current-instructions", asset=accepted_version,
+                    ),))
                 elif index == 2:
                     await assets.delete(rule)
                 result = (await session.run(f"question {index}", timeout_seconds=5)).result
@@ -154,6 +159,7 @@ async def test_session_admission_captures_current_rules_without_rewriting_histor
             contexts = [await reader.load_input_context(record.input_context) for record in records]
             assert all(context is not None for context in contexts)
             assert contexts[0].repository_instructions is None
+            assert expected is not None
             assert contexts[1].repository_instructions == expected.to_payload()
             assert contexts[2].repository_instructions is None
             assert "Rule added after startup" not in observed[0]
