@@ -133,3 +133,21 @@ async def test_unsupported_group_keeps_preparation_metadata_before_archive_open(
         assert len(prepared) == 1
     finally:
         await state.close()
+
+
+async def test_content_identity_keys_preserve_content_preparation_keys(tmp_path: Path) -> None:
+    state = Persistence(_storage("memory", tmp_path))
+    await state.initialize(namespace="archive", tenant_id="tenant")
+    try:
+        archive = await _archive(state)
+        values = (("bytes", b"body"),)
+        prepared = PreparedArchive()
+        identities = await archive.prepare_content(values, prepared)
+        assert archive.content_identity_keys(identities) == archive.content_record_keys(values)
+        assert set(archive.content_identity_keys(identities)) == set(prepared.records)
+        with pytest.raises(AIError):
+            archive.content_identity_keys(("invalid",))
+        await _publish(archive, prepared)
+        assert await archive.read_contents(identities, codec="bytes") == (b"body",)
+    finally:
+        await state.close()

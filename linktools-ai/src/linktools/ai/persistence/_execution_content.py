@@ -25,7 +25,7 @@ from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
 from .codec import (decode_execution_terminal_details,  binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
     encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
-from .state import StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
+from .state import GroupRecordReader, StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
 from ._execution_policy_content import (POLICY_CODEC, policy_reference, policy_values, encode_policy, decode_policy, expand_policy)
 
@@ -265,6 +265,30 @@ class ExecutionContent:
                                    or self._content_archive.store not in active.transactions):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return self._content_archive
+
+    async def prefetch_configuration_owner(self, hint: StoredRecord) -> None:
+        """Use earlier reference addresses only to batch a fresh owner observation."""
+        active = active_state_scope()
+        if (active is None or active.writable or active.group is not self._store.storage_group
+                or not isinstance(active.record_reader, GroupRecordReader)):
+            return
+        try:
+            references = tuple(reference for reference in (binding_reference(_binding(hint)), policy_reference(hint))
+                               if reference is not None)
+        except AIError:
+            return
+        if not references:
+            return
+        archive = await self._archive()
+        if any(reference[:2] != (archive.scope_id, archive.content_scope) for reference in references):
+            return
+        # These are hints, not retained values or source-existence evidence. The
+        # current owner and hinted content are both read in the active snapshot;
+        # normal decoding follows the current owner's refs, including changes.
+        await active.record_reader.get_records({
+            self._store: (hint.key,),
+            archive.store: archive.content_identity_keys(tuple(reference[2] for reference in references)),
+        })
 
     async def expand(self, record: StoredRecord) -> StoredRecord:
         return (await self.expand_many((record,)))[0]

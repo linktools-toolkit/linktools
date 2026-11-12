@@ -1016,6 +1016,10 @@ class ContentArchive:
         prepared.nodes.update(nodes)
         return groups, {identity: contents[identity] for group in groups for identity in group} if include_content else {}
 
+    def content_identity_keys(self, identities: Sequence[str]) -> tuple[bytes, ...]:
+        """Resolve fixed content identities without preparing or loading bytes."""
+        return tuple(self._key("archive_content", validate_archive_content_identity(identity)) for identity in identities)
+
     async def content_records(self, identities: Sequence[str]) -> tuple[ContentRecord, ...]:
         """Read content metadata in a batch without opening object bodies."""
         keys = {identity: self._key("archive_content", validate_archive_content_identity(identity)) for identity in identities}

@@ -655,9 +655,12 @@ class StepExecutionHistoryReader:
     async def read_authorized_model_interaction_updates(
         self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
         after_cutoffs: tuple[UsageReadCutoff, ...], limit: int,
+        source_hint: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
         """Capture identities and their first bounded suffix in one authorized scope."""
         async def read() -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+            if source_hint is not None:
+                await source_hint()
             record, boundary = await self._capture_authorized_model_interaction_cutoffs(
                 execution_id, tenant_id=tenant_id, executions=executions,
             )

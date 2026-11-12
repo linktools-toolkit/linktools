@@ -344,6 +344,29 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         record = await self._store.read_record(self._key("execution", (identity,)))
         return None if record is None else self._decode_header(record, identity)
 
+    async def capture_header(
+        self, identity: str, *, tenant_id: str,
+    ) -> tuple[ResourceRef | None, Callable[[], Awaitable[None]] | None]:
+        """Capture authorization identity and a one-operation source-read hint."""
+        if tenant_id != self._tenant_id:
+            return None, None
+
+        async def capture(transaction: StateTransaction) -> tuple[ResourceRef | None, Callable[[], Awaitable[None]] | None]:
+            header = await self.get_header(identity, tenant_id=tenant_id)
+            if header is None:
+                return None, None
+            hint = await transaction.get_record(self._key("execution", (identity,)))
+            if hint is None:
+                return None, None
+            self._decode_header(hint, identity)
+
+            async def load() -> None:
+                await self._execution_content.prefetch_configuration_owner(hint)
+
+            return header, load
+
+        return await self._store.read(capture)
+
     async def get_header_fresh(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
         if tenant_id != self._tenant_id:
             return None

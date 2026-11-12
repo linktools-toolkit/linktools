@@ -306,3 +306,74 @@ async def test_structural_short_pages_keep_cross_run_budget_and_finish_via_exist
         assert all(0 < limit <= 200 for _, _, _, limit in requests)
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("change", ("binding", "missing", "content", "denied"))
+async def test_update_source_hints_never_replace_post_authorization_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, change: str,
+) -> None:
+    from linktools.ai.core import AuthorizationAction, ResourceRef
+    from linktools.ai.execution import ExecutionView
+    from linktools.ai.persistence.state import RecordQuery
+
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
+    try:
+        await _seed(state)
+        repository = state.execution.executions
+        original = await repository.get("execution", tenant_id="tenant")
+        assert original is not None
+        observed = []
+        get_view = repository.get_view
+
+        async def tracked_view(identity: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+            value = await get_view(identity, tenant_id=tenant_id)
+            if value is not None:
+                observed.append(value[1])
+            return value
+
+        async def forbidden_history(*args: object, **kwargs: object) -> None:
+            raise AssertionError("denied or missing sources must not disclose history")
+
+        class Authorization:
+            async def authorize(self, principal: Principal, action: AuthorizationAction, resource: ResourceRef) -> None:
+                assert active_state_scope() is None
+                if change == "denied":
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                if change == "binding":
+                    binding = replace(original.binding, agent_spec=replace(
+                        original.binding.agent_spec, id="replacement-agent", revision=2,
+                    ))
+                    await repository.compare_and_swap(
+                        "execution", tenant_id="tenant", expected_revision=original.revision,
+                        next_record=replace(original, binding=binding, revision=original.revision + 1),
+                    )
+                elif change == "missing":
+                    await repository.state_store.mutate(lambda transaction: transaction.delete_record(
+                        repository.execution_record_key("execution"),
+                    ))
+                else:
+                    _, archive = await repository.state_store.storage_group.open_archive()
+                    rows = await archive.read(lambda transaction: transaction.list_records(RecordQuery(kind="archive_content")))
+                    binding = next(row for row in rows if row.data["codec"] == "execution-binding")
+                    await archive.mutate(lambda transaction: transaction.delete_record(
+                        binding.key, expected_storage_revision=binding.storage_revision,
+                    ))
+
+        monkeypatch.setattr(repository, "get_view", tracked_view)
+        if change != "binding":
+            monkeypatch.setattr(state.run_store.read_store(PersistenceDomain.TRACE), "capture_history", forbidden_history)
+        service = _service(state, authorization=Authorization())
+        if change == "binding":
+            boundary, rows = await service.read_model_interaction_updates("execution", principal=_PRINCIPAL)
+            assert boundary.cutoffs and rows
+            assert observed and all(value.agent_id == "replacement-agent" for value in observed)
+        else:
+            with pytest.raises(AIError) as raised:
+                await service.read_model_interaction_updates("execution", principal=_PRINCIPAL)
+            expected = ErrorCode.STORAGE_INTEGRITY_ERROR if change == "content" else ErrorCode.AUTHORIZATION_DENIED
+            assert raised.value.code is expected
+            assert not observed
+    finally:
+        await state.close()
