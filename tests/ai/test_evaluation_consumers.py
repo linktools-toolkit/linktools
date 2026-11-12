@@ -257,7 +257,7 @@ async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp
 
 
 @pytest.mark.asyncio
-async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denominators(tmp_path: Path) -> None:
+async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denominators() -> None:
     calls: list[tuple[str, str]] = []
 
     async def baseline(context: TaskNodeContext[None]) -> JsonValue:
@@ -277,7 +277,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
     scorer = Task("consumer.first-score", exact, effect_policy="none")
     revised_task = Task("consumer.revised-score", revised, effect_policy="none")
     async with (
-        Persistence.open('rescore-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_256,
+        Persistence.open('rescore-consumers', storage=PersistenceStorage.in_memory(), tenant_id=TENANT) as persistence_256,
         TaskEngine.open(old, new, scorer, persistence=persistence_256, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -285,7 +285,8 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
             CaseSpec.task(CaseRef("paired", name, 1), input={"answer": name}, expected=name) for name in ("first", "second")
         )), principal=PRINCIPAL, idempotency_key="publish-paired")
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("baseline", task=old.ref), CandidateSpec("candidate", task=new.ref)), (rule_scorer(scorer),)),
+            (CandidateSpec("baseline", task=old.ref), CandidateSpec("candidate", task=new.ref)), (rule_scorer(scorer),),
+            policy=EvaluationPolicy(allow_volatile=True)),
             PRINCIPAL, "start-paired"))
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
@@ -326,7 +327,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
 
 
 @pytest.mark.asyncio
-async def test_target_failure_invalid_score_and_na_remain_in_the_report_denominator(tmp_path: Path) -> None:
+async def test_target_failure_invalid_score_and_na_remain_in_the_report_denominator() -> None:
     async def target(context: TaskNodeContext[None]) -> JsonValue:
         if context.input["answer"] == "target-error":
             raise ValueError("target failed")
@@ -343,7 +344,7 @@ async def test_target_failure_invalid_score_and_na_remain_in_the_report_denomina
     target_task = Task("consumer.failures", target, effect_policy="none")
     scorer_task = Task("consumer.score-failures", score, effect_policy="none")
     async with (
-        Persistence.open('failure-consumers', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id=TENANT) as persistence_316,
+        Persistence.open('failure-consumers', storage=PersistenceStorage.in_memory(), tenant_id=TENANT) as persistence_316,
         TaskEngine.open(target_task, scorer_task, persistence=persistence_316, context=CONTEXT) as engine,
         Evaluations.open(engine) as evaluations,
     ):
@@ -351,7 +352,8 @@ async def test_target_failure_invalid_score_and_na_remain_in_the_report_denomina
             CaseSpec.task(CaseRef("failures", name, 1), input={"answer": name}) for name in ("good", "target-error", "bad-score", "na")
         )), principal=PRINCIPAL, idempotency_key="publish-failures")
         run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("current", task=target_task.ref),), (rule_scorer(scorer_task),)), PRINCIPAL, "start-failures"))
+            (CandidateSpec("current", task=target_task.ref),), (rule_scorer(scorer_task),),
+            policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start-failures"))
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         report = await run.create_report()
