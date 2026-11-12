@@ -29,16 +29,19 @@ def content_reference_statement(
     metadata: "MetaData", *, dialect: str, owner_store_key: bytes, owner_keys: Sequence[bytes],
     content_store_key: bytes, content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
     typed_payloads: bool, additional_records: Mapping[bytes, Sequence[bytes]] | None = None,
+    owner_statement: "Select | None" = None,
 ) -> "Select":
     from sqlalchemy import JSON, LargeBinary, and_, case, cast, func, literal, select, true, type_coerce, union_all
     from sqlalchemy.dialects.mysql import BINARY
 
-    table = record_owner_rows(metadata, keys=owner_keys)
-    owner_query = select(table).where(
-        table.c.store_key == owner_store_key,
-        table.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in owner_keys)),
-        table.c.key.in_(tuple(owner_keys)),
-    )
+    owner_query = owner_statement
+    if owner_query is None:
+        table = record_owner_rows(metadata, keys=owner_keys)
+        owner_query = select(table).where(
+            table.c.store_key == owner_store_key,
+            table.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in owner_keys)),
+            table.c.key.in_(tuple(owner_keys)),
+        )
     # MySQL 5.7 retains the same indexed plan through derived tables.
     owners = (owner_query.subquery("content_owners") if dialect == "mysql" else
               owner_query.cte("content_owners"))

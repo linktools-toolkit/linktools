@@ -731,10 +731,11 @@ class ToolRepositoryImpl(_RepositoryBase):
         async def read(_transaction):
             if tenant_id != self._tenant_id:
                 return ()
-            records = await self._records(
-                "tool_operation",
-                parent=self._parent("tool_operation", "execution", (execution_id,)),
-            )
+            parent = self._parent("tool_operation", "execution", (execution_id,))
+            records = await self._tool_content.prefetch_owners(
+                (), query=RecordQuery(kind="tool_operation", parent_key=parent))
+            if records is None:
+                records = await self._records("tool_operation", parent=parent)
             values = tuple(
                 [await self._decode(record, ToolOperationRecord) for record in await self._tool_content.expand_many(records)]
             )
@@ -825,10 +826,11 @@ class ToolRepositoryImpl(_RepositoryBase):
             if execution_id is not None:
                 values = await self._list_effect_records(execution_id, agent_run_id, recovery_agent_run_id)
                 return tuple(values)
-            records = await self._records(
-                "tool_operation",
-                scope=self._scope("tool_operation", "agent_run", (agent_run_id,)),
-            )
+            scope = self._scope("tool_operation", "agent_run", (agent_run_id,))
+            records = await self._tool_content.prefetch_owners(
+                (), query=RecordQuery(kind="tool_operation", scope_key=scope))
+            if records is None:
+                records = await self._records("tool_operation", scope=scope)
             values = tuple(
                 [await self._decode(record, ToolOperationRecord) for record in await self._tool_content.expand_many(records)]
             )

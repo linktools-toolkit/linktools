@@ -166,6 +166,7 @@ class _SqlGroupTransaction:
         self, *, owner_store: StateStore, owner_keys: Sequence[bytes], content_store: StateStore,
         content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
         additional_records: Mapping[StateStore, Sequence[bytes]] | None = None,
+        owner_query: RecordQuery | None = None,
     ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]] | None:
         from ._archive import archive_scope_parts, validate_archive_content_identity
         from ._content_reference_sql import content_reference_batch_size, content_reference_statement
@@ -184,6 +185,9 @@ class _SqlGroupTransaction:
                 or any(not isinstance(part, str) or not part for part in path) for path in paths)):
             raise ValueError("content references require bounded explicit JSON paths")
         keys = tuple(dict.fromkeys(validate_record_key(key) for key in owner_keys))
+        if owner_query is not None and (keys or additional_records or owner_query.kind != "tool_operation"
+                or owner_query.scope_key is None and owner_query.parent_key is None):
+            raise ValueError("content owner queries require one scoped tool selection")
         namespace, tenant = archive_scope_parts(content_scope_key)
         required = []
         for key in keys:
@@ -218,7 +222,8 @@ class _SqlGroupTransaction:
         found: dict[StateStore, dict[bytes, StoredRecord]] = {owner_store: {}, content_store: {}}
         found.update({store: {} for store in extras if store not in found})
         size = max(1, content_reference_batch_size(len(paths)) - (sum(map(len, extras.values())) * 3 + 5) // 6)
-        for offset in range(0, len(required), size):
+        offsets = (0,) if owner_query is not None else range(0, len(required), size)
+        for offset in offsets:
             batch = tuple(required[offset:offset + size])
             statement = content_reference_statement(
                 self._group.metadata, dialect=dialect, owner_store_key=owner._store_key, owner_keys=batch,
@@ -226,6 +231,8 @@ class _SqlGroupTransaction:
                 typed_payloads=(content._store_key == STATE_GROUP_ARCHIVE_KEY
                     and any(path[-1] == "$execution_payload" for path in paths)),
                 additional_records={self.transaction(store)._store_key: requested for store, requested in extras.items()} if offset == 0 else None,
+                owner_statement=(_record_query_statement(self._group.metadata, owner._store_key, owner_query)
+                                 if owner_query is not None else None),
             )
             for row in (await owner._execute(statement)).mappings():
                 kind = row["source_kind"]
@@ -244,7 +251,7 @@ class _SqlGroupTransaction:
                     if kind not in {0, 1} or row["store_key"] != transaction._store_key:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     record = _record_from_row(row)
-                    if kind == 0 and record.key not in batch:
+                    if kind == 0 and owner_query is None and record.key not in batch:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 transaction._record_cache[record.key] = record
                 found[target_store][record.key] = record
@@ -2050,49 +2057,7 @@ class _SqlTransaction:
         return result.rowcount == 1
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
-        from sqlalchemy import and_, or_, select
-
-        table = record_owner_rows(self._metadata, kind=query.kind)
-        conditions = [table.c.store_key == self._store_key]
-        if query.scope_key is not None:
-            conditions.append(_key_matches(table.c.scope_key, query.scope_key))
-        if query.parent_key is not None:
-            conditions.append(_key_matches(table.c.parent_key, query.parent_key))
-        if query.kind is not None:
-            conditions.append(table.c.kind == query.kind)
-        if query.states is not None:
-            conditions.append(table.c.state.in_(tuple(query.states)))
-        if query.sort_key_prefix is not None:
-            conditions.append(table.c.sort_prefix >= query.sort_key_prefix[:128])
-            conditions.append(table.c.sort_key >= query.sort_key_prefix)
-            prefix_end = _sort_key_prefix_upper_bound(query.sort_key_prefix)
-            if prefix_end is not None:
-                conditions.append(table.c.sort_key < prefix_end)
-        if query.after_sort_key is not None:
-            conditions.append(table.c.sort_prefix >= query.after_sort_key[:128])
-        if query.after_sort_key is not None and query.after_key is not None:
-            conditions.append(
-                or_(
-                    table.c.sort_key > query.after_sort_key,
-                    and_(
-                        table.c.sort_key == query.after_sort_key,
-                        table.c.key > validate_record_key(query.after_key),
-                    ),
-                )
-            )
-        elif query.after_sort_key is not None:
-            conditions.append(table.c.sort_key > query.after_sort_key)
-        statement = (
-            select(table)
-            .where(*conditions)
-            .order_by(
-                table.c.sort_prefix,
-                table.c.sort_key,
-                table.c.key,
-            )
-        )
-        if query.limit is not None:
-            statement = statement.limit(query.limit)
+        statement = _record_query_statement(self._metadata, self._store_key, query)
         rows = (await self._execute(statement)).mappings().all()
         values = tuple(_record_from_row(row) for row in rows)
         if self._store_key == STATE_GROUP_ARCHIVE_KEY:
@@ -2905,6 +2870,52 @@ def _datetime_or_none(value: object) -> datetime | None:
 def _require_scan_limit(limit: int) -> None:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("scan page limit must be positive")
+
+def _record_query_statement(metadata: "MetaData", store_key: bytes, query: RecordQuery) -> "Select":
+    from sqlalchemy import and_, or_, select
+
+    table = record_owner_rows(metadata, kind=query.kind)
+    conditions = [table.c.store_key == store_key]
+    if query.scope_key is not None:
+        conditions.append(_key_matches(table.c.scope_key, query.scope_key))
+    if query.parent_key is not None:
+        conditions.append(_key_matches(table.c.parent_key, query.parent_key))
+    if query.kind is not None:
+        conditions.append(table.c.kind == query.kind)
+    if query.states is not None:
+        conditions.append(table.c.state.in_(tuple(query.states)))
+    if query.sort_key_prefix is not None:
+        conditions.append(table.c.sort_prefix >= query.sort_key_prefix[:128])
+        conditions.append(table.c.sort_key >= query.sort_key_prefix)
+        prefix_end = _sort_key_prefix_upper_bound(query.sort_key_prefix)
+        if prefix_end is not None:
+            conditions.append(table.c.sort_key < prefix_end)
+    if query.after_sort_key is not None:
+        conditions.append(table.c.sort_prefix >= query.after_sort_key[:128])
+    if query.after_sort_key is not None and query.after_key is not None:
+        conditions.append(
+            or_(
+                table.c.sort_key > query.after_sort_key,
+                and_(
+                    table.c.sort_key == query.after_sort_key,
+                    table.c.key > validate_record_key(query.after_key),
+                ),
+            )
+        )
+    elif query.after_sort_key is not None:
+        conditions.append(table.c.sort_key > query.after_sort_key)
+    statement = (
+        select(table)
+        .where(*conditions)
+        .order_by(
+            table.c.sort_prefix,
+            table.c.sort_key,
+            table.c.key,
+        )
+    )
+    if query.limit is not None:
+        statement = statement.limit(query.limit)
+    return statement
 
 
 __all__ = ["SqlStateStorageGroup", "SqlStateStore"]

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from ._record_key import validate_record_key
 
 if TYPE_CHECKING:
-    from .state import StateStore, StoredRecord
+    from .state import RecordQuery, StateStore, StoredRecord
 
 
 class ArchiveNodeSlot(IntFlag):
@@ -53,6 +53,7 @@ class ContentReferenceReader(Protocol):
         self, *, owner_store: "StateStore", owner_keys: Sequence[bytes], content_store: "StateStore",
         content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
         additional_records: Mapping["StateStore", Sequence[bytes]] | None = None,
+        owner_query: "RecordQuery | None" = None,
     ) -> "Mapping[StateStore, Mapping[bytes, StoredRecord]] | None":
         """Capture current owners and declared references in their enlisted snapshot."""
         ...

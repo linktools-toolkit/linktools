@@ -16,7 +16,8 @@ from linktools.ai.persistence._content_reference_sql import content_reference_st
 from linktools.ai.persistence._record_owner import record_owner_rows
 from linktools.ai.persistence.schema import build_runtime_sql_metadata
 from linktools.ai.persistence import PersistenceDomain
-from linktools.ai.persistence.state import record_key
+from linktools.ai.persistence.state import RecordQuery, record_key
+from linktools.ai.persistence._sql import _record_query_statement
 
 from ._metrics_server_test_helpers import _mysql_server, _postgresql_server, _server_database
 
@@ -43,8 +44,9 @@ def test_single_typed_owner_nulls_have_explicit_server_types(kind: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("tool_operation", "agent_run"))
 @pytest.mark.parametrize("backend", ("postgresql", "mysql"))
+@pytest.mark.parametrize("scoped", (False, True))
 async def test_server_typed_owner_content_union_prepares(
-    request: pytest.FixtureRequest, kind: str, backend: str,
+    request: pytest.FixtureRequest, kind: str, backend: str, scoped: bool,
 ) -> None:
     server = request.getfixturevalue(f"_{backend}_server")
     with _server_database(server) as (_, command):
@@ -63,10 +65,27 @@ async def test_server_typed_owner_content_union_prepares(
                 owner_keys=(record_key("owner-types", "tenant", "checkpoint", kind, ("owner",)),),
                 content_store_key=b"archive", content_scope_key=archive_scope_key("owner-types", "tenant"),
                 content_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$execution_payload"),),
-                typed_payloads=True)
+                typed_payloads=True,
+                owner_statement=(_record_query_statement(metadata, b"owner",
+                    RecordQuery(kind=kind, parent_key=b"parent", limit=2)) if scoped else None))
             async with engine.connect() as connection:
                 # Both servers parse casts and resolve UNION column types even
                 # with no rows: exercise the actual owner/content JOIN.
                 assert not (await connection.execute(query)).all()
         finally:
             await engine.dispose()
+
+
+@pytest.mark.parametrize("backend", ("postgresql", "mysql", "sqlite"))
+def test_scoped_owner_content_join_compiles_with_inner_limit(backend: str) -> None:
+    metadata = build_runtime_sql_metadata(frozenset(PersistenceDomain))
+    owner = _record_query_statement(metadata, b"owner",
+        RecordQuery(kind="tool_operation", parent_key=b"parent", limit=2))
+    query = content_reference_statement(metadata, dialect=backend, owner_store_key=b"owner", owner_keys=(),
+        content_store_key=b"archive", content_scope_key=archive_scope_key("owner-types", "tenant"),
+        content_paths=(("value", "payload", "fields", "arguments_payload", "fields", "content", "$execution_payload"),),
+        typed_payloads=True, owner_statement=owner)
+    dialect = {"postgresql": postgresql, "mysql": mysql, "sqlite": sqlite}[backend].dialect()
+    sql = str(query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True}))
+    assert "LIMIT" in sql and "content_owners" in sql and "parent_key" in sql
+    assert "COLLATE utf8mb4_bin)" not in sql

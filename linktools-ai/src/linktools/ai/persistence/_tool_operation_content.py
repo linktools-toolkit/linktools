@@ -26,7 +26,7 @@ from ..steps import native_store_key
 from .codec import (TOOL_PAYLOAD_CODEC, decode_envelope, encode_envelope,
                     tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference,
                     decode_domain, encode_domain, _encode_persisted_domain)
-from .state import StateStore, StoredRecord, active_state_scope
+from .state import RecordQuery, StateStore, StoredRecord, active_state_scope
 
 class ToolContentReadRequired(AIError):
     def __init__(self) -> None:
@@ -135,21 +135,26 @@ class ToolOperationContent:
         return ContentArchive(opened[1], opened[0], namespace=self.namespace, tenant_id=self.tenant_id, object_store=None,
                               object_reader=self._archive_object_reader)
 
-    async def prefetch_owners(self, keys: Sequence[bytes]) -> None:
+    async def prefetch_owners(
+        self, keys: Sequence[bytes], *, query: RecordQuery | None = None,
+    ) -> tuple[StoredRecord, ...] | None:
         """Capture fixed payload slots with keyed owners in the current snapshot."""
         active = active_state_scope()
-        if (not keys or active is None or active.writable
+        if (not keys and query is None or active is None or active.writable
                 or active.group is not self.store.storage_group
                 or not isinstance(active.record_reader, ContentReferenceReader)
                 or self.store.storage_group.opened_archive is None):
             return
         archive = await self._archive()
-        await active.record_reader.read_content_references(
+        found = await active.record_reader.read_content_references(
             owner_store=self.store, owner_keys=keys, content_store=archive.store,
             content_scope_key=archive_scope_key(self.namespace, self.tenant_id),
             content_paths=tuple(("value", "payload", "fields", name, "fields", "content", "$execution_payload")
                                 for name in ("arguments_payload", "result_payload", "error_payload")),
+            owner_query=query,
         )
+        return (None if found is None else
+                tuple(sorted(found[self.store].values(), key=lambda row: (row.sort_key, row.key))))
 
     async def encode(
         self, record: StoredRecord, *, previous: StoredRecord | None = None,
