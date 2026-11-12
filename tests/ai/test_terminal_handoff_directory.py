@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Terminal publication depends on durable facts, not a live model directory."""
 
+import shutil
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -19,54 +21,97 @@ from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _storage
 from ._runtime_test_helpers import native_checkpoint
 
 
-def _features_without_model() -> RuntimeFeatures:
+def _features_without_model(*, native_database: Path | None = None) -> RuntimeFeatures:
     features = RuntimeFeatures(_NAMESPACE)
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
-    features.capability(native_checkpoint(), scope="runtime")
+    features.capability(native_checkpoint(database=native_database), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     return features
+
+
+@pytest.fixture(scope="module")
+def terminal_handoff_copy(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Callable[[Path], tuple[Path, dict[str, object]]]:
+    frozen: tuple[Path, dict[str, object]] | None = None
+
+    def prepare(destination: Path) -> tuple[Path, dict[str, object]]:
+        nonlocal frozen
+        if frozen is None:
+            source = tmp_path_factory.mktemp("terminal-handoff-owner")
+            owner = _RuntimeProcess(
+                source / "runtime.db", phase="finalizing", native_database=source / "native.db",
+            )
+            try:
+                initial = owner.initial
+                assert initial["status"] == "FINALIZING"
+                assert initial["handoff_phase"] == "prepared"
+                assert initial["model_calls"] == 1
+                owner.crash()
+                assert not owner.process.is_alive()
+                assert owner.process.exitcode is not None
+            finally:
+                owner.close()
+            assert all((source / name).is_file() for name in (
+                "runtime-execution.db", "runtime-conversation.db", "native.db",
+            ))
+            # Never open the frozen stores. Copy the complete stopped directory,
+            # including native history and crash-time SQLite sidecars.
+            frozen = source, initial
+        source, initial = frozen
+        copied = Path(shutil.copytree(source, destination / "crash"))
+        return copied, initial
+
+    return prepare
+
+
+async def _assert_prepared_handoff(persistence: Persistence, initial: dict[str, object]) -> str:
+    execution_id = initial["execution_id"]
+    assert isinstance(execution_id, str)
+    record = await persistence.execution.executions.get(execution_id, tenant_id="default")
+    assert record is not None
+    assert record.status is ExecutionStatus.FINALIZING
+    assert record.recovery.handoff_phase.value == "prepared"
+    assert record.producer_generation == initial["generation"]
+    assert record.producer_claim_id == initial["claim_id"]
+    session = await persistence.conversation.sessions.get("session", tenant_id="default")
+    assert session is not None and session.active_execution_id == execution_id
+    return execution_id
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery", ("startup", "explicit"))
 async def test_terminal_handoff_survives_removed_model_route(
     tmp_path: Path, recovery: str,
+    terminal_handoff_copy: Callable[[Path], tuple[Path, dict[str, object]]],
 ) -> None:
-    database = tmp_path / "runtime.db"
-    owner = _RuntimeProcess(database, phase="finalizing")
-    try:
-        initial = owner.initial
-        assert initial["status"] == "FINALIZING"
-        assert initial["handoff_phase"] == "prepared"
-        assert initial["model_calls"] == 1
-        execution_id = initial["execution_id"]
-        owner.crash()
-        async with Persistence.open(_NAMESPACE, storage=_storage(database, "finalizing")) as persistence:
-            async with Runtime.attach(
-                persistence=persistence, features=_features_without_model(),
-                auto_recover=recovery == "startup",
-            ) as runtime:
-                principal = runtime.default_principal
-                if recovery == "explicit":
-                    with pytest.raises(AIError) as denied:
-                        await runtime.executions.recover(
-                            execution_id, principal=replace(principal, principal_id="other-owner"),
-                        )
-                    assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-                    await runtime.executions.recover(execution_id, principal=principal)
-                result = await runtime.executions.result(execution_id, principal=principal)
-                assert result.status is ExecutionStatus.SUCCEEDED
-                assert result.output == {"text": "owner answer"}
-                record = await persistence.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
-                assert record.recovery.handoff_phase.value == "completed"
-                assert record.producer_generation == initial["generation"]
-                session = await persistence.conversation.sessions.get("session", tenant_id=principal.tenant_id)
-                assert session.active_execution_id is None
-                timeline = await runtime.sessions.timeline("session", principal=principal)
-                assert len(timeline.items) == 1
-                assert timeline.items[0].output == result.output
-    finally:
-        owner.close()
+    copied, initial = terminal_handoff_copy(tmp_path)
+    database = copied / "runtime.db"
+    async with Persistence.open(_NAMESPACE, storage=_storage(database, "finalizing")) as persistence:
+        execution_id = await _assert_prepared_handoff(persistence, initial)
+        async with Runtime.attach(
+            persistence=persistence, features=_features_without_model(native_database=copied / "native.db"),
+            auto_recover=recovery == "startup",
+        ) as runtime:
+            principal = runtime.default_principal
+            if recovery == "explicit":
+                with pytest.raises(AIError) as denied:
+                    await runtime.executions.recover(
+                        execution_id, principal=replace(principal, principal_id="other-owner"),
+                    )
+                assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+                await runtime.executions.recover(execution_id, principal=principal)
+            result = await runtime.executions.result(execution_id, principal=principal)
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert result.output == {"text": "owner answer"}
+            record = await persistence.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
+            assert record.recovery.handoff_phase.value == "completed"
+            assert record.producer_generation == initial["generation"]
+            session = await persistence.conversation.sessions.get("session", tenant_id=principal.tenant_id)
+            assert session.active_execution_id is None
+            timeline = await runtime.sessions.timeline("session", principal=principal)
+            assert len(timeline.items) == 1
+            assert timeline.items[0].output == result.output
 
 
 @pytest.mark.asyncio
@@ -74,45 +119,42 @@ async def test_terminal_handoff_survives_removed_model_route(
 @pytest.mark.parametrize("damage", ("binding", "outcome"))
 async def test_terminal_handoff_rejects_corruption_without_model_route(
     tmp_path: Path, recovery: str, damage: str,
+    terminal_handoff_copy: Callable[[Path], tuple[Path, dict[str, object]]],
 ) -> None:
-    database = tmp_path / "runtime.db"
-    owner = _RuntimeProcess(database, phase="finalizing")
-    try:
-        execution_id = owner.initial["execution_id"]
-        owner.crash()
-        async with Persistence.open(_NAMESPACE, storage=_storage(database, "finalizing")) as persistence:
-            repository = persistence.execution.executions
+    copied, initial = terminal_handoff_copy(tmp_path)
+    database = copied / "runtime.db"
+    async with Persistence.open(_NAMESPACE, storage=_storage(database, "finalizing")) as persistence:
+        execution_id = await _assert_prepared_handoff(persistence, initial)
+        repository = persistence.execution.executions
 
-            async def corrupt(transaction):
-                stored = await transaction.get_record(repository.execution_record_key(execution_id))
-                assert stored is not None
-                value = deepcopy(decode_envelope(stored.data).value)
-                fields = value["payload"]["fields"]
-                if damage == "binding":
-                    fields["binding"]["output_mode"] = "invalid"
-                else:
-                    outcome = fields["recovery"]["fields"]["terminal_handoff"]["fields"]["outcome"]["fields"]
-                    output = (fields["result"]["fields"]["output"]
-                              if outcome.get("execution_result") is True else outcome["output"])
-                    output["fields"]["digest"] = "0" * 64
-                malformed = replace(
-                    stored, data=encode_envelope(value),
-                    storage_revision=stored.storage_revision + 1,
-                )
-                assert await transaction.replace_record(
-                    malformed, expected_storage_revision=stored.storage_revision,
-                )
+        async def corrupt(transaction):
+            stored = await transaction.get_record(repository.execution_record_key(execution_id))
+            assert stored is not None
+            value = deepcopy(decode_envelope(stored.data).value)
+            fields = value["payload"]["fields"]
+            if damage == "binding":
+                fields["binding"]["output_mode"] = "invalid"
+            else:
+                outcome = fields["recovery"]["fields"]["terminal_handoff"]["fields"]["outcome"]["fields"]
+                output = (fields["result"]["fields"]["output"]
+                          if outcome.get("execution_result") is True else outcome["output"])
+                output["fields"]["digest"] = "0" * 64
+            malformed = replace(
+                stored, data=encode_envelope(value),
+                storage_revision=stored.storage_revision + 1,
+            )
+            assert await transaction.replace_record(
+                malformed, expected_storage_revision=stored.storage_revision,
+            )
 
-            await repository.state_store.mutate(corrupt)
-            with pytest.raises(AIError) as rejected:
-                async with Runtime.attach(
-                    persistence=persistence, features=_features_without_model(),
-                    auto_recover=recovery == "startup",
-                ) as runtime:
-                    await runtime.executions.recover(execution_id, principal=runtime.default_principal)
-            assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    finally:
-        owner.close()
+        await repository.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as rejected:
+            async with Runtime.attach(
+                persistence=persistence, features=_features_without_model(native_database=copied / "native.db"),
+                auto_recover=recovery == "startup",
+            ) as runtime:
+                await runtime.executions.recover(execution_id, principal=runtime.default_principal)
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
