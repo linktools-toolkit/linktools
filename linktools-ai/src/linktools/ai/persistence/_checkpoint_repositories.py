@@ -1224,16 +1224,22 @@ class ToolRepositoryImpl(_RepositoryBase):
                        subject_ids=subjects) if isinstance(transaction, RecordSubjectReader) else None)
             if records is None:
                 records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_key=scope))
+            selected = []
+            eligibility = []
             for stored in records:
-                envelope = decode_envelope(stored.data)
-                payload = envelope.value["payload"]
-                fields = payload.get("fields", {})
+                fields = decode_envelope(stored.data).value["payload"].get("fields", {})
                 argument_ref, result_ref = fields.get("arguments_payload"), fields.get("result_payload")
                 share_arguments = not (isinstance(argument_ref, Mapping) and native_tool_arguments_reference(argument_ref) is not None)
                 share_result = not (isinstance(result_ref, Mapping) and native_tool_result_reference(result_ref) is not None)
-                if not (share_arguments and arguments or share_result and results):
-                    continue
-                value = await self._decode(stored, ToolOperationRecord)
+                if share_arguments and arguments or share_result and results:
+                    selected.append(stored)
+                    eligibility.append((share_arguments, share_result))
+            expanded = await self._tool_content.expand_many(tuple(selected))
+            for stored, materialized, (share_arguments, share_result) in zip(selected, expanded, eligibility, strict=True):
+                envelope = decode_envelope(stored.data)
+                payload = envelope.value["payload"]
+                fields = payload.get("fields", {})
+                value = await super(ToolRepositoryImpl, self)._decode(materialized, ToolOperationRecord)
                 if value.execution_id != execution_id or value.agent_run_id != agent_run_id:
                     continue
                 replacements = {}
