@@ -23,7 +23,7 @@ from ..steps import native_store_key
 from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
-from .codec import ( binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
+from .codec import (decode_execution_terminal_details,  binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
     encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
@@ -420,8 +420,11 @@ class ExecutionContent:
             await self.initialize(create=True)
 
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
-                     result_source: NativeTextReference | None = None) -> JsonValue:
+                     result_source: NativeTextReference | None = None,
+                     observed_value: ExecutionRecord | None = None) -> JsonValue:
         """Publish new immutable bodies with the same transaction as their owner."""
+        if observed_value is not None and (previous is None or self.projection(observed_value) is not previous):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = None if value.result is None else value.result.output
         # Native locations own the value, not a redundant digest in records.
         # Reuse requires comparing the current canonical source, never trusting
@@ -452,16 +455,18 @@ class ExecutionContent:
                         if previous_native.get(source) != value.stored_user_input:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         input_source = source
-        terminal_details = StoredPayload.inline_json({
-            "safe_error_details": _encode_persisted_domain(value.safe_error_details),
-            "error_diagnostics": _encode_persisted_domain(value.error_diagnostics),
-        })
+        terminal_details = (None if not value.safe_error_details and value.error_diagnostics is None else
+            StoredPayload.inline_json({
+                "safe_error_details": _encode_persisted_domain(value.safe_error_details),
+                "error_diagnostics": _encode_persisted_domain(value.error_diagnostics),
+            }))
         handoff = None if value.recovery is None else value.recovery.terminal_handoff
-        handoff_details = (None if handoff is None else StoredPayload.inline_json({
-            "safe_error_details": _encode_persisted_domain(handoff.outcome.safe_error_details),
-            "error_diagnostics": _encode_persisted_domain(handoff.outcome.error_diagnostics),
-        }))
-        details_values = (terminal_details,) if handoff_details is None else (terminal_details, handoff_details)
+        handoff_details = (None if handoff is None or not handoff.outcome.safe_error_details
+            and handoff.outcome.error_diagnostics is None else StoredPayload.inline_json({
+                "safe_error_details": _encode_persisted_domain(handoff.outcome.safe_error_details),
+                "error_diagnostics": _encode_persisted_domain(handoff.outcome.error_diagnostics),
+            }))
+        details_values = tuple(item for item in (terminal_details, handoff_details) if item is not None)
         selected = [(payload, self._encoding(payload)) for payload in (*details_values, *self.payload_values(value))
                     if (result_source is None or payload is not output)
                     and (input_source is None or payload is not value.stored_user_input)]
@@ -502,7 +507,8 @@ class ExecutionContent:
                     str(index): encoded_payloads[id(call.arguments_payload)]
                     for index, call in enumerate((*payload.approvals, *payload.calls))}
             if isinstance(payload, RecoveryTerminalHandoff):
-                encoded_payloads[id(payload)]["fields"]["terminal_details"] = encoded_payloads[id(handoff_details)]
+                encoded_payloads[id(payload)]["fields"]["terminal_details"] = (
+                    None if handoff_details is None else encoded_payloads[id(handoff_details)])
             if isinstance(payload, (ResultRecord, RecoveryTerminalHandoff)):
                 body = payload.output if isinstance(payload, ResultRecord) else payload.outcome.output
                 encoded_payloads[id(payload)]["fields"]["output"] = None if body is None else encoded_payloads[id(body)]
@@ -518,11 +524,18 @@ class ExecutionContent:
         else:
             if previous_policy[:2] != (archive.scope_id, archive.content_scope):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            policy_raw, = await archive.read_contents((previous_policy[2],), codec=POLICY_CODEC)
-            base_policy = decode_policy(previous_policy, policy_raw)
             policy_identity = previous_policy[2]
-            policy_overrides = {name: item for name, item in effective_policy.items()
-                                if canonical_json_bytes(item) != canonical_json_bytes(base_policy[name])}
+            if (observed_value is not None
+                    and canonical_json_bytes(effective_policy) == canonical_json_bytes(policy_values(observed_value))):
+                # A confirmed observed boundary retains its unchanged fixed policy.
+                # The caller still CASes that owner's physical revision; ordinary
+                # reads and policy changes must inspect their current source.
+                policy_overrides = decode_envelope(previous.data).value["payload"]["fields"].get("runtime_overrides", {})
+            else:
+                policy_raw, = await archive.read_contents((previous_policy[2],), codec=POLICY_CODEC)
+                base_policy = decode_policy(previous_policy, policy_raw)
+                policy_overrides = {name: item for name, item in effective_policy.items()
+                                    if canonical_json_bytes(item) != canonical_json_bytes(base_policy[name])}
         encoded_policy = {"$runtime_policy": policy_identity, "archive_scope": archive.scope_id,
                           "content_scope": archive.content_scope}
         encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
@@ -532,7 +545,7 @@ class ExecutionContent:
             await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
         return encode_execution_content(value, encoded_payloads, binding=encoded_binding,
                                         policy=encoded_policy, policy_overrides=policy_overrides,
-                                        terminal_details=encoded_payloads[id(terminal_details)])
+                                        terminal_details=None if terminal_details is None else encoded_payloads[id(terminal_details)])
 
     @staticmethod
     def has_native_input_candidate(prepared: PreparedArchive) -> bool:
@@ -711,19 +724,24 @@ class ExecutionContent:
             paths.add(("terminal_details",))
         references = {reference for record in records for path, payload in _payloads(record)
                       if path in paths and (reference := payload_reference(payload)) is not None}
-        if not references:
-            return tuple(records)
-        archive = await self._archive()
-        if any(reference[:2] != (archive.scope_id, archive.content_scope) for reference in references):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        ordered = tuple(references)
-        raws = await archive.read_contents(tuple(reference[2] for reference in ordered), codec=PAYLOAD_CODEC)
-        decoded = {reference: _decode_payload(raw, reference[2]) for reference, raw in zip(ordered, raws, strict=True)}
+        decoded = {}
+        if references:
+            archive = await self._archive()
+            if any(reference[:2] != (archive.scope_id, archive.content_scope) for reference in references):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            ordered = tuple(references)
+            raws = await archive.read_contents(tuple(reference[2] for reference in ordered), codec=PAYLOAD_CODEC)
+            decoded = {reference: _decode_payload(raw, reference[2]) for reference, raw in zip(ordered, raws, strict=True)}
         values = []
         for record in records:
             envelope = decode_envelope(record.data)
             payload = envelope.value["payload"]
             fields_value = dict(payload["fields"])
+            if terminal_details and "terminal_details" in fields_value and fields_value["terminal_details"] is None:
+                if "safe_error_details" in fields_value or "error_diagnostics" in fields_value:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                fields_value.pop("terminal_details")
+                fields_value.update(decode_execution_terminal_details(None))
             for path, wrapper in _payloads(record):
                 if path == ("recovery", "fields", "terminal_handoff", "fields", "terminal_details"):
                     continue
@@ -731,11 +749,7 @@ class ExecutionContent:
                     continue
                 value = decoded[reference]
                 if path == ("terminal_details",):
-                    if not isinstance(value, StoredPayload) or value.kind != "inline" or value.encoding != "json":
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    details = value.decode()
-                    if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    details = decode_execution_terminal_details(value)
                     if "safe_error_details" in fields_value or "error_diagnostics" in fields_value:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     fields_value.pop("terminal_details")
@@ -751,13 +765,12 @@ class ExecutionContent:
                         expanded_fields["output"] = wrapper["fields"]["output"]
                     else:
                         outcome = expanded_fields["outcome"]
-                        details_reference = payload_reference(wrapper["fields"]["terminal_details"])
-                        details_payload = decoded[details_reference]
-                        if not isinstance(details_payload, StoredPayload) or details_payload.kind != "inline" or details_payload.encoding != "json":
+                        details_wrapper = wrapper["fields"]["terminal_details"]
+                        details_reference = None if details_wrapper is None else payload_reference(details_wrapper)
+                        if details_wrapper is not None and details_reference is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        details = details_payload.decode()
-                        if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        details = decode_execution_terminal_details(
+                            None if details_reference is None else decoded[details_reference])
                         expanded_fields["outcome"] = {**outcome, "fields": {**outcome["fields"], **details,
                             "output": wrapper["fields"]["output"]}}
                     expanded["fields"] = expanded_fields

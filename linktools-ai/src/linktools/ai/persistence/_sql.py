@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from ..storage import SqlValue
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
-    from sqlalchemy.sql import ColumnElement, Executable, Select
+    from sqlalchemy.sql import ColumnElement, CompoundSelect, Executable, Select
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 ValueT = TypeVar("ValueT")
@@ -1203,18 +1203,24 @@ class _SqlTransaction:
         subjects = tuple(dict.fromkeys(subject_ids))
         if not subjects:
             return ()
-        from sqlalchemy import select
+        from sqlalchemy import LargeBinary, and_, cast, select
 
         subject_values = tuple(validate_resource_id(subject).encode("utf-8") for subject in subjects)
         table = record_owner_rows(self._metadata, kind=kind)
         records: list[StoredRecord] = []
         for offset in range(0, len(subjects), _RECORD_SUBJECT_READ_BATCH_SIZE):
-            rows = (await self._execute(select(table).where(
+            # Keep selective scope/subject discovery separate from partition lookup.
+            # The binary cast prevents partition equality from being pushed into
+            # this stage and selecting a broad store-prefix index on fresh stats.
+            matches = select(table.c.store_key, table.c.key_locator, table.c.key).where(
                 _key_matches(table.c.scope_key, scope_key),
                 table.c.subject_id.in_(subject_values[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]),
-                table.c.store_key == self._store_key,
-                table.c.kind == kind,
-            ))).mappings().all()
+            ).distinct().subquery("subject_matches")
+            rows = (await self._execute(select(table).select_from(matches.join(table, and_(
+                table.c.store_key == cast(matches.c.store_key, LargeBinary),
+                table.c.key_locator == matches.c.key_locator,
+                table.c.key == matches.c.key,
+            ))).where(table.c.store_key == self._store_key, table.c.kind == kind))).mappings().all()
             records.extend(_record_from_row(row) for row in rows)
         records.sort(key=lambda record: (record.sort_key, record.key))
         self._record_cache.update((record.key, record) for record in records)
@@ -1301,7 +1307,7 @@ class _SqlTransaction:
 
     def _archive_read_statement(
         self, scope_key: bytes, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
-    ) -> "Select":
+    ) -> "Select | CompoundSelect":
         from sqlalchemy import and_, func, literal, select, union
 
         table = self._table("ai_state_records")
@@ -1333,20 +1339,28 @@ class _SqlTransaction:
             branches.append(select(literal("archive_content").label("kind"),
                                    self._archive_link(node.c.payload_json, "content").label("identity"))
                             .select_from(joined).where(current_scope, _keys_match(current.c.key, body_keys)))
-        if content_keys:
-            content = record_owner_rows(self._metadata, keys=content_keys).alias("archive_direct_content")
-            branches.append(select(content.c.kind.label("kind"), content.c.sort_key.label("identity")).where(
+        selections = []
+        if branches:
+            keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
+            # Metadata-only frontiers cannot reference payload owners.
+            targets = (record_owner_rows(self._metadata, kind="archive_content")
+                       if any(request.content_slots for request in requests) else table)
+            selections.append(select(targets).select_from(keys.outerjoin(targets, and_(
+                targets.c.store_key == self._store_key, _key_matches(targets.c.scope_key, scope_key),
+                targets.c.kind == keys.c.kind, targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
+                targets.c.sort_key == keys.c.identity,
+            ))))
+        # Direct content addresses already identify their physical owner. Do not
+        # rediscover them through an unindexed content-identity join.
+        for owner in dict.fromkeys(record_owner_table(key) for key in content_keys):
+            owner_keys = tuple(validate_record_key(key) for key in content_keys
+                               if record_owner_table(key) == owner)
+            content = record_owner_rows(self._metadata, keys=owner_keys)
+            selections.append(select(content).where(
                 content.c.store_key == self._store_key, _key_matches(content.c.scope_key, scope_key),
-                content.c.kind == "archive_content", _keys_match(content.c.key, tuple(validate_record_key(key) for key in content_keys)),
+                content.c.kind == "archive_content", _keys_match(content.c.key, owner_keys),
             ))
-        keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
-        # Keep the bounded identity set on the driving side of the row lookup.
-        targets = record_owner_rows(self._metadata, kind="archive_content")
-        return select(targets).select_from(keys.outerjoin(targets, and_(
-            targets.c.store_key == self._store_key, _key_matches(targets.c.scope_key, scope_key),
-            targets.c.kind == keys.c.kind, targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
-            targets.c.sort_key == keys.c.identity,
-        )))
+        return selections[0] if len(selections) == 1 else union(*selections)
 
     async def insert_record(self, record: StoredRecord) -> None:
         await self.insert_records((record,))

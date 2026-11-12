@@ -174,7 +174,8 @@ class _RepositoryBase:
     ) -> StoredRecord:
         if isinstance(value, ExecutionRecord):
             previous = None if previous_value is None else self._execution_content.projection(previous_value)
-            encoded = await self._execution_content.encode(value, previous=previous)
+            encoded = await self._execution_content.encode(value, previous=previous,
+                observed_value=previous_value if previous is not None else None)
             record = project_record(
                 namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
                 kind=kind, identity=identity, value=value, scope=scope, parent=parent,

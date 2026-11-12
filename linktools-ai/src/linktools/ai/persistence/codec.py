@@ -1066,17 +1066,25 @@ def _encode_v1_execution_record(
     return cast(Mapping[str, JsonValue], encoded)
 
 
+def decode_execution_terminal_details(payload: StoredPayload | None) -> Mapping[str, JsonValue]:
+    """Decode the typed empty-diagnostics marker or its verified content owner."""
+    if payload is None:
+        return {"safe_error_details": _encode_persisted_domain({}), "error_diagnostics": None}
+    if not isinstance(payload, StoredPayload) or payload.kind != "inline" or payload.encoding != "json":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    details = payload.decode()
+    if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return details
+
+
 def _execution_terminal_fields(raw_fields: Mapping[str, object], codec: "_VersionCodec", *, persisted: bool) -> Mapping[str, object]:
     if "terminal_details" not in raw_fields:
         return raw_fields
     if "safe_error_details" in raw_fields or "error_diagnostics" in raw_fields:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    payload = _decode_domain(raw_fields["terminal_details"], StoredPayload, codec, persisted=persisted)
-    if payload.kind != "inline" or payload.encoding != "json":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    details = payload.decode()
-    if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    payload = _decode_domain(raw_fields["terminal_details"], StoredPayload | None, codec, persisted=persisted)
+    details = decode_execution_terminal_details(payload)
     return {**{name: item for name, item in raw_fields.items() if name != "terminal_details"}, **details}
 
 
@@ -2118,7 +2126,7 @@ def encode_execution_content(
             encoded["runtime_policy"] = policy
             if policy_overrides:
                 encoded["runtime_overrides"] = dict(policy_overrides)
-        if terminal_details is not None:
+        if terminal_details is not None or not item.safe_error_details and item.error_diagnostics is None:
             encoded.pop("safe_error_details", None)
             encoded.pop("error_diagnostics", None)
             encoded["terminal_details"] = terminal_details
@@ -2203,10 +2211,8 @@ def _execution_payload_codec(codec: _VersionCodec, payloads: Mapping) -> _Versio
                     target = ResultRecord
                 else:
                     outcome = dict(fields_value["outcome"])
-                    details_payload = _decode_domain(raw["terminal_details"], StoredPayload, current, persisted=True)
-                    details = details_payload.decode()
-                    if details_payload.kind != "inline" or details_payload.encoding != "json" or not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    details_payload = _decode_domain(raw["terminal_details"], StoredPayload | None, current, persisted=True)
+                    details = decode_execution_terminal_details(details_payload)
                     outcome["fields"] = {**outcome["fields"], **details, "output": _encode_domain(output, current, persisted=True)}
                     fields_value["outcome"] = outcome
                     target = RecoveryTerminalHandoff
@@ -3305,4 +3311,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
