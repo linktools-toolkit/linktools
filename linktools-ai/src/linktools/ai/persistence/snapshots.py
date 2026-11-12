@@ -1272,15 +1272,16 @@ async def restore_snapshot(
 
     validate_snapshot_references(
         semantic_domains,
-        {domain: values[2] for domain, values in decoded_domains.items()},
+        {domain: facts for domain, (_records, facts, _operations, _sequences) in decoded_domains.items()},
     )
     capture_state_closure(tuple(record for records in semantic_domains.values() for record in records),
-        values=tuple(dict(value.data) for domain in decoded_domains.values() for value in (*domain[2], *domain[3])),
+        values=tuple(dict(value.data) for _records, facts, operations, _sequences in decoded_domains.values()
+                     for value in (*facts, *operations)),
         namespace=namespace, tenant_id=tenant_id, require_bindings=True)
     if required_checkpoint_groups != set(native_checkpoints):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     referenced_runs = {RunRegistrationReference.from_data(record.data).run_id
-                       for values in decoded_domains.values() for record in values[0]
+                       for records, _facts, _operations, _sequences in decoded_domains.values() for record in records
                        if record.kind == "agent_run"}
     referenced_runs.update(row["run_id"] for backup in native_checkpoints.values() for row in backup.runs)
     if referenced_runs != set(run_registrations):
@@ -1290,9 +1291,9 @@ async def restore_snapshot(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     native_record_projections, native_fact_projections = {}, {}
     seen_projection_groups = set()
-    trace_values = decoded_domains.get(PersistenceDomain.TRACE, ((), (), (), (), {}))
-    trace_records = {value.key: value for value in trace_values[0]}
-    trace_facts = {(value.stream_key, value.sequence): value for value in trace_values[2]}
+    _trace_records, trace_events, _trace_operations, _trace_sequences = decoded_domains.get(
+        PersistenceDomain.TRACE, ((), (), (), {}))
+    trace_facts = {(value.stream_key, value.sequence): value for value in trace_events}
     for entry in raw_projections:
         if (not isinstance(entry, dict) or set(entry) != {"group_id", "records", "facts"}
                 or entry["group_id"] not in native_checkpoints or entry["group_id"] in seen_projection_groups
