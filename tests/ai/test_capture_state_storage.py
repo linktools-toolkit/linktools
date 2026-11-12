@@ -98,7 +98,8 @@ async def test_capture_attachment_codec_preserves_context_original_input_and_sou
 
 
 @pytest.mark.asyncio
-async def test_large_task_declarations_share_database_content_and_collect_without_object_candidates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("repetitions", (1, 20000))
+async def test_task_declarations_share_database_content_and_collect_without_object_candidates(tmp_path: Path, repetitions: int) -> None:
     namespace = "capture-bindings"
     objects = InMemoryObjectStore()
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite", object_store=objects)
@@ -106,7 +107,7 @@ async def test_large_task_declarations_share_database_content_and_collect_withou
         pass
     task = Task.from_runner("capture.custom", Runner(), contract={
         "version": 1, "type": "custom", "effect_policy": "none", "output_contract": {"kind": "json"},
-        "reconcile": False, "config": {"instructions": "large declaration " * 20000},
+        "reconcile": False, "config": {"instructions": "large declaration " * repetitions},
     })
     async with Persistence.open(namespace, storage=storage, tenant_id=PRINCIPAL.tenant_id) as state:
         store = state.task.tasks.state_store
@@ -125,6 +126,22 @@ async def test_large_task_declarations_share_database_content_and_collect_withou
         await state.snapshot_operations().purge_unreferenced_objects((), exclusive=Offline())
         assert await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content"))) == ()
         assert await store.read(lambda tx: tx.list_records(RecordQuery(kind="task_graph_binding_capture"))) == ()
+
+
+@pytest.mark.asyncio
+async def test_empty_task_declarations_do_not_create_archive_content() -> None:
+    from linktools.ai.persistence._memory import InMemoryStateStore
+    from linktools.ai.persistence.captures import prepare_task_binding_value
+
+    store = InMemoryStateStore()
+    await store.initialize()
+    try:
+        manifest = {"tasks": [], "expanders": []}
+        assert await prepare_task_binding_value(store, manifest,
+            namespace="empty", tenant_id="tenant") == manifest
+        assert await store.storage_group.open_archive() is None
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

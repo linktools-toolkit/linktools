@@ -401,32 +401,66 @@ async def test_snapshot_capture_rejects_binding_budget_before_hydration(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_small_bindings_stay_inline_without_archive_hydration(tmp_path: Path, monkeypatch, backend: str) -> None:
+@pytest.mark.parametrize("kind", ("agent", "task"))
+async def test_small_bindings_share_complete_content_across_executions(tmp_path: Path, monkeypatch, backend: str, kind: str) -> None:
     from linktools.ai.persistence._archive import ContentArchive
+    from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
     from linktools.ai.storage import PayloadPolicy
+    from linktools.ai.task import TaskBindingContract
 
     state = Persistence(_storage(backend, tmp_path))
     await state.initialize(namespace="bindings", tenant_id="tenant")
     try:
         repository = state.execution.executions
-        assert repository.state_store.storage_group.opened_archive is None
         execution = _execution()
-        stored = project_record(namespace="bindings", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                                kind="execution", identity=(execution.execution_id,), value=execution)
-        assert len(canonical_json_bytes(stored.data["value"]["payload"]["fields"]["binding"])) <= PayloadPolicy().inline_limit_bytes
+        schema = {"type": "string", "description": "output contract " * 64}
+        if kind == "agent":
+            execution = replace(execution, binding=replace(execution.binding, output_schema=schema))
+        else:
+            execution = replace(execution, mode=None, planning=None, thinking=None, agent_run_seq=0,
+                binding=TaskBindingContract("task", 1, "none", schema, None, 3, 0))
+        executions = tuple(replace(execution, execution_id=f"execution-{index}", root_execution_id=f"execution-{index}")
+                           for index in range(20))
+        inline = tuple(project_record(namespace="bindings", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
+            kind="execution", identity=(value.execution_id,), value=value) for value in executions)
+        assert len(canonical_json_bytes(inline[0].data["value"]["payload"]["fields"]["binding"])) < PayloadPolicy().inline_limit_bytes
+        for value in executions:
+            await repository.create_execution(value)
+        records = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
+        references = [tuple(iter_archive_content_refs(record.data)) for record in records]
+        assert len(records) == len(executions) and all(reference == references[0] for reference in references)
+        assert len(references[0]) == 1
+        _, archive = repository.state_store.storage_group.opened_archive
+        archive_records = await archive.read(lambda tx: tx.scan_records())
+        contents = [record for record in archive_records if record.kind == "archive_content"]
+        assert len(contents) == 1 and contents[0].data["codec"] == "execution-binding"
+
+        def record_bytes(values):
+            return sum(len(canonical_json_bytes(record.data)) + len(record.payload_bytes or b"") for record in values)
+
+        # Include archive metadata and binary bodies, not only the compact owner JSON.
+        assert record_bytes((*records, *archive_records)) < record_bytes(inline)
+        cold = ExecutionRepositoryImpl(repository.state_store, namespace="bindings", tenant_id="tenant")
 
         async def reject_archive(*args, **kwargs):
-            raise AssertionError("small execution metadata must not hydrate shared bindings")
+            raise AssertionError("state views must not hydrate shared bindings")
 
-        monkeypatch.setattr(ContentArchive, "read_contents", reject_archive)
-        assert await repository.create_execution(execution) == execution
-        records = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
-        assert len(records) == 1 and not tuple(iter_archive_content_refs(records[0].data))
-        assert await repository.get_fresh(execution.execution_id, tenant_id="tenant") == execution
-        changed = replace(execution, revision=execution.revision + 1)
-        assert await repository.compare_and_swap(execution.execution_id, tenant_id="tenant",
-                                                expected_revision=execution.revision, next_record=changed) == changed
-        assert await repository.get(execution.execution_id, tenant_id="tenant") == changed
+        with monkeypatch.context() as patch:
+            patch.setattr(ContentArchive, "read_contents", reject_archive)
+            assert (await cold.get_view(executions[0].execution_id, tenant_id="tenant"))[1].binding_kind == kind
+        assert await cold.get_fresh(executions[0].execution_id, tenant_id="tenant") == executions[0]
+        changed = replace(executions[0], revision=executions[0].revision + 1)
+        assert await repository.compare_and_swap(changed.execution_id, tenant_id="tenant",
+            expected_revision=executions[0].revision, next_record=changed) == changed
+        assert await cold.get_fresh(changed.execution_id, tenant_id="tenant") == changed
+        assert len(await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))) == 1
+
+        different = replace(execution.binding, **({"output_schema": {"type": "integer"}} if kind == "agent"
+                            else {"output_contract": {"type": "integer"}}))
+        variant = replace(execution, execution_id="variant", root_execution_id="variant", binding=different)
+        await repository.create_execution(variant)
+        assert len(await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))) == 2
+        assert await cold.get_fresh("variant", tenant_id="tenant") == variant
     finally:
         await state.close()
 

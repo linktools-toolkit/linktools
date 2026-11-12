@@ -274,21 +274,18 @@ class ExecutionContent:
         self._payload_encodings[key] = (ref(payload, lambda _value: self._payload_encodings.pop(key, None)), identity, raw)
         return identity, raw
 
-    def _binding_encoding(self, binding: AgentBindingContract | TaskBindingContract) -> tuple[str, bytes] | None:
+    def _binding_encoding(self, binding: AgentBindingContract | TaskBindingContract) -> tuple[str, bytes]:
         key = id(binding)
         cached = self._binding_encodings.get(key)
         if cached is not None and cached[0]() is binding:
             return cached[1:]
         raw = canonical_json_bytes(_encode_persisted_domain(binding))
-        if len(raw) <= PayloadPolicy().inline_limit_bytes:
-            return None
         identity = archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest())
         self._binding_encodings[key] = (ref(binding, lambda _value: self._binding_encodings.pop(key, None)), identity, raw)
         return identity, raw
 
     async def prepare_value(self, value: ExecutionRecord) -> None:
-        if self._share_content and (any(self._encoding(payload) is not None for payload in self.payload_values(value))
-                or self._binding_encoding(value.binding) is not None):
+        if self._share_content:
             await self.initialize(create=True)
 
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None) -> JsonValue:
@@ -298,8 +295,6 @@ class ExecutionContent:
         selected = [(payload, self._encoding(payload)) for payload in self.payload_values(value)]
         selected = [(payload, encoded) for payload, encoded in selected if encoded is not None]
         binding = self._binding_encoding(value.binding)
-        if not selected and binding is None:
-            return _encode_persisted_domain(value)
         active = active_state_scope()
         opened = self._store.storage_group.opened_archive
         if active is not None and (opened is None or opened[1] not in active.transactions):
@@ -322,14 +317,12 @@ class ExecutionContent:
             encoded_payloads[id(payload)] = {"$dataclass": "stored_user_input" if isinstance(payload, StoredUserInput) else "stored_payload", "schema": 1,
                 "fields": {"content": {"$execution_payload": identity,
                     "archive_scope": archive.scope_id, "content_scope": archive.content_scope}}}
-        encoded_binding = None
-        if binding is not None:
-            identity, raw = binding
-            if previous_binding != (archive.scope_id, archive.content_scope, identity):
-                missing.append((BINDING_CODEC, raw))
-            encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
-                               "content_scope": archive.content_scope,
-                               "summary": _execution_binding_summary(value.binding)}
+        identity, raw = binding
+        if previous_binding != (archive.scope_id, archive.content_scope, identity):
+            missing.append((BINDING_CODEC, raw))
+        encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
+                           "content_scope": archive.content_scope,
+                           "summary": _execution_binding_summary(value.binding)}
         if missing:
             await archive.prepare_content(tuple(missing), prepared)
             await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))

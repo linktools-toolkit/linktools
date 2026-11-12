@@ -423,7 +423,7 @@ Execution fields without expanding execution bindings. Session controls admissio
 and sequencing; it is not a replacement for standalone or Task executions.
 
 Large Execution input, result and prepared terminal bodies are compressed database
-archive content, alongside large binding contracts. The control record retains
+archive content, alongside shared binding contracts. The control record retains
 scoped content addresses; ordinary text and JSON are not ObjectStore files. Only
 typed attachment slots contribute binary dependencies. The archived input also
 owns its display/model view so a repeated prompt is not copied into control CAS.
@@ -437,27 +437,28 @@ views read this projection without opening or decoding the immutable contract;
 recovery and snapshot expansion still load the complete bytes, verify their
 content identity, and compare the summary with the decoded contract. The summary
 is not a new behavior identity or a replacement for declaration validation.
-Small bindings remain inline. This removes contract reads from archived-binding
-state views, not from cold recovery, and does not change the archive threshold or
-claim that every configuration is now stored by reference.
+Sharing-enabled execution repositories archive every Agent/Task binding, without
+a size threshold. State views do not load those bodies; cold recovery still does.
+Standalone repositories that have not enabled content sharing, and caller-owned
+transactions that have not enlisted the archive, retain their inline contract.
 
 ## Configuration and large-record ownership
 
 - Execution Agent and Task bindings retain the complete admitted contract for
   declaration validation, cold recovery and portable snapshots. Named ID/revision
   alone does not reconstruct output schemas, resolved Agent declarations or
-  captured child bindings. Identical bindings above the existing payload limit
-  share one scoped archive content record; smaller bindings remain inline per
-  execution. Those inline copies are real duplication, retained to avoid an
-  additional content lookup for small executions. The view summary above removes
-  that lookup from state views of archived bindings, not from recovery.
+  captured child bindings. Identical bindings share one scoped archive content record across executions,
+  including configurations below the former payload limit. Each execution keeps
+  a content reference and the derived view summary. A different complete contract
+  with the same declared ID/revision remains a different immutable content value.
+  The view summary avoids body reads for state views, not for recovery.
 - Task graph headers contain no node-definition body. Immutable node definitions
   and mutable node states are separate records. The prepared submission retains
   the initial graph until admission or cancellation, then deletes its payload;
   it is not a permanent second graph copy.
-- Task graph binding captures deduplicate declarations within a graph. Large
-  task/expander declaration sets share content-addressed archive bytes; small
-  sets remain inline in the capture. These are the admitted restore contract,
+- Task graph binding captures deduplicate declarations within a graph. Nonempty
+  task/expander declaration sets share content-addressed archive bytes across
+  graphs regardless of size; empty sets remain inline without a content record. These are the admitted restore contract,
   while input captures and invocation captures preserve frozen input/provenance
   independently of a source execution's lifetime. They cannot be replaced by
   looking up the caller's current mutable configuration.
@@ -479,8 +480,17 @@ already reuse its record read set. The existence read also preserves the stored
 compression or object representation, so constructing another encoding and
 skipping verification is not an equivalent optimization. Preparations outside
 publication cannot be treated as current-transaction existence proof. Sharing
-all small configurations would still add content reads and publication work;
-this audit does not establish an improved threshold or a measured SQL saving.
+small configurations adds an existence/integrity read and immutable publication
+when a new execution or graph first references content. An unchanged binding
+reference on hot Execution CAS is retained without republishing its body. Cold
+full-record recovery still reads the content, with existing bounded batch reads
+for multiple records. There is no new size threshold or claim of fewer SQL calls.
+An extremely small or single-use Task binding can occupy more total bytes after
+adding its reference and archive metadata; repeated substantial configurations
+and hot owner rows are the intended space benefit. A regression workload counts
+all record JSON and binary bytes for twenty repeated sub-64KiB Agent/Task bindings,
+including the archive row, rather than measuring only the shortened owner JSON.
+Its runtime results remain subject to CI; no production storage saving is claimed.
 The archive remains in `ai_state_records`: sharing reduces duplicate bodies and
 hot owner-row width, not the count of logical kinds in that physical table.
 
@@ -497,3 +507,18 @@ scanned rows, returned bytes and retained bytes before claiming an overall gain.
 See [native boundary details](atomic-native-step-boundaries.md) for append,
 recovery, collection and extension limits, and [public entry points](runtime-entrypoints.md)
 for the Runtime handle and explicit-ID APIs.
+
+
+## Requested storage simplification coverage
+
+| Requirement | Implementation or retained owner | Verification boundary |
+| --- | --- | --- |
+| Trace events outside generic facts | `ai_trace_events`; native body references and bounded identity lookup | Existing Trace/source/recovery regressions; real-backend plans still require validation |
+| Remove duplicate complete run metadata | Canonical `ai_step_runs` or non-SQL run registration; domain membership/CAS only | Routing, publication and portable snapshot coverage; no automatic shared-owner deletion |
+| Domain-specific names | `ai_tool_operation_aliases`, shared `ai_state_counters`; `ai_step_runs` unchanged | Metadata/DDL/readers/writers and schema tests updated together |
+| Execution Agent/Task configuration duplication | All sharing-enabled bindings use the existing complete-contract content archive | Repeated small/large configurations, changed same-revision contracts, cold recovery and CAS regressions |
+| Other configuration duplication | Nonempty Task/Expander declaration sets share existing archive bytes; graph definitions already separate from node state | Small/large declaration load and collection regressions; empty sets create no archive |
+| Hot state query cost | Execution views use a derived binding summary, not full configuration bytes | Agent/Task and child-view regressions reject contract-body reads |
+| Input/result/message bodies | Existing large-body archive, Native messages, and handoff/result references retain their owners | Existing attachment, snapshot, recovery and cleanup coverage; no deletion of effect or user facts |
+| No historical baggage | Current writer/reader/schema evolve together; no legacy migration or new config registry | Current-shape round trips and explicit malformed-data rejection |
+| Space and I/O trade-off | Reuse removes repeated contract bodies and shrinks hot rows; initial publication and cold recovery still cost reads | Byte-accounting regressions are not executed measurements or a MySQL/PostgreSQL latency claim |

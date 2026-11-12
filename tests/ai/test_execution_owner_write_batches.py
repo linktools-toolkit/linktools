@@ -114,7 +114,8 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
             assert final.producer_generation == 1
             assert final.history_seal_digest is None
             assert await repository.get_history_seal(current.execution_id, tenant_id="tenant") is None
-            snapshots.append(await _snapshot(repository.state_store))
+            scope, _archive = repository.state_store.storage_group.opened_archive
+            snapshots.append(await _snapshot(repository.state_store, scope_mapping={scope: "canonical"}))
             counts.append(calls)
         _assert_semantic_snapshot(snapshots[0], snapshots[1], {"execution": 1})
         if backend == "sqlite":
@@ -158,7 +159,8 @@ async def test_single_execution_cas_preserves_generation_and_subclass_guard(tmp_
             assert active == updated
             records, _facts, _sequences = await _snapshot(repository.state_store)
             assert [record.kind for record in records] == ["execution"]
-            snapshots.append(await _snapshot(repository.state_store))
+            scope, _archive = repository.state_store.storage_group.opened_archive
+            snapshots.append(await _snapshot(repository.state_store, scope_mapping={scope: "canonical"}))
         finally:
             await state.close()
     _assert_semantic_snapshot(snapshots[0], snapshots[1], {})

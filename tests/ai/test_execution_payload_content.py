@@ -132,7 +132,7 @@ async def test_payload_publication_rolls_back_and_complete_reads_require_present
         await repository.create_execution(value)
         assert await repository.get_fresh(value.execution_id, tenant_id="tenant") == value
         rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
-        body = rows[0]
+        body = next(row for row in rows if row.data["codec"] == "execution-payload")
         if corruption == "missing":
             await archive.mutate(lambda tx: tx.delete_record(body.key, expected_storage_revision=body.storage_revision))
         else:

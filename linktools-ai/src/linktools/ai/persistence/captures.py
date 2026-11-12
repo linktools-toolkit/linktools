@@ -12,7 +12,7 @@ from ..agent import AgentInputCaptureRef
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..task import TaskDependencyCapture, TaskGraphCaptureRef, TaskGraphTemplateRef, TaskInvocationInputRef
-from ..storage import ObjectRef, PayloadPolicy, StoredPayload
+from ..storage import ObjectRef, StoredPayload
 from ..model import StoredUserInput
 from ..model.attachments import store_attachment_payload, read_attachment_payload
 from ._archive import archive_content_scope, decode_archive_scope, validate_archive_content_identity, validate_archive_group_id, ContentArchive, ContentRecord, PreparedArchive
@@ -384,9 +384,9 @@ def task_binding_content_reference(value: object) -> tuple[str, str, str] | None
 
 async def prepare_task_binding_value(store: StateStore, manifest: Mapping[str, JsonValue], *,
                                      namespace: str, tenant_id: str) -> JsonValue:
-    raw = canonical_json_bytes({"tasks": manifest["tasks"], "expanders": manifest["expanders"]})
-    if len(raw) <= PayloadPolicy().inline_limit_bytes:
+    if not manifest["tasks"] and not manifest["expanders"]:
         return dict(manifest)
+    raw = canonical_json_bytes({"tasks": manifest["tasks"], "expanders": manifest["expanders"]})
     opened = await store.storage_group.open_archive(create=True)
     if opened is None:
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
