@@ -108,14 +108,19 @@ async def test_history_request_filters_bound_tool_operation_reads(monkeypatch: p
         await history.archive()
         repository = history.state.checkpoint.tools
         history.reader._tool_operations = repository
-        original = repository.get_operations
+        original = repository.get_operation_metadata
         calls = set()
 
         async def capture(operation_ids, *, tenant_id):
             calls.update(operation_ids)
             return await original(operation_ids, tenant_id=tenant_id)
 
-        monkeypatch.setattr(repository, "get_operations", capture)
+        monkeypatch.setattr(repository, "get_operation_metadata", capture)
+
+        async def reject_full_receipts(*args, **kwargs):
+            raise AssertionError("history association must not hydrate unrelated tool payloads")
+
+        monkeypatch.setattr(repository, "get_operations", reject_full_receipts)
         for selector in ({"model_request_seq": 2}, {"step_index": 2}):
             calls.clear()
             selected = await history.reader.history(

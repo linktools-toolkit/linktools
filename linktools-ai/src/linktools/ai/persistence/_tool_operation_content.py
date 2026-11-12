@@ -104,7 +104,7 @@ def expand_native_tool_content(
                 or isinstance(reference, NativeToolResultReference)
                 and (value.digest, value.size) != (reference.digest, reference.size)
                 or isinstance(reference, NativeToolArgumentsReference)
-                and value.digest != decode_envelope(record.data).value["payload"]["fields"]["arguments_digest"]):
+                and value.digest != decode_envelope(record.data).value["payload"]["fields"].get("arguments_digest")):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if attached and (value.value["format"] != reference.attachment_format
                          or canonical_json_bytes(value.value["attachments"]) != canonical_json_bytes(reference.attachment_entries())):
