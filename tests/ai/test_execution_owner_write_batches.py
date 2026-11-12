@@ -156,7 +156,13 @@ async def test_single_execution_cas_preserves_generation_and_subclass_guard(tmp_
             active, _stored = await repository.state_store.mutate(lambda tx: repository.require_execution_producer_in_transaction(
                 tx, current.execution_id, expected_producer_generation=2,
             ))
-            assert active == updated
+            from linktools.ai.execution import ExecutionControlRecord
+            assert active == ExecutionControlRecord(
+                execution_id=updated.execution_id, status=updated.status,
+                producer_generation=updated.producer_generation, producer_claim_id=updated.producer_claim_id,
+                durable_trace=updated.durable_trace, history_seal_digest=updated.history_seal_digest,
+                budget_scope_id=updated.budget_scope_id, retention_closed=updated.retention_closed,
+            )
             records, _facts, _sequences = await _snapshot(repository.state_store)
             assert [record.kind for record in records] == ["execution"]
             scope, _archive = repository.state_store.storage_group.opened_archive

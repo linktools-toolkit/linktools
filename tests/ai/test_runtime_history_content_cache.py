@@ -206,7 +206,7 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
     ))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
-        record = await _seed(storage, output=StoredPayload.object(reference))
+        await _seed(storage, output=StoredPayload.object(reference))
         domains: list[PersistenceDomain] = []
 
         async def read(domain: PersistenceDomain, ref: ObjectRef) -> bytes:
@@ -232,11 +232,13 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
         assert objects.reads == (1 if use_storage_reader else 2)
 
         foreign = replace(reference, store_id="foreign")
-        async def foreign_result(execution_id: str, *, tenant_id: str):
-            assert execution_id == "execution" and tenant_id == "tenant"
-            return replace(record, result=replace(record.result, output=StoredPayload.object(foreign)))
+        read_result = storage.execution.executions.get_result_record
+        async def foreign_result(execution_id: str, *, tenant_id: str, fresh: bool = False):
+            assert execution_id == "execution" and tenant_id == "tenant" and fresh
+            current = await read_result(execution_id, tenant_id=tenant_id, fresh=fresh)
+            return replace(current, result=replace(current.result, output=StoredPayload.object(foreign)))
 
-        monkeypatch.setattr(storage.execution.executions, "get_fresh", foreign_result)
+        monkeypatch.setattr(storage.execution.executions, "get_result_record", foreign_result)
         with pytest.raises(AIError) as error:
             await service.result("execution", principal=principal)
         assert error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
