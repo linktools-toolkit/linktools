@@ -92,4 +92,4 @@ checks:
       runtime: []
     shards:
       evaluation-recovery: 3
-      runtime: 4
+      runtime: 6
