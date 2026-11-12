@@ -367,12 +367,17 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
         before = traffic.statements['SELECT']
         execution = await cold.execution.executions.get('execution', tenant_id=tenant)
         assert execution is not None and execution.input_context is not None
-        # Full restoration reads the owner, one typed input and the batched
-        # binding/policy owners. No Native message is hydrated by these reads.
-        assert traffic.statements['SELECT'] == before + 3
-        typed_query, typed_parameters = traffic.reads[-2]
+        # One scoped owner/content join restores the typed input and binding/
+        # policy sources. The counter includes WITH statements; Native model
+        # messages are not hydrated by this typed-content branch.
+        assert traffic.statements['SELECT'] == before + 1
+        typed_query, typed_parameters = traffic.reads[-1]
+        assert "content_owners" in typed_query and "content_source" in typed_query
+        assert "ai_step_messages.store_locator =" in typed_query
         assert "ai_step_messages.store_key =" in typed_query
-        assert typed_parameters[1] == payload_store_key(namespace, tenant)
+        assert "ai_step_messages.sha256 =" in typed_query
+        assert payload_store_key(namespace, tenant) in typed_parameters
+        assert payload_store_locator(payload_store_key(namespace, tenant)) in typed_parameters
         before = traffic.statements['SELECT']
         assert await cold_service.load(execution.input_context) == context
         assert traffic.statements['SELECT'] == before + 1
