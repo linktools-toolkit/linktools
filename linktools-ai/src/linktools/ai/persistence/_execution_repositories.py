@@ -264,6 +264,19 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if tenant_id != self._tenant_id:
             return None
         key = self._key("execution", (identity,))
+        from ._sql import SqlStateStore
+        if (isinstance(self._store, SqlStateStore) and not self._store.record_cache_enabled
+                and (active_state_scope() is None or not active_state_scope().writable)):
+            # Without an observation cache there is no earlier value to preserve.
+            # Capture the actual owner and fixed contents together, rather than
+            # reading an owner merely to choose a second source snapshot.
+            async def read(_group: object) -> ExecutionRecord | None:
+                await self._execution_content.prefetch_projection_owners(
+                    (key,), bindings=True, input_body=True, result=True,
+                    result_body=True, recovery=True, terminal_details=True,
+                )
+                return await super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id)
+            return await self.read_content(read)
         # Keep ordinary inspection's cache capture time and write-through ordering.
         # A forced read still refreshes that observation through the store API.
         record = ((await self._refresh_records((key,))).get(key) if fresh

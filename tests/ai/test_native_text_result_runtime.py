@@ -21,7 +21,7 @@ from linktools.ai.persistence.codec import decode_envelope, execution_payload_sl
 from linktools.ai.persistence.contracts import ExecutionEventAppend, ExecutionRecord, ExecutionTerminalCommit, ExecutionTerminalCommitResult, ResultRecord
 from linktools.ai.persistence.state import StateTransaction, StoredRecord
 from linktools.ai.persistence._message_root import NativeTextReference
-from linktools.ai.storage import StoredPayload
+from linktools.ai.storage import InMemoryCacheBackend, StoredPayload
 from linktools.ai.steps import native_store_key
 
 from .test_step_projection import _execution
@@ -192,7 +192,8 @@ async def test_native_inspection_discards_observed_owner_before_atomic_hydration
     from linktools.ai.persistence.state import active_state_scope
 
     async with Persistence.open("native-result", tenant_id="tenant",
-                                storage=PersistenceStorage.sqlite(tmp_path / "observation.db")) as state:
+                                storage=PersistenceStorage.sqlite(tmp_path / "observation.db",
+                                    cache=InMemoryCacheBackend(max_bytes=1_000_000))) as state:
         commands, commit, current, checkpoint = await _prepare(state, "native " * 12000, "native " * 12000)
         await _publish(commands, commit, current, checkpoint)
         repository = state.execution.executions
