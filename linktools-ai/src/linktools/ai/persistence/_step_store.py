@@ -1387,8 +1387,16 @@ class SqlStepStore:
                 if not isinstance(active, SqlStateRowReader):
                     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
                 transaction = active
-        rows = ()
-        if query is not None:
+        rows = None
+        if transaction is not None:
+            from .state import active_state_scope
+            from ._archive_read import ContentReferenceReader
+
+            active = active_state_scope()
+            if (active is not None and not active.writable
+                    and isinstance(active.record_reader, ContentReferenceReader)):
+                rows = active.record_reader.captured_native_message_rows(self._context, roots)
+        if rows is None and query is not None:
             if transaction is not None:
                 rows = await transaction.read_sql_rows(self._context, query.statement)
             else:
@@ -1398,6 +1406,8 @@ class SqlStepStore:
                         session.execute(query.statement),
                     )).mappings())
 
+        if rows is None:
+            rows = ()
         if reserve is not None:
             # Structural ancestors carry NULL bodies. Only physical message
             # bodies consume decompression memory, once per distinct identity.

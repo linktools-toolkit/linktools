@@ -152,6 +152,9 @@ class ToolOperationContent:
             content_paths=tuple(("value", "payload", "fields", name, "fields", "content", "$execution_payload")
                                 for name in ("arguments_payload", "result_payload", "error_payload")),
             owner_query=query,
+            native_root_paths=tuple(("value", "payload", "fields", name, "fields", "content", marker)
+                for name, marker in (("arguments_payload", "$native_tool_arguments"),
+                                     ("result_payload", "$native_tool_result"))),
         )
         return (None if found is None else
                 tuple(sorted(found[self.store].values(), key=lambda row: (row.sort_key, row.key))))

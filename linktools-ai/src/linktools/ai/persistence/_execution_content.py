@@ -295,17 +295,21 @@ class ExecutionContent:
                 or self._store.storage_group.opened_archive is None):
             return
         paths = [("runtime_policy", "$runtime_policy")]
+        native_paths = []
         if input_body:
             paths.append(("stored_user_input", "fields", "content", "$execution_payload"))
+            native_paths.append(("stored_user_input", "fields", "content", "$native_user_input"))
         if bindings:
             paths.append(("binding", "$execution_binding"))
         if result:
             paths.append(("result", "fields", "content", "$execution_payload"))
         if result_body:
             paths.append(("result", "fields", "output", "fields", "content", "$execution_payload"))
+            native_paths.append(("result", "fields", "output", "fields", "content", "$native_text"))
         if terminal_details:
             paths.append(("terminal_details", "fields", "content", "$execution_payload"))
         if recovery:
+            native_paths.append(("recovery", "fields", "terminal_handoff", "fields", "output", "fields", "content", "$native_text"))
             paths.extend((
                 ("recovery", "fields", "pending_tools", "fields", "content", "$execution_payload"),
                 ("recovery", "fields", "terminal_handoff", "fields", "content", "$execution_payload"),
@@ -316,6 +320,7 @@ class ExecutionContent:
             owner_store=self._store, owner_keys=keys, content_store=archive.store,
             content_scope_key=archive_scope_key(self._namespace, self._tenant_id),
             content_paths=tuple(("value", "payload", "fields", *path) for path in paths),
+            native_root_paths=tuple(("value", "payload", "fields", *path) for path in native_paths),
             additional_records=additional_records,
         )
 

@@ -11,6 +11,8 @@ from ._record_key import validate_record_key
 
 if TYPE_CHECKING:
     from .state import RecordQuery, StateStore, StoredRecord
+    from ._message_root import NativeMessageRoot
+    from ..storage._database import SqlStorageContext
 
 
 class ArchiveNodeSlot(IntFlag):
@@ -54,8 +56,15 @@ class ContentReferenceReader(Protocol):
         content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
         additional_records: Mapping["StateStore", Sequence[bytes]] | None = None,
         owner_query: "RecordQuery | None" = None,
+        native_root_paths: Sequence[tuple[str, ...]] = (),
     ) -> "Mapping[StateStore, Mapping[bytes, StoredRecord]] | None":
         """Capture current owners and declared references in their enlisted snapshot."""
+        ...
+
+    def captured_native_message_rows(
+        self, context: "SqlStorageContext", roots: Sequence["NativeMessageRoot"],
+    ) -> "tuple[Mapping[str, object], ...] | None":
+        """Return only fixed source rows captured with owners in this read snapshot."""
         ...
 
 

@@ -30,8 +30,9 @@ def content_reference_statement(
     content_store_key: bytes, content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
     typed_payloads: bool, additional_records: Mapping[bytes, Sequence[bytes]] | None = None,
     owner_statement: "Select | None" = None,
+    native_root_paths: Sequence[tuple[str, ...]] = (),
 ) -> "Select":
-    from sqlalchemy import JSON, LargeBinary, and_, case, cast, func, literal, select, true, type_coerce, union_all
+    from sqlalchemy import JSON, Integer, LargeBinary, String, and_, case, cast, func, literal, null, select, true, type_coerce, union_all
     from sqlalchemy.dialects.mysql import BINARY
 
     owner_query = owner_statement
@@ -87,6 +88,34 @@ def content_reference_statement(
             extra.c.store_key == store_key,
             extra.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in keys)),
             extra.c.key.in_(tuple(keys))))
+    if native_root_paths:
+        from ..steps import native_store_key, native_store_locator
+
+        nodes = metadata.tables["ai_step_sequences"].alias("fixed_native_nodes")
+        messages = metadata.tables["ai_step_messages"].alias("fixed_native_messages")
+        source_columns = tuple(nodes.c[name] for name in (
+            "sha256", "message_sha256", "tree_count", "left_sha256", "right_sha256", "next_sha256")) + tuple(
+            messages.c[name] for name in ("message", "compression", "raw_size", "payload_json"))
+        null_columns = (cast(null(), Integer).label("native_slot"), *(cast(null(),
+            String(column.type.length) if isinstance(column.type, String) else column.type
+        ).label("native_" + column.name) for column in source_columns))
+        selections = [selection.add_columns(*null_columns) for selection in selections]
+        native_slots = [select(literal(index).label("slot")) for index in range(len(native_root_paths))]
+        native_slots = (native_slots[0] if len(native_slots) == 1 else union_all(*native_slots)).subquery("native_slots")
+        first = case(*((native_slots.c.slot == index, payload[(*path, "slices", 0, "first")].as_string())
+                       for index, path in enumerate(native_root_paths)))
+        partition = native_store_key(*archive_scope_parts(content_scope_key))
+        locator = native_store_locator(partition)
+        native_join = owners.join(native_slots, true()).outerjoin(nodes, and_(
+            nodes.c.store_key == partition, nodes.c.store_locator == locator, nodes.c.sha256 == first,
+        )).outerjoin(messages, and_(
+            messages.c.store_key == partition, messages.c.store_locator == locator,
+            messages.c.sha256 == nodes.c.message_sha256,
+        ))
+        selections.append(select(literal(4).label("source_kind"), *owners.c, *native_nulls,
+            native_slots.c.slot.label("native_slot"),
+            *(column.label("native_" + column.name) for column in source_columns)
+        ).select_from(native_join).where(first.is_not(None)))
     statement = select(union_all(*selections).subquery("owner_content_rows"))
     if dialect != "mysql":
         # Keep CTE materialization within this SELECT so callers can compose the

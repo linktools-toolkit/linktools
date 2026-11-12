@@ -67,6 +67,7 @@ from .state import (
 )
 
 if TYPE_CHECKING:
+    from ._message_root import NativeMessageRoot
     from ..storage import SqlValue
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
@@ -102,6 +103,7 @@ class _SqlGroupTransaction:
     ) -> None:
         self._group = group
         self._transactions = transactions
+        self._native_message_rows: dict[object, tuple[Mapping[str, object], ...]] = {}
 
     def transaction(self, store: StateStore) -> "_SqlTransaction":
         if store.storage_group is not self._group:
@@ -167,6 +169,7 @@ class _SqlGroupTransaction:
         content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
         additional_records: Mapping[StateStore, Sequence[bytes]] | None = None,
         owner_query: RecordQuery | None = None,
+        native_root_paths: Sequence[tuple[str, ...]] = (),
     ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]] | None:
         from ._archive import archive_scope_parts, validate_archive_content_identity
         from ._content_reference_sql import content_reference_batch_size, content_reference_statement
@@ -181,6 +184,10 @@ class _SqlGroupTransaction:
         if dialect not in {"sqlite", "mysql", "postgresql"}:
             return None
         paths = tuple(dict.fromkeys(content_paths))
+        native_paths = tuple(dict.fromkeys(native_root_paths))
+        if (len(native_paths) > 4 or any(not path or len(path) > 16
+                or any(not isinstance(part, str) or not part for part in path) for path in native_paths)):
+            raise ValueError("native content requires bounded declared root paths")
         if (not paths or len(paths) > 16 or any(not path or len(path) > 16
                 or any(not isinstance(part, str) or not part for part in path) for path in paths)):
             raise ValueError("content references require bounded explicit JSON paths")
@@ -196,6 +203,9 @@ class _SqlGroupTransaction:
                 continue
             record = owner._record_cache[key]
             if record is None:
+                continue
+            if native_paths:
+                required.append(key)
                 continue
             for path in paths:
                 value = record.data
@@ -233,9 +243,41 @@ class _SqlGroupTransaction:
                 additional_records={self.transaction(store)._store_key: requested for store, requested in extras.items()} if offset == 0 else None,
                 owner_statement=(_record_query_statement(self._group.metadata, owner._store_key, owner_query)
                                  if owner_query is not None else None),
+                native_root_paths=native_paths,
             )
             for row in (await owner._execute(statement)).mappings():
                 kind = row["source_kind"]
+                if kind == 4:
+                    from ._message_root import NativeMessageRoot
+                    from ..steps import native_store_key
+
+                    if row["store_key"] != owner._store_key or owner_query is None and row["key"] not in batch:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    slot = row["native_slot"]
+                    if type(slot) is not int or not 0 <= slot < len(native_paths):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    record = _record_from_row(row)
+                    value = record.data
+                    for part in native_paths[slot]:
+                        value = value.get(part) if isinstance(value, Mapping) else None
+                    try:
+                        root = NativeMessageRoot.from_json(value)
+                    except (TypeError, ValueError):
+                        # Ordinary typed decoding still rejects malformed references.
+                        continue
+                    opened = self._group.opened_archive
+                    if (opened is None or root.group_id != opened[0]
+                            or root.store_key != native_store_key(namespace, tenant)):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if len(root.slices) != 1:
+                        continue
+                    item = root.slices[0]
+                    if item.start != item.count - 1 or item.end != item.count:
+                        continue
+                    self._native_message_rows[root] = (() if row["native_sha256"] is None else ({
+                        name.removeprefix("native_"): value for name, value in row.items()
+                        if name.startswith("native_") and name != "native_slot"},))
+                    continue
                 if kind == 3:
                     target_store = extra_stores.get(row["store_key"])
                     if target_store is None or row["key"] not in extras[target_store]:
@@ -279,6 +321,26 @@ class _SqlGroupTransaction:
                 if (source := content._record_cache.get(target)) is not None:
                     found[content_store][target] = source
         return found
+
+    def captured_native_message_rows(
+        self, context: "SqlStorageContext", roots: Sequence["NativeMessageRoot"],
+    ) -> tuple[Mapping[str, object], ...] | None:
+        active = active_state_scope()
+        if (active is None or active.writable or active.record_reader is not self
+                or context is not self._group._context):
+            return None
+        if any(root not in self._native_message_rows for root in roots):
+            return None
+        rows = []
+        seen = set()
+        for request, root in enumerate(roots):
+            # The existing range decoder aliases repeated identical slices.
+            if root.slices[0] in seen:
+                continue
+            seen.add(root.slices[0])
+            rows.extend(dict(row, request=request, span=0, position=0)
+                        for row in self._native_message_rows[root])
+        return tuple(rows)
 
     @classmethod
     def _record_read_batches(

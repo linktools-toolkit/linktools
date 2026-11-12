@@ -292,9 +292,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             # The observation only selects this path. Never hydrate its old owner
             # in a later snapshot: reread owner and Native source together, so GC
             # or a concurrent owner change cannot leave a dangling source read.
-            return await self.read_content(lambda _group: super(ExecutionRepositoryImpl, self).get(
-                identity, tenant_id=tenant_id,
-            ))
+            async def read_current(_group: object) -> ExecutionRecord | None:
+                await self._execution_content.prefetch_projection_owners(
+                    (key,), bindings=True, input_body=True, result=True,
+                    result_body=True, recovery=True, terminal_details=True,
+                )
+                return await super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id)
+            return await self.read_content(read_current)
         return await self._decode(record, ExecutionRecord)
 
     async def _decode_many(self, records: Sequence[StoredRecord]) -> tuple[ExecutionRecord, ...]:
@@ -694,6 +698,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 for execution_id in ordered
             }
 
+            await self._execution_content.prefetch_projection_owners(
+                tuple(keys.values()), bindings=True, input_body=True, result=True,
+                result_body=True, recovery=True, terminal_details=True,
+            )
             records = (await self._refresh_records(tuple(keys.values())) if refresh else
                        await self._store.read_records(tuple(keys.values())))
             if not records:
