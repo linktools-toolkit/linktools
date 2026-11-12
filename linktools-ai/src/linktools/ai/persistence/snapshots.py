@@ -1653,7 +1653,7 @@ def snapshot_manifest_usage(
         records = tuple(decode_record(row) for row in group["records"]
                         if isinstance(row, Mapping) and row.get("kind") == "archive_content"
                         and isinstance(row.get("data"), Mapping)
-                        and row["data"].get("codec") in {"execution-binding", "task-graph-binding", "execution-payload", "tool-operation-payload"})
+                        and row["data"].get("codec") in {"execution-binding", "runtime-policy", "task-graph-binding", "execution-payload", "tool-operation-payload"})
         if records:
             scope = group.get("scope_id")
             if not isinstance(scope, str) or not scope:

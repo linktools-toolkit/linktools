@@ -38,9 +38,11 @@ async def test_tool_receipts_are_wholly_owned_by_the_step_ledger(tmp_path: Path,
         records = await tools.state_store.read(lambda tx: tx.scan_records())
         assert len(records) == 2
         references = [tuple(iter_archive_content_refs(record.data)) for record in records]
-        assert references == [(), ()]
-        assert all(len(canonical_json_bytes(record.data)) > payload.size for record in records)
-        assert await archive.read(lambda tx: tx.scan_records()) == ()
+        assert references[0] == references[1] and len(references[0]) == 1
+        assert references[0][0][2].startswith("execution-payload:")
+        assert all(len(canonical_json_bytes(record.data)) < 5000 for record in records)
+        contents = await archive.read(lambda tx: tx.scan_records())
+        assert len(contents) == 1 and contents[0].payload_bytes is not None
 
 
 @pytest.mark.asyncio
@@ -65,9 +67,10 @@ async def test_tool_payload_publication_rolls_back_with_owner(tmp_path: Path, mo
             if record.kind == "tool_operation":
                 assert replaced
                 assert await tx.get_record(record.key) == record
-                # The payload is part of the same owner CAS, never a generic archive row.
-                assert len(canonical_json_bytes(record.data)) > 100_000
-                assert await archive.read(lambda current: current.scan_records()) == ()
+                # The immutable Step payload and its owner share this transaction.
+                contents = await archive.read(lambda current: current.scan_records())
+                assert len(contents) == 1 and contents[0].payload_bytes is not None
+                assert len(tuple(iter_archive_content_refs(record.data))) == 1
                 failed_writes += 1
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replaced
@@ -112,8 +115,8 @@ async def test_small_tool_payload_and_opaque_reference_shaped_data_remain_inline
         await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
             fence=operation.fence, result_payload=payload)
         records = await tools.state_store.read(lambda tx: tx.scan_records())
-        assert tuple(iter_archive_content_refs(records[0].data)) == ()
-        assert await archive.read(lambda tx: tx.scan_records()) == ()
+        assert len(tuple(iter_archive_content_refs(records[0].data))) == 1
+        assert len(await archive.read(lambda tx: tx.scan_records())) == 1
         assert (await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
 
 
@@ -169,7 +172,7 @@ async def test_archived_tool_attachment_survives_cleanup_and_snapshot(tmp_path: 
         await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
             fence=operation.fence, result_payload=payload)
         owner, = await tools.state_store.read(lambda tx: tx.scan_records())
-        assert tuple(iter_archive_content_refs(owner.data)) == ()
+        assert len(tuple(iter_archive_content_refs(owner.data))) == 1
         candidates = tuple((PersistenceDomain.CHECKPOINT, ref) for ref in payload.object_refs())
         assert candidates
         cleanup = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
@@ -193,6 +196,7 @@ async def test_tool_content_expansion_validates_owner_wrapper_before_replacing_i
 ) -> None:
     import copy
     from linktools.ai.persistence._tool_operation_content import expand_tool_content
+    from linktools.ai.persistence._archive import ContentRecord
     from linktools.ai.persistence.codec import decode_envelope, encode_envelope
 
     payload = StoredPayload.inline_bytes(b"large wrapper validation" * 5000)
@@ -203,8 +207,9 @@ async def test_tool_content_expansion_validates_owner_wrapper_before_replacing_i
         await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
             fence=operation.fence, result_payload=payload)
         owner, = await tools.state_store.read(lambda tx: tx.scan_records())
-        assert await archive.read(lambda tx: tx.scan_records()) == ()
-        contents = {}
+        content, = await archive.read(lambda tx: tx.scan_records())
+        reference, = iter_archive_content_refs(owner.data)
+        contents = {reference: ContentRecord.from_record(content)}
         wire = copy.deepcopy(decode_envelope(owner.data).value)
         wrapper = wire["payload"]["fields"]["result_payload"]
         if fault == "missing_schema":

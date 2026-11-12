@@ -12,7 +12,7 @@ from dataclasses import replace
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
-from ..execution import ExecutionRecord, ExecutionTimelineRecord
+from ..execution import ExecutionRecord, ExecutionTimelineRecord, PendingToolContinuation, RecoveryTerminalHandoff, ResultRecord
 from ..model import StoredUserInput
 from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
@@ -24,8 +24,10 @@ from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
 from .codec import ( binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
-    encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
+    encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
+
+from ._execution_policy_content import (POLICY_CODEC, policy_reference, policy_values, encode_policy, decode_policy, expand_policy)
 
 BINDING_CODEC = "execution-binding"
 PAYLOAD_CODEC = "execution-payload"
@@ -52,7 +54,7 @@ def _map_payloads(record: StoredRecord, mapper: Callable[[Mapping], JsonValue]) 
 def _content(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord]) -> Iterator[tuple[tuple[str, str, str], ContentRecord]]:
     if record.kind != "execution":
         return
-    references = [(binding_reference(_binding(record)), BINDING_CODEC)]
+    references = [(binding_reference(_binding(record)), BINDING_CODEC), (policy_reference(record), POLICY_CODEC)]
     references.extend((payload_reference(payload), PAYLOAD_CODEC) for _, payload in _payloads(record))
     for reference, codec in references:
         if reference is None:
@@ -64,14 +66,19 @@ def _content(record: StoredRecord, contents: Mapping[tuple[str, str, str], Conte
         yield reference, content
 
 
-def _decode_payload(raw: bytes, identity: str) -> StoredPayload | StoredUserInput:
+def _decode_payload(raw: bytes, identity: str) -> StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping:
     if archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()) != identity:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         value = json.loads(raw)
         if not isinstance(value, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return decode_domain(value, StoredUserInput if value.get("$dataclass") == "stored_user_input" else StoredPayload)
+        target = {"stored_user_input": StoredUserInput, "stored_payload": StoredPayload,
+                  "pending_tool_continuation": PendingToolContinuation,
+                  "recovery_terminal_handoff": RecoveryTerminalHandoff, "result_record": ResultRecord}.get(value.get("$dataclass"))
+        if target is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value if target in {RecoveryTerminalHandoff, ResultRecord} else decode_domain(value, target)
     except (UnicodeError, ValueError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -146,12 +153,17 @@ def _expand_execution_content(record: StoredRecord, contents: Mapping[tuple[str,
             reserve(content.raw_size)
         decoded[reference] = decode_payload_bytes(content.body, codec=content.compression,
             raw_digest=content.raw_digest, raw_size=content.raw_size)
+    policy = policy_reference(record)
+    if policy is not None:
+        record = expand_policy(record, decoded[policy])
     binding = binding_reference(_binding(record))
     if binding is not None:
         record = expand_binding(record, decoded[binding])
+    values = {reference: _decode_payload(raw, reference[2]) for reference, raw in decoded.items()
+              if reference != binding}
     def expand(payload: Mapping) -> JsonValue:
         reference = payload_reference(payload)
-        return payload if reference is None else _encode_persisted_domain(_decode_payload(decoded[reference], reference[2]))
+        return payload if reference is None else _encode_persisted_domain(decode_execution_payload(payload, values))
     return _map_payloads(record, expand)
 
 
@@ -184,7 +196,7 @@ def restore_native_user_input(reference: NativeUserInputReference, raw: bytes) -
 
 
 def expand_native_execution_content(
-    record: StoredRecord, payloads: Mapping[NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput],
+    record: StoredRecord, payloads: Mapping[NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping],
 ) -> StoredRecord:
     if record.kind != "execution":
         return record
@@ -257,8 +269,27 @@ class ExecutionContent:
     async def expand(self, record: StoredRecord) -> StoredRecord:
         return (await self.expand_many((record,)))[0]
 
+    async def expand_policies(self, records: Sequence[StoredRecord], *,
+                              reserve: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
+        references = tuple(policy_reference(record) for record in records)
+        if not any(reference is not None for reference in references):
+            return tuple(records)
+        archive = await self._archive()
+        if any(reference is not None and reference[:2] != (archive.scope_id, archive.content_scope)
+               for reference in references):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        counts = Counter(reference[2] for reference in references if reference is not None)
+        def reserve_content(identity: str, size: int) -> None:
+            if reserve is not None:
+                reserve(counts[identity] * size)
+        identities = tuple(counts)
+        contents = dict(zip(identities, await archive.read_contents(identities, codec=POLICY_CODEC,
+                            reserve=reserve_content if reserve is not None else None), strict=True))
+        return tuple(record if reference is None else expand_policy(record, contents[reference[2]])
+                     for record, reference in zip(records, references, strict=True))
+
     async def expand_bindings(self, records: Sequence[StoredRecord]) -> tuple[StoredRecord, ...]:
-        return await self._expand_bindings(records)
+        return await self._expand_bindings(await self.expand_policies(records))
 
     async def _expand_bindings(self, records: Sequence[StoredRecord], *,
                           reserve: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
@@ -324,23 +355,37 @@ class ExecutionContent:
         return cached[1] if cached is not None and cached[0]() is value else None
 
     @staticmethod
-    def payload_values(value: ExecutionRecord) -> tuple[StoredPayload | StoredUserInput, ...]:
+    def payload_values(value: ExecutionRecord) -> tuple[StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping, ...]:
         values = [value.stored_user_input]
         if value.result is not None and value.result.output is not None:
             values.append(value.result.output)
         recovery = value.recovery
         handoff = None if recovery is None else recovery.terminal_handoff
+        if recovery is not None and recovery.pending_tools is not None:
+            values.append(recovery.pending_tools)
         if handoff is not None and handoff.outcome.output is not None:
             values.append(handoff.outcome.output)
+        if value.result is not None:
+            values.append(value.result)
+        if handoff is not None:
+            values.append(handoff)
         return tuple(values)
 
-    def _encoding(self, payload: StoredPayload | StoredUserInput) -> tuple[str, bytes]:
+    def _encoding(self, payload: StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping) -> tuple[str, bytes]:
         key = id(payload)
         cached = self._payload_encodings.get(key)
         if cached is not None and cached[0]() is payload:
             return cached[1:]
         from .codec import encode_domain
-        raw = canonical_json_bytes(encode_domain(payload))
+        wire = (_encode_persisted_domain(payload) if isinstance(payload, (ResultRecord, RecoveryTerminalHandoff))
+                else encode_domain(payload))
+        if isinstance(payload, ResultRecord):
+            wire = {**wire, "fields": {**wire["fields"], "output": None}}
+        elif isinstance(payload, RecoveryTerminalHandoff):
+            outcome = wire["fields"]["outcome"]
+            outcome = {**outcome, "fields": {**outcome["fields"], "output": None}}
+            wire = {**wire, "fields": {**wire["fields"], "outcome": outcome}}
+        raw = canonical_json_bytes(wire)
         identity = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
         self._payload_encodings[key] = (ref(payload, lambda _value: self._payload_encodings.pop(key, None)), identity, raw)
         return identity, raw
@@ -392,7 +437,11 @@ class ExecutionContent:
                         if previous_native.get(source) != value.stored_user_input:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         input_source = source
-        selected = [(payload, self._encoding(payload)) for payload in self.payload_values(value)
+        terminal_details = StoredPayload.inline_json({
+            "safe_error_details": _encode_persisted_domain(value.safe_error_details),
+            "error_diagnostics": _encode_persisted_domain(value.error_diagnostics),
+        })
+        selected = [(payload, self._encoding(payload)) for payload in (*self.payload_values(value), terminal_details)
                     if (result_source is None or payload is not output)
                     and (input_source is None or payload is not value.stored_user_input)]
         selected = [(payload, encoded) for payload, encoded in selected if encoded is not None]
@@ -422,18 +471,41 @@ class ExecutionContent:
             reference = archive.scope_id, archive.content_scope, identity
             if reference not in retained:
                 missing.append((PAYLOAD_CODEC, raw))
-            encoded_payloads[id(payload)] = {"$dataclass": "stored_user_input" if isinstance(payload, StoredUserInput) else "stored_payload", "schema": 1,
+            wire = {StoredUserInput: "stored_user_input", StoredPayload: "stored_payload",
+                    PendingToolContinuation: "pending_tool_continuation", RecoveryTerminalHandoff: "recovery_terminal_handoff", ResultRecord: "result_record"}[type(payload)]
+            encoded_payloads[id(payload)] = {"$dataclass": wire, "schema": 1,
                 "fields": {"content": {"$execution_payload": identity,
                     "archive_scope": archive.scope_id, "content_scope": archive.content_scope}}}
+            if isinstance(payload, (ResultRecord, RecoveryTerminalHandoff)):
+                body = payload.output if isinstance(payload, ResultRecord) else payload.outcome.output
+                encoded_payloads[id(payload)]["fields"]["output"] = None if body is None else encoded_payloads[id(body)]
         identity, raw = binding
         if previous_binding != (archive.scope_id, archive.content_scope, identity):
             missing.append((BINDING_CODEC, raw))
+        previous_policy = None if previous is None else policy_reference(previous)
+        effective_policy = policy_values(value)
+        if previous_policy is None:
+            policy_identity, policy_raw = encode_policy(effective_policy)
+            missing.append((POLICY_CODEC, policy_raw))
+            policy_overrides = {}
+        else:
+            if previous_policy[:2] != (archive.scope_id, archive.content_scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            policy_raw, = await archive.read_contents((previous_policy[2],), codec=POLICY_CODEC)
+            base_policy = decode_policy(previous_policy, policy_raw)
+            policy_identity = previous_policy[2]
+            policy_overrides = {name: item for name, item in effective_policy.items()
+                                if canonical_json_bytes(item) != canonical_json_bytes(base_policy[name])}
+        encoded_policy = {"$runtime_policy": policy_identity, "archive_scope": archive.scope_id,
+                          "content_scope": archive.content_scope}
         encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
                            "content_scope": archive.content_scope}
         if missing:
             await archive.prepare_content(tuple(missing), prepared)
             await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
-        return encode_execution_content(value, encoded_payloads, binding=encoded_binding)
+        return encode_execution_content(value, encoded_payloads, binding=encoded_binding,
+                                        policy=encoded_policy, policy_overrides=policy_overrides,
+                                        terminal_details=encoded_payloads[id(terminal_details)])
 
     @staticmethod
     def has_native_input_candidate(prepared: PreparedArchive) -> bool:
@@ -524,11 +596,11 @@ class ExecutionContent:
 
     async def read_payloads(self, records: Sequence[StoredRecord], *,
                             reserve: Callable[[int], None] | None = None, result_only: bool = False,
-                            reserve_native: Callable[[int], None] | None = None) -> dict[tuple[str, str, str] | NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput]:
+                            reserve_native: Callable[[int], None] | None = None) -> dict[tuple[str, str, str] | NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping]:
         native_references = []
         for record in records:
             for path, payload in _payloads(record):
-                if result_only and path != ("result", "fields", "output"):
+                if result_only and path not in {("result",), ("result", "fields", "output")}:
                     continue
                 reference = native_user_input_reference(payload) or native_text_reference(payload)
                 if reference is not None:
@@ -555,7 +627,7 @@ class ExecutionContent:
                            else restore_native_text_payload(source, raw_messages[0]))
                 native_values[source] = payload
         references = [reference for record in records for path, payload in _payloads(record)
-                      if (not result_only or path == ("result", "fields", "output"))
+                      if (not result_only or path in {("result",), ("result", "fields", "output")})
                       if (reference := payload_reference(payload)) is not None]
         if not references:
             return native_values
@@ -572,14 +644,22 @@ class ExecutionContent:
         values = dict(native_values)
         for identity, raw in zip(identities, raws, strict=True):
             value = _decode_payload(raw, identity)
-            key = id(value)
-            self._payload_encodings[key] = (ref(value, lambda _value, key=key: self._payload_encodings.pop(key, None)), identity, raw)
+            if not isinstance(value, Mapping):
+                key = id(value)
+                self._payload_encodings[key] = (ref(value, lambda _value, key=key: self._payload_encodings.pop(key, None)), identity, raw)
             values[(archive.scope_id, archive.content_scope, identity)] = value
         return values
 
-    def terminal_matches(self, current: StoredRecord, candidate: StoredRecord, value: ExecutionRecord) -> bool:
-        values = {("stored_user_input",): value.stored_user_input,
-                  ("result", "fields", "output"): None if value.result is None else value.result.output}
+    async def terminal_matches(self, current: StoredRecord, candidate: StoredRecord, value: ExecutionRecord) -> bool:
+        current, candidate = await self.expand_policies((current, candidate))
+        values = {("terminal_details",): StoredPayload.inline_json({
+                      "safe_error_details": _encode_persisted_domain(value.safe_error_details),
+                      "error_diagnostics": _encode_persisted_domain(value.error_diagnostics)}),
+                  ("stored_user_input",): value.stored_user_input, ("result",): value.result,
+                  ("result", "fields", "output"): None if value.result is None else value.result.output,
+                  ("recovery", "fields", "pending_tools"): None if value.recovery is None else value.recovery.pending_tools,
+                  ("recovery", "fields", "terminal_handoff"): None if value.recovery is None else value.recovery.terminal_handoff,
+                  ("recovery", "fields", "terminal_handoff", "fields", "output"): (None if value.recovery is None or value.recovery.terminal_handoff is None else value.recovery.terminal_handoff.outcome.output)}
         decoded = {reference: values[path] for path, payload in _payloads(candidate)
                    if path in values and (reference := native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)) is not None}
         if any(reference not in decoded for path, payload in _payloads(current)
@@ -588,13 +668,78 @@ class ExecutionContent:
         previous = decode_execution_content(current.data, decoded, timeline=True)
         return previous.completed_at is None or previous.terminal_matches(value)
 
+    async def expand_projection_components(
+        self, records: Sequence[StoredRecord], *, result: bool = False,
+        recovery: bool = False, terminal_details: bool = False,
+    ) -> tuple[StoredRecord, ...]:
+        """Read requested control templates only, retaining input/output locations."""
+        paths = set()
+        if result:
+            paths.add(("result",))
+        if recovery:
+            paths.update({("recovery", "fields", "pending_tools"),
+                          ("recovery", "fields", "terminal_handoff")})
+        if terminal_details:
+            paths.add(("terminal_details",))
+        references = {reference for record in records for path, payload in _payloads(record)
+                      if path in paths and (reference := payload_reference(payload)) is not None}
+        if not references:
+            return tuple(records)
+        archive = await self._archive()
+        if any(reference[:2] != (archive.scope_id, archive.content_scope) for reference in references):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        ordered = tuple(references)
+        raws = await archive.read_contents(tuple(reference[2] for reference in ordered), codec=PAYLOAD_CODEC)
+        decoded = {reference: _decode_payload(raw, reference[2]) for reference, raw in zip(ordered, raws, strict=True)}
+        values = []
+        for record in records:
+            envelope = decode_envelope(record.data)
+            payload = envelope.value["payload"]
+            fields_value = dict(payload["fields"])
+            for path, wrapper in _payloads(record):
+                if path not in paths or (reference := payload_reference(wrapper)) is None:
+                    continue
+                value = decoded[reference]
+                if path == ("terminal_details",):
+                    if not isinstance(value, StoredPayload) or value.kind != "inline" or value.encoding != "json":
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    details = value.decode()
+                    if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if "safe_error_details" in fields_value or "error_diagnostics" in fields_value:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    fields_value.pop("terminal_details")
+                    fields_value.update(details)
+                    continue
+                expanded = dict(value) if isinstance(value, Mapping) else _encode_persisted_domain(value)
+                if wrapper["$dataclass"] in {"result_record", "recovery_terminal_handoff"}:
+                    expanded_fields = dict(expanded["fields"])
+                    if wrapper["$dataclass"] == "result_record":
+                        expanded_fields["output"] = wrapper["fields"]["output"]
+                    else:
+                        outcome = expanded_fields["outcome"]
+                        expanded_fields["outcome"] = {**outcome, "fields": {**outcome["fields"],
+                            "output": wrapper["fields"]["output"]}}
+                    expanded["fields"] = expanded_fields
+                current = fields_value
+                for name in path[:-1]:
+                    current[name] = dict(current[name])
+                    current = current[name]
+                current[path[-1]] = expanded
+            values.append(replace(record, data=encode_envelope({**envelope.value,
+                "payload": {**payload, "fields": fields_value}})))
+        return tuple(values)
+
+    async def expand_terminal_details(self, records: Sequence[StoredRecord]) -> tuple[StoredRecord, ...]:
+        return await self.expand_projection_components(records, terminal_details=True)
+
     async def decode(self, record: StoredRecord, *, timeline: bool = False) -> ExecutionRecord | ExecutionTimelineRecord:
         return (await self.decode_many((record,), timeline=timeline))[0]
 
     async def decode_many(self, records: Sequence[StoredRecord], *,
                           timeline: bool = False) -> tuple[ExecutionRecord | ExecutionTimelineRecord, ...]:
         payloads = await self.read_payloads(records)
-        expanded = records if timeline else await self.expand_bindings(records)
+        expanded = await self.expand_policies(records) if timeline else await self.expand_bindings(records)
         values = []
         for original, record in zip(records, expanded, strict=True):
             value = decode_execution_content(record.data, payloads, timeline=timeline)
@@ -607,10 +752,11 @@ class ExecutionContent:
                           reserve: Callable[[int], None] | None = None,
                           reserve_native: Callable[[int], None] | None = None) -> tuple[StoredRecord, ...]:
         payloads = await self.read_payloads(records, reserve=reserve, reserve_native=reserve_native)
+        records = await self.expand_policies(records, reserve=reserve)
         records = await self._expand_bindings(records, reserve=reserve)
         def expand(payload: Mapping) -> JsonValue:
             reference = native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)
-            return payload if reference is None else _encode_persisted_domain(payloads[reference])
+            return payload if reference is None else _encode_persisted_domain(decode_execution_payload(payload, payloads))
         return tuple(_map_payloads(record, expand) for record in records)
 
 

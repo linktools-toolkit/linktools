@@ -1039,7 +1039,8 @@ def _encode_v1_execution_record(
         name: binding if name == "binding" and binding is not None else
         _encode_domain(getattr(value, name), codec, persisted=persisted)
         for name in _dataclass_fields(ExecutionRecord)
-        if not (persisted and name == "repository_instructions" and value.input_context is not None)
+        if not (persisted and (name == "repository_instructions" and value.input_context is not None
+                              or name in {"memory_scope", "tool_response_ref"} and getattr(value, name) is None))
     }
     recovery = value.recovery
     handoff = None if recovery is None else recovery.terminal_handoff
@@ -1059,9 +1060,26 @@ def _encode_v1_execution_record(
     return cast(Mapping[str, JsonValue], encoded)
 
 
+def _execution_terminal_fields(raw_fields: Mapping[str, object], codec: "_VersionCodec", *, persisted: bool) -> Mapping[str, object]:
+    if "terminal_details" not in raw_fields:
+        return raw_fields
+    if "safe_error_details" in raw_fields or "error_diagnostics" in raw_fields:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    payload = _decode_domain(raw_fields["terminal_details"], StoredPayload, codec, persisted=persisted)
+    if payload.kind != "inline" or payload.encoding != "json":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    details = payload.decode()
+    if not isinstance(details, Mapping) or set(details) != {"safe_error_details", "error_diagnostics"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return {**{name: item for name, item in raw_fields.items() if name != "terminal_details"}, **details}
+
+
 def _decode_v1_execution_record(
     raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool,
 ) -> ExecutionRecord:
+    if "runtime_policy" in raw_fields or "runtime_overrides" in raw_fields:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    raw_fields = _execution_terminal_fields(raw_fields, codec, persisted=persisted)
     outcome = _execution_outcome_fields(raw_fields)
     if outcome is not None and "execution_result" in outcome:
         if not persisted or outcome["execution_result"] is not True:
@@ -1727,6 +1745,10 @@ def _execution_projection_fields(value: Mapping[str, JsonValue]) -> tuple[Mappin
 
 
 def _execution_projection_field(source: Mapping[str, JsonValue], name: str, codec: _VersionCodec) -> object:
+    if name in EXECUTION_POLICY_FIELDS and "runtime_policy" in source:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if name in {"safe_error_details", "error_diagnostics"}:
+        source = _execution_terminal_fields(source, codec, persisted=True)
     target, _init = _dataclass_fields(ExecutionRecord)[name]
     if name in source:
         try:
@@ -1904,8 +1926,12 @@ def decode_execution_metadata(value: Mapping[str, JsonValue], *, tenant_id: str)
 
 _PAYLOAD_PATHS = (
     ("stored_user_input",),
+    ("terminal_details",),
+    ("result",),
     ("result", "fields", "output"),
-    ("recovery", "fields", "terminal_handoff", "fields", "outcome", "fields", "output"),
+    ("recovery", "fields", "pending_tools"),
+    ("recovery", "fields", "terminal_handoff"),
+    ("recovery", "fields", "terminal_handoff", "fields", "output"),
 )
 
 
@@ -1922,9 +1948,11 @@ def execution_payload_slots(value: object) -> tuple[tuple[tuple[str, ...], Mappi
         for name in path:
             item = item.get(name) if isinstance(item, Mapping) else None
         if item is not None:
-            if not isinstance(item, Mapping) or item.get("$dataclass") != ("stored_user_input" if path == _PAYLOAD_PATHS[0] else "stored_payload"):
+            expected = {"stored_user_input": "stored_user_input", "pending_tools": "pending_tool_continuation",
+                        "terminal_handoff": "recovery_terminal_handoff", "result": "result_record"}.get(path[-1], "stored_payload")
+            if not isinstance(item, Mapping) or item.get("$dataclass") != expected:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if native_text_reference(item) is not None and path != ("result", "fields", "output"):
+            if native_text_reference(item) is not None and path not in {("result", "fields", "output"), ("recovery", "fields", "terminal_handoff", "fields", "output")}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if native_user_input_reference(item) is not None and path != ("stored_user_input",):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1989,31 +2017,62 @@ def payload_reference(value: Mapping) -> tuple[str, str, str] | None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if "content" not in fields:
         return None
-    target = StoredUserInput if value.get("$dataclass") == "stored_user_input" else StoredPayload
+    target = {"stored_user_input": StoredUserInput, "stored_payload": StoredPayload,
+              "pending_tool_continuation": PendingToolContinuation,
+              "recovery_terminal_handoff": RecoveryTerminalHandoff, "result_record": ResultRecord}.get(value.get("$dataclass"))
+    if target is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _validate_dataclass_wrapper(value, target, _CURRENT_CODEC, persisted=True)
     if native_user_input_reference(value) is not None or native_text_reference(value) is not None:
         return None
     reference = execution_payload_reference(fields["content"])
-    if reference is None or set(fields) != {"content"}:
+    if reference is None or set(fields) != ({"content", "output"} if target in {ResultRecord, RecoveryTerminalHandoff} else {"content"}):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return reference
 
 
 def map_execution_payload_slots(value: Mapping, mapper: Callable[[Mapping], JsonValue]) -> dict:
     fields = dict(value["fields"])
-    for path, payload in execution_payload_slots(value):
+    # Child reference slots must be rewritten before replacing their whole
+    # typed parent; a restored handoff no longer has the wrapper-only output slot.
+    for path, payload in reversed(execution_payload_slots(value)):
         current = fields
         for name in path[:-1]:
             current[name] = dict(current[name])
             current = current[name]
-        current[path[-1]] = mapper(payload)
+        current[path[-1]] = mapper(current[path[-1]])
     return {**value, "fields": fields}
 
 
 
+EXECUTION_POLICY_FIELDS = (
+    "mode", "planning", "thinking", "tool_effects", "session_context",
+    "restart_checkpoints", "durable_trace", "conversation",
+)
+
+
+def runtime_policy_reference(value: object) -> tuple[str, str, str] | None:
+    """Read the fixed policy owner only from its declared execution slot."""
+    if not isinstance(value, Mapping) or value.get("$dataclass") != "execution_record":
+        return None
+    fields = value.get("fields")
+    if not isinstance(fields, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    reference = fields.get("runtime_policy")
+    if reference is None:
+        if "runtime_overrides" in fields:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return None
+    if not isinstance(reference, Mapping) or "$runtime_policy" not in reference:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _execution_content_reference(reference, "$runtime_policy")
+
+
 def encode_execution_content(
     value: ExecutionRecord, payloads: Mapping[int, JsonValue],
-    *, binding: JsonValue | None = None,
+    *, binding: JsonValue | None = None, policy: JsonValue | None = None,
+    policy_overrides: Mapping[str, JsonValue] | None = None,
+    terminal_details: JsonValue | None = None,
 ) -> JsonValue:
     """Encode references only in the declared input and result owner slots."""
     def input_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
@@ -2025,12 +2084,30 @@ def encode_execution_content(
             if name == "output" and id(getattr(item, name)) in payloads else
             _encode_domain(getattr(item, name), codec, persisted=persisted))
             for name in _dataclass_fields(type(item))}
+    def recovery_content_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
+        if id(item) in payloads:
+            return payloads[id(item)]["fields"]
+        return {name: _encode_domain(getattr(item, name), codec, persisted=persisted)
+                for name in _dataclass_fields(type(item))}
     def execution_encoder(item: object, codec: _VersionCodec, persisted: bool) -> Mapping[str, JsonValue]:
-        return _encode_v1_execution_record(item, codec, persisted, binding=binding)
+        encoded = dict(_encode_v1_execution_record(item, codec, persisted, binding=binding))
+        if policy is not None:
+            for name in EXECUTION_POLICY_FIELDS:
+                encoded.pop(name)
+            encoded["runtime_policy"] = policy
+            if policy_overrides:
+                encoded["runtime_overrides"] = dict(policy_overrides)
+        if terminal_details is not None:
+            encoded.pop("safe_error_details", None)
+            encoded.pop("error_diagnostics", None)
+            encoded["terminal_details"] = terminal_details
+        return encoded
     codec = replace(_CURRENT_CODEC, dataclass_encoders={**_CURRENT_CODEC.dataclass_encoders,
         "execution_record": execution_encoder,
-        "stored_user_input": input_encoder, "result_record": output_encoder,
+        "stored_user_input": input_encoder, "result_record": recovery_content_encoder,
         "recovery_terminal_outcome": output_encoder,
+        "pending_tool_continuation": recovery_content_encoder,
+        "recovery_terminal_handoff": recovery_content_encoder,
     })
     return _encode_domain(value, codec, persisted=True)
 
@@ -2042,15 +2119,7 @@ def execution_payload_reference(value: object) -> tuple[str, str, str] | None:
     return _execution_content_reference(value, "$execution_payload")
 
 
-def decode_execution_content(
-    value: Mapping[str, JsonValue], payloads: Mapping[tuple[str, str, str] | NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput],
-    *, timeline: bool = False, result: bool = False,
-) -> ExecutionRecord | ExecutionTimelineRecord | ExecutionResultRecord:
-    """Inject verified immutable bodies without encoding or decoding them again."""
-    envelope = decode_envelope(value)
-    codec = _VERSION_CODECS.get(envelope.version)
-    if codec is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+def _execution_payload_codec(codec: _VersionCodec, payloads: Mapping) -> _VersionCodec:
     def decoder(original: DataclassDecoder) -> DataclassDecoder:
         def decode_payload(raw: Mapping[str, object], current: _VersionCodec, persisted: bool) -> object:
             content = raw.get("content")
@@ -2072,17 +2141,62 @@ def decode_execution_content(
                 reference = execution_payload_reference(content)
             if reference is None:
                 return original(raw, current, persisted)
-            if set(raw) != {"content"} or reference not in payloads:
+            if set(raw) not in ({"content"}, {"content", "output"}) or reference not in payloads:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             selected = payloads[reference]
+            if isinstance(selected, Mapping) and selected.get("$dataclass") in {"result_record", "recovery_terminal_handoff"}:
+                if set(raw) != {"content", "output"}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                output = _decode_domain(raw["output"], StoredPayload | None, current, persisted=True)
+                restored = dict(selected)
+                fields_value = dict(restored["fields"])
+                if selected["$dataclass"] == "result_record":
+                    fields_value["output"] = _encode_domain(output, current, persisted=True)
+                    target = ResultRecord
+                else:
+                    outcome = dict(fields_value["outcome"])
+                    outcome["fields"] = {**outcome["fields"], "output": _encode_domain(output, current, persisted=True)}
+                    fields_value["outcome"] = outcome
+                    target = RecoveryTerminalHandoff
+                restored["fields"] = fields_value
+                return _decode_domain(restored, target, current, persisted=True)
             if isinstance(reference, NativeUserInputReference):
                 return validate_native_user_input(reference, selected)
             return validate_native_text_payload(reference, selected) if isinstance(reference, NativeTextReference) else selected
         return decode_payload
     current = replace(codec, dataclass_decoders={**codec.dataclass_decoders,
+        "result_record": decoder(lambda raw, current, persisted:
+            _decode_dataclass_fields(raw, ResultRecord, current, persisted=persisted)),
         "stored_payload": decoder(_decode_v1_stored_payload),
         "stored_user_input": decoder(_decode_v1_stored_user_input),
+        "pending_tool_continuation": decoder(lambda raw, current, persisted:
+            _decode_dataclass_fields(raw, PendingToolContinuation, current, persisted=persisted)),
+        "recovery_terminal_handoff": decoder(lambda raw, current, persisted:
+            _decode_dataclass_fields(raw, RecoveryTerminalHandoff, current, persisted=persisted)),
     })
+    return current
+
+
+def decode_execution_payload(value: Mapping, payloads: Mapping) -> object:
+    targets = {"stored_user_input": StoredUserInput, "stored_payload": StoredPayload,
+               "pending_tool_continuation": PendingToolContinuation,
+               "recovery_terminal_handoff": RecoveryTerminalHandoff, "result_record": ResultRecord}
+    target = targets.get(value.get("$dataclass"))
+    if target is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _decode_domain(value, target, _execution_payload_codec(_CURRENT_CODEC, payloads), persisted=True)
+
+
+def decode_execution_content(
+    value: Mapping[str, JsonValue], payloads: Mapping[tuple[str, str, str] | NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput],
+    *, timeline: bool = False, result: bool = False,
+) -> ExecutionRecord | ExecutionTimelineRecord | ExecutionResultRecord:
+    """Inject verified immutable bodies without encoding or decoding them again."""
+    envelope = decode_envelope(value)
+    codec = _VERSION_CODECS.get(envelope.version)
+    if codec is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    current = _execution_payload_codec(codec, payloads)
     if result:
         return decode_execution_result(value, codec=current)
     if timeline:
@@ -2105,7 +2219,7 @@ def decode_execution_timeline(value: Mapping[str, JsonValue], *, codec: _Version
         if type(payload["schema"]) is not int or payload["schema"] != envelope.version:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         source = payload["fields"]
-        if not isinstance(source, Mapping):
+        if not isinstance(source, Mapping) or "runtime_policy" in source or "runtime_overrides" in source:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         codec = codec or _VERSION_CODECS[envelope.version]
         values = {}
@@ -2193,7 +2307,7 @@ def _execution_content_reference(value: Mapping, marker: str) -> tuple[str, str,
     return scope, content_scope, identity
 
 
-TOOL_PAYLOAD_CODEC = "tool-operation-payload"
+TOOL_PAYLOAD_CODEC = "execution-payload"
 _TOOL_PAYLOAD_SLOTS = ("arguments_payload", "result_payload", "error_payload")
 
 
@@ -2231,27 +2345,10 @@ def native_tool_result_reference(payload: Mapping) -> NativeToolResultReference 
 
 
 def tool_payload_reference(payload: Mapping) -> tuple[str, str, str] | None:
-    fields = payload.get("fields")
-    if not isinstance(fields, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if "content" not in fields:
-        return None
-    # Expansion replaces this wrapper, so validate it before reading its body.
-    _validate_dataclass_wrapper(payload, StoredPayload, _CURRENT_CODEC, persisted=True)
+    """Tool facts use the same canonical Step payload owner as continuations."""
     if native_tool_result_reference(payload) is not None:
         return None
-    content = fields["content"]
-    if (set(fields) != {"content"} or not isinstance(content, Mapping)
-            or set(content) != {"$tool_payload", "archive_scope", "content_scope"}):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    scope, owner, identity = content["archive_scope"], content["content_scope"], content["$tool_payload"]
-    if (not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope)
-            or not isinstance(identity, str) or not identity.startswith(TOOL_PAYLOAD_CODEC + ":")
-            or len(identity) != len(TOOL_PAYLOAD_CODEC) + 65
-            or any(c not in "0123456789abcdef" for c in identity[-64:])):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    decode_archive_scope(owner)
-    return scope, owner, identity
+    return payload_reference(payload)
 
 
 def map_tool_payload_slots(value: Mapping, mapper: Callable[[Mapping], JsonValue]) -> dict:
@@ -3155,4 +3252,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

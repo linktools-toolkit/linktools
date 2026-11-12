@@ -330,6 +330,11 @@ class ToolRepositoryImpl(_RepositoryBase):
         )
         self._tool_content = ToolOperationContent(store, namespace=namespace, tenant_id=tenant_id)
 
+    async def _mutate_content(self, operation: Callable[[StateTransaction], Awaitable[_ToolValue]]) -> _ToolValue:
+        if active_state_scope() is None:
+            await self._store.storage_group.open_archive()
+        return await self._store.mutate(operation)
+
     async def _decode(self, record: StoredRecord, target: type[_ToolValue]) -> _ToolValue:
         if target is ToolOperationRecord:
             record = await self._tool_content.expand(record)
@@ -398,7 +403,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             value = replace(value, updated_at=datetime.now(timezone.utc))
             await self._replace_tool_in_transaction(transaction, stored, value)
             return Observed(value, stored.storage_revision + 1)
-        return await self._store.mutate(mutate)
+        return await self._mutate_content(mutate)
 
     async def get_tool_effect(
         self, *, run_id: str, tool_call_id: str, source_run_id: str | None = None,
@@ -445,7 +450,7 @@ class ToolRepositoryImpl(_RepositoryBase):
 
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
-            result = await self._store.mutate(
+            result = await self._mutate_content(
                 lambda transaction: self.admit_in_transaction(transaction, request)
             )
             result = result.value
@@ -648,7 +653,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 await transaction.insert_aliases((StoredAlias(replay_alias, key),))
                 return record
 
-            return await self._store.mutate(mutate)
+            return await self._mutate_content(mutate)
 
         return await self._retry_storage_conflict(attempt)
 
@@ -1003,7 +1008,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         fence: int,
     ) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
-            return await self._store.mutate(
+            return await self._mutate_content(
                 lambda transaction: self.defer_in_transaction(
                     transaction,
                     tool_operation_id,
@@ -1101,7 +1106,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     await write(transaction)
                 return value
 
-            return await self._store.mutate(mutate)
+            return await self._mutate_content(mutate)
 
         return await self._retry_storage_conflict(attempt)
 
@@ -1170,7 +1175,7 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         if transaction is not None:
             return await mutate(transaction)
-        return await self._store.mutate(mutate)
+        return await self._mutate_content(mutate)
 
     async def complete_in_transaction(
         self,
@@ -1293,7 +1298,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 candidate = replace(stored, storage_revision=stored.storage_revision + 1,
                                     data=encode_envelope({**envelope.value, "payload": {**payload, "fields": fields}}))
                 await _replace_checked(transaction, candidate, stored.storage_revision)
-        await self._store.mutate(update)
+        await self._mutate_content(update)
 
     async def _replace_tool_in_transaction(
         self,

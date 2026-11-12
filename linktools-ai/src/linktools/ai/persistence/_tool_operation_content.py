@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 
-from ..core import JsonValue
+from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity
@@ -17,7 +17,8 @@ from ._native_tool_result import restore_native_tool_result_payload
 from ._step_store import SqlStepStore
 from ..steps import native_store_key
 from .codec import (TOOL_PAYLOAD_CODEC, decode_envelope, encode_envelope,
-                    tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, _encode_persisted_domain)
+                    tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference,
+                    decode_domain, encode_domain, _encode_persisted_domain)
 from .state import StateStore, StoredRecord, active_state_scope
 
 class ToolContentReadRequired(AIError):
@@ -36,10 +37,9 @@ def _decode(raw: bytes, identity: str) -> Mapping:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         value = json.loads(raw)
-        if (not isinstance(value, Mapping) or value.get("$dataclass") != "stored_payload"
-                or tool_payload_reference(value) is not None):
+        if not isinstance(value, Mapping) or value.get("$dataclass") != "stored_payload":
             raise ValueError("invalid archived tool payload")
-        return value
+        return _encode_persisted_domain(decode_domain(value, StoredPayload))
     except (UnicodeError, ValueError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -118,6 +118,7 @@ class ToolOperationContent:
             for name, payload in tool_payload_slots(decode_envelope(previous.data).value["payload"])
             if (reference := native_tool_result_reference(payload)) is not None}
         retained_fields = {}
+        selected = {}
         for name, payload in tool_payload_slots(decode_envelope(record.data).value["payload"]):
             fields = payload.get("fields", {})
             reference = native_retained.get(name)
@@ -125,6 +126,28 @@ class ToolOperationContent:
                     and (fields.get("digest"), fields.get("size")) == (reference.digest, reference.size)):
                 retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
                                          "fields": {"content": reference.to_json()}}
+                continue
+            selected[name] = canonical_json_bytes(encode_domain(decode_domain(payload, StoredPayload)))
+        if selected:
+            archive = await self._archive()
+            retained = set() if previous is None else {tool_payload_reference(payload)
+                for _, payload in tool_payload_slots(decode_envelope(previous.data).value["payload"])}
+            if any(reference is not None and reference[:2] != (archive.scope_id, archive.content_scope)
+                   for reference in retained):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            prepared = PreparedArchive()
+            missing = []
+            for name, raw in selected.items():
+                identity = archive_content_identity(TOOL_PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
+                reference = archive.scope_id, archive.content_scope, identity
+                if reference not in retained:
+                    missing.append((TOOL_PAYLOAD_CODEC, raw))
+                retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1, "fields": {"content": {
+                    "$execution_payload": identity, "archive_scope": archive.scope_id,
+                    "content_scope": archive.content_scope}}}
+            if missing:
+                await archive.prepare_content(tuple(missing), prepared)
+                await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
         if not retained_fields:
             return record
         envelope = decode_envelope(record.data)

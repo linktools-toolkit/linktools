@@ -91,3 +91,16 @@ Other invariant fields are validated then projected as constants.
 
 This is first-pass implementation evidence only; no local verification was run
 for the payload-owner change before submitting it to natural CI.
+
+## Shared first-writer payload owner
+
+The next first-pass change replaces inline tool bodies with the same canonical
+`encode_domain(StoredPayload)` / `execution-payload` immutable Step content used
+by accepted execution payloads and continuation arguments. This applies to every
+size and encoding. Content and effect references are published within the same
+storage-group transaction. Standalone tool mutations open the archive before
+entering that transaction; an already-active transaction must have enlisted it.
+Previously published exact Native receipts retain their fixed-source reference.
+No new payload protocol or table is introduced. The preceding inline-owner
+tradeoff describes the intermediate implementation, not this final writer.
+This change has not been locally tested or probed before natural CI.

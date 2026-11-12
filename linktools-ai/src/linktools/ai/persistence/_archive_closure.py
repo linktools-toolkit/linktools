@@ -26,7 +26,7 @@ from .codec import (
 )
 from .state import StoredRecord, record_key
 from .captures import task_binding_content_reference
-from .codec import (execution_payload_slots, payload_reference, map_execution_payload_slots,
+from .codec import (runtime_policy_reference, execution_payload_slots, payload_reference, map_execution_payload_slots,
                     native_text_reference, native_user_input_reference)
 
 
@@ -117,6 +117,9 @@ def iter_archive_content_refs(value: object) -> Iterator[tuple[str, str, str]]:
     if isinstance(value, Mapping):
         if value.get("$dataclass") in {"stored_payload", "stored_user_input"}:
             return
+        policy = runtime_policy_reference(value)
+        if policy is not None:
+            yield policy
         for _path, payload in execution_payload_slots(value):
             reference = payload_reference(payload)
             if reference is not None:
@@ -411,7 +414,7 @@ class ArchiveClosure(_SequenceClosure):
         """Expose immutable binding metadata for complete offline validation."""
         return {(self.scope_id, scope, identity): ContentRecord.from_record(record)
                 for (scope, kind, identity), record in self._records.items()
-                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "task-graph-binding", "execution-payload", "tool-operation-payload"}}
+                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "runtime-policy", "task-graph-binding", "execution-payload", "tool-operation-payload"}}
 
     @property
     def has_roots(self) -> bool:

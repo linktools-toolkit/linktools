@@ -93,7 +93,9 @@ class RuntimeRetentionController:
         if publication is not None:
             retained = publication.execution
         if retained is None:
-            retained = await repository.state_store.read(read_source)
+            retained = (await repository.read_content(lambda _group: repository.state_store.read(read_source))
+                        if type(repository) is ExecutionRepositoryImpl else
+                        await repository.state_store.read(read_source))
         if retained is not None and retained.status not in {
             ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
         }:
