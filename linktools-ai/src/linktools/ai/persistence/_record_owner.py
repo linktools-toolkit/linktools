@@ -57,7 +57,7 @@ def record_owner_names(*, keys: Sequence[bytes] | None = None, kind: str | None 
 def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = None,
                       kind: str | None = None, owner: str | None = None) -> "FromClause":
     """Read a bounded owner set as one SQL statement, preserving global ordering."""
-    from sqlalchemy import cast, literal, null, select, union_all
+    from sqlalchemy import String, cast, literal, null, select, union_all
 
     if owner is not None and owner not in RECORD_OWNER_TABLES:
         raise ValueError("unknown record owner")
@@ -72,8 +72,11 @@ def record_owner_rows(metadata: "MetaData", *, keys: Sequence[bytes] | None = No
         # SQL type metadata alone does not type an inlined NULL on the server.
         # PostgreSQL resolves an untyped NULL in a derived owner to text before
         # outer UNIONs can see the corresponding canonical bytea/date column.
+        # NULL has no text comparison semantics. Use a collation-free string
+        # cast target: MySQL forbids COLLATE inside CAST(... AS CHAR ...).
+        # Keep binary/date targets explicit for PostgreSQL derived UNIONs.
         selections.append(select(*(
-            (cast(null(), column.type) if constants[column.name] is None else
+            (cast(null(), String(column.type.length) if isinstance(column.type, String) else column.type) if constants[column.name] is None else
              literal(constants[column.name], type_=column.type, literal_execute=True)).label(column.name)
             if column.name in constants else table.c[column.name]
             for column in canonical.c)))

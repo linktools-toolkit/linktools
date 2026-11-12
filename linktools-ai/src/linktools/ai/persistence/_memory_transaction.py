@@ -89,8 +89,10 @@ class _MemoryTransaction:
         *,
         now: datetime | None = None,
         validate_record: Callable[[StoredRecord], None] = validate_record_identity,
+        record_values: Callable[[], Iterator[StoredRecord]] | None = None,
     ) -> None:
         self._validate_record = validate_record
+        self._record_values = record_values
         self.records = _MemoryOverlay(records, validate=validate_record)
         self.sequences = _MemoryOverlay(sequences)
         self.facts = _MemoryOverlay(facts)
@@ -329,6 +331,17 @@ class _MemoryTransaction:
             del self.records[key]
             self.guarded_record_keys.discard(key)
 
+    def _iter_records(self) -> Iterator[StoredRecord]:
+        if self._record_values is None:
+            yield from self.records.values()
+            return
+        changes = self.records.changes()
+        deleted = self.records.deleted()
+        for record in self._record_values():
+            if record.key not in changes and record.key not in deleted:
+                yield record
+        yield from changes.values()
+
     async def read_record_subjects(
         self, *, scope_key: bytes, kind: str, subject_ids: Sequence[str],
     ) -> tuple[StoredRecord, ...]:
@@ -337,7 +350,7 @@ class _MemoryTransaction:
         if not subjects:
             return ()
         return tuple(sorted(
-            (record for record in self.records.values()
+            (record for record in self._iter_records()
              if record.scope_key == scope_key and record.kind == kind
              and record.subject_id in subjects),
             key=lambda record: (record.sort_key, record.key),
@@ -345,7 +358,7 @@ class _MemoryTransaction:
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
         values = [
-            record for record in self.records.values() if _matches_record(record, query)
+            record for record in self._iter_records() if _matches_record(record, query)
         ]
         values.sort(key=lambda record: (record.sort_key, record.key))
         if query.after_sort_key is not None and query.after_key is not None:
@@ -362,7 +375,7 @@ class _MemoryTransaction:
         return tuple(values)
 
     async def scan_records(self) -> tuple[StoredRecord, ...]:
-        return tuple(self.records.values())
+        return tuple(self._iter_records())
 
     async def scan_records_page(
         self,
@@ -372,7 +385,7 @@ class _MemoryTransaction:
     ) -> tuple[StoredRecord, ...]:
         _require_scan_limit(limit)
         values = sorted(
-            self.records.values(),
+            self._iter_records(),
             key=lambda value: (value.kind, value.key),
         )
         if after is not None:

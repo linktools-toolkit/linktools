@@ -78,6 +78,14 @@ class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
             yield from owner
         yield from (payload_record_from_row(row).key for row in self.payload_rows.values())
 
+    def iter_records(self) -> Iterator[StoredRecord]:
+        """Scan physical owners once without routing every known key again."""
+        from ._step_payload_owner import payload_record_from_row
+        for owner in self._owners.values():
+            yield from owner.values()
+        for row in self.payload_rows.values():
+            yield payload_record_from_row(row)
+
     def __len__(self) -> int:
         return sum(map(len, self._owners.values())) + len(self.payload_rows)
 
@@ -278,6 +286,7 @@ class InMemoryStateStorageGroup:
             store._operation_streams,
             now=now,
             validate_record=store._record_owners.validate,
+            record_values=store._record_owners.iter_records,
         )
 
     def _ensure_member(self, store: "InMemoryStateStore") -> None:
