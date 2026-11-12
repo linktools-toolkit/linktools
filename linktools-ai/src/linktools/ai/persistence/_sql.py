@@ -66,7 +66,7 @@ from .state import (
     validate_record_replacement,
 )
 
-from ._run_counters import RUN_COUNTER_COLUMNS, run_counter_address, run_counter_streams
+from ._run_counters import RUN_COUNTER_COLUMNS, run_counter_address, run_counter_streams, run_counter_page_start
 
 if TYPE_CHECKING:
     from ._message_root import NativeMessageRoot
@@ -2329,13 +2329,38 @@ class _SqlTransaction:
     async def scan_sequences_page(
         self, *, after: bytes | None, limit: int,
     ) -> Mapping[bytes, int]:
+        from sqlalchemy import select
         _require_scan_limit(limit)
         if after is not None:
             validate_stream_key(after)
-        # Physical run columns and opaque counters share one logical key order.
-        values = await self.scan_sequences()
-        return dict(tuple((key, value) for key, value in values.items()
-                          if after is None or key > after)[:limit])
+        table = self._table("ai_state_counters")
+        query = select(table).where(table.c.store_key == self._store_key)
+        if after is not None:
+            query = query.where(table.c.stream_key > after)
+        values = {}
+        for row in (await self._execute(query.order_by(table.c.stream_key).limit(limit))).mappings():
+            _validate_locators(row, "stream_key")
+            key = _row_stream_key(row["stream_key"])
+            if run_counter_address(key) is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values[key] = _row_nonnegative_int(row["value"])
+        table = self._table("ai_step_run_admissions")
+        for index, column in enumerate(RUN_COUNTER_COLUMNS):
+            bound = run_counter_page_start(after, column)
+            if bound is None:
+                continue
+            query = select(table.c.key, table.c.key_locator, table.c[column]).where(
+                table.c.store_key == self._store_key, table.c[column].is_not(None))
+            start, inclusive = bound
+            if start is not None:
+                query = query.where(table.c.key >= start if inclusive else table.c.key > start)
+            for row in (await self._execute(query.order_by(table.c.key).limit(limit))).mappings():
+                _validate_locators(row, "key")
+                streams = run_counter_streams(row["key"])
+                if not streams or (after is not None and streams[index] <= after):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[streams[index]] = _row_nonnegative_int(row[column])
+        return dict(sorted(values.items())[:limit])
 
     async def next_sequence(self, key: bytes) -> int:
         return await self.reserve_sequence(key, 1)

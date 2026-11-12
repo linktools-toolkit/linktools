@@ -435,9 +435,9 @@ class _MemoryTransaction:
     async def scan_sequences(self) -> Mapping[bytes, int]:
         values = dict(self.sequences)
         if self.run_counters is not None:
-            for record in self._iter_records():
-                for index, stream in enumerate(run_counter_streams(record.key)):
-                    value = self._run_counter_value(record.key, index)
+            for owner in self.run_counters:
+                for index, stream in enumerate(run_counter_streams(owner)):
+                    value = self._run_counter_value(owner, index)
                     if value is not None:
                         values[stream] = value
         return dict(sorted(values.items()))
