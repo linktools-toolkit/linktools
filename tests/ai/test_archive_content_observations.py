@@ -151,3 +151,50 @@ async def test_content_identity_keys_preserve_content_preparation_keys(tmp_path:
         assert await archive.read_contents(identities, codec="bytes") == (b"body",)
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_ensure_content_checks_current_bytes_without_republishing_existing_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    from linktools.ai.errors import ErrorCode
+    from linktools.ai.persistence.state import StateTransaction
+
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace="archive", tenant_id="tenant")
+    try:
+        archive = await _archive(state)
+        values = (("execution-payload", b"shared terminal bytes"),)
+        publications = []
+        preparations = []
+        publish = archive.publish
+        prepare_content = archive.prepare_content
+
+        async def tracked_prepare(values: tuple[tuple[str, bytes], ...], prepared: PreparedArchive) -> tuple[str, ...]:
+            preparations.append(values)
+            return await prepare_content(values, prepared)
+
+        async def tracked_publish(transaction: StateTransaction, prepared: PreparedArchive, *, native: bool = True) -> None:
+            publications.append(tuple(prepared.records))
+            await publish(transaction, prepared, native=native)
+
+        monkeypatch.setattr(archive, "publish", tracked_publish)
+        monkeypatch.setattr(archive, "prepare_content", tracked_prepare)
+        identities = await archive.ensure_content(values)
+        assert len(publications) == 1
+        assert await archive.ensure_content(values) == identities
+        assert len(publications) == 1
+        key, = archive.content_record_keys(values)
+        current = await archive.store.read_record(key)
+        assert current is not None
+        damaged = replace(current, payload_bytes=b"corrupt", storage_revision=current.storage_revision + 1)
+        assert await archive.store.mutate(lambda transaction: transaction.replace_record(
+            damaged, expected_storage_revision=current.storage_revision,
+        ))
+        with pytest.raises(AIError) as caught:
+            await archive.ensure_content(values)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert len(publications) == 1
+        assert preparations == [values, values, values]
+    finally:
+        await state.close()

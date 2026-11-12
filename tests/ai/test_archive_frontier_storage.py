@@ -231,6 +231,11 @@ def test_fixed_frontier_compiles_for_supported_server_dialects_with_bounded_para
 @pytest.mark.asyncio
 async def test_direct_step_content_uses_exact_index_without_sequence_union(tmp_path: Path) -> None:
     async with _archive_database(tmp_path / "direct-step.db") as (engine, archive, prepared, root):
+        scope, store = await archive.store.storage_group.open_archive(create=True)
+        archive = ContentArchive(store, scope, namespace="namespace", tenant_id="tenant", object_store=None)
+        prepared = PreparedArchive()
+        root = await archive.prepare_append(archive.empty_root(), (("model-message", b"message"),), prepared)
+        await store.mutate(lambda tx: archive.publish(tx, prepared))
         identities = await archive.prepare_content((("execution-payload", b"payload"),), prepared)
         await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
         key = archive._key("archive_content", identities[0])
@@ -250,11 +255,11 @@ async def test_direct_step_content_uses_exact_index_without_sequence_union(tmp_p
         assert "ai_state_records" not in sql
         async with engine.connect() as connection:
             plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)).all()
-        assert any("SEARCH ai_step_payload_contents" in row[3] and "key_locator=?" in row[3] for row in plan), plan
+        assert any("SEARCH ai_step_messages" in row[3] and "store_locator=? AND sha256=?" in row[3] for row in plan), plan
         await archive.store.read(lambda tx: tx.read_archive_frontiers(
             scope_key=decode_archive_scope(archive.content_scope),
             requests=(ArchiveNodeRead(archive._key("archive_sequence", root.slices[0].first)),),
         ))
         event.remove(engine.sync_engine, "before_cursor_execute", record_query)
         assert len(statements) == 1
-        assert "ai_step_payload_contents" not in statements[0][0]
+        assert "ai_step_messages" not in statements[0][0]

@@ -135,16 +135,16 @@ def build_step_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData"
 
     if "ai_step_messages" not in metadata.tables:
         messages = table(
-            "ai_step_messages", "Deduplicated upstream ModelMessage bodies and attachment manifests.",
+            "ai_step_messages", "Immutable typed content bytes: native messages and accepted execution payloads in disjoint partitions.",
             partition(),
-            digest("sha256", "SHA-256 of the canonical uncompressed upstream message JSON."),
-            Column("message", sql_blob(), nullable=True, comment="Raw or compressed canonical message bytes, absent for attachment manifests."),
+            digest("sha256", "SHA-256 of the canonical uncompressed bytes for the partition content type."),
+            Column("message", sql_blob(), nullable=True, comment="Raw or compressed canonical content bytes, absent for native attachment manifests."),
             Column("compression", sql_state(), nullable=False, comment="Message body compression codec: raw or zlib."),
-            Column("raw_size", BigInteger, nullable=False, comment="Canonical uncompressed message byte count for bounded decompression."),
+            Column("raw_size", BigInteger, nullable=False, comment="Canonical uncompressed content byte count for bounded decompression."),
             Column("payload_json", JSON(none_as_null=True), nullable=True,
                    comment="Typed attachment manifest without attachment bytes, absent for ordinary message bodies."),
             Column("gc_revision", BigInteger, nullable=False, server_default=sql_text("0"),
-                   comment="Optimistic native dependency publication fence."),
+                   comment="Optimistic content revision used by the owning partition."),
         )
         sql_unique(messages, "store_locator", "sha256")
 

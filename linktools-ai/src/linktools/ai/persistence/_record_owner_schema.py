@@ -122,19 +122,16 @@ def build_record_owner_table(metadata: "MetaData", *, name: str, comment: str) -
                comment="First 128 bytes of the full sort key; non-unique query projection only."),
         *sql_audit_columns(),
     ]
-    omitted = ({"kind", "payload_bytes"} if name == "ai_step_tool_operations" else
-               {"kind", "subject_id", "parent_key", "parent_locator", "state", "lease_owner", "lease_fence", "lease_expires_at"}
-               if name == "ai_step_payload_contents" else set())
+    omitted = {"kind", "payload_bytes"} if name == "ai_step_tool_operations" else set()
     records = Table(name, metadata, *(column for column in columns if column.name not in omitted),
                     comment=comment, **sql_table_options())
     sql_unique(records, "store_key", "key_locator")
     if "kind" in records.c:
         sql_query_index(records, "store_key", "kind", "sort_prefix")
-    if name not in {"ai_step_tool_operations", "ai_step_payload_contents"}:
+    if name != "ai_step_tool_operations":
         sql_query_index(records, "scope_locator", "sort_prefix")
-    if name != "ai_step_payload_contents":
-        sql_query_index(records, "scope_locator", "subject_id")
-        sql_query_index(records, "parent_locator", "sort_prefix")
+    sql_query_index(records, "scope_locator", "subject_id")
+    sql_query_index(records, "parent_locator", "sort_prefix")
     sql_audit_indexes(records)
 
 

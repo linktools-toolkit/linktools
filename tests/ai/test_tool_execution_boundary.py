@@ -94,7 +94,7 @@ async def test_known_new_admission_and_result_use_no_select_or_alias(tmp_path: P
         selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
         # The immutable result owner must be checked even for a new effect.
         assert len(selects) <= 1
-        assert all("ai_step_payload_contents" in sql and "key_locator IN" in sql
+        assert all("ai_step_messages" in sql and "store_locator" in sql and "sha256" in sql
                    and "ai_step_tool_operations" not in sql and "ai_state_records" not in sql
                    for sql in selects)
         assert not [sql for sql in statements if "ai_tool_operation_aliases" in sql]

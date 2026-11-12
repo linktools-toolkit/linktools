@@ -32,7 +32,7 @@ from ..steps import native_store_key
 from pydantic_ai.messages import ModelResponse, TextPart
 from ._message_root import NativeMessageRoot, NativeTextReference
 from .contracts import ArchivedContextBlock
-from ._archive import ContentArchive, PreparedArchive
+from ._archive import ContentArchive, PreparedArchive, archive_content_scope
 from ..session import SessionTurnRef
 from ..execution import ExecutionControlRecord
 from .contracts import (
@@ -3086,12 +3086,15 @@ class StateCommands:
             ) if participates and archive is not None
         )
         shared_archive = None
+        execution_archive_scope = archive_content_scope(self._namespace, self._tenant_id)
+        shared_execution_scope = False
         if _same_group(stores) and terminal_archives:
             roots = tuple([
                 (await archive.transcript_repository.content_archive(create=True)).empty_root()
                 for archive in terminal_archives
             ])
             same_content_scope = all(root == roots[0] for root in roots)
+            shared_execution_scope = same_content_scope and roots[0].content_scope == execution_archive_scope
             shared_archive = _copy_archive_union(tuple(
                 archive for projection in execution_projections
                 for archive in (
@@ -3189,6 +3192,30 @@ class StateCommands:
                     observation=(None if projection.observation is None else
                                  replace(projection.observation, archive=PreparedArchive())),
                 ) for projection in execution_projections)
+            result_source = None
+            if type(self._execution) is ExecutionRepositoryImpl:
+                for checkpoints in (tuple(prepared_conversation), tuple(prepared_execution),
+                        tuple(checkpoint for projection in terminal_projections for checkpoint in projection.checkpoints)):
+                    result_source = self._native_terminal_text(commit.result.output, checkpoints)
+                    if result_source is not None:
+                        break
+                if shared_archive is not None and shared_execution_scope:
+                    await self._execution.prepare_terminal_content(commit, shared_archive, result_source=result_source)
+                elif self._execution_run_store is not None and (prepared_execution or terminal_projections):
+                    content = await self._execution_run_store.transcript_repository.content_archive(create=True)
+                    if content.content_scope == execution_archive_scope:
+                        if prepared_execution:
+                            checkpoint = prepared_execution[0]
+                            bundle = _copy_archive_union((checkpoint.archive,))
+                            await self._execution.prepare_terminal_content(commit, bundle, result_source=result_source)
+                            prepared_execution = replace(prepared_execution, checkpoints=(
+                                replace(checkpoint, archive=bundle), *prepared_execution.checkpoints[1:],
+                            ))
+                        else:
+                            projection = terminal_projections[0]
+                            bundle = _copy_archive_union((projection.archive,))
+                            await self._execution.prepare_terminal_content(commit, bundle, result_source=result_source)
+                            terminal_projections = (replace(projection, archive=bundle), *terminal_projections[1:])
             prepared = (await self._capability_writes.prepare_terminal(
                 commit.execution.execution_id, capability_run_id, stores[0].storage_group,
             ) if self._capability_writes is not None else None)
@@ -3231,11 +3258,6 @@ class StateCommands:
                         session_id, start_turn_seq=session_turn.turn_seq, end_turn_seq=session_turn.turn_seq + 1,
                     ))
             try:
-                result_checkpoints = (tuple(prepared_conversation) or tuple(prepared_execution)
-                                      or tuple(checkpoint for projection in terminal_projections for checkpoint in projection.checkpoints))
-                result_source = (self._native_terminal_text(commit.result.output, result_checkpoints)
-                                 if shared_archive is not None and type(self._execution) is ExecutionRepositoryImpl else None)
-
                 async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                     nonlocal effective_commit, next_cursor
                     if fresh_record_keys and isinstance(group, GroupRecordReader):

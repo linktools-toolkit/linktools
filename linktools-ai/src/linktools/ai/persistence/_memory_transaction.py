@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """In-memory StateTransaction implementation."""
 
-from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
@@ -35,8 +35,9 @@ MapValueT = TypeVar("MapValueT")
 
 
 class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):  # noqa: PYI059
-    def __init__(self, base: Mapping[KeyT, MapValueT]) -> None:
+    def __init__(self, base: Mapping[KeyT, MapValueT], *, validate: Callable[[MapValueT], None] | None = None) -> None:
         self._base = base
+        self._validate = validate
         self._changes: dict[KeyT, MapValueT] = {}
         self._deleted: set[KeyT] = set()
 
@@ -48,6 +49,8 @@ class _MemoryOverlay(Generic[KeyT, MapValueT], MutableMapping[KeyT, MapValueT]):
         return self._base[key]
 
     def __setitem__(self, key: KeyT, value: MapValueT) -> None:
+        if self._validate is not None:
+            self._validate(value)
         self._deleted.discard(key)
         self._changes[key] = value
 
@@ -87,8 +90,10 @@ class _MemoryTransaction:
         operation_streams: Mapping[bytes, Mapping[int, bytes]],
         *,
         now: datetime | None = None,
+        validate_record: Callable[[StoredRecord], None] = validate_record_identity,
     ) -> None:
-        self.records = _MemoryOverlay(records)
+        self._validate_record = validate_record
+        self.records = _MemoryOverlay(records, validate=validate_record)
         self.aliases = _MemoryOverlay(aliases)
         self.sequences = _MemoryOverlay(sequences)
         self.facts = _MemoryOverlay(facts)
@@ -124,6 +129,7 @@ class _MemoryTransaction:
         ordered = tuple(sorted(values, key=lambda value: value.key))
         for record in ordered:
             validate_record_identity(record)
+            self._validate_record(record)
             if record.key in self.records:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         for record in ordered:
@@ -137,6 +143,7 @@ class _MemoryTransaction:
                 raise ValueError("insert_immutable_records contains duplicate keys")
             for record in values:
                 validate_record_identity(record)
+                self._validate_record(record)
                 current = self.records.get(record.key)
                 if current is not None and (
                     replace(current, data={}) != replace(record, data={})
@@ -201,6 +208,7 @@ class _MemoryTransaction:
         ordered = sorted(values, key=lambda value: value.record.key)
         for replacement in ordered:
             validate_record_identity(replacement.record)
+            self._validate_record(replacement.record)
             if replacement.record.storage_revision != replacement.expected_storage_revision + 1:
                 raise ValueError("replacement must increment storage_revision exactly once")
         try:

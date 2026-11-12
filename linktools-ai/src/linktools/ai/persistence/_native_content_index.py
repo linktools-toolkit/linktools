@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 _EMPTY = 0
-_STATE_KINDS = ("record", "tool_record", "run_admission", "step_payload", "fact", "operation", "snapshot")
+_STATE_KINDS = ("record", "tool_record", "run_admission", "fact", "operation", "snapshot")
 _SEQUENCE_EDGES = (*_STATE_KINDS, "sequence")
 _MESSAGE_EDGES = ("message",)
 _PENDING = "linktools.native_owner_changes"
@@ -320,7 +320,7 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
         if wire is not None:
             group_id = json.loads(wire)["archive_scope_id"]
     for (kind, store, identity), roots in pending.items():
-        names = {"record": "ai_state_records", "tool_record": "ai_step_tool_operations", "run_admission": "ai_step_run_admissions", "step_payload": "ai_step_payload_contents", "fact": "ai_state_facts", "operation": "ai_state_operations"}
+        names = {"record": "ai_state_records", "tool_record": "ai_step_tool_operations", "run_admission": "ai_step_run_admissions", "fact": "ai_state_facts", "operation": "ai_state_operations"}
         key_column = "operation_key" if kind == "operation" else "key"
         owner = table(names[kind], column("id"), column("store_key", LargeBinary(STORE_KEY_MAX_BYTES)), column(key_column, LargeBinary(RECORD_KEY_MAX_BYTES)),
                       column("stream_key", LargeBinary(STREAM_KEY_MAX_BYTES)), column("sequence"),

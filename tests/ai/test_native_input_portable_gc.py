@@ -13,6 +13,7 @@ from sqlalchemy import text
 from linktools.ai.model import StoredUserInput
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive_closure import iter_native_message_roots
+from linktools.ai.steps import native_store_key
 from linktools.ai.persistence.codec import decode_envelope, encode_domain, native_user_input_reference
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.state import StoredRecord
@@ -72,7 +73,7 @@ async def test_native_input_snapshot_and_last_owner_collection(tmp_path: Path) -
                 await partition.mutate(lambda tx: tx.delete_fact_streams(owner))
         await state.purge_unreferenced_objects((), exclusive=Guard())
         async with store.storage_group.context.engine.connect() as connection:
-            assert await connection.scalar(text("select count(*) from ai_step_messages")) == 2  # Execution retains both input and result Native messages.
+            assert await connection.scalar(text("select count(*) from ai_step_messages where store_key = :key"), {"key": native_store_key("native-result", "tenant")}) == 2  # Execution retains both input and result Native messages.
         assert (await repository.get_fresh("execution", tenant_id="tenant")).stored_user_input == original
         await store.mutate(lambda tx: tx.delete_records((repository.execution_record_key("execution"),)))
         await state.purge_unreferenced_objects((), exclusive=Guard())

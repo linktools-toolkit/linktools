@@ -213,13 +213,13 @@ async def test_snapshot_capture_reads_shared_bindings_in_batches(tmp_path: Path,
         execution = _large_execution()
         for identity in ("first", "second", "third"):
             await repository.create_execution(replace(execution, execution_id=identity, root_execution_id=identity))
-        batches = []
-        read_contents = ContentArchive.read_contents
+        bindings = []
+        read_content = ContentArchive._read_content
 
-        async def read_batch(self, identities, *, codec, reserve=None):
-            if codec == "execution-binding":
-                batches.append(tuple(identities))
-            return await read_contents(self, identities, codec=codec, reserve=reserve)
+        async def read_body(self, content):
+            if content.codec == "execution-binding":
+                bindings.append(content)
+            return await read_content(self, content)
 
         expected = ObjectRef("snapshot", "captured", "a" * 64, 0)
 
@@ -229,7 +229,7 @@ async def test_snapshot_capture_reads_shared_bindings_in_batches(tmp_path: Path,
             assert all(tuple(iter_archive_content_refs(record.data)) for record in records)
             return expected
 
-        monkeypatch.setattr(ContentArchive, "read_contents", read_batch)
+        monkeypatch.setattr(ContentArchive, "_read_content", read_body)
         monkeypatch.setattr(snapshots, "_export_snapshot", accept_capture)
         objects = InMemoryObjectStore()
         resources = snapshots.SnapshotResources(
@@ -243,13 +243,13 @@ async def test_snapshot_capture_reads_shared_bindings_in_batches(tmp_path: Path,
         )
         assert result == expected
         # One shared body is hydrated once for the capture batch, not per execution.
-        assert len(batches) == 1 and len(batches[0]) == 1
+        assert len(bindings) == 1
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_archive_handle_without_transaction_enlistment_keeps_binding_inline(monkeypatch) -> None:
+async def test_archive_handle_without_transaction_enlistment_rejects_duplicate_inline_owner(monkeypatch) -> None:
     from types import SimpleNamespace
     from linktools.ai.persistence import _execution_content as binding_module
     from linktools.ai.persistence._execution_content import ExecutionContent
@@ -266,10 +266,14 @@ async def test_archive_handle_without_transaction_enlistment_keeps_binding_inlin
         # transaction for it. No archive read or write may be attempted.
         monkeypatch.setattr(binding_module, "active_state_scope",
                             lambda: SimpleNamespace(group=group, transactions={store: object()}, writable=False))
-        assert await content.encode(execution) == record.data["value"]["payload"]
+        with pytest.raises(AIError) as unprepared:
+            await content.encode(execution)
+        assert unprepared.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
         unbound = ExecutionContent(store, namespace="bindings", tenant_id="tenant")
         unbound.enable_sharing()
-        assert await unbound.encode(execution) == record.data["value"]["payload"]
+        with pytest.raises(AIError) as unprepared:
+            await unbound.encode(execution)
+        assert unprepared.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
         _, _, compact, _, _ = _shared_record()
         with pytest.raises(AIError) as error:
             await unbound.expand(compact)
@@ -386,8 +390,12 @@ async def test_snapshot_capture_rejects_binding_budget_before_hydration(tmp_path
         await repository.create_execution(_large_execution())
         _, _, content, _ = _binding_manifest(1)
 
-        async def reject_hydration(*args, **kwargs):
-            raise AssertionError("binding hydration must follow the capture budget check")
+        read_content = ContentArchive._read_content
+
+        async def reject_hydration(self, source):
+            if source.codec == "execution-binding":
+                raise AssertionError("binding hydration must follow the capture budget check")
+            return await read_content(self, source)
 
         monkeypatch.setattr(ContentArchive, "_read_content", reject_hydration)
         objects = InMemoryObjectStore()

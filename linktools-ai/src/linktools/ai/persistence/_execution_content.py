@@ -432,6 +432,24 @@ class ExecutionContent:
         if self._share_content:
             await self.initialize(create=True)
 
+    async def prepare_terminal_content(
+        self, value: ExecutionRecord, prepared: PreparedArchive, *, result_source: NativeTextReference | None = None,
+    ) -> None:
+        """Add newly terminal bytes to the caller's matching publication bundle."""
+        if value.result is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        selected = [value.result]
+        if result_source is None and value.result.output is not None:
+            selected.append(value.result.output)
+        if value.safe_error_details or value.error_diagnostics is not None:
+            selected.append(StoredPayload.inline_json({
+                "safe_error_details": _encode_persisted_domain(value.safe_error_details),
+                "error_diagnostics": _encode_persisted_domain(value.error_diagnostics),
+            }))
+        archive = await self._archive(create=True)
+        encoded = tuple(self._encoding(payload) for payload in selected)
+        await archive.prepare_content(tuple((PAYLOAD_CODEC, raw) for identity, raw in encoded), prepared)
+
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
                      result_source: NativeTextReference | None = None,
                      observed_value: ExecutionRecord | None = None,
@@ -525,7 +543,6 @@ class ExecutionContent:
         previous_binding = None if previous is None else binding_reference(_binding(previous))
         if previous_binding is not None and previous_binding[:2] != (archive.scope_id, archive.content_scope):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        prepared = PreparedArchive()
         encoded_payloads = {} if result_source is None else {id(output): {
             "$dataclass": "stored_payload", "schema": 1, "fields": {"content": result_source.to_json()}}}
         if input_source is not None:
@@ -580,8 +597,7 @@ class ExecutionContent:
         encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
                            "content_scope": archive.content_scope}
         if missing:
-            await archive.prepare_content(tuple(missing), prepared)
-            await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
+            await archive.ensure_content(tuple(missing))
         return encode_execution_content(value, encoded_payloads, binding=encoded_binding,
                                         policy=encoded_policy, policy_overrides=policy_overrides,
                                         terminal_details=None if terminal_details is None else encoded_payloads[id(terminal_details)])

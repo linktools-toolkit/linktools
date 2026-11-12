@@ -5,27 +5,25 @@
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components
+from ._record_key import RECORD_KEY_MAX_BYTES, decode_key_components, encode_key_components
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
     from sqlalchemy.sql.selectable import FromClause
 
 
-RECORD_OWNER_TABLES = ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_step_payload_contents")
+RECORD_OWNER_TABLES = ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions")
 _KIND_OWNERS = {"tool_operation": "ai_step_tool_operations", "agent_run": "ai_step_run_admissions"}
 _CONSTANTS = {
-    "ai_step_payload_contents": {"kind": "archive_content", "subject_id": None, "parent_key": None,
-        "parent_locator": None, "state": None, "lease_owner": None, "lease_fence": 0, "lease_expires_at": None},
     "ai_step_tool_operations": {"kind": "tool_operation", "payload_bytes": None},
     "ai_step_run_admissions": {"kind": "agent_run", "subject_id": None, "state": None,
         "lease_owner": None, "lease_fence": 0, "lease_expires_at": None, "payload_bytes": None},
 }
 _EDGE_OWNERS = {"ai_state_records": "record", "ai_step_tool_operations": "tool_record",
-                "ai_step_run_admissions": "run_admission", "ai_step_payload_contents": "step_payload"}
+                "ai_step_run_admissions": "run_admission"}
 
 
-def record_owner_table(key: bytes) -> str:
+def record_owner_table(key: bytes, *, store_key: bytes | None = None) -> str:
     """Resolve canonical addresses without interpreting opaque custom keys."""
     try:
         parts = decode_key_components(key, RECORD_KEY_MAX_BYTES)
@@ -33,7 +31,8 @@ def record_owner_table(key: bytes) -> str:
         return "ai_state_records"
     if len(parts) == 6 and parts[0] == "record" and parts[3:5] == ("archive", "archive_content"):
         if parts[5].rpartition(":")[0] == "execution-payload":
-            return "ai_step_payload_contents"
+            return ("ai_step_messages" if store_key == encode_key_components(("state-group-archive",), 128)
+                    else "ai_state_records")
     if len(parts) >= 6 and parts[0] == "record":
         return _KIND_OWNERS.get(parts[4], "ai_state_records")
     return "ai_state_records"
@@ -48,7 +47,7 @@ def record_owner_names(*, keys: Sequence[bytes] | None = None, kind: str | None 
     if keys is not None:
         return tuple(dict.fromkeys(record_owner_table(key) for key in keys))
     if kind == "archive_content":
-        return ("ai_state_records", "ai_step_payload_contents")
+        return ("ai_state_records",)
     if kind is not None:
         owner = _KIND_OWNERS.get(kind)
         return ("ai_state_records", owner) if owner is not None else ("ai_state_records",)

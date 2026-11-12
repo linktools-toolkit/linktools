@@ -80,8 +80,6 @@ def build_runtime_sql_metadata(
     build_record_owner_table(metadata, name="ai_state_records", comment=_RECORD_COMMENT)
     build_record_owner_table(metadata, name="ai_step_tool_operations",
                              comment="Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.")
-    build_record_owner_table(metadata, name="ai_step_payload_contents",
-                             comment="Immutable Step-owned accepted input and result payload bodies with integrity metadata.")
     from ._run_admission_schema import build_run_admission_sql_metadata
     build_run_admission_sql_metadata(metadata)
 

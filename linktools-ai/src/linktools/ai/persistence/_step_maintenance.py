@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload
 from ..storage import ObjectRef
-from ..steps import native_store_locator
+from ..steps import native_store_locator, validate_native_store_key
 from ._archive_closure import (
     NativeMessageClosure, iter_native_message_roots, require_known_retention,
     validate_native_message_content,
@@ -21,7 +21,7 @@ from ._payload import decode_payload_bytes
 from .state import FactScanCursor, OperationScanCursor, RecordScanCursor, StateStorageGroup
 
 if TYPE_CHECKING:
-    from sqlalchemy import MetaData
+    from sqlalchemy import MetaData, Table
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from ..storage import SqlStorageContext
@@ -63,6 +63,33 @@ async def inspect_native_message_tables(
             or "ai_step_snapshots" in actual and not content.issubset(actual)):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return tuple(name for name in names if name in actual)
+
+
+async def native_message_partitions(
+    context: "SqlStorageContext", session: "AsyncSession", table: "Table",
+) -> tuple[bytes, ...]:
+    """Inventory only Native tuples in the shared physical content relation.
+
+    Step payload tuples belong to the logical archive adapter instead. Unknown
+    or malformed partitions are corruption, not content to silently omit.
+    """
+    from sqlalchemy import select
+    from ._step_payload_owner import payload_store_parts, payload_store_locator
+
+    rows = await context.run_statement(session.execute(select(table.c.store_key, table.c.store_locator).distinct()))
+    partitions = []
+    for store_key, locator in rows:
+        try:
+            validate_native_store_key(store_key)
+        except (TypeError, ValueError):
+            payload_store_parts(store_key)
+            if locator != payload_store_locator(store_key):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        else:
+            if locator != native_store_locator(store_key):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            partitions.append(store_key)
+    return tuple(partitions)
 
 
 async def scan_native_message_roots(group: "StateStorageGroup") -> tuple[NativeMessageRoot, ...]:
@@ -130,7 +157,7 @@ async def purge_step_content(
         async with context.engine.connect() as connection:
             has_state = await connection.run_sync(lambda connection: any(
                 inspect(connection).has_table(name)
-                for name in ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_step_payload_contents", "ai_state_facts", "ai_state_operations")
+                for name in ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_state_facts", "ai_state_operations")
             ))
         if has_state:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,
@@ -225,4 +252,4 @@ async def purge_step_content(
     return await context.run_mutation(mutate, domain="steps.content_cleanup")
 
 
-__all__ = ["StepContentCleanupResult", "scan_native_message_roots", "inspect_native_message_tables"]
+__all__ = ["StepContentCleanupResult", "scan_native_message_roots", "inspect_native_message_tables", "native_message_partitions"]

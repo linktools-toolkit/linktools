@@ -32,12 +32,12 @@ async def test_effect_ledger_is_the_only_physical_owner(tmp_path: Path, backend:
         if backend == "sqlite":
             async with store.context.engine.connect() as connection:
                 assert await connection.scalar(text("SELECT count(*) FROM ai_step_tool_operations")) == 1
-                assert await connection.scalar(text("SELECT count(*) FROM ai_step_payload_contents")) == 1
+                assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
                 assert await connection.scalar(text("SELECT count(*) FROM ai_state_records WHERE kind='tool_operation'")) == 0
         else:
             assert store.storage_group.opened_archive is not None
             _, content_store = store.storage_group.opened_archive
-            assert len(content_store._step_payload_contents) == 1
+            assert len(content_store._record_owners.payload_rows) == 1
             assert len(store._step_tool_operations) == 1
             assert not any(record.kind == "tool_operation" for record in store._records.values())
         raw = await store.read_record(key)

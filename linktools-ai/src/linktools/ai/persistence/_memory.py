@@ -25,6 +25,7 @@ from .state import (
     StoredFact,
     StoredOperation,
     StoredRecord,
+    STATE_GROUP_ARCHIVE_KEY,
     active_state_group_transaction,
     active_state_scope,
     active_state_transaction,
@@ -40,24 +41,44 @@ _logger = environ.get_logger("ai.runtime.state.memory")
 class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
     """One transactional view over disjoint physical in-memory owners."""
 
-    def __init__(self, owners: Mapping[str, dict[bytes, StoredRecord]]) -> None:
+    def __init__(self, owners: Mapping[str, dict[bytes, StoredRecord]], *, archive: bool = False) -> None:
         self._owners = owners
+        self._archive = archive
+        self.payload_rows: dict[tuple[bytes, str], dict[str, object]] = {}
+
+    def validate(self, record: StoredRecord) -> None:
+        if self._archive and record_owner_table(record.key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+            from ._step_payload_owner import payload_record_values
+            payload_record_values(record)
 
     def __getitem__(self, key: bytes) -> StoredRecord:
+        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+            from ._step_payload_owner import payload_address, payload_record_from_row
+            return payload_record_from_row(self.payload_rows[payload_address(key)])
         return self._owners[record_owner_table(key)][key]
 
     def __setitem__(self, key: bytes, value: StoredRecord) -> None:
+        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+            from ._step_payload_owner import payload_address, payload_record_values
+            self.payload_rows[payload_address(key)] = payload_record_values(value)
+            return
         self._owners[record_owner_table(key)][key] = value
 
     def __delitem__(self, key: bytes) -> None:
+        if self._archive and record_owner_table(key, store_key=STATE_GROUP_ARCHIVE_KEY) == "ai_step_messages":
+            from ._step_payload_owner import payload_address
+            del self.payload_rows[payload_address(key)]
+            return
         del self._owners[record_owner_table(key)][key]
 
     def __iter__(self) -> Iterator[bytes]:
+        from ._step_payload_owner import payload_record_from_row
         for owner in self._owners.values():
             yield from owner
+        yield from (payload_record_from_row(row).key for row in self.payload_rows.values())
 
     def __len__(self) -> int:
-        return sum(map(len, self._owners.values()))
+        return sum(map(len, self._owners.values())) + len(self.payload_rows)
 
 
 class _MemoryGroupTransaction:
@@ -132,7 +153,7 @@ class InMemoryStateStorageGroup:
         if create and self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
         if self._archive is None and create:
-            store = InMemoryStateStore(self)
+            store = InMemoryStateStore(self, archive=True)
             await store.initialize()
             self._archive = (uuid4().hex, store)
         return self._archive
@@ -255,6 +276,7 @@ class InMemoryStateStorageGroup:
             store._operations,
             store._operation_streams,
             now=now,
+            validate_record=store._record_owners.validate,
         )
 
     def _ensure_member(self, store: "InMemoryStateStore") -> None:
@@ -268,13 +290,12 @@ class InMemoryStateStorageGroup:
 class InMemoryStateStore:
     """Atomic process-local StateStore used by tests and volatile routes."""
 
-    def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: CacheBackend | None = None) -> None:
+    def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: CacheBackend | None = None, archive: bool = False) -> None:
         owners: dict[str, dict[bytes, StoredRecord]] = {name: {} for name in RECORD_OWNER_TABLES}
         self._records = owners["ai_state_records"]
         self._step_tool_operations = owners["ai_step_tool_operations"]
         self._step_run_admissions = owners["ai_step_run_admissions"]
-        self._step_payload_contents = owners["ai_step_payload_contents"]
-        self._record_owners = _MemoryRecordOwners(owners)
+        self._record_owners = _MemoryRecordOwners(owners, archive=archive)
         self._aliases: dict[bytes, bytes] = {}
         self._sequences: dict[bytes, int] = {}
         self._facts: dict[tuple[bytes, int], StoredFact] = {}

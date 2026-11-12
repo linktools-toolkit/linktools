@@ -450,6 +450,22 @@ class ContentArchive:
                               prepared: PreparedArchive) -> tuple[str, ...]:
         return await self._prepare_content(values, prepared)
 
+    async def ensure_content(self, values: Sequence[tuple[str, bytes]]) -> tuple[str, ...]:
+        """Verify current immutable bytes and publish only contents not yet present."""
+        keys = self.content_record_keys(values)
+
+        async def ensure(transaction: StateTransaction) -> tuple[str, ...]:
+            existing = await transaction.get_records(keys)
+            prepared = PreparedArchive()
+            self.observe_content(prepared, keys, existing)
+            identities = await self.prepare_content(values, prepared)
+            prepared.records = {key: record for key, record in prepared.records.items() if key not in existing}
+            if prepared.records:
+                await self.publish(transaction, prepared)
+            return identities
+
+        return await self.store.mutate(ensure)
+
     async def _prepare_content(self, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
                                existing: Mapping[bytes, StoredRecord] | None = None) -> tuple[str, ...]:
         self._bind(prepared)

@@ -1700,6 +1700,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             commit.execution.error_code,
         )
 
+    async def prepare_terminal_content(
+        self, commit: ExecutionTerminalCommit, archive: PreparedArchive, *, result_source: NativeTextReference | None = None,
+    ) -> None:
+        """Prepare terminal payloads in the existing shared archive, without publishing."""
+        await self._execution_content.prepare_terminal_content(
+            commit.execution.finalize_terminal(commit.result), archive, result_source=result_source,
+        )
+
     async def commit_terminal(
         self,
         commit: ExecutionTerminalCommit,

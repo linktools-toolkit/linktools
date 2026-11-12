@@ -32,7 +32,7 @@ from ._execution_content import (expand_retained_execution_content, expand_nativ
                                  restore_native_text_payload, restore_native_user_input)
 from ._sql import SqlStateStorageGroup
 from ._step_schema import build_step_sql_metadata
-from ._step_maintenance import inspect_native_message_tables
+from ._step_maintenance import inspect_native_message_tables, native_message_partitions
 from ._capability_marker import has_capability_partition_marker
 from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
                     execution_payload_slots, tool_payload_slots, native_user_input_reference,
@@ -261,7 +261,15 @@ async def _purge_unreferenced_objects(
             await group.context.dialect.begin_consistent_read(session)
             rows = {}
             for name in names:
-                result = await group.context.run_statement(session.execute(select(metadata.tables[name])))
+                table = metadata.tables[name]
+                statement = select(table)
+                if name == "ai_step_messages":
+                    # Typed Step payload bytes share this physical relation but
+                    # are owned and swept by ArchiveClosure, never Native GC.
+                    native_partitions = await native_message_partitions(group.context, session, table)
+                    statement = statement.where(table.c.store_key.in_(native_partitions),
+                        table.c.store_locator.in_(tuple(native_store_locator(key) for key in native_partitions)))
+                result = await group.context.run_statement(session.execute(statement))
                 rows[name] = result.mappings().all()
         snapshots = rows.get("ai_step_snapshots", ())
         sequences, messages = rows["ai_step_sequences"], rows["ai_step_messages"]
