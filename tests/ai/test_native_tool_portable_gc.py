@@ -45,8 +45,8 @@ async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path:
         record = next(row for row in records if row.kind == "tool_operation")
         assert native_tool_result_reference(
             decode_envelope(record.data).value["payload"]["fields"]["result_payload"]) is not None
-        # Conversion does not reclaim a possibly shared archive body itself.
-        assert len(await _old_receipts(state)) == 1
+        # Initial settlement belongs to the Step ledger, not a generic archive.
+        assert await _old_receipts(state) == ()
         await state.purge_unreferenced_objects((), exclusive=Guard())
         assert await _old_receipts(state) == ()
         assert (await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload

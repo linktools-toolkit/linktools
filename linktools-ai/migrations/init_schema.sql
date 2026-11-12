@@ -391,3 +391,51 @@ CREATE TABLE ai_trace_events (
 	KEY ix_updated_at (updated_at),
 	UNIQUE KEY uk_store_key_run_id_sequence (store_key, run_id, sequence)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=DYNAMIC COMMENT='Immutable Trace events with direct history correlation and chronological queries.';
+
+CREATE TABLE ai_step_tool_operations (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT, 
+	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.', 
+	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.', 
+	scope_key VARBINARY(768) COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.', 
+	subject_id VARBINARY(128) COMMENT 'Exact UTF-8 subject identifier used for lookups within a record scope.', 
+	parent_key VARBINARY(768) COMMENT 'Bounded binary parent identity used by hierarchical list queries.', 
+	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.', 
+	state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.', 
+	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.', 
+	lease_owner TEXT COMMENT 'Current durable lease owner for record kinds using claim and fencing semantics.', 
+	lease_fence BIGINT NOT NULL COMMENT 'Monotonic fencing token for the current durable record lease.' DEFAULT 0, 
+	lease_expires_at TIMESTAMP(6) NULL COMMENT 'Database-authoritative expiry time of the current durable lease.', 
+	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON encoded as a JSON string preserving numeric representations.', 
+	key_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete key; raw identity must also match.', 
+	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.', 
+	parent_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Single SHA-256 lookup projection of the complete parent_key; raw identity must also match.', 
+	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.', 
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP, 
+	PRIMARY KEY (id),
+	KEY ix_created_at (created_at),
+	KEY ix_parent_locator_sort_prefix (parent_locator, sort_prefix),
+	KEY ix_scope_locator_subject_id (scope_locator, subject_id),
+	KEY ix_updated_at (updated_at),
+	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
+)ENGINE=InnoDB COMMENT='Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
+
+CREATE TABLE ai_step_payload_contents (
+	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
+	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
+	`key` VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the persisted runtime record.',
+	scope_key VARBINARY(768) NULL COMMENT 'Bounded binary grouping identity used by the record kind''s primary list query.',
+	sort_key LONGBLOB NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
+	storage_revision BIGINT NOT NULL COMMENT 'Physical compare-and-swap revision incremented by every record mutation.',
+	payload_json JSON NOT NULL COMMENT 'Canonical domain JSON encoded as a JSON string preserving numeric representations.',
+	payload_bytes LONGBLOB NULL COMMENT 'Optional binary content body owned by this record; ordinary domain state remains JSON.',
+	key_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete key; raw identity must also match.',
+	scope_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Single SHA-256 lookup projection of the complete scope_key; raw identity must also match.',
+	sort_prefix VARBINARY(128) NOT NULL COMMENT 'First 128 bytes of the full sort key; non-unique query projection only.',
+	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	KEY ix_created_at (created_at),
+	KEY ix_updated_at (updated_at),
+	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
+)ENGINE=InnoDB COMMENT='Immutable Step-owned accepted input and result payload bodies with integrity metadata.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;

@@ -27,7 +27,7 @@ from ..core import (
     agent_run_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import PayloadPolicy, StoredPayload
+from ..storage import StoredPayload
 from ..steps import native_store_key
 from pydantic_ai.messages import ModelResponse, TextPart
 from ._message_root import NativeMessageRoot, NativeTextReference
@@ -2993,7 +2993,7 @@ class StateCommands:
     ) -> NativeTextReference | None:
         """Select only an equal, immutable text from this terminal publication."""
         if (output is None or output.kind != "inline" or output.encoding != "json"
-                or output.size <= PayloadPolicy().inline_limit_bytes or not checkpoints):
+                or not checkpoints):
             return None
         text = output.decode()
         prepared = checkpoints[-1]
@@ -3011,7 +3011,7 @@ class StateCommands:
         if (opened is None or block.root.group_id != opened[0]
                 or block.root.store_key != native_store_key(self._namespace, self._tenant_id)):
             return None
-        return NativeTextReference(block.root.slice(len(messages) - 1, len(messages)), output.digest, output.size)
+        return NativeTextReference(block.root.slice(len(messages) - 1, len(messages)))
 
     async def commit_terminal_checkpoint(
         self,

@@ -10,7 +10,7 @@ from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ._archive import ContentArchive, PreparedArchive, archive_content_identity
 from .codec import (
-    agent_binding_content_summary, binding_reference, decode_agent_binding_content,
+    binding_reference, decode_agent_binding_content,
     decode_domain, encode_agent_binding_content, encode_domain,
 )
 
@@ -84,7 +84,7 @@ async def prepare_capture_bindings(
         identity = archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest())
         bodies[identity] = raw
         return {"$execution_binding": identity, "archive_scope": archive.scope_id,
-                "content_scope": archive.content_scope, "summary": agent_binding_content_summary(contract)}
+                "content_scope": archive.content_scope}
     projected = map_capture_binding_slots(key, value, prepare)
     if bodies:
         await archive.prepare_content(tuple((BINDING_CODEC, raw) for raw in bodies.values()), prepared)
@@ -102,8 +102,6 @@ def expand_capture_bindings(
         if raw is None or archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest()) != reference[2]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         contract = decode_agent_binding_content(raw)
-        if canonical_json_bytes(binding["summary"]) != canonical_json_bytes(agent_binding_content_summary(contract)):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return contract.to_payload()
     return map_capture_binding_slots(key, value, expand)
 

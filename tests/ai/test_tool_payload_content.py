@@ -24,7 +24,7 @@ def _storage(backend: str, path: Path) -> PersistenceStorage:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_tool_receipts_share_large_content_without_changing_payload_contract(tmp_path: Path, backend: str) -> None:
+async def test_tool_receipts_are_wholly_owned_by_the_step_ledger(tmp_path: Path, backend: str) -> None:
     payload = StoredPayload.inline_bytes(b"large independent tool result\n" * 20000)
     async with Persistence.open("tool-content", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
         tools = state.checkpoint.tools
@@ -38,11 +38,9 @@ async def test_tool_receipts_share_large_content_without_changing_payload_contra
         records = await tools.state_store.read(lambda tx: tx.scan_records())
         assert len(records) == 2
         references = [tuple(iter_archive_content_refs(record.data)) for record in records]
-        assert references[0] == references[1] and len(references[0]) == 1
-        assert all(len(canonical_json_bytes(record.data)) < 5000 for record in records)
-        contents = await archive.read(lambda tx: tx.scan_records())
-        assert len(contents) == 1 and contents[0].payload_bytes is not None
-        assert sum(len(canonical_json_bytes(row.data)) + len(row.payload_bytes or b"") for row in (*records, *contents)) < payload.size
+        assert references == [(), ()]
+        assert all(len(canonical_json_bytes(record.data)) > payload.size for record in records)
+        assert await archive.read(lambda tx: tx.scan_records()) == ()
 
 
 @pytest.mark.asyncio
@@ -67,9 +65,9 @@ async def test_tool_payload_publication_rolls_back_with_owner(tmp_path: Path, mo
             if record.kind == "tool_operation":
                 assert replaced
                 assert await tx.get_record(record.key) == record
-                # Prove content and its new owner both existed before aborting.
-                contents = await archive.read(lambda current: current.scan_records())
-                assert len(contents) == 1 and contents[0].payload_bytes is not None
+                # The payload is part of the same owner CAS, never a generic archive row.
+                assert len(canonical_json_bytes(record.data)) > 100_000
+                assert await archive.read(lambda current: current.scan_records()) == ()
                 failed_writes += 1
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return replaced
@@ -120,16 +118,25 @@ async def test_small_tool_payload_and_opaque_reference_shaped_data_remain_inline
 
 
 @pytest.mark.asyncio
-async def test_missing_tool_content_is_not_treated_as_an_empty_result() -> None:
+async def test_malformed_tool_payload_is_not_treated_as_an_empty_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    import copy
+    from linktools.ai.persistence.codec import decode_envelope, encode_envelope
+
     async with Persistence.open("tool-content", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state:
         tools = state.checkpoint.tools
-        _, archive = await tools.state_store.storage_group.open_archive(create=True)
         operation = await tools.admit(_request())
         await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
             fence=operation.fence, result_payload=StoredPayload.inline_bytes(b"large" * 20000))
-        contents = await archive.read(lambda tx: tx.scan_records())
-        assert len(contents) == 1
-        await archive.mutate(lambda tx: tx.delete_record(contents[0].key))
+        owner = await tools.state_store.read_record(tools._tool_key(operation.tool_operation_id))
+        wire = copy.deepcopy(decode_envelope(owner.data).value)
+        wire["payload"]["fields"]["result_payload"]["fields"]["digest"] = "f" * 64
+        changed = replace(owner, data=encode_envelope(wire))
+
+        async def read_owner(key: bytes) -> StoredRecord:
+            assert key == owner.key
+            return changed
+
+        monkeypatch.setattr(tools, "_record", read_owner)
         with pytest.raises(AIError) as error:
             await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -162,7 +169,7 @@ async def test_archived_tool_attachment_survives_cleanup_and_snapshot(tmp_path: 
         await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
             fence=operation.fence, result_payload=payload)
         owner, = await tools.state_store.read(lambda tx: tx.scan_records())
-        assert len(tuple(iter_archive_content_refs(owner.data))) == 1
+        assert tuple(iter_archive_content_refs(owner.data)) == ()
         candidates = tuple((PersistenceDomain.CHECKPOINT, ref) for ref in payload.object_refs())
         assert candidates
         cleanup = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
@@ -185,7 +192,6 @@ async def test_tool_content_expansion_validates_owner_wrapper_before_replacing_i
     monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
     import copy
-    from linktools.ai.persistence._archive import ContentRecord
     from linktools.ai.persistence._tool_operation_content import expand_tool_content
     from linktools.ai.persistence.codec import decode_envelope, encode_envelope
 
@@ -197,9 +203,8 @@ async def test_tool_content_expansion_validates_owner_wrapper_before_replacing_i
         await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
             fence=operation.fence, result_payload=payload)
         owner, = await tools.state_store.read(lambda tx: tx.scan_records())
-        content, = await archive.read(lambda tx: tx.scan_records())
-        reference, = iter_archive_content_refs(owner.data)
-        contents = {reference: ContentRecord.from_record(content)}
+        assert await archive.read(lambda tx: tx.scan_records()) == ()
+        contents = {}
         wire = copy.deepcopy(decode_envelope(owner.data).value)
         wrapper = wire["payload"]["fields"]["result_payload"]
         if fault == "missing_schema":

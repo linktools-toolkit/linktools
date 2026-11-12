@@ -11,7 +11,7 @@ from dataclasses import replace
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import PayloadPolicy, StoredPayload
+from ..storage import StoredPayload
 from ..execution import ExecutionRecord, ExecutionTimelineRecord
 from ..model import StoredUserInput
 from ..agent import AgentBindingContract
@@ -23,7 +23,7 @@ from ..steps import native_store_key
 from ._step_store import SqlStepStore
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
-from .codec import (_execution_binding_summary, binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
+from .codec import ( binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
     encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
@@ -112,9 +112,7 @@ def expand_binding(record: StoredRecord, raw: bytes) -> StoredRecord:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(binding, dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    decoded = decode_domain(binding, AgentBindingContract | TaskBindingContract)
-    if _binding(record)["summary"] != _execution_binding_summary(decoded):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    decode_domain(binding, AgentBindingContract | TaskBindingContract)
     return _with_binding(record, binding)
 
 
@@ -165,8 +163,6 @@ def restore_native_text_payload(reference: NativeTextReference, raw: bytes) -> S
                 or len(messages[0].parts) != 1 or not isinstance(messages[0].parts[0], TextPart)):
             raise ValueError("native result source is not one response text")
         payload = StoredPayload.inline_json(messages[0].parts[0].content)
-        if (payload.digest, payload.size) != (reference.digest, reference.size):
-            raise ValueError("native result digest differs from admitted result")
         return payload
     except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -206,7 +202,7 @@ class ExecutionContent:
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         self._store, self._namespace, self._tenant_id = store, namespace, tenant_id
         self._content_archive: ContentArchive | None = None
-        self._share_content = False
+        self._share_content = True
         # This cache saves immutable encoding work, never proves source existence.
         self._payload_encodings: dict[int, tuple[ref, str, bytes]] = {}
         self._binding_encodings: dict[int, tuple[ref, str, bytes]] = {}
@@ -338,19 +334,13 @@ class ExecutionContent:
             values.append(handoff.outcome.output)
         return tuple(values)
 
-    def _encoding(self, payload: StoredPayload | StoredUserInput) -> tuple[str, bytes] | None:
+    def _encoding(self, payload: StoredPayload | StoredUserInput) -> tuple[str, bytes]:
         key = id(payload)
         cached = self._payload_encodings.get(key)
         if cached is not None and cached[0]() is payload:
             return cached[1:]
-        body = payload.payload if isinstance(payload, StoredUserInput) else payload
-        if body.kind != "inline" or (body.size <= PayloadPolicy().inline_limit_bytes
-                and not (isinstance(payload, StoredUserInput) and payload.view is not None)):
-            return None
         from .codec import encode_domain
         raw = canonical_json_bytes(encode_domain(payload))
-        if len(raw) <= PayloadPolicy().inline_limit_bytes:
-            return None
         identity = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
         self._payload_encodings[key] = (ref(payload, lambda _value: self._payload_encodings.pop(key, None)), identity, raw)
         return identity, raw
@@ -372,20 +362,23 @@ class ExecutionContent:
     async def encode(self, value: ExecutionRecord, *, previous: StoredRecord | None = None,
                      result_source: NativeTextReference | None = None) -> JsonValue:
         """Publish new immutable bodies with the same transaction as their owner."""
-        if not self._share_content:
-            return _encode_persisted_domain(value)
         output = None if value.result is None else value.result.output
+        # Native locations own the value, not a redundant digest in records.
+        # Reuse requires comparing the current canonical source, never trusting
+        # a proposed in-memory value merely because its type still matches.
+        previous_native = (await self.read_payloads((previous,)) if previous is not None and any(
+            native_user_input_reference(payload) is not None or native_text_reference(payload) is not None
+            for _, payload in _payloads(previous)) else {})
         if result_source is None and previous is not None and output is not None:
             for path, payload in _payloads(previous):
                 if path == ("result", "fields", "output"):
                     previous_source = native_text_reference(payload)
-                    if previous_source is not None and (output.digest, output.size) == (previous_source.digest, previous_source.size):
+                    if previous_source is not None and previous_native.get(previous_source) == output:
                         result_source = previous_source
         if result_source is not None:
             opened = self._store.storage_group.opened_archive
             if (output is None or output.kind != "inline" or output.encoding != "json"
                     or not isinstance(output.decode(), str)
-                    or (output.digest, output.size) != (result_source.digest, result_source.size)
                     or opened is None or result_source.root.group_id != opened[0]
                     or result_source.root.store_key != native_store_key(self._namespace, self._tenant_id)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -396,6 +389,8 @@ class ExecutionContent:
                     source = native_user_input_reference(payload)
                     if source is not None:
                         validate_native_user_input(source, value.stored_user_input)
+                        if previous_native.get(source) != value.stored_user_input:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         input_source = source
         selected = [(payload, self._encoding(payload)) for payload in self.payload_values(value)
                     if (result_source is None or payload is not output)
@@ -405,7 +400,9 @@ class ExecutionContent:
         active = active_state_scope()
         opened = self._store.storage_group.opened_archive
         if active is not None and (opened is None or opened[1] not in active.transactions):
-            return _encode_persisted_domain(value)
+            # An accepted execution must never fall back to a second inline owner.
+            # Callers entering their own transaction must prepare content first.
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         archive = await self._archive(create=True)
         retained = {reference for _, payload in _payloads(previous)
                     if (reference := payload_reference(payload)) is not None} if previous is not None else set()
@@ -432,8 +429,7 @@ class ExecutionContent:
         if previous_binding != (archive.scope_id, archive.content_scope, identity):
             missing.append((BINDING_CODEC, raw))
         encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
-                           "content_scope": archive.content_scope,
-                           "summary": _execution_binding_summary(value.binding)}
+                           "content_scope": archive.content_scope}
         if missing:
             await archive.prepare_content(tuple(missing), prepared)
             await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
@@ -441,17 +437,16 @@ class ExecutionContent:
 
     @staticmethod
     def has_native_input_candidate(prepared: PreparedArchive) -> bool:
-        """Inspect new prepared bodies only; small boundaries add no SQL."""
+        """Inspect new published bodies for an exact input source at any size."""
         for sequence in prepared.native_messages.values():
             for _identity, content in sequence.messages:
-                if content.payload is not None or content.raw_size <= PayloadPolicy().inline_limit_bytes:
+                if content.payload is not None:
                     continue
                 raw = decode_payload_bytes(content.body, codec=content.compression,
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
                 for message in decode_model_messages(raw):
                     if isinstance(message, ModelRequest) and any(isinstance(part, UserPromptPart)
-                            and isinstance(part.content, str)
-                            and len(part.content.encode("utf-8")) > PayloadPolicy().inline_limit_bytes for part in message.parts):
+                            and isinstance(part.content, str) for part in message.parts):
                         return True
         return False
 
@@ -479,8 +474,7 @@ class ExecutionContent:
             if raw != canonical_json_bytes(encode_domain(original)):
                 return None
         if (not isinstance(original, StoredUserInput) or original.codec != "text" or original.view is not None
-                or original.payload.kind != "inline" or original.payload.encoding != "utf-8"
-                or original.payload.size <= PayloadPolicy().inline_limit_bytes):
+                or original.payload.kind != "inline" or original.payload.encoding != "utf-8"):
             return None
         if any(root.group_id != archive.scope_id or root.store_key != native_store_key(self._namespace, self._tenant_id)
                for root in roots):
@@ -500,8 +494,7 @@ class ExecutionContent:
                 for part_index, part in enumerate(decoded[0].parts):
                     if not isinstance(part, UserPromptPart) or part.content != original.payload.decode():
                         continue
-                    source = NativeUserInputReference(root.slice(message_index, message_index + 1), part_index,
-                                                      original.payload.digest, original.payload.size)
+                    source = NativeUserInputReference(root.slice(message_index, message_index + 1), part_index)
                     if restore_native_user_input(source, raw) != original:
                         continue
                     replacement = {"$dataclass": "stored_user_input", "schema": 1,

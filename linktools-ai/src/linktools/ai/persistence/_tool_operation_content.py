@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable large tool payloads owned by the database content archive."""
+"""Tool ledger payloads and fixed Native receipt projections."""
 
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 
-from ..core import JsonValue, canonical_json_bytes
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ..storage import PayloadPolicy, StoredPayload
+from ..storage import StoredPayload
 from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity
 from ._payload import decode_payload_bytes
 from ._message_root import NativeMessageRoot, NativeToolResultReference
@@ -118,7 +118,6 @@ class ToolOperationContent:
             for name, payload in tool_payload_slots(decode_envelope(previous.data).value["payload"])
             if (reference := native_tool_result_reference(payload)) is not None}
         retained_fields = {}
-        selected = {}
         for name, payload in tool_payload_slots(decode_envelope(record.data).value["payload"]):
             fields = payload.get("fields", {})
             reference = native_retained.get(name)
@@ -126,38 +125,12 @@ class ToolOperationContent:
                     and (fields.get("digest"), fields.get("size")) == (reference.digest, reference.size)):
                 retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
                                          "fields": {"content": reference.to_json()}}
-                continue
-            raw = canonical_json_bytes(payload)
-            if len(raw) > PayloadPolicy().inline_limit_bytes:
-                selected[name] = raw
-        if retained_fields:
-            envelope = decode_envelope(record.data)
-            value = envelope.value["payload"]
-            record = replace(record, data=encode_envelope({**envelope.value, "payload": {
-                **value, "fields": {**value["fields"], **retained_fields}}}))
-        if not selected:
+        if not retained_fields:
             return record
-        # Standalone repositories without shared content retain their inline contract.
-        opened, active = self.store.storage_group.opened_archive, active_state_scope()
-        if opened is None or active is not None and opened[1] not in active.transactions:
-            return record
-        archive = await self._archive()
-        retained = set() if previous is None else {tool_payload_reference(payload)
-            for _, payload in tool_payload_slots(decode_envelope(previous.data).value["payload"])}
-        references = {name: (archive.scope_id, archive.content_scope,
-            archive_content_identity(TOOL_PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())) for name, raw in selected.items()}
-        missing = tuple((TOOL_PAYLOAD_CODEC, raw) for name, raw in selected.items() if references[name] not in retained)
-        if missing:
-            prepared = PreparedArchive()
-            await archive.prepare_content(missing, prepared)
-            await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
         envelope = decode_envelope(record.data)
         value = envelope.value["payload"]
-        fields = dict(value["fields"])
-        for name, (scope, owner, identity) in references.items():
-            fields[name] = {"$dataclass": "stored_payload", "schema": 1, "fields": {"content": {
-                "$tool_payload": identity, "archive_scope": scope, "content_scope": owner}}}
-        return replace(record, data=encode_envelope({**envelope.value, "payload": {**value, "fields": fields}}))
+        return replace(record, data=encode_envelope({**envelope.value, "payload": {
+            **value, "fields": {**value["fields"], **retained_fields}}}))
 
     async def capture_native_sources(self, roots: Sequence[NativeMessageRoot]) -> dict[NativeMessageRoot, tuple[bytes, ...]]:
         """Read fixed published messages inside the same owner write transaction."""

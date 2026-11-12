@@ -339,6 +339,13 @@ class StoredRecord:
     payload_bytes: bytes | None = None
 
     def __post_init__(self) -> None:
+        from ._record_owner import record_owner_table, record_owner_values
+
+        record_owner_values(record_owner_table(self.key), {
+            "kind": self.kind, "subject_id": self.subject_id, "parent_key": self.parent_key, "state": self.state,
+            "lease_owner": self.lease_owner, "lease_fence": self.lease_fence,
+            "lease_expires_at": self.lease_expires_at, "payload_bytes": self.payload_bytes,
+        })
         if self.payload_bytes is not None and type(self.payload_bytes) is not bytes:
             raise TypeError("record binary payload must be frozen bytes")
         validate_record_key(self.key)

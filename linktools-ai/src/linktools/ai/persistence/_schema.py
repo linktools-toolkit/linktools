@@ -76,109 +76,14 @@ def build_runtime_sql_metadata(
     ):
         raise ValueError("at least one durable PersistenceDomain is required")
 
-    records = Table(
-        "ai_state_records",
-        metadata,
-        sql_id_column(),
-        Column(
-            "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the physical State store partition.",
-        ),
-        Column(
-            "key",
-            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the persisted runtime record.",
-        ),
-        Column(
-            "scope_key",
-            LargeBinary(RELATION_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RELATION_KEY_MAX_BYTES), "mysql"),
-            nullable=True,
-            comment="Bounded binary grouping identity used by the record kind's primary list query.",
-        ),
-        Column(
-            "subject_id",
-            LargeBinary(RESOURCE_ID_MAX_BYTES).with_variant(mysql.VARBINARY(RESOURCE_ID_MAX_BYTES), "mysql"),
-            nullable=True,
-            comment="Exact UTF-8 subject identifier used for lookups within a record scope.",
-        ),
-        Column(
-            "parent_key",
-            LargeBinary(PARENT_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(PARENT_KEY_MAX_BYTES), "mysql"),
-            nullable=True,
-            comment="Bounded binary parent identity used by hierarchical list queries.",
-        ),
-        Column(
-            "kind",
-            String(32),
-            nullable=False,
-            comment="Stable persisted record kind such as session, execution, task_node, or agent_run.",
-        ),
-        Column(
-            "sort_key",
-            sql_blob(),
-            nullable=False,
-            comment="Stable canonical ordering token used for deterministic keyset pagination.",
-        ),
-        Column(
-            "state",
-            sql_state(),
-            nullable=True,
-            comment="Current SQL-queryable state for record kinds with persisted state-machine semantics.",
-        ),
-        Column(
-            "storage_revision",
-            BigInteger,
-            nullable=False,
-            comment="Physical compare-and-swap revision incremented by every record mutation.",
-        ),
-        Column(
-            "lease_owner",
-            Text,
-            nullable=True,
-            comment="Current durable lease owner for record kinds using claim and fencing semantics.",
-        ),
-        Column(
-            "lease_fence",
-            BigInteger,
-            nullable=False,
-            server_default=text("0"),
-            comment="Monotonic fencing token for the current durable record lease.",
-        ),
-        Column(
-            "lease_expires_at",
-            TIMESTAMP(timezone=True).with_variant(mysql.TIMESTAMP(fsp=6), "mysql"),
-            nullable=True,
-            comment="Database-authoritative expiry time of the current durable lease.",
-        ),
-        Column(
-            "payload_json",
-            JSON(),
-            nullable=False,
-            comment="Canonical domain JSON encoded as a JSON string preserving numeric representations.",
-        ),
-        Column("payload_bytes", sql_blob(), nullable=True,
-               comment="Optional binary content body owned by this record; ordinary domain state remains JSON."),
-        Column("key_locator", sql_sha256(), nullable=False,
-               comment="Single SHA-256 lookup projection of the complete key; raw identity must also match."),
-        Column("scope_locator", sql_sha256(), nullable=True,
-               comment="Single SHA-256 lookup projection of the complete scope_key; raw identity must also match."),
-        Column("parent_locator", sql_sha256(), nullable=True,
-               comment="Single SHA-256 lookup projection of the complete parent_key; raw identity must also match."),
-        Column("sort_prefix", LargeBinary(128).with_variant(mysql.VARBINARY(128), "mysql"), nullable=False,
-               comment="First 128 bytes of the full sort key; non-unique query projection only."),
-        *_audit(),
-        comment=_RECORD_COMMENT,
-        **sql_table_options(),
-    )
-    sql_unique(records, "store_key", "key_locator")
-    sql_query_index(records, "store_key", "kind", "sort_prefix")
-    sql_query_index(records, "scope_locator", "sort_prefix")
-    sql_query_index(records, "scope_locator", "subject_id")
-    sql_query_index(records, "parent_locator", "sort_prefix")
-    sql_audit_indexes(records)
+    from ._record_owner_schema import build_record_owner_table
+    build_record_owner_table(metadata, name="ai_state_records", comment=_RECORD_COMMENT)
+    build_record_owner_table(metadata, name="ai_step_tool_operations",
+                             comment="Authoritative Step tool effect ledger, including dispatch fencing and durable receipts.")
+    build_record_owner_table(metadata, name="ai_step_payload_contents",
+                             comment="Immutable Step-owned accepted input and result payload bodies with integrity metadata.")
+    from ._run_admission_schema import build_run_admission_sql_metadata
+    build_run_admission_sql_metadata(metadata)
 
     aliases = Table(
         "ai_tool_operation_aliases",

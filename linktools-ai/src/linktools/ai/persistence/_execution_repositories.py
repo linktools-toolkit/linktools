@@ -297,12 +297,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if record is None:
                 return None
             self._decode_header(record, execution_id)
+            record, = await self._execution_content.expand_bindings((record,))
             metadata = decode_execution_metadata(record.data, tenant_id=tenant_id)
             if fresh and metadata.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 payloads = await self._execution_content.read_payloads((record,), result_only=True)
                 metadata = replace(metadata, result_record=decode_execution_content(record.data, payloads, result=True))
             return metadata
-        return await self.read_content(lambda _group: read()) if fresh else await read()
+        return await self.read_content(lambda _group: read())
 
     async def get_result_record(self, execution_id: str, *, tenant_id: str,
                                 fresh: bool = False) -> ExecutionResultRecord | None:
@@ -349,28 +350,36 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return header
 
     async def get_view(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
-        if tenant_id != self._tenant_id:
-            return None
-        record = await self._store.read_record(self._key("execution", (execution_id,)))
-        return None if record is None else await self._decode_view(record, execution_id)
+        return await self._get_view(execution_id, tenant_id=tenant_id, fresh=False)
 
     async def get_view_fresh(self, execution_id: str, *, tenant_id: str) -> tuple[ResourceRef, ExecutionView] | None:
+        return await self._get_view(execution_id, tenant_id=tenant_id, fresh=True)
+
+    async def _get_view(self, execution_id: str, *, tenant_id: str, fresh: bool) -> tuple[ResourceRef, ExecutionView] | None:
         if tenant_id != self._tenant_id:
             return None
         key = self._key("execution", (execution_id,))
-        record = (await self._refresh_records((key,))).get(key)
-        return None if record is None else await self._decode_view(record, execution_id)
+        async def read(_group: object) -> tuple[ResourceRef, ExecutionView] | None:
+            record = ((await self._refresh_records((key,))).get(key) if fresh else await self._store.read_record(key))
+            return None if record is None else await self._decode_view(record, execution_id)
+        return await self.read_content(read)
 
     async def _decode_view(self, record: StoredRecord, execution_id: str) -> tuple[ResourceRef, ExecutionView]:
         self._decode_header(record, execution_id)
+        record, = await self._execution_content.expand_bindings((record,))
         return decode_execution_view(record.data, tenant_id=self._tenant_id)
 
     async def list_child_views(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        records = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
+        async def read(_group: object) -> tuple[ExecutionView, ...]:
+            records = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
+            return await self._child_views(records, execution_id, tenant_id=tenant_id)
+        return await self.read_content(read)
+
+    async def _child_views(self, records: Sequence[StoredRecord], execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
         values = []
-        for record in records:
+        for record in await self._execution_content.expand_bindings(records):
             header = decode_execution_header(record.data, tenant_id=tenant_id)
             self._decode_header(record, header.id)
             _owner, view = decode_execution_view(record.data, tenant_id=tenant_id)
@@ -382,31 +391,17 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def get_view_with_children(
         self, execution_id: str, *, tenant_id: str,
     ) -> tuple[tuple[ResourceRef, ExecutionView] | None, tuple[ExecutionView, ...]]:
-        """Capture parent and child view projections in the same read scope."""
+        """Capture parent, children and admitted bindings in the same read scope."""
         if tenant_id != self._tenant_id:
             return None, ()
-
-        async def capture(transaction: StateTransaction) -> tuple[StoredRecord | None, tuple[StoredRecord, ...]]:
-            parent = await transaction.get_record(self._key("execution", (execution_id,)))
+        async def read(_group: object) -> tuple[tuple[ResourceRef, ExecutionView] | None, tuple[ExecutionView, ...]]:
+            parent = await self._store.read_record(self._key("execution", (execution_id,)))
             if parent is None:
                 return None, ()
-            children = await self._records(
-                "execution", parent=self._parent("execution", "execution", (execution_id,)),
-            )
-            return parent, tuple(children)
-
-        parent, children = await self._store.read(capture)
-        if parent is None:
-            return None, ()
-        owner = await self._decode_view(parent, execution_id)
-        views = []
-        for record in children:
-            header = decode_execution_header(record.data, tenant_id=tenant_id)
-            _principal, view = await self._decode_view(record, header.id)
-            if view.parent_execution_id != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            views.append(view)
-        return owner, tuple(views)
+            children = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
+            return (await self._decode_view(parent, execution_id),
+                    await self._child_views(children, execution_id, tenant_id=tenant_id))
+        return await self.read_content(read)
 
     async def _projected_content(self, current: StoredRecord, value: object, *,
                                  result_source: NativeTextReference | None = None) -> StoredRecord:

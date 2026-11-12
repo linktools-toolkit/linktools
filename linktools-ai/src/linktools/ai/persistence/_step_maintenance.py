@@ -130,7 +130,7 @@ async def purge_step_content(
         async with context.engine.connect() as connection:
             has_state = await connection.run_sync(lambda connection: any(
                 inspect(connection).has_table(name)
-                for name in ("ai_state_records", "ai_state_facts", "ai_state_operations")
+                for name in ("ai_state_records", "ai_step_tool_operations", "ai_step_run_admissions", "ai_step_payload_contents", "ai_state_facts", "ai_state_operations")
             ))
         if has_state:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING,

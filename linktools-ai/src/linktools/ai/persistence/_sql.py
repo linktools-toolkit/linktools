@@ -25,6 +25,7 @@ from ..storage import (
 )
 from ._plan import PersistenceDomain
 from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
+from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_rows, record_owner_values
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
 from .state import (
@@ -183,7 +184,7 @@ class _SqlGroupTransaction:
     ) -> "Select":
         from sqlalchemy import and_, or_, select
 
-        table = self._group.metadata.tables["ai_state_records"]
+        table = record_owner_rows(self._group.metadata, keys=tuple(key for keys in requests.values() for key in keys))
         return select(table).where(or_(*(and_(
             table.c.store_key == self.transaction(store)._store_key,
             _keys_match(table.c.key, tuple(validate_record_key(key) for key in keys)),
@@ -253,7 +254,7 @@ class SqlStateStorageGroup:
                 select(self._metadata.tables[name].c.store_key).where(
                     self._metadata.tables[name].c.store_key == key,
                 )
-                for name in ("ai_state_records", "ai_tool_operation_aliases", "ai_state_facts",
+                for name in (*RECORD_OWNER_TABLES, "ai_tool_operation_aliases", "ai_state_facts",
                              "ai_state_counters", "ai_state_operations")
             ]
             async with self._session() as session:
@@ -389,7 +390,7 @@ class SqlStateStorageGroup:
         await self.initialize()
         statements = [
             select(self._metadata.tables[name].c.store_key)
-            for name in ("ai_state_records", "ai_tool_operation_aliases", "ai_state_facts",
+            for name in (*RECORD_OWNER_TABLES, "ai_tool_operation_aliases", "ai_state_facts",
                          "ai_state_counters", "ai_state_operations")
         ]
         async with self._session() as session:
@@ -805,7 +806,7 @@ class SqlStateStore:
             )
             from sqlalchemy import and_, select
 
-            records = transaction._table("ai_state_records")
+            records = record_owner_rows(self._metadata)
             aliases = transaction._table("ai_tool_operation_aliases")
             facts = transaction._table("ai_state_facts")
             sequences = transaction._table("ai_state_counters")
@@ -1097,7 +1098,7 @@ class _SqlTransaction:
             if (next(iter_native_message_roots(self._native_record_owner_data(previous)), None) is None
                     and next(iter_native_message_roots(data), None) is None):
                 return
-        self._stage_native_owner("record", (validate_record_key(record.key),), data, state=record.state, inserting=inserting)
+        self._stage_native_owner(record_owner_edge(record.key), (validate_record_key(record.key),), data, state=record.state, inserting=inserting)
 
     async def _retire_native_rows(self, kind: str, table: "Table", *conditions: "ColumnElement[bool]") -> None:
         if not self._native_content_index:
@@ -1138,7 +1139,7 @@ class _SqlTransaction:
 
         if key in self._record_cache:
             return self._record_cache[key]
-        table = self._table("ai_state_records")
+        table = record_owner_rows(self._metadata, keys=(key,))
         row = (
             (
                 await self._execute(
@@ -1168,7 +1169,7 @@ class _SqlTransaction:
 
         unique_keys = tuple(dict.fromkeys(keys))
         missing = tuple(key for key in unique_keys if key not in self._record_cache)
-        table = self._table("ai_state_records")
+        table = record_owner_rows(self._metadata, keys=missing or unique_keys)
         rows = ()
         if missing:
             rows = (
@@ -1205,21 +1206,15 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         subject_values = tuple(validate_resource_id(subject).encode("utf-8") for subject in subjects)
-        table = self._table("ai_state_records")
+        table = record_owner_rows(self._metadata, kind=kind)
         records: list[StoredRecord] = []
         for offset in range(0, len(subjects), _RECORD_SUBJECT_READ_BATCH_SIZE):
-            matches = select(table.c.id).where(
+            rows = (await self._execute(select(table).where(
                 _key_matches(table.c.scope_key, scope_key),
-                table.c.subject_id.in_(
-                    subject_values[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]
-                ),
-            ).subquery("record_subjects")
-            rows = (await self._execute(
-                select(table).select_from(matches.join(table, table.c.id == matches.c.id)).where(
-                    table.c.store_key == self._store_key,
-                    table.c.kind == kind,
-                )
-            )).mappings().all()
+                table.c.subject_id.in_(subject_values[offset:offset + _RECORD_SUBJECT_READ_BATCH_SIZE]),
+                table.c.store_key == self._store_key,
+                table.c.kind == kind,
+            ))).mappings().all()
             records.extend(_record_from_row(row) for row in rows)
         records.sort(key=lambda record: (record.sort_key, record.key))
         self._record_cache.update((record.key, record) for record in records)
@@ -1339,17 +1334,18 @@ class _SqlTransaction:
                                    self._archive_link(node.c.payload_json, "content").label("identity"))
                             .select_from(joined).where(current_scope, _keys_match(current.c.key, body_keys)))
         if content_keys:
-            content = table.alias("archive_direct_content")
+            content = record_owner_rows(self._metadata, keys=content_keys).alias("archive_direct_content")
             branches.append(select(content.c.kind.label("kind"), content.c.sort_key.label("identity")).where(
                 content.c.store_key == self._store_key, _key_matches(content.c.scope_key, scope_key),
                 content.c.kind == "archive_content", _keys_match(content.c.key, tuple(validate_record_key(key) for key in content_keys)),
             ))
         keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
         # Keep the bounded identity set on the driving side of the row lookup.
-        return select(table).select_from(keys.outerjoin(table, and_(
-            table.c.store_key == self._store_key, _key_matches(table.c.scope_key, scope_key),
-            table.c.kind == keys.c.kind, table.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
-            table.c.sort_key == keys.c.identity,
+        targets = record_owner_rows(self._metadata, kind="archive_content")
+        return select(targets).select_from(keys.outerjoin(targets, and_(
+            targets.c.store_key == self._store_key, _key_matches(targets.c.scope_key, scope_key),
+            targets.c.kind == keys.c.kind, targets.c.sort_prefix == func.substr(keys.c.identity, 1, 128),
+            targets.c.sort_key == keys.c.identity,
         )))
 
     async def insert_record(self, record: StoredRecord) -> None:
@@ -1357,6 +1353,16 @@ class _SqlTransaction:
 
     async def insert_records(self, records: Sequence[StoredRecord]) -> None:
         values = tuple(records)
+        owners = tuple(dict.fromkeys(record_owner_table(record.key) for record in values))
+        if len(owners) > 1:
+            try:
+                for owner in owners:
+                    batch = tuple(record for record in values if record_owner_table(record.key) == owner)
+                    await self.insert_records(batch)
+            except BaseException as error:
+                self._abort_mutation(error)
+                raise
+            return
         keys = [record.key for record in values]
         if len(keys) != len(set(keys)):
             raise ValueError("insert_records contains duplicate keys")
@@ -1367,10 +1373,10 @@ class _SqlTransaction:
         from sqlalchemy import insert
 
         await self._execute(
-            insert(self._table("ai_state_records")).values(
+            insert(self._table(owners[0])).values(
                 [
                     {
-                        **_record_values(record),
+                        **record_owner_values(owners[0], _record_values(record)),
                         "store_key": self._store_key,
                     }
                     for record in sorted(values, key=lambda value: value.key)
@@ -1386,16 +1392,26 @@ class _SqlTransaction:
 
     async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
         values = tuple(sorted(records, key=lambda record: record.key))
+        owners = tuple(dict.fromkeys(record_owner_table(record.key) for record in values))
+        if len(owners) > 1:
+            try:
+                for owner in owners:
+                    batch = tuple(record for record in values if record_owner_table(record.key) == owner)
+                    await self.insert_immutable_records(batch)
+            except BaseException as error:
+                self._abort_mutation(error)
+                raise
+            return
         try:
             if len({record.key for record in values}) != len(values):
                 raise ValueError("insert_immutable_records contains duplicate keys")
             for record in values:
                 validate_record_identity(record)
             for offset in range(0, len(values), _IMMUTABLE_RECORD_BATCH_SIZE):
-                rows = [{**_record_values(record), "store_key": self._store_key}
+                rows = [{**record_owner_values(owners[0], _record_values(record)), "store_key": self._store_key}
                         for record in values[offset:offset + _IMMUTABLE_RECORD_BATCH_SIZE]]
                 await self._context.run_statement(self._context.dialect.insert_immutable_many(
-                    self._session, table=self._table("ai_state_records"), rows=rows,
+                    self._session, table=self._table(owners[0]), rows=rows,
                     index_elements=("store_key", "key_locator"), conflict_column="storage_revision",
                 ))
         except BaseException as error:
@@ -1426,7 +1442,7 @@ class _SqlTransaction:
             return self._guarded_record_revisions[key]
         from sqlalchemy import update
 
-        table = self._table("ai_state_records")
+        table = self._table(record_owner_table(key))
         result = await self._execute(
             update(table).where(
                 table.c.store_key == self._store_key,
@@ -1461,6 +1477,16 @@ class _SqlTransaction:
 
     async def replace_records(self, replacements: Sequence[RecordReplacement]) -> None:
         values = tuple(replacements)
+        owners = tuple(dict.fromkeys(record_owner_table(record.record.key) for record in values))
+        if len(owners) > 1:
+            try:
+                for owner in owners:
+                    batch = tuple(record for record in values if record_owner_table(record.record.key) == owner)
+                    await self.replace_records(batch)
+            except BaseException as error:
+                self._abort_mutation(error)
+                raise
+            return
         keys = [replacement.record.key for replacement in values]
         if len(keys) != len(set(keys)):
             raise ValueError("replace_records contains duplicate keys")
@@ -1478,11 +1504,12 @@ class _SqlTransaction:
                 )
         from sqlalchemy import and_, bindparam, case, func, literal, or_, update
 
-        table = self._table("ai_state_records")
-        prepared = tuple(_record_values(value.record) for value in ordered)
+        table = self._table(owners[0])
+        prepared = tuple(record_owner_values(owners[0], _record_values(value.record)) for value in ordered)
         columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json", "payload_bytes")
-        identity_columns = ("scope_key", "parent_key", "subject_id", "kind", "sort_key")
+        identity_columns = tuple(name for name in ("scope_key", "parent_key", "subject_id", "kind", "sort_key") if name in table.c)
+        columns = tuple(name for name in columns if name in table.c)
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
@@ -1627,7 +1654,7 @@ class _SqlTransaction:
             raise ValueError("record lease integer fields are invalid")
         if lease_expires_at is not None and lease_expires_at.tzinfo is None:
             raise ValueError("record lease is invalid")
-        table = self._table("ai_state_records")
+        table = self._table(record_owner_table(key))
         result = await self._execute(
             update(table)
             .where(
@@ -1635,13 +1662,12 @@ class _SqlTransaction:
                 _key_matches(table.c.key, validate_record_key(key)),
                 table.c.storage_revision == expected_storage_revision,
             )
-            .values(
-                lease_owner=lease_owner,
-                lease_fence=lease_fence,
-                lease_expires_at=lease_expires_at,
-                storage_revision=expected_storage_revision + 1,
-                updated_at=func.current_timestamp(),
-            )
+            .values(**record_owner_values(table.name, {
+                "lease_owner": lease_owner, "lease_fence": lease_fence,
+                "lease_expires_at": lease_expires_at,
+                "storage_revision": expected_storage_revision + 1,
+                "updated_at": func.current_timestamp(),
+            }))
         )
         if result.rowcount == 1:
             self._guarded_record_revisions[key] = expected_storage_revision + 1
@@ -1659,11 +1685,21 @@ class _SqlTransaction:
     async def delete_records(self, keys: Sequence[bytes]) -> None:
         """A failed batch requires a new transaction, even if its error is caught."""
         unique_keys = tuple(dict.fromkeys(keys))
+        owners = tuple(dict.fromkeys(record_owner_table(record) for record in unique_keys))
+        if len(owners) > 1:
+            try:
+                for owner in owners:
+                    batch = tuple(record for record in unique_keys if record_owner_table(record) == owner)
+                    await self.delete_records(batch)
+            except BaseException as error:
+                self._abort_mutation(error)
+                raise
+            return
         if not unique_keys:
             return
         from sqlalchemy import delete, tuple_, update
 
-        table = self._table("ai_state_records")
+        table = self._table(owners[0])
         aliases = self._table("ai_tool_operation_aliases")
         facts = self._table("ai_state_facts")
         deleted_keys: set[bytes] = set()
@@ -1691,7 +1727,7 @@ class _SqlTransaction:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 cas_conditions = tuple((key, revision + 1) for key, revision in cas_conditions)
                 await self._retire_native_facts(record_keys)
-                await self._retire_native_rows("record", table,
+                await self._retire_native_rows(record_owner_edge(record_keys[0]), table,
                     table.c.store_key == self._store_key, _keys_match(table.c.key, record_keys))
                 # Deleting the CAS-matched owners fences concurrent alias/fact writers.
                 result = await self._execute(
@@ -1716,7 +1752,7 @@ class _SqlTransaction:
                     )
                 )
                 for key in current:
-                    self._stage_native_owner("record", (validate_record_key(key),), None)
+                    self._stage_native_owner(record_owner_edge(key), (validate_record_key(key),), None)
                 deleted_keys.update(current)
                 statement_count += 3
         except BaseException as error:
@@ -1756,7 +1792,7 @@ class _SqlTransaction:
         guarded = await self.guard_record(key, expected_storage_revision=expected)
         if guarded is None:
             return False
-        table = self._table("ai_state_records")
+        table = self._table(record_owner_table(key))
         statement = delete(table).where(
             table.c.store_key == self._store_key,
             _key_matches(table.c.key, validate_record_key(key)),
@@ -1765,7 +1801,7 @@ class _SqlTransaction:
         children_changed = False
         try:
             await self._retire_native_facts((validate_record_key(key),))
-            await self._retire_native_rows("record", table,
+            await self._retire_native_rows(record_owner_edge(key), table,
                 table.c.store_key == self._store_key, _key_matches(table.c.key, validate_record_key(key)))
             await self._execute(
                 delete(self._table("ai_tool_operation_aliases")).where(
@@ -1788,7 +1824,7 @@ class _SqlTransaction:
         if result.rowcount != 1:
             self._abort_mutation(AIError(ErrorCode.STORAGE_CONFLICT))
         if result.rowcount == 1:
-            self._stage_native_owner("record", (validate_record_key(key),), None)
+            self._stage_native_owner(record_owner_edge(key), (validate_record_key(key),), None)
             self._deleted_records = True
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
@@ -1800,7 +1836,7 @@ class _SqlTransaction:
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
         from sqlalchemy import and_, or_, select
 
-        table = self._table("ai_state_records")
+        table = record_owner_rows(self._metadata, kind=query.kind)
         conditions = [table.c.store_key == self._store_key]
         if query.scope_key is not None:
             conditions.append(_key_matches(table.c.scope_key, query.scope_key))
@@ -1849,7 +1885,7 @@ class _SqlTransaction:
     async def scan_records(self) -> tuple[StoredRecord, ...]:
         from sqlalchemy import select
 
-        table = self._table("ai_state_records")
+        table = record_owner_rows(self._metadata)
         rows = (
             await self._execute(
                 select(table).where(table.c.store_key == self._store_key)
@@ -1867,7 +1903,7 @@ class _SqlTransaction:
 
         _require_scan_limit(limit)
 
-        table = self._table("ai_state_records")
+        table = record_owner_rows(self._metadata)
         statement = select(table).where(table.c.store_key == self._store_key)
         if after is not None:
             statement = statement.where(
@@ -1891,7 +1927,7 @@ class _SqlTransaction:
             from sqlalchemy import and_, select
 
             table = self._table("ai_tool_operation_aliases")
-            records = self._table("ai_state_records")
+            records = record_owner_rows(self._metadata)
             rows = (
                 (
                     await self._execute(
@@ -2524,6 +2560,8 @@ class _SqlTransaction:
 
         conditions = []
         for name in ("scope_key", "parent_key", "subject_id", "kind", "sort_key"):
+            if name not in table.c:
+                continue
             column = table.c[name]
             # MySQL text equality may ignore case or trailing spaces even when
             # the in-memory identity contract distinguishes those values.

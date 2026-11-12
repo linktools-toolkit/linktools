@@ -14,6 +14,7 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepEvent as NativeS
 from ..errors import AIError, ErrorCode
 from ..steps import native_store_locator, encode_native_replay_key
 from ._run_registration import RunRegistrationReference
+from ._record_owner import record_owner_rows
 from ._plan import PersistenceDomain
 from ._schema import build_runtime_sql_metadata
 from ._sql import SqlStateStore
@@ -37,10 +38,10 @@ def is_native_run_reference(data: Mapping[str, object]) -> bool:
 
 
 class NativeRunReferences:
-    """Resolve a native source in the same SELECT as its Trace sidecar.
+    """Resolve Step admissions and their canonical source in one SELECT.
 
-    Only source-confirmed registrations may create references. The physical
-    record keeps distinct Runtime projection differences, never
+    Only source-confirmed registrations may create admissions. Each local
+    admission keeps distinct Runtime projection differences, never
     another copy of the native lineage, agent or shared metadata.
     """
 
@@ -52,7 +53,7 @@ class NativeRunReferences:
         self._projections: WeakKeyDictionary[StateTransaction, dict[bytes, tuple[Mapping[str, object], Mapping[str, object]]]] = WeakKeyDictionary()
         metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE}))
         build_step_sql_metadata(metadata=metadata)
-        self._records = metadata.tables["ai_state_records"]
+        self._record_metadata = metadata
         self._runs = metadata.tables["ai_step_runs"]
         self._events = metadata.tables["ai_step_events"]
 
@@ -126,7 +127,8 @@ class NativeRunReferences:
         from sqlalchemy.sql import visitors
         from sqlalchemy.sql.elements import BindParameter
 
-        records, runs = self._records, self._runs
+        records = record_owner_rows(self._record_metadata, keys=keys, kind="agent_run" if query is not None else None)
+        runs = self._runs
         encoded = type_coerce(records.c.payload_json, JSON)[()].as_string()
         payload = cast(encoded, JSON) if self._state.context.dialect.name == "postgresql" else type_coerce(encoded, JSON)
         reference = payload["value"]["payload"]

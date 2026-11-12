@@ -3,7 +3,7 @@
 """In-memory Runtime StateStore and storage-group lifecycle."""
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from datetime import datetime, timezone
 from typing import TypeVar
 from uuid import uuid4
@@ -15,6 +15,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import InMemoryObjectStore
 from ._memory_transaction import _MemoryTransaction, _validate_transaction_integrity
 from ._record_cache import StateRecordCache
+from ._record_owner import RECORD_OWNER_TABLES, record_owner_table
 from .state import (
     StateCallback,
     StateGroupCallback,
@@ -34,6 +35,29 @@ from .state import (
 
 ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.memory")
+
+
+class _MemoryRecordOwners(MutableMapping[bytes, StoredRecord]):
+    """One transactional view over disjoint physical in-memory owners."""
+
+    def __init__(self, owners: Mapping[str, dict[bytes, StoredRecord]]) -> None:
+        self._owners = owners
+
+    def __getitem__(self, key: bytes) -> StoredRecord:
+        return self._owners[record_owner_table(key)][key]
+
+    def __setitem__(self, key: bytes, value: StoredRecord) -> None:
+        self._owners[record_owner_table(key)][key] = value
+
+    def __delitem__(self, key: bytes) -> None:
+        del self._owners[record_owner_table(key)][key]
+
+    def __iter__(self) -> Iterator[bytes]:
+        for owner in self._owners.values():
+            yield from owner
+
+    def __len__(self) -> int:
+        return sum(map(len, self._owners.values()))
 
 
 class _MemoryGroupTransaction:
@@ -224,7 +248,7 @@ class InMemoryStateStorageGroup:
         now: datetime | None = None,
     ) -> _MemoryTransaction:
         return _MemoryTransaction(
-            store._records,
+            store._record_owners,
             store._aliases,
             store._sequences,
             store._facts,
@@ -245,7 +269,12 @@ class InMemoryStateStore:
     """Atomic process-local StateStore used by tests and volatile routes."""
 
     def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: CacheBackend | None = None) -> None:
-        self._records: dict[bytes, StoredRecord] = {}
+        owners: dict[str, dict[bytes, StoredRecord]] = {name: {} for name in RECORD_OWNER_TABLES}
+        self._records = owners["ai_state_records"]
+        self._step_tool_operations = owners["ai_step_tool_operations"]
+        self._step_run_admissions = owners["ai_step_run_admissions"]
+        self._step_payload_contents = owners["ai_step_payload_contents"]
+        self._record_owners = _MemoryRecordOwners(owners)
         self._aliases: dict[bytes, bytes] = {}
         self._sequences: dict[bytes, int] = {}
         self._facts: dict[tuple[bytes, int], StoredFact] = {}
@@ -321,7 +350,7 @@ class InMemoryStateStore:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     def _apply_transaction(self, transaction: _MemoryTransaction) -> None:
-        transaction.records.apply_to(self._records)
+        transaction.records.apply_to(self._record_owners)
         transaction.aliases.apply_to(self._aliases)
         transaction.sequences.apply_to(self._sequences)
         transaction.facts.apply_to(self._facts)
