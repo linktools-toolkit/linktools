@@ -24,10 +24,11 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ..model.messages import decode_model_messages
-from pydantic_ai.messages import ModelRequest, ToolReturnPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from ._message_root import NativeMessageRoot
 from ._native_tool_result import prepare_native_tool_result
-from .codec import decode_envelope, encode_envelope, native_tool_result_reference
+from ._native_tool_arguments import prepare_native_tool_arguments
+from .codec import decode_envelope, encode_envelope, native_tool_result_reference, native_tool_arguments_reference
 from ._archive import PreparedArchive
 from ._payload import decode_payload_bytes
 from .contracts import ToolOperationRecord
@@ -1098,22 +1099,86 @@ class ToolRepositoryImpl(_RepositoryBase):
             observed=observed,
         )
 
-    async def share_published_results(
+    async def share_published_arguments(
         self, *, agent_run_id: str, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
     ) -> None:
-        """Replace settled receipts only after their immutable Step source is published."""
-        # Inspect newly prepared ordinary messages before reading their verified
-        # published roots. Size does not change whether a receipt has one owner.
-        possible = False
+        """Reuse exact admitted arguments only after their fixed call source exists."""
+        new_calls: set[str] = set()
         for prepared in archive.native_messages.values():
             for _identity, content in prepared.messages:
                 if content.payload is not None:
                     continue
                 raw = decode_payload_bytes(content.body, codec=content.compression,
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
+                for message in decode_model_messages(raw):
+                    if isinstance(message, ModelResponse):
+                        new_calls.update(part.tool_call_id for part in message.parts if isinstance(part, ToolCallPart))
+        if not new_calls or not roots:
+            return
+        sources = await self._tool_content.capture_native_sources(roots)
+        candidates = {}
+        for root, messages in sources.items():
+            for index, raw in enumerate(messages):
+                decoded = decode_model_messages(raw)
+                if len(decoded) != 1 or not isinstance(decoded[0], ModelResponse):
+                    continue
+                for part_index, part in enumerate(decoded[0].parts):
+                    if isinstance(part, ToolCallPart) and part.tool_call_id in new_calls:
+                        candidates[part.tool_call_id] = (root.slice(index, index + 1), raw, part_index, part.tool_name)
+        if not candidates:
+            return
+
+        async def update(transaction: StateTransaction) -> None:
+            scope = self._scope("tool_operation", "agent_run", (agent_run_id,))
+            records = (await transaction.read_record_subjects(kind="tool_operation", scope_key=scope,
+                       subject_ids=tuple(candidates)) if isinstance(transaction, RecordSubjectReader) else None)
+            if records is None:
+                records = await transaction.list_records(RecordQuery(kind="tool_operation", scope_key=scope))
+            selected = []
+            for stored in records:
+                current_ref = decode_envelope(stored.data).value["payload"].get("fields", {}).get("arguments_payload")
+                if isinstance(current_ref, Mapping) and native_tool_arguments_reference(current_ref) is not None:
+                    continue
+                selected.append(stored)
+            expanded = await self._tool_content.expand_many(tuple(selected))
+            for stored, materialized in zip(selected, expanded, strict=True):
+                envelope = decode_envelope(stored.data)
+                payload = envelope.value["payload"]
+                value = await self._decode(materialized, ToolOperationRecord)
+                source = candidates.get(value.tool_call_id)
+                if (source is None or value.execution_id != execution_id or value.agent_run_id != agent_run_id
+                        or value.tool_name != source[3] or value.arguments_payload is None):
+                    continue
+                reference = prepare_native_tool_arguments(source[0], source[1], source[2], value.arguments_payload)
+                if reference is None:
+                    continue
+                fields = {**payload["fields"], "arguments_payload": {"$dataclass": "stored_payload", "schema": 1,
+                          "fields": {"content": reference.to_json()}}}
+                candidate = replace(stored, storage_revision=stored.storage_revision + 1,
+                                    data=encode_envelope({**envelope.value, "payload": {**payload, "fields": fields}}))
+                await _replace_checked(transaction, candidate, stored.storage_revision)
+        await self._mutate_content(update)
+
+    async def share_published_results(
+        self, *, agent_run_id: str, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
+    ) -> None:
+        """Replace settled receipts only after their immutable Step source is published."""
+        await self.share_published_arguments(agent_run_id=agent_run_id, execution_id=execution_id,
+                                             roots=roots, archive=archive)
+        # Inspect newly prepared ordinary messages before reading their verified
+        # published roots. Size does not change whether a receipt has one owner.
+        possible = False
+        for prepared in archive.native_messages.values():
+            for _identity, content in prepared.messages:
+                if content.payload is not None:
+                    # A mixed-media message can still contain an exact ordinary
+                    # receipt. Its published root supplies the verified bytes.
+                    possible = True
+                    break
+                raw = decode_payload_bytes(content.body, codec=content.compression,
+                                           raw_digest=content.raw_digest, raw_size=content.raw_size)
                 messages = decode_model_messages(raw)
                 if any(isinstance(message, ModelRequest) and any(isinstance(part, ToolReturnPart)
-                       and isinstance(part.content, str)
                        for part in message.parts) for message in messages):
                     possible = True
                     break
@@ -1127,7 +1192,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 if len(decoded) != 1 or not isinstance(decoded[0], ModelRequest):
                     continue
                 for part_index, part in enumerate(decoded[0].parts):
-                    if isinstance(part, ToolReturnPart) and isinstance(part.content, str):
+                    if isinstance(part, ToolReturnPart):
                         candidates[part.tool_call_id] = (root.slice(index, index + 1), raw, part_index, part.tool_name)
         if not candidates:
             return

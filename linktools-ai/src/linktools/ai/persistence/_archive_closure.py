@@ -15,7 +15,7 @@ from ._archive import (ArchiveRoot, ArchiveSlice, ContentRecord, ImmutableSequen
                        validate_archive_content_identity, validate_archive_group_id)
 from ._message_root import NativeMessageRoot, NativeMessageSlice
 from ._payload import decode_payload_bytes
-from .codec import tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference
+from .codec import tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -174,7 +174,7 @@ def iter_native_message_roots(value: object) -> Iterator[NativeMessageRoot]:
             if reference is not None:
                 yield reference.root
         for _name, payload in tool_payload_slots(value):
-            reference = native_tool_result_reference(payload)
+            reference = native_tool_arguments_reference(payload) or native_tool_result_reference(payload)
             if reference is not None:
                 yield reference.root
         if kind in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
@@ -640,12 +640,13 @@ def rekey_native_message_roots(
             value = map_execution_payload_slots(value, rekey_payload)
         if kind == "tool_operation":
             def rekey_tool_payload(payload: Mapping) -> JsonValue:
-                reference = native_tool_result_reference(payload)
+                reference = native_tool_arguments_reference(payload) or native_tool_result_reference(payload)
                 if reference is None:
                     return payload
                 content = payload["fields"]["content"]
-                return {**payload, "fields": {"content": {
-                    **content, "$native_tool_result": rewrite(reference.root).to_json(),
+                marker = "$native_tool_arguments" if "$native_tool_arguments" in content else "$native_tool_result"
+                return {**payload, "fields": {**payload["fields"], "content": {
+                    **content, marker: rewrite(reference.root).to_json(),
                 }}}
             value = map_tool_payload_slots(value, rekey_tool_payload)
         result = {key: rekey_native_message_roots(item, groups, stores) for key, item in value.items()}

@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from ._tool_operation_content import expand_tool_content, tool_content_size, expand_native_tool_content
 from ._native_tool_result import restore_native_tool_result_payload
+from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._execution_content import (ExecutionContent, expand_snapshot_execution_content, snapshot_execution_content_size,
     expand_native_execution_content, restore_native_text_payload, restore_native_user_input)
 from .codec import (decode_envelope, execution_payload_slots, native_text_reference, binding_reference,
-    tool_payload_slots, native_tool_result_reference, native_user_input_reference)
+    tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_user_input_reference)
 
 from ..core import (
     JsonValue,
@@ -1891,7 +1892,7 @@ def _expand_snapshot_native_content(
     restored = {}
     for _path, payload in slots:
         reference = ((native_user_input_reference(payload) or native_text_reference(payload)) if is_execution
-                     else native_tool_result_reference(payload))
+                     else (native_tool_arguments_reference(payload) or native_tool_result_reference(payload)))
         if reference is None or reference in restored:
             continue
         root = reference.root
@@ -1919,6 +1920,8 @@ def _expand_snapshot_native_content(
             raw_digest=content.raw_digest, raw_size=content.raw_size)
         if is_execution and _path == ("stored_user_input",):
             restored[reference] = restore_native_user_input(reference, raw)
+        elif not is_execution and _path == "arguments_payload":
+            restored[reference] = restore_native_tool_arguments_payload(reference, raw)
         else:
             restored[reference] = (restore_native_text_payload(reference, raw) if is_execution
                                    else restore_native_tool_result_payload(reference, raw))

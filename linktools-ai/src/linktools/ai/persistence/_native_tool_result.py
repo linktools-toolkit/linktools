@@ -24,7 +24,7 @@ def restore_native_tool_result_payload(reference: NativeToolResultReference, raw
             raise ValueError("invalid tool result source")
         source, original = messages[0].parts[reference.part_index], templates[0].parts[0]
         if (not isinstance(source, ToolReturnPart) or not isinstance(original, ToolReturnPart)
-                or not isinstance(source.content, str) or original.content is not None
+                or original.content is not None
                 or original.tool_name != "runtime"
                 or source.tool_name != reference.tool_name or source.tool_call_id != reference.tool_call_id):
             raise ValueError("invalid tool return projection")
@@ -40,7 +40,7 @@ def restore_native_tool_result_payload(reference: NativeToolResultReference, raw
 def prepare_native_tool_result(
     root: NativeMessageRoot, raw: bytes, part_index: int, payload: StoredPayload, *, operation_id: str,
 ) -> NativeToolResultReference | None:
-    """Select exact ordinary text receipts whose complete original bytes survive."""
+    """Select canonical receipts whose complete bytes reconstruct from one part."""
     if payload.kind != "inline" or payload.encoding != "base64":
         return None
     value = payload.decode()
@@ -57,12 +57,15 @@ def prepare_native_tool_result(
         return None
     original, source = messages[0].parts[0], sources[0].parts[part_index]
     if (not isinstance(original, ToolReturnPart) or not isinstance(source, ToolReturnPart)
-            or original.tool_name != "runtime" or original.tool_call_id != operation_id
-            or not isinstance(original.content, str) or original.content != source.content):
+            or original.tool_name != "runtime" or original.tool_call_id != operation_id):
         return None
     # Selection must not change a valid noncanonical receipt into a fatal
     # publication error. Strict restoration remains the durable read contract.
     if encode_model_messages(messages) != value:
+        return None
+    reconstructed = encode_model_messages((
+        replace(messages[0], parts=[replace(original, content=source.content)]),))
+    if reconstructed != value:
         return None
     template = encode_model_messages((replace(messages[0], parts=[replace(original, content=None)]),)).decode("utf-8")
     reference = NativeToolResultReference(root, part_index, source.tool_name, source.tool_call_id,

@@ -12,12 +12,13 @@ from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity
 from ._payload import decode_payload_bytes
-from ._message_root import NativeMessageRoot, NativeToolResultReference
+from ._message_root import NativeMessageRoot, NativeToolResultReference, NativeToolArgumentsReference
 from ._native_tool_result import restore_native_tool_result_payload
+from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._step_store import SqlStepStore
 from ..steps import native_store_key
 from .codec import (TOOL_PAYLOAD_CODEC, decode_envelope, encode_envelope,
-                    tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference,
+                    tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference,
                     decode_domain, encode_domain, _encode_persisted_domain)
 from .state import StateStore, StoredRecord, active_state_scope
 
@@ -80,13 +81,13 @@ def expand_tool_content(record: StoredRecord, contents: Mapping[tuple[str, str, 
 
 
 def expand_native_tool_content(
-    record: StoredRecord, payloads: Mapping[NativeToolResultReference, StoredPayload],
+    record: StoredRecord, payloads: Mapping[NativeToolResultReference | NativeToolArgumentsReference, StoredPayload],
 ) -> StoredRecord:
     """Expand validated native receipt projections before ordinary domain decoding."""
     if record.kind != "tool_operation":
         return record
     def expand(payload: Mapping) -> JsonValue:
-        reference = native_tool_result_reference(payload)
+        reference = (native_tool_arguments_reference(payload) or native_tool_result_reference(payload))
         if reference is None:
             return payload
         value = payloads.get(reference)
@@ -116,7 +117,7 @@ class ToolOperationContent:
     async def encode(self, record: StoredRecord, *, previous: StoredRecord | None = None) -> StoredRecord:
         native_retained = {} if previous is None else {name: reference
             for name, payload in tool_payload_slots(decode_envelope(previous.data).value["payload"])
-            if (reference := native_tool_result_reference(payload)) is not None}
+            if (reference := (native_tool_arguments_reference(payload) or native_tool_result_reference(payload))) is not None}
         retained_fields = {}
         selected = {}
         for name, payload in tool_payload_slots(decode_envelope(record.data).value["payload"]):
@@ -173,10 +174,10 @@ class ToolOperationContent:
 
     async def read_native_payloads(
         self, records: Sequence[StoredRecord], *, reserve: Callable[[int], None] | None = None,
-    ) -> dict[NativeToolResultReference, StoredPayload]:
+    ) -> dict[NativeToolResultReference | NativeToolArgumentsReference, StoredPayload]:
         references = tuple(dict.fromkeys(reference for record in records
             for _, payload in tool_payload_slots(decode_envelope(record.data).value["payload"])
-            if (reference := native_tool_result_reference(payload)) is not None))
+            if (reference := (native_tool_arguments_reference(payload) or native_tool_result_reference(payload))) is not None))
         if not references:
             return {}
         archive = await self._archive()
@@ -198,7 +199,9 @@ class ToolOperationContent:
             raw = messages[reference.root]
             if len(raw) != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values[reference] = restore_native_tool_result_payload(reference, raw[0])
+            values[reference] = (restore_native_tool_arguments_payload(reference, raw[0])
+                                 if isinstance(reference, NativeToolArgumentsReference)
+                                 else restore_native_tool_result_payload(reference, raw[0]))
         return values
 
     async def expand(self, record: StoredRecord) -> StoredRecord:

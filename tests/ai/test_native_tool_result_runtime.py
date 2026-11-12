@@ -21,7 +21,7 @@ from .test_native_text_result_runtime import _prepare, _publish
 from .test_tool_execution_boundary import _request
 
 
-async def _settle(state: Persistence, body: str) -> tuple[ToolOperationRecord, StoredPayload]:
+async def _settle(state: Persistence, body: object) -> tuple[ToolOperationRecord, StoredPayload]:
     operation = await state.checkpoint.tools.admit(_request())
     payload = StoredPayload.inline_bytes(encode_model_messages((ModelRequest(parts=[
         ToolReturnPart("runtime", body, tool_call_id=operation.tool_operation_id)]),)))
@@ -31,14 +31,18 @@ async def _settle(state: Persistence, body: str) -> tuple[ToolOperationRecord, S
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ("large_equal", "small_equal", "different"))
-async def test_tool_receipt_reuses_only_exact_published_text(tmp_path: Path, case: str) -> None:
-    body = "tool body " * (9000 if case != "small_equal" else 1)
+@pytest.mark.parametrize("case", ("large_equal", "small_equal", "different", "structured_equal",
+                                 "large_structured_equal", "typed_different"))
+async def test_tool_receipt_reuses_only_exact_published_content(tmp_path: Path, case: str) -> None:
+    body = ({"items": [None, True, 1, 1.0], "text": "structured " * (9000 if case.startswith("large") else 1)}
+            if "structured" in case else {"value": 1} if case == "typed_different"
+            else "tool body " * (9000 if case != "small_equal" else 1))
     config = PersistenceStorage.sqlite(tmp_path / "tool.db")
     async with Persistence.open("native-result", tenant_id="tenant", storage=config) as state:
         commands, commit, current, checkpoint = await _prepare(state, "done", "done")
         operation, payload = await _settle(state, body)
-        source = body if case != "different" else "different " * 9000
+        source = ({"value": True} if case == "typed_different" else
+                  "different " * 9000 if case == "different" else body)
         checkpoint = replace(checkpoint, messages=[ModelRequest(parts=[ToolReturnPart("tool", source, tool_call_id="call")]),
                                                    *checkpoint.messages])
         # The original effect is durable before any Step publication.
@@ -47,7 +51,7 @@ async def test_tool_receipt_reuses_only_exact_published_text(tmp_path: Path, cas
         records = await state.checkpoint.tools.state_store.read(lambda tx: tx.scan_records())
         record = next(record for record in records if record.kind == "tool_operation")
         reference = native_tool_result_reference(decode_envelope(record.data).value["payload"]["fields"]["result_payload"])
-        assert (reference is not None) is (case != "different")
+        assert (reference is not None) is case.endswith("equal")
         assert (await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
     async with Persistence.open("native-result", tenant_id="tenant", storage=config, read_only=True) as state:
         assert (await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload

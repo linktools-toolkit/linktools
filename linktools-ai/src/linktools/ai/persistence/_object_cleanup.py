@@ -26,6 +26,7 @@ from ._archive_closure import (
 from ._payload import decode_payload_bytes
 from ._tool_operation_content import expand_tool_content, expand_native_tool_content
 from ._native_tool_result import restore_native_tool_result_payload
+from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._archive import archive_content_scope
 from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
 from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
@@ -36,7 +37,7 @@ from ._step_maintenance import inspect_native_message_tables, native_message_par
 from ._capability_marker import has_capability_partition_marker
 from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
                     execution_payload_slots, tool_payload_slots, native_user_input_reference,
-                    native_text_reference, native_tool_result_reference)
+                    native_text_reference, native_tool_result_reference, native_tool_arguments_reference)
 from .captures import (
     CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
     capture_record_key, capture_record_scope, capture_record_value, expand_snapshot_capture, input_capture_expiry_key,
@@ -320,7 +321,7 @@ async def _purge_unreferenced_objects(
         restored = {}
         for path, payload in slots:
             reference = ((native_user_input_reference(payload) or native_text_reference(payload))
-                         if is_execution else native_tool_result_reference(payload))
+                         if is_execution else (native_tool_arguments_reference(payload) or native_tool_result_reference(payload)))
             if reference is None or reference in restored:
                 continue
             root = reference.root
@@ -355,6 +356,8 @@ async def _purge_unreferenced_objects(
             if is_execution:
                 restored[reference] = (restore_native_user_input(reference, raw) if path == ("stored_user_input",)
                                        else restore_native_text_payload(reference, raw))
+            elif path == "arguments_payload":
+                restored[reference] = restore_native_tool_arguments_payload(reference, raw)
             else:
                 restored[reference] = restore_native_tool_result_payload(reference, raw)
         return (expand_native_execution_content(record, restored) if is_execution

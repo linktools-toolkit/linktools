@@ -17,6 +17,7 @@ from linktools.ai.persistence.codec import decode_envelope, encode_domain, nativ
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
+from linktools.ai.steps import native_store_key
 
 from .test_native_result_portable_gc import Guard
 from .test_native_text_result_runtime import _prepare, _publish
@@ -31,8 +32,9 @@ async def _old_receipts(state: Persistence, payload: StoredPayload) -> tuple[Sto
 
 
 @pytest.mark.asyncio
-async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path: Path) -> None:
-    body = "terminal body " * 10000
+@pytest.mark.parametrize("content", ("large_text", "small_structured"))
+async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path: Path, content: str) -> None:
+    body = "terminal body " * 10000 if content == "large_text" else {"items": [None, True, 1, 1.0]}
     storage = PersistenceStorage.sqlite(tmp_path / "source.db")
     objects = InMemoryObjectStore("native-tool-portable")
     limits = SnapshotLimits(10000, 20_000_000)
@@ -75,12 +77,15 @@ async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path:
                 await partition.mutate(lambda tx: tx.delete_fact_streams(owner))
         await state.purge_unreferenced_objects((), exclusive=Guard())
         async with store.storage_group.context.engine.connect() as connection:
-            assert await connection.scalar(text("select count(*) from ai_step_messages")) == 1
+            assert await connection.scalar(text("select count(*) from ai_step_messages where store_key=:store"),
+                {"store": native_store_key("native-result", "tenant")}) == 1
         assert (await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
         records = await store.read(lambda tx: tx.scan_records())
         keys = tuple(row.key for row in records if row.kind == "tool_operation")
         await store.mutate(lambda tx: tx.delete_records(keys))
         await state.purge_unreferenced_objects((), exclusive=Guard())
         async with store.storage_group.context.engine.connect() as connection:
-            assert await connection.scalar(text("select count(*) from ai_step_messages")) == 0
-            assert await connection.scalar(text("select count(*) from ai_step_sequences")) == 0
+            assert await connection.scalar(text("select count(*) from ai_step_messages where store_key=:store"),
+                {"store": native_store_key("native-result", "tenant")}) == 0
+            assert await connection.scalar(text("select count(*) from ai_step_sequences where store_key=:store"),
+                {"store": native_store_key("native-result", "tenant")}) == 0
