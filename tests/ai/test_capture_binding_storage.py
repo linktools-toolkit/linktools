@@ -17,7 +17,9 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.inputs import CaptureInputRequest, InputCaptures
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive import ContentArchive, PreparedArchive, archive_content_scope
-from linktools.ai.persistence.captures import capture_record, capture_record_digest, capture_record_key, capture_record_value
+from linktools.ai.persistence.captures import (
+    capture_record, capture_record_digest, capture_record_key, capture_record_value, input_capture_state_dependency,
+)
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.state import StateGroupTransaction, StateTransaction, StoredRecord, active_state_scope
 from linktools.ai.storage import InMemoryObjectStore, StorageRoute
@@ -141,8 +143,8 @@ async def test_capture_binding_reference_never_falls_back_to_execution_or_latest
             else:
                 pointer["summary"]["id"] = "another-agent"
             changed = capture_record("binding-integrity", "tenant", capture_record_key(row), value,
-                storage_revision=row.storage_revision, source_digest=capture_record_digest(row))
-            await state.task.tasks.state_store.mutate(lambda tx: tx.replace_record(
+                storage_revision=row.storage_revision + 1, source_digest=capture_record_digest(row))
+            assert await state.task.tasks.state_store.mutate(lambda tx: tx.replace_record(
                 changed, expected_storage_revision=row.storage_revision))
         with pytest.raises(AIError) as failure:
             await service.read_agent(reference, principal=_PRINCIPAL)
@@ -227,3 +229,30 @@ async def test_capture_binding_warm_and_cold_readonly_sql_budget(tmp_path: Path,
                 assert not any(name in sql for sql in statements for name in ("ai_objects", "ai_step_messages"))
         finally:
             event.remove(Engine, "before_cursor_execute", collect)
+
+
+@pytest.mark.parametrize("split", (False, True))
+async def test_capture_binding_is_collected_after_its_final_owner_is_removed(tmp_path: Path, split: bool) -> None:
+    async with Persistence.open("binding-release", storage=_storage(tmp_path, split=split), tenant_id="tenant") as state:
+        binding = await _seed(state)
+        service = _captures(state)
+        references = [await service.capture_input("execution", CaptureInputRequest(_PRINCIPAL, key))
+                      for key in ("first", "second")]
+        source = state.execution.executions.state_store
+        records = await source.read(lambda tx: tx.scan_records())
+        await source.mutate(lambda tx: tx.delete_records(tuple(row.key for row in records if row.kind == "execution")))
+        archive_store = state.task.tasks.state_store.storage_group.opened_archive[1]
+        for remaining, reference in zip((1, 0), references, strict=True):
+            key, _ = input_capture_state_dependency(reference)
+            deleted = await state.snapshot_operations().purge_unreferenced_captures((key,), exclusive=Offline())
+            assert deleted.deleted == (key,)
+            await state.purge_unreferenced_objects((), exclusive=Offline())
+            archived = await archive_store.read(lambda tx: tx.scan_records())
+            bindings = [row for row in archived if row.kind == "archive_content" and row.data.get("codec") == "execution-binding"]
+            assert len(bindings) == remaining
+            if remaining:
+                assert (await service.read_agent(references[1], principal=_PRINCIPAL)).binding == binding
+            with pytest.raises(AIError) as unavailable:
+                await service.read_agent(reference, principal=_PRINCIPAL)
+            assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
+        assert await _capture_rows(state) == ()

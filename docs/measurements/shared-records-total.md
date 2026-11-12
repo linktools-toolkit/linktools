@@ -8,12 +8,12 @@ The unchanged fixed workload reduced whole `ai_state_records` column-value bytes
 
 ## Exact sources and reproducibility
 
-| Item | Baseline | Measured candidate |
+| Item | Baseline | Final measured production tree |
 | --- | --- | --- |
-| Commit | `c99c687d7b325d2b34350080c76bae5023324313` | `cdbdce17e2ccfe0715a73e6873c702a9cec98575` |
-| Tree | `4990e07e00e45438e718a01db549ff23cba7f250` | `43167e5098a4306af7f77bc69df7a99ddd30e98c` |
+| Commit | `c99c687d7b325d2b34350080c76bae5023324313` | `cb259f8c1f2d022415e6290111ed958715f0f6a7` |
+| Tree | `4990e07e00e45438e718a01db549ff23cba7f250` | `c91ff942f30a21ef2c0bcd80ff60a2909a7d1f0d` |
 
-The candidate is an intermediate integration revision, not a claim about an unmeasured later head. The documentation commit does not change the measured source tree.
+This final run measured the production-complete integration tree above in a fresh isolated checkout. The publisher confirmed that published commit `4755e00e` has the identical tree. The final run actually repeated the workload after capture-binding and batch-cache fixes; equal metrics were observed, not inherited from an earlier run. This documentation-only update changes no measured production code. No claim is made about unmeasured later code changes.
 
 - Script: `tests/ai/_measure_shared_records.py`, unchanged in both runs.
 - Script SHA-256: `087f9bfb1044b458cea5f496cf76bc607d9698b2ed165ffe1a7f56ef4737ffce`.
@@ -21,6 +21,8 @@ The candidate is an intermediate integration revision, not a claim about an unme
 - Interpreter: `3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]`.
 - Both runs used fresh databases, separate processes, the same interpreter, and identical full installed dependency name/version mappings. Imports were verified to resolve to each requested checkout rather than the installed editable source.
 - No models or tools executed. No pytest, formal suite or CI was run for this diagnostic.
+- Final raw-result SHA-256: `36076d88967f057ea93f2577f28b4c6b2669f13c2bf00c5c0fff41a58c7d7712`.
+- Baseline raw-result SHA-256: `2b369b115ef6b1373b9ad26557b7a781ee46c3460e8aef2b032e9610b0999be1`.
 
 Example invocation, repeated with a separate database/output for each checkout:
 
@@ -83,9 +85,11 @@ Each execution had two CAS updates, two warm views, two cold views and one cold 
 | --- | ---: | ---: | ---: | ---: | --- |
 | `d2e4e57d710a66700d9b8644fff418a3aecaaede` | 141330 | 487 | 201 | 425 | Earlier stage |
 | `e91adab9ad2002f39a6682a91236d6613c8b9ff9` | 141330 | 488 | 201 | 385 | Superseded Native stage with get/get_fresh cache-contract regression |
-| `cdbdce17e2ccfe0715a73e6873c702a9cec98575` | 141330 | 487 | 201 | 425 | Latest measured candidate, cache contract restored |
+| `cdbdce17e2ccfe0715a73e6873c702a9cec98575` | 141330 | 487 | 201 | 425 | Earlier candidate, cache contract restored |
 
-**The old 385-commit number is not applicable to the latest measured candidate.** It must not be presented as the current optimization result. All stages above used the same fixed workload; the latest candidate was actually rerun rather than inheriting earlier counters.
+| `cb259f8c1f2d022415e6290111ed958715f0f6a7` | 141330 | 487 | 201 | 425 | Final production tree, independently rerun after capture-binding and batch-cache fixes |
+
+**The old 385-commit number is not applicable to the final measured production tree.** It must not be presented as the current optimization result. All stages above used the same fixed workload; the final production tree was actually rerun rather than inheriting earlier counters.
 
 ## Full matched dependency manifest
 
