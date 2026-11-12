@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Accepted instruction payloads separate semantic identity from stored bytes."""
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ..core import ImmutableJsonMapping, JsonValue, PersistenceDomain, canonical_sha256
+from ..core import ImmutableJsonMapping, JsonValue, PersistenceDomain, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..execution import RuntimePayloadRef
 from ..spec import RepositoryInstructions
@@ -36,6 +37,32 @@ class RepositoryInstructionPayload:
     def verify(self, accepted: RepositoryInstructions) -> None:
         if canonical_sha256(accepted.to_payload()) != self.semantic_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def has_same_content(self, other: "RepositoryInstructionPayload") -> bool:
+        """Compare accepted content across full-body and retained Rule projections."""
+        return (self.semantic_digest == other.semantic_digest
+                and canonical_json_bytes(self._content_projection())
+                == canonical_json_bytes(other._content_projection()))
+
+    def _content_projection(self) -> dict[str, JsonValue]:
+        value = dict(self.instructions)
+        documents = value.get("documents")
+        if not isinstance(documents, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        projected = []
+        for raw in documents:
+            if not isinstance(raw, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            document = dict(raw)
+            if ("content" in document and "content_digest" not in document
+                    and document.get("asset") is not None and document.get("asset_source_id") is not None):
+                content = document.pop("content")
+                if not isinstance(content, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                document["content_digest"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            projected.append(document)
+        value["documents"] = projected
+        return value
 
     def to_reference(self, source_domain: PersistenceDomain) -> RuntimePayloadRef:
         kind = self._kind(source_domain)

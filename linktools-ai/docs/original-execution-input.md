@@ -74,8 +74,12 @@ checking that semantic digest. Tool-argument barrier digests and the approval
 frontier's ordered source/scope/body digest are unchanged. Barrier compare-and-
 swap, historical replay, and uncertain-write readback continue to select the
 durable cumulative frontier rather than a newly resolved instruction set.
-Admission buffer prefixes retain both their original semantic digest comparison
-and exact stored-byte comparison. Pre-context input capture and subagent
+Admission buffer entries retain exact transport-byte verification. Prefixes
+compare the original semantic digest and every instruction field in order,
+normalizing only retained Rule content to its content digest so complete and
+compact representations remain equivalent. Changed content, provenance, or
+metadata still fails even if the semantic digest was copied. Pre-context input
+capture and subagent
 inheritance restore the same accepted documents, including after admission
 failure, cancellation, or deletion of a current Asset head. No live head is
 resolved when an accepted parent instruction version already exists.

@@ -235,13 +235,11 @@ class _ExecutionPayloadBuffer:
                                 or previous.reservation is not None and captured.reservation != previous.reservation
                                 or previous.execution.repository_instructions is not None and (
                                     captured.execution.repository_instructions is None
-                                    or RepositoryInstructionPayload.from_reference(
+                                    or not RepositoryInstructionPayload.from_reference(
                                         captured.execution.repository_instructions, source_domain=PersistenceDomain.EXECUTION,
-                                    ).semantic_digest != RepositoryInstructionPayload.from_reference(
+                                    ).has_same_content(RepositoryInstructionPayload.from_reference(
                                         previous.execution.repository_instructions, source_domain=PersistenceDomain.EXECUTION,
-                                    ).semantic_digest
-                                    or captured.execution.repository_instructions.payload.digest
-                                    != previous.execution.repository_instructions.payload.digest)
+                                    )))
                                 or previous.execution.input_context is not None and (
                                     captured.execution.input_context is None
                                     or captured.execution.input_context.payload.digest
