@@ -691,21 +691,13 @@ class ExecutionContent:
         return values
 
     async def terminal_matches(self, current: StoredRecord, candidate: StoredRecord, value: ExecutionRecord) -> bool:
-        current, candidate = await self.expand_policies((current, candidate))
-        values = {("terminal_details",): StoredPayload.inline_json({
-                      "safe_error_details": _encode_persisted_domain(value.safe_error_details),
-                      "error_diagnostics": _encode_persisted_domain(value.error_diagnostics)}),
-                  ("stored_user_input",): value.stored_user_input, ("result",): value.result,
-                  ("result", "fields", "output"): None if value.result is None else value.result.output,
-                  ("recovery", "fields", "pending_tools"): None if value.recovery is None else value.recovery.pending_tools,
-                  ("recovery", "fields", "terminal_handoff"): None if value.recovery is None else value.recovery.terminal_handoff,
-                  ("recovery", "fields", "terminal_handoff", "fields", "output"): (None if value.recovery is None or value.recovery.terminal_handoff is None else value.recovery.terminal_handoff.outcome.output)}
-        decoded = {reference: values[path] for path, payload in _payloads(candidate)
-                   if path in values and (reference := native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)) is not None}
-        if any(reference not in decoded for path, payload in _payloads(current)
-               if path in values and (reference := native_user_input_reference(payload) or native_text_reference(payload) or payload_reference(payload)) is not None):
-            return False
-        previous = decode_execution_content(current.data, decoded, timeline=True)
+        # Recovery templates may disappear or change phase when a prepared
+        # handoff is published. Their identities are not terminal facts. Read
+        # the existing owners instead of treating candidate identities as a
+        # substitute for the previous execution's semantic projection.
+        current, = await self.expand_policies((current,))
+        payloads = await self.read_payloads((current,))
+        previous = decode_execution_content(current.data, payloads, timeline=True)
         return previous.completed_at is None or previous.terminal_matches(value)
 
     async def expand_projection_components(
