@@ -37,19 +37,6 @@ if TYPE_CHECKING:
     from .execution.planner import ExecutionPlanner
 
 
-def describe_origin(container: "BaseContainer") -> str:
-    """Safe, credential-free description of where a container came from --
-    ``builtin`` or a repository's ``repo_name`` (never its URL, which may
-    embed a Git credential), plus its filesystem root_path. Used to
-    identify the two sides of a duplicate-container-name error."""
-    context = container.repo_context
-    if context is None:
-        return "container:%s" % id(container.config)
-    origin = "builtin" if context.builtin else (context.repo_name or "repo")
-    root_path = context.root_path
-    return f"{origin} ({root_path})" if root_path else origin
-
-
 class ContainerManager:
 
     def __init__(self, environ: "Environ", name: str = "aio"):  # all_in_one
@@ -60,10 +47,7 @@ class ContainerManager:
         self.config = self.environ.build_config("container", "")
         self.config.update_defaults(**self.fields)
 
-        # Populated by the `containers` cached_property -- structured load
-        # failures (import/on_init errors) from the last time containers
-        # were discovered, for callers (e.g. Doctor) that want to report
-        # them instead of only the log-only warning.
+        # Discovery errors are retained for diagnostics such as Doctor.
         self.container_load_errors: "list[ContainerLoadError]" = []
 
         self.docker_container_name = "container.py"
@@ -204,28 +188,9 @@ class ContainerManager:
 
     @cached_property
     def containers(self) -> "dict[str, BaseContainer]":
-        result = dict()
-        load_result = self.loader.load_all()
-        self.container_load_errors = load_result.errors
-        for container in load_result.containers:
-            existing = result.get(container.name)
-            if existing is not None:
-                raise ContainerError(
-                    "Duplicate container name %r: %s and %s"
-                    % (container.name, describe_origin(existing), describe_origin(container)))
-            result[container.name] = container
-        # Raw persisted names only -- resolving them to container objects here
-        # would recurse back into this same property via InstalledStateStore.
-        errors_by_name = {e.expected_name: e for e in load_result.errors if e.expected_name}
-        for name in self.installed_state.load_names():
-            if name not in result:
-                error = errors_by_name.get(name)
-                if error is not None:
-                    self.logger.warning(
-                        f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
-                else:
-                    self.logger.warning(f"Not found installed container `{name}`, skip.")
-        return result
+        containers = self.loader.containers
+        self.lifecycle.initialize(containers.values())
+        return containers
 
     @cached_property
     def hooks(self) -> "HookRegistry":
@@ -347,8 +312,9 @@ class ContainerManager:
         Returns ``[]`` when nothing is installed instead of raising -- see
         ``prepare_installed_containers`` for the variant that rejects an empty installed project.
         """
+        all_containers = self.containers
         containers = self.installed_state.get(resolve=True)
-        for container in self.containers.values():
+        for container in all_containers.values():
             container.enable = container in containers
         for container in reversed(containers):
             container.register_fields()

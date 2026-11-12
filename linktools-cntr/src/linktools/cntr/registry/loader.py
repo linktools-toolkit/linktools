@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from linktools.core import ProjectProfile
+from linktools.decorator import cached_property
 from linktools.errors import ConfigError, ConfigValidationError
 from linktools.runtime import import_module_file
 
-from ..container import BaseContainer, SimpleContainer
+from ..container import BaseContainer, ContainerError, SimpleContainer
 from ..repo.context import RepositoryConfigContext
 from ..repo.requirements import ensure_requirement
 from ..repo.service import safe_display_url
@@ -29,8 +30,8 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ContainerLoadError:
     """One ``container.py``/compose-file discovery that failed to load --
-    import error, ``on_init()`` error, or any other exception raised while
-    constructing the container. ``expected_name`` is a best-effort guess
+    import error or any other exception raised while constructing the
+    container. ``expected_name`` is a best-effort guess
     (the directory's name with any numeric order prefix stripped, the same
     convention ``BaseContainer.__init__`` uses) -- ``None`` when the
     failure happened before a name could even be determined (e.g. a syntax
@@ -42,11 +43,7 @@ class ContainerLoadError:
 
 @dataclass(frozen=True)
 class ContainerLoadResult:
-    """``ContainerLoader.load_all()``'s return value: the containers that
-    loaded successfully, plus every
-    load failure as a structured
-    ``ContainerLoadError`` instead of a log-only warning that leaves
-    callers unable to tell "not installed" apart from "failed to load"."""
+    """Discovered containers awaiting ``on_init``, plus load errors."""
     containers: "list[BaseContainer]"
     errors: "list[ContainerLoadError]" = field(default_factory=list)
 
@@ -58,11 +55,45 @@ def _guess_container_name(path: "PathType") -> "str | None":
     return match.group(2) if match else (basename or None)
 
 
+def _describe_origin(container: BaseContainer) -> str:
+    """Identify duplicate sources without exposing repository credentials."""
+    context = container.repo_context
+    if context is None:
+        return "container:%s" % id(container.config)
+    origin = "builtin" if context.builtin else (context.repo_name or "repo")
+    root_path = context.root_path
+    return f"{origin} ({root_path})" if root_path else origin
+
+
 class ContainerLoader:
     """Discover and instantiate containers behind the facade."""
 
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
+
+    @cached_property
+    def containers(self) -> "dict[str, BaseContainer]":
+        result = {}
+        loaded = self.load_all()
+        for container in loaded.containers:
+            existing = result.get(container.name)
+            if existing is not None:
+                raise ContainerError(
+                    "Duplicate container name %r: %s and %s"
+                    % (container.name, _describe_origin(existing), _describe_origin(container)))
+            result[container.name] = container
+
+        self.manager.container_load_errors = loaded.errors
+        errors_by_name = {error.expected_name: error for error in loaded.errors if error.expected_name}
+        for name in self.manager.installed_state.load_names():
+            if name not in result:
+                error = errors_by_name.get(name)
+                if error is not None:
+                    self.manager.logger.warning(
+                        f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
+                else:
+                    self.manager.logger.warning(f"Not found installed container `{name}`, skip.")
+        return result
 
     def load_all(self) -> "ContainerLoadResult":
         manager = self.manager
@@ -153,7 +184,6 @@ class ContainerLoader:
                             container = value(manager, path)
                             container.repo_context = repository
                             manager.logger.debug(f"Load container {container.name} in {path}")
-                            container.on_init()
                             yield container
                             return
             except Exception as e:
@@ -168,6 +198,5 @@ class ContainerLoader:
                 container = SimpleContainer(manager, path)
                 container.repo_context = repository
                 manager.logger.debug(f"Load container {container.name} in {path}")
-                container.on_init()
                 yield container
                 return

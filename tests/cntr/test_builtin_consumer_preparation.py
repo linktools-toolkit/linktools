@@ -360,10 +360,10 @@ def test_selected_nginx_requires_unselected_auth_and_waf_services_running(monkey
     container = _container("100-nginx", monkeypatch)
     container.__dict__["sites"] = {object(): SimpleNamespace(enabled=True, auth=True, waf=True)}
     container.__dict__["config_path"] = Path("/candidate")
-    container.manager.containers = {
+    container.manager.loader = SimpleNamespace(containers={
         "authelia": SimpleNamespace(enable=True),
         "safeline": SimpleNamespace(enable=True, services={"safeline-mgt": {}, "safeline-tengine": {}}),
-    }
+    })
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs: False)
     calls = []
     container.manager.compose_runner = SimpleNamespace(validate_service=lambda *args, **kwargs:

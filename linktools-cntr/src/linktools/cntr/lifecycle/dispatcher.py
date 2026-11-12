@@ -29,11 +29,27 @@ class LifecycleStep:
 class LifecycleDispatcher:
     def __init__(self, manager: "ContainerManager") -> None:
         self.manager = manager
+        self._initialized = False
+        self._initialization_error: "Exception | None" = None
 
     def _invoke_callback(self, callback, context: "Any" = MISSING) -> "Any":
         if context is MISSING or len(inspect.signature(callback).parameters) == 0:
             return callback()
         return callback(context)
+
+    def initialize(self, containers: "Iterable[BaseContainer]") -> None:
+        """Initialize all containers after discovery has completed."""
+        if self._initialization_error is not None:
+            raise self._initialization_error
+        if self._initialized:
+            return
+        try:
+            for container in containers:
+                container.on_init()
+        except Exception as error:
+            self._initialization_error = error
+            raise
+        self._initialized = True
 
     def prepare(self, containers: "Iterable[BaseContainer]") -> None:
         """Prepare installed declarations before constructing an execution model."""
