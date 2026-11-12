@@ -2,10 +2,13 @@
 # -*- coding: utf-8 -*-
 """Ordinary budget queries consume authority and scope, not recovery bodies."""
 
+from contextvars import ContextVar
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
@@ -13,10 +16,16 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._execution_content import ExecutionContent
 from linktools.ai.runtime import Runtime
-from linktools.ai.storage import StoredPayload
 
-from ._runtime_test_helpers import RuntimeUsageModels, model_features
+from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel, model_features
 from .test_run_budget_public_api import _capabilities
+
+
+class _LargeModels(RuntimeUsageModels):
+    def materialize(self) -> _UsageFunctionModel:
+        async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart("large result " * 10000)])
+        return _UsageFunctionModel(respond)
 
 
 @pytest.mark.asyncio
@@ -24,24 +33,31 @@ async def test_budget_usage_view_skips_bodies_and_preserves_pending_and_custom_s
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open("budget-view", storage=PersistenceStorage.in_memory()) as persistence:
-        async with Runtime.attach(persistence=persistence, features=model_features(RuntimeUsageModels(), features)) as runtime:
+        async with Runtime.attach(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
             handle = await runtime.agents.get().start("large accepted input " * 10000, budget=RunBudget(model_requests=10))
             assert (await handle.wait()).result.status is ExecutionStatus.SUCCEEDED
+            execution_id = handle.execution_id
+        async with Runtime.attach(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
+            handle = await runtime.executions.get(execution_id, principal=runtime.default_principal)
             repository = persistence.execution.executions
             original = await repository.get_fresh(handle.execution_id, tenant_id="default")
             assert original is not None and original.budget_scope_id is not None and original.result is not None
-            original = replace(original, result=replace(original.result,
-                output=StoredPayload.inline_json("large result " * 10000)))
-            await repository.state_store.mutate(lambda tx: tx.delete_record(repository.execution_record_key(handle.execution_id)))
-            await repository.create_execution(original)
             expected = await persistence.execution.budgets.read(original.budget_scope_id)
             service = runtime._execution_service
 
             async def forbid(*args: object, **kwargs: object) -> None:
                 raise AssertionError("budget usage must not hydrate recovery input or output")
 
+            query_active = ContextVar("budget_query_active", default=False)
+            read_payloads = ExecutionContent.read_payloads
+            async def guarded_read(self: ExecutionContent, *args: object, **kwargs: object) -> object:
+                if query_active.get():
+                    return await forbid()
+                return await read_payloads(self, *args, **kwargs)
+
             with monkeypatch.context() as patch:
-                patch.setattr(ExecutionContent, "read_payloads", forbid)
+                patch.setattr(ExecutionContent, "read_payloads", guarded_read)
+                query_active.set(True)
                 patch.setattr(service, "load_observed_authorized", forbid)
                 assert await handle.budget_usage() == expected
                 with pytest.raises(AIError) as denied:
@@ -63,6 +79,7 @@ async def test_budget_usage_view_skips_bodies_and_preserves_pending_and_custom_s
                 pending = replace(pending, budget_scope_id=None)
                 assert await handle.budget_usage() is None
 
+            query_active.set(False)
             calls = []
             async def custom_read(*args: object, **kwargs: object) -> object:
                 calls.append(args)
