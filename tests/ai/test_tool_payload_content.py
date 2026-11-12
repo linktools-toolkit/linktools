@@ -12,6 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive_closure import iter_archive_content_refs
 from linktools.ai.persistence._snapshot import SnapshotLimits
+from linktools.ai.persistence.state import StoredRecord
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from .test_tool_execution_boundary import _request
@@ -162,3 +163,59 @@ async def test_archived_tool_attachment_survives_cleanup_and_snapshot(tmp_path: 
         assert await read_attachment_payload(restored.result_payload, read_object=lambda ref: state.read_object(
             PersistenceDomain.CHECKPOINT, ref,
         )) == raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ("missing_schema", "future_schema", "boolean_schema", "wrong_type", "extra"))
+async def test_tool_content_expansion_validates_owner_wrapper_before_replacing_it(
+    monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    import copy
+    from linktools.ai.persistence._archive import ContentRecord
+    from linktools.ai.persistence._tool_operation_content import expand_tool_content
+    from linktools.ai.persistence.codec import decode_envelope, encode_envelope
+
+    payload = StoredPayload.inline_bytes(b"large wrapper validation" * 5000)
+    async with Persistence.open("tool-content", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state:
+        tools = state.checkpoint.tools
+        _, archive = await tools.state_store.storage_group.open_archive(create=True)
+        operation = await tools.admit(_request())
+        await tools.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
+            fence=operation.fence, result_payload=payload)
+        owner, = await tools.state_store.read(lambda tx: tx.scan_records())
+        content, = await archive.read(lambda tx: tx.scan_records())
+        reference, = iter_archive_content_refs(owner.data)
+        contents = {reference: ContentRecord.from_record(content)}
+        wire = copy.deepcopy(decode_envelope(owner.data).value)
+        wrapper = wire["payload"]["fields"]["result_payload"]
+        if fault == "missing_schema":
+            del wrapper["schema"]
+        elif fault == "future_schema":
+            wrapper["schema"] = 999
+        elif fault == "boolean_schema":
+            wrapper["schema"] = True
+        elif fault == "wrong_type":
+            wrapper["$dataclass"] = "stored_user_input"
+        else:
+            wrapper["future_annotation"] = "accepted additive metadata"
+        changed = replace(owner, data=encode_envelope(wire))
+
+        async def read_owner(key: bytes) -> StoredRecord:
+            assert key == owner.key
+            return changed
+
+        monkeypatch.setattr(tools, "_record", read_owner)
+        if fault == "extra":
+            assert (await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
+            assert expand_tool_content(changed, contents).kind == "tool_operation"
+        else:
+            expected = (ErrorCode.STORAGE_VERSION_UNSUPPORTED if fault == "future_schema"
+                        else ErrorCode.STORAGE_INTEGRITY_ERROR)
+            with pytest.raises(AIError) as runtime_error:
+                await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")
+            assert runtime_error.value.code is expected
+            # Snapshot restore and GC use this same offline expansion, without
+            # a repository decoder to validate the overwritten wrapper later.
+            with pytest.raises(AIError) as offline_error:
+                expand_tool_content(changed, contents)
+            assert offline_error.value.code is expected

@@ -2170,6 +2170,8 @@ def tool_payload_reference(payload: Mapping) -> tuple[str, str, str] | None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if "content" not in fields:
         return None
+    # Expansion replaces this wrapper, so validate it before reading its body.
+    _validate_dataclass_wrapper(payload, StoredPayload, _CURRENT_CODEC, persisted=True)
     content = fields["content"]
     if (set(fields) != {"content"} or not isinstance(content, Mapping)
             or set(content) != {"$tool_payload", "archive_scope", "content_scope"}):
@@ -2622,13 +2624,13 @@ def _dataclass_fields(
     })
 
 
-def _decode_dataclass(
+def _validate_dataclass_wrapper(
     value: object,
     target: type,
     codec: _VersionCodec,
     *,
     persisted: bool = False,
-) -> object:
+) -> tuple[str, Mapping[str, object]]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if persisted:
@@ -2657,6 +2659,17 @@ def _decode_dataclass(
         if schema != codec.version:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
+    return wire_id, raw_fields
+
+
+def _decode_dataclass(
+    value: object,
+    target: type,
+    codec: _VersionCodec,
+    *,
+    persisted: bool = False,
+) -> object:
+    wire_id, raw_fields = _validate_dataclass_wrapper(value, target, codec, persisted=persisted)
     decoder = codec.dataclass_decoders.get(wire_id)
     if decoder is not None:
         try:
