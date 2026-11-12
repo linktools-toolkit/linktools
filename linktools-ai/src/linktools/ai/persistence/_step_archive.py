@@ -1481,6 +1481,7 @@ class StateStepArchive(AgentRunStore):
         ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int]]:
             records = await self.read_run_records(
                 transaction, (*run_keys, *projection_keys, *head_keys), registrations=registrations,
+                sequence_keys=sequence_keys,
             )
             sequences = await transaction.get_sequences(sequence_keys)
             return records, sequences

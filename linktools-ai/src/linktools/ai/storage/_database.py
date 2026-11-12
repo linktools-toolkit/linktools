@@ -30,7 +30,7 @@ from ._dialects import (
 if TYPE_CHECKING:
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Connection
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 
 _logger = environ.get_logger("ai.storage.database")
@@ -360,13 +360,19 @@ async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     async with engine.begin() as connection:
         await require_sqlite_write(connection)
         await connection.run_sync(metadata.create_all)
-    await validate_sql(engine, metadata)
+    if engine.dialect.name == "sqlite":
+        await validate_sql(engine, metadata)
     _logger.info("SQL metadata provisioned: dialect=%s tables=%s", engine.dialect.name, len(metadata.tables))
 
 
-async def validate_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
-    """Validate that required metadata is a compatible subset of the database."""
+async def validate_sql(engine: "AsyncEngine | AsyncConnection", metadata: "MetaData") -> None:
+    """Explicitly validate metadata, optionally on an already owned connection."""
+    from sqlalchemy.ext.asyncio import AsyncConnection
 
+    if isinstance(engine, AsyncConnection):
+        for table in metadata.tables.values():
+            await engine.run_sync(_validate_connection_table, table)
+        return
     dialect = dialect_for_name(engine.dialect.name)
     await dialect.configure_engine(engine)
     await _validate_sql_schema(engine, metadata)

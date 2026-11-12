@@ -2257,8 +2257,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             current = observed.value
             if current.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            stored = replace(await self._stored_content("execution", (execution_id,), current, state=current.status.value, previous_value=current),
-                             storage_revision=observed.storage_revision)
+            stored = self._execution_content.projection(current)
+            if (stored is None or stored.key != key or stored.kind != "execution"
+                    or stored.storage_revision != observed.storage_revision):
+                stored = replace(await self._stored_content("execution", (execution_id,), current,
+                    state=current.status.value, previous_value=current), storage_revision=observed.storage_revision)
+            # The original wire preserves unchanged content locations, not source
+            # authority. The physical CAS below still fences this observation.
             expanded, = await self._execution_content.expand_policies((stored,))
             expanded, = await self._execution_content.expand_projection_components((expanded,), recovery=True)
             current = decode_execution_retention(expanded.data)
