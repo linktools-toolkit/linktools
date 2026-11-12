@@ -177,17 +177,23 @@ async def test_cold_history_reads_share_one_native_join_and_keep_raw_cache(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing", (False, True))
-async def test_native_run_reference_fails_closed_when_source_is_missing_or_changed(tmp_path: Path, missing: bool) -> None:
-    async with _source(tmp_path) as (state, native, _, _):
+async def test_native_run_reference_requires_owner_but_reads_valid_source_changes(tmp_path: Path, missing: bool) -> None:
+    async with _source(tmp_path) as (state, native, _, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
         table = build_step_sql_metadata().tables["ai_step_runs"]
         async with native.storage_context.engine.begin() as connection:
             statement = delete(table) if missing else update(table).values(metadata='{"changed":"source"}')
             await connection.execute(statement.where(table.c.store_key == native.store_key))
-        with pytest.raises(AIError) as caught:
-            await archive.get_agent_run(agent_run_id="run")
-        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        if missing:
+            with pytest.raises(AIError) as caught:
+                await archive.get_agent_run(agent_run_id="run")
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        else:
+            # Fixed identity owns current valid source fields; only actual
+            # runtime overrides are retained, not an old projection checksum.
+            assert await archive.get_agent_run(agent_run_id="run") == replace(run, metadata={
+                "changed": "source", "different": "runtime", "runtime-only": "retained"})
 
 
 @pytest.mark.asyncio
@@ -327,7 +333,7 @@ async def test_native_reference_cannot_redirect_trace_to_another_tenant(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key", ("shared", "different", "native-only"))
-async def test_native_projection_checks_reused_fields_but_retains_runtime_overrides(tmp_path: Path, key: str) -> None:
+async def test_native_projection_reads_source_fields_and_retains_runtime_overrides(tmp_path: Path, key: str) -> None:
     async with _source(tmp_path) as (state, native, source, run):
         await _flush(state)
         archive = state.run_store.read_store(PersistenceDomain.TRACE)
@@ -336,12 +342,8 @@ async def test_native_projection_checks_reused_fields_but_retains_runtime_overri
         async with native.storage_context.engine.begin() as connection:
             await connection.execute(update(table).where(table.c.store_key == native.store_key)
                                      .values(metadata=json.dumps(metadata)))
-        if key == "shared":
-            with pytest.raises(AIError) as caught:
-                await archive.get_agent_run(agent_run_id="run")
-            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        else:
-            assert await archive.get_agent_run(agent_run_id="run") == run
+        expected = replace(run, metadata={**run.metadata, "shared": "changed"}) if key == "shared" else run
+        assert await archive.get_agent_run(agent_run_id="run") == expected
 
 
 @pytest.mark.asyncio
