@@ -191,55 +191,62 @@ def test_raw_store_and_partition_names_are_not_in_object_representations() -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ("record", "fact", "operation"))
 @pytest.mark.parametrize("known_group", (False, True))
-async def test_native_publication_uses_raw_state_owner_and_native_target_without_extra_lookup(
-    monkeypatch: pytest.MonkeyPatch, kind: str, known_group: bool,
+async def test_native_publication_checks_scoped_targets_without_owner_edge_queries(
+    kind: str, known_group: bool,
 ) -> None:
     import json
     from types import SimpleNamespace
+    from sqlalchemy.sql import Select
     from sqlalchemy.dialects import mysql, postgresql, sqlite
     from linktools.ai.persistence import _native_content_index as index
     from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
     from linktools.ai.persistence.contracts import ArchivedContextBlock
     from linktools.ai.persistence.state import record_key
+    from linktools.ai.steps import native_store_locator
 
     group_id, native_store, root_id = "a" * 32, native_store_key("native", "tenant"), "c" * 64
     store_key = b"\xff" * STORE_KEY_MAX_BYTES
     root = NativeMessageRoot(group_id, native_store, (NativeMessageSlice(root_id, 1, 0, 1),))
     owner_key = b"owner" if kind != "operation" else b"o" * OPERATION_KEY_MAX_BYTES
     identity = (b"s" * STREAM_KEY_MAX_BYTES, 1) if kind == "fact" else (owner_key,)
-    selects = []
-    selected_owners = []
-    target_requests = []
+    scope_reads, target_reads = [], []
+    available = True
 
-    async def scalar(statement):
-        selects.append(statement)
+    async def scalar(statement: Select) -> str:
+        scope_reads.append(statement)
         for dialect in (mysql.dialect(), postgresql.dialect(), sqlite.dialect()):
             compiled = statement.compile(dialect=dialect)
             assert STATE_GROUP_METADATA_KEY in compiled.params.values()
             assert record_key("", "", "archive", "archive_scope", ("archive_scope_id",)) in compiled.params.values()
         return json.dumps({"archive_scope_id": group_id})
 
-    async def targets(session, store, roots):
-        target_requests.append((store, roots))
-        return (17,)
-
-    async def edges(context, session, owner_kind, sources, targets):
-        assert owner_kind == kind and targets == [17]
-        selected_owners.append(sources)
+    async def execute(statement: Select) -> SimpleNamespace:
+        target_reads.append(statement)
         for dialect in (mysql.dialect(), postgresql.dialect(), sqlite.dialect()):
-            compiled = sources.compile(dialect=dialect)
-            assert store_key in compiled.params.values()
-            assert store_key.hex() not in compiled.params.values()
-            assert len(compiled.params) == (4 if kind == "fact" else 3)
-            assert identity[0] in compiled.params.values()
-            assert hashlib.sha256(identity[0]).hexdigest() in compiled.params.values()
-            assert list(sources.selected_columns.keys()) == ["id"]
+            compiled = statement.compile(dialect=dialect)
+            assert native_store in compiled.params.values()
+            assert native_store_locator(native_store) in compiled.params.values()
+            assert [root_id] in compiled.params.values()
+            assert native_store.hex() not in compiled.params.values()
+            assert len(compiled.params) == 3
+            assert list(statement.selected_columns.keys()) == ["sha256", "id"]
+        return SimpleNamespace(all=lambda: [(root_id, 17)] if available else [])
 
-    monkeypatch.setattr(index, "_owner_targets", targets)
-    monkeypatch.setattr(index, "replace_owner_edges", edges)
-    session = SimpleNamespace(info={}, scalar=scalar)
-    index.stage_owner(session, kind, store_key, identity, ArchivedContextBlock(root, "d" * 64, 2))
+    session = SimpleNamespace(info={}, scalar=scalar, execute=execute)
+    value = ArchivedContextBlock(root, "d" * 64, 2)
+    index.stage_owner(session, kind, store_key, identity, value)
     await index.flush_owners(SimpleNamespace(), session, group_id=group_id if known_group else None)
-    assert len(selects) == (0 if known_group else 1)
-    assert len(selected_owners) == 1
-    assert target_requests == [(native_store, (root_id,))]
+    assert len(scope_reads) == (0 if known_group else 1)
+    assert len(target_reads) == 1
+
+    index.stage_owner(session, kind, store_key, identity, value)
+    with pytest.raises(AIError) as wrong_group:
+        await index.flush_owners(SimpleNamespace(), session, group_id="b" * 32)
+    assert wrong_group.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+    assert len(target_reads) == 1
+
+    available = False
+    index.stage_owner(session, kind, store_key, identity, value)
+    with pytest.raises(index.NativeContentUnavailable):
+        await index.flush_owners(SimpleNamespace(), session, group_id=group_id)
+    assert len(target_reads) == 2

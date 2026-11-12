@@ -162,6 +162,8 @@ async def test_binary_record_boundaries_remain_partition_local(tmp_path: Path, b
             with pytest.raises(ValueError):
                 await store.read(lambda tx: tx.get_record(b"x" * (RECORD_KEY_MAX_BYTES + 1)))
             with pytest.raises(ValueError):
+                await store.read(lambda tx: tx.get_records((keys[0], b"x" * (RECORD_KEY_MAX_BYTES + 1))))
+            with pytest.raises(ValueError):
                 RecordScanCursor(rows[0].kind, b"x" * (RECORD_KEY_MAX_BYTES + 1))
         await stores[0].mutate(lambda tx: tx.delete_records(keys))
         assert await stores[0].read(lambda tx: tx.scan_records()) == ()

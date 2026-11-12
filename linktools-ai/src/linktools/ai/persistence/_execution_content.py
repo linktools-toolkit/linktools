@@ -28,7 +28,7 @@ from .codec import (decode_execution_terminal_details,  binding_reference, decod
     pending_operation_reference, encode_execution_content, decode_execution_content, decode_execution_payload, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, native_user_input_reference, validate_native_user_input, native_text_reference, validate_native_text_payload, map_execution_payload_slots)
 from .state import GroupRecordReader, StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
-from ._execution_policy_content import (POLICY_CODEC, policy_reference, policy_values, encode_policy, decode_policy, expand_policy)
+from ._execution_policy_content import (POLICY_CODEC, policy_reference, policy_values, encode_policy, decode_policy, expand_policy, expand_policy_records)
 
 BINDING_CODEC = "execution-binding"
 PAYLOAD_CODEC = "execution-payload"
@@ -399,12 +399,16 @@ class ExecutionContent:
             contents[identity] = raw
             if cached is not None:
                 cached[identity] = records_by_id[identity], raw
+        if policies:
+            records = expand_policy_records(records, {reference: contents[reference[2]]
+                for reference in policy_refs if reference is not None})
+        decoded_bindings = {}
         expanded = []
-        for record, binding, policy in zip(records, binding_refs, policy_refs, strict=True):
-            if policy is not None:
-                record = expand_policy(record, contents[policy[2]])
+        for record, binding in zip(records, binding_refs, strict=True):
             if binding is not None:
-                record = expand_binding(record, contents[binding[2]])
+                if binding not in decoded_bindings:
+                    decoded_bindings[binding] = _binding(expand_binding(record, contents[binding[2]]))
+                record = _with_binding(record, decoded_bindings[binding])
             expanded.append(record)
         return tuple(expanded)
 

@@ -449,6 +449,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if tenant_id != self._tenant_id:
             return None, ()
         async def read(_group: object) -> tuple[tuple[ResourceRef, ExecutionView] | None, tuple[ExecutionView, ...]]:
+            await self._execution_content.prefetch_projection_owners(
+                (self._key("execution", (execution_id,)),), bindings=True, result=True)
             parent = await self._store.read_record(self._key("execution", (execution_id,)))
             if parent is None:
                 return None, ()
@@ -486,6 +488,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[value.execution_id] = value
             return values
+        from ._sql import SqlStateStore
+        if isinstance(self._store, SqlStateStore) and self._store.record_cache_enabled:
+            # Preserve ordinary bounded observations, including capture age and
+            # write-through invalidation. Cache absence remains authoritative
+            # only in the separate fresh pending-membership check.
+            return await read(None)
         return await self.read_content(read)
 
     async def prefetch_timeline_records(self, execution_ids: Sequence[str], *,

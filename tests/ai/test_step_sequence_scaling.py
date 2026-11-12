@@ -76,7 +76,7 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
             traffic.assert_publication_metadata(
                 start, store_key=store.store_key, node_bound=4, message_bound=1,
             )
-        assert traffic.count == 3 * size
+        assert traffic.count == 2 * size
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == size
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == size
@@ -193,7 +193,7 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
             assert "ai_step_snapshots.store_locator =" in statement
             assert parameters == (native_store_locator(store.store_key), snapshot.run_id,
                                   encode_native_replay_key(snapshot.idempotency_key))
-        assert traffic.count == 4 * len(cases)
+        assert traffic.count == 3 * len(cases)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == len(cases)
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
@@ -401,9 +401,9 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
                 await store.save_snapshot(snapshot)
             projections.clear()
         await store.save_snapshot(snapshot)
-        # Two bounded ID lookups index the node/message, then the collector
-        # checks durable candidates. Neither publication nor snapshot rereads the root.
-        assert len(projections) == 3
+        # Two bounded ID lookups verify node/message publication. Offline GC
+        # adds no online candidate scan or dependency revision update.
+        assert len(projections) == 2
         assert not any("ai_step_messages.message" in sql or "ai_step_messages.payload_json" in sql
                        for sql in projections)
         for receipt, session in zip(receipts, sessions):

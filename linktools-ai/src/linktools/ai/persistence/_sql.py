@@ -856,6 +856,11 @@ class SqlStateStore:
             self._content_dependencies = (*self._content_dependencies, source)
 
     @property
+    def record_cache_enabled(self) -> bool:
+        """Report the configured ordinary-read policy, without owning new state."""
+        return self._reads.enabled
+
+    @property
     def context(self) -> SqlStorageContext:
         return self._storage_group.context
 
@@ -1243,6 +1248,7 @@ class _SqlTransaction:
     async def get_record(self, key: bytes) -> StoredRecord | None:
         from sqlalchemy import select
 
+        validate_record_key(key)
         if key in self._record_cache:
             return self._record_cache[key]
         if self._is_payload_key(key):
@@ -1277,7 +1283,7 @@ class _SqlTransaction:
         if not keys:
             return {}
 
-        unique_keys = tuple(dict.fromkeys(keys))
+        unique_keys = tuple(dict.fromkeys(validate_record_key(key) for key in keys))
         missing = tuple(key for key in unique_keys if key not in self._record_cache)
         payload_keys = tuple(key for key in missing if self._is_payload_key(key))
         if payload_keys:

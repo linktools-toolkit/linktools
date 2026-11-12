@@ -4,7 +4,7 @@
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from ..core import JsonValue, canonical_json_bytes
@@ -50,21 +50,36 @@ def expand_policy(record: StoredRecord, raw: bytes) -> StoredRecord:
     reference = policy_reference(record)
     if reference is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    values = decode_policy(reference, raw)
-    envelope = decode_envelope(record.data)
-    payload = envelope.value["payload"]
-    fields = dict(payload["fields"])
-    overrides = fields.pop("runtime_overrides", {})
-    if (not isinstance(overrides, Mapping) or set(overrides) - set(EXECUTION_POLICY_FIELDS)
-            or set(fields).intersection(EXECUTION_POLICY_FIELDS)
-            or any(canonical_json_bytes(item) == canonical_json_bytes(values[name])
-                   for name, item in overrides.items())):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    fields.pop("runtime_policy")
-    fields.update(values)
-    fields.update(overrides)
-    return replace(record, data=encode_envelope({**envelope.value,
-        "payload": {**payload, "fields": fields}}))
+    return expand_policy_records((record,), {reference: raw})[0]
 
 
-__all__ = ["POLICY_CODEC", "policy_reference", "policy_values", "encode_policy", "decode_policy", "expand_policy"]
+def expand_policy_records(records: Sequence[StoredRecord], contents: Mapping[tuple[str, str, str], bytes]) -> tuple[StoredRecord, ...]:
+    """Verify each immutable policy once, then apply each execution's own overrides."""
+    decoded = {}
+    expanded = []
+    for record in records:
+        reference = policy_reference(record)
+        if reference is None:
+            expanded.append(record)
+            continue
+        if reference not in decoded:
+            decoded[reference] = decode_policy(reference, contents[reference])
+        values = decoded[reference]
+        envelope = decode_envelope(record.data)
+        payload = envelope.value["payload"]
+        fields = dict(payload["fields"])
+        overrides = fields.pop("runtime_overrides", {})
+        if (not isinstance(overrides, Mapping) or set(overrides) - set(EXECUTION_POLICY_FIELDS)
+                or set(fields).intersection(EXECUTION_POLICY_FIELDS)
+                or any(canonical_json_bytes(item) == canonical_json_bytes(values[name])
+                       for name, item in overrides.items())):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        fields.pop("runtime_policy")
+        fields.update(values)
+        fields.update(overrides)
+        expanded.append(replace(record, data=encode_envelope({**envelope.value,
+            "payload": {**payload, "fields": fields}})))
+    return tuple(expanded)
+
+
+__all__ = ["POLICY_CODEC", "policy_reference", "policy_values", "encode_policy", "decode_policy", "expand_policy", "expand_policy_records"]

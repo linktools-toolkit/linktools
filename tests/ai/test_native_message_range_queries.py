@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from sqlalchemy import event, select, update
+from sqlalchemy import event, select
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -288,39 +288,20 @@ async def _check_native_cas_and_range_execution(engine: AsyncEngine) -> None:
                                            store_key=native.store_key, max_cached_messages=0, max_cached_nodes=0)
             prepared = await content.prepare_append(frozen, prepare_payload=_payload)
             proof = await _publish(native, content, prepared)
-            # Each fresh publisher resolves bounded surrogate IDs, then fences
-            # those exact dependency sets against concurrent garbage collection.
-            # No message body or sequence frontier is reread during publication.
-            assert len(publication_io) == 4
+            # Publication verifies exact node/message dependencies once. Offline GC
+            # requires no online revision writes or message-body rereads.
+            assert len(publication_io) == 2
             sequence_ids = sorted({value for identity, node in prepared.nodes
                                    for value in (identity, node.left, node.right, node.next_forest)
                                    if value is not None})
             message_ids = sorted({identity for identity, _body in prepared.messages})
             for actual, table, identities in zip(
-                publication_io[:2], (content._nodes, content._messages),
+                publication_io, (content._nodes, content._messages),
                 (sequence_ids, message_ids), strict=True,
             ):
                 expected = select(table.c.sha256, table.c.id).where(
                     table.c.store_locator == native_store_locator(native.store_key),
                     table.c.store_key == native.store_key, table.c.sha256.in_(identities),
-                )
-                assert str(actual.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
-                    expected.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}),
-                )
-            dependency_counts = (
-                len({value for _identity, node in prepared.nodes
-                     for value in (node.left, node.right, node.next_forest) if value is not None}),
-                len(message_ids),
-            )
-            for actual, table, count in zip(
-                publication_io[2:], (content._nodes, content._messages), dependency_counts, strict=True,
-            ):
-                targets = actual.whereclause.right.value
-                assert len(targets) == len(set(targets)) == count
-                assert 0 < count <= len(frozen)
-                assert all(type(value) is int and value > 0 for value in targets)
-                expected = update(table).where(table.c.id.in_(targets)).values(
-                    gc_revision=table.c.gc_revision + 1, updated_at=table.c.updated_at,
                 )
                 assert str(actual.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
                     expected.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}),

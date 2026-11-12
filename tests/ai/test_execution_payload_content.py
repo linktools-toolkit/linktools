@@ -286,7 +286,8 @@ async def test_terminal_cas_accepts_declared_default_omission_with_content_refs(
         record = await repository.state_store.read_record(repository.execution_record_key(value.execution_id))
         from copy import deepcopy
         data = deepcopy(dict(record.data))
-        del data["value"]["payload"]["fields"]["conversation"]
+        assert not value.retention_closed
+        del data["value"]["payload"]["fields"]["retention_closed"]
         await repository.state_store.mutate(lambda tx: tx.replace_record(replace(record, data=data, storage_revision=record.storage_revision + 1),
             expected_storage_revision=record.storage_revision))
         changed = replace(value, revision=value.revision + 1, retention_closed=True)

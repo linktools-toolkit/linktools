@@ -27,6 +27,11 @@ class StateRecordCache:
         self._close_task: asyncio.Task[None] | None = None
         self._cache = StorageReadCache(cache) if isinstance(cache, CacheBackend) else None
 
+    @property
+    def enabled(self) -> bool:
+        """Whether ordinary observations use the existing bounded cache."""
+        return self._cache is not None
+
     async def read_record(self, key: bytes) -> StoredRecord | None:
         records = await self.read_records((key,))
         return records.get(key)

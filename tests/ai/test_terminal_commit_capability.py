@@ -238,7 +238,10 @@ async def test_current_execution_record_retains_conversation_through_recovery(
             lambda transaction: transaction.get_record(repository.execution_record_key(execution.execution_id))
         )
         assert written is not None
-        assert decode_envelope(written.data).value["payload"]["fields"]["conversation"] is True
+        fields = decode_envelope(written.data).value["payload"]["fields"]
+        assert "conversation" not in fields and "runtime_policy" in fields
+        expanded, = await repository._execution_content.expand_policies((written,))
+        assert decode_envelope(expanded.data).value["payload"]["fields"]["conversation"] is True
         assert await repository._execution_content.decode(written) == before
 
     reopened = PersistenceStorage.from_root(storage_path, exclusive_writer=True)

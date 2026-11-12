@@ -25,6 +25,7 @@ from .state import (
     validate_relation_key,
     validate_operation_replacement,
     validate_record_identity,
+    validate_record_key,
     validate_record_replacement,
 )
 
@@ -109,9 +110,10 @@ class _MemoryTransaction:
         await _validate_transaction_integrity(self)
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
-        return self.records.get(key)
+        return self.records.get(validate_record_key(key))
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        keys = tuple(validate_record_key(key) for key in keys)
         return {key: self.records[key] for key in keys if key in self.records}
 
     async def insert_record(self, record: StoredRecord) -> None:

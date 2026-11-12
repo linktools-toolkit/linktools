@@ -261,10 +261,13 @@ async def test_native_factory_uses_execution_route_in_split_plan(tmp_path: Path)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert {name for name in tables if name.startswith("ai_step_")} == {
             "ai_step_runs", "ai_step_messages", "ai_step_sequences",
+            "ai_step_run_admissions", "ai_step_tool_operations",
         }
         assert connection.execute("SELECT * FROM ai_step_runs").fetchall() == []
         assert connection.execute("SELECT * FROM ai_step_messages").fetchall() == []
         assert connection.execute("SELECT * FROM ai_step_sequences").fetchall() == []
+        assert connection.execute("SELECT * FROM ai_step_run_admissions").fetchall() == []
+        assert connection.execute("SELECT * FROM ai_step_tool_operations").fetchall() == []
 
 
 @pytest.mark.asyncio

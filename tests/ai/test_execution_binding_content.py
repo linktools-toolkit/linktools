@@ -668,3 +668,35 @@ async def test_configuration_body_reuse_rechecks_current_source(
             assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
         await group.mutate((repository.state_store, archive), corrupt_after_read)
+
+
+@pytest.mark.asyncio
+async def test_batch_configuration_validates_each_fixed_owner_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence import PersistenceStorage
+    from linktools.ai.persistence import _execution_content, _execution_policy_content
+    from .test_step_projection import _execution as execution_fixture
+
+    initial = execution_fixture()
+    values = tuple(replace(initial, execution_id=f"execution-{index}") for index in range(4))
+    storage = PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with Persistence.open("native-result", tenant_id="tenant", storage=storage) as state:
+        for value in values:
+            await state.execution.executions.create_execution(value)
+    calls = {"binding": 0, "policy": 0}
+    original_binding = _execution_content.expand_binding
+    original_policy = _execution_policy_content.decode_policy
+
+    def binding(record: StoredRecord, raw: bytes) -> StoredRecord:
+        calls["binding"] += 1
+        return original_binding(record, raw)
+
+    def policy(reference: tuple[str, str, str], raw: bytes) -> object:
+        calls["policy"] += 1
+        return original_policy(reference, raw)
+
+    monkeypatch.setattr(_execution_content, "expand_binding", binding)
+    monkeypatch.setattr(_execution_policy_content, "decode_policy", policy)
+    async with Persistence.open("native-result", tenant_id="tenant", storage=storage, read_only=True) as state:
+        result = await state.execution.executions.get_many_fresh(tuple(value.execution_id for value in values), tenant_id="tenant")
+        assert tuple(result.values()) == values
+    assert calls == {"binding": 1, "policy": 1}
