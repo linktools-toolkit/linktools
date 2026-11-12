@@ -3809,18 +3809,11 @@ class StateStepArchive(AgentRunStore):
         if self._trace_events is None:
             raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
         async def read(transaction: StateTransaction) -> list[StepEvent]:
-            if await transaction.get_sequence(self._stream(agent_run_id, "event")) < event_high_water:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
-                message_identities=tuple(map(str, message_seqs)), tool_call_ids=tool_call_ids, history=True)
-            selected = {fact.sequence: _decode_step(fact.data) for fact in facts}
-            requests = tuple(dict.fromkeys(event.metadata["linktools.ai.model_request_seq"]
-                for event in selected.values() if "linktools.ai.model_request_seq" in event.metadata))
-            for offset in range(0, len(requests), 32):
-                facts = await self._trace_events.select(transaction, agent_run_id, high_water=event_high_water,
-                    request_identities=requests[offset:offset + 32], history=True)
-                selected.update((fact.sequence, _decode_step(fact.data)) for fact in facts)
-            return [selected[sequence] for sequence in sorted(selected)]
+            facts = await self._trace_events.history_associations(
+                transaction, agent_run_id, event_stream=self._stream(agent_run_id, "event"),
+                high_water=event_high_water, message_identities=tuple(map(str, message_seqs)),
+                tool_call_ids=tool_call_ids)
+            return [_decode_step(fact.data) for fact in facts]
         return await self._store.read(read)
 
     async def _read_selected_history_facts(

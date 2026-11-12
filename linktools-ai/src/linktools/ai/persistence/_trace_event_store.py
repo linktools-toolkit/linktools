@@ -294,6 +294,63 @@ class SqlTraceEventStore:
             statement = statement.limit(limit)
         return tuple(self.row_to_fact(row) for row in await self._rows(transaction, statement))
 
+    async def history_associations(
+        self, transaction: StateTransaction, run_id: str, *, event_stream: bytes,
+        high_water: int, message_identities: Sequence[str], tool_call_ids: Sequence[str],
+    ) -> tuple[StoredFact, ...]:
+        from hashlib import sha256
+        from sqlalchemy import and_, literal, or_, select, true, union, union_all
+
+        if self.run_id(event_stream) != run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        table = self.table
+        t = table.c
+        counters = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_state_counters"]
+        messages = tuple(dict.fromkeys(map(_identity, message_identities)))
+        tools = tuple(dict.fromkeys(map(_identity, tool_call_ids)))
+        found: dict[int, StoredFact] = {}
+        for offset in range(0, max(len(messages), len(tools)), 32):
+            # Only correlation keys are repeated in the derived branches. Each
+            # selected event body is fetched once after sequence deduplication.
+            seed = select(t.sequence, t.request_identity).where(
+                t.store_key == self.state.store_key, t.run_id == _identity(run_id), t.sequence <= high_water)
+            branches = []
+            if tools[offset:offset + 32]:
+                branches.append(seed.where(t.history_identity.in_(tools[offset:offset + 32]),
+                    t.kind.in_(_TOOL_KINDS), or_(t.kind != "TOOL_CALL_FAILED", t.error_code.is_(None),
+                        t.error_code != ErrorCode.TOOL_EFFECT_UNKNOWN.value.encode("utf-8"))))
+            if messages[offset:offset + 32]:
+                branches.append(seed.where(t.message_identity.in_(messages[offset:offset + 32]),
+                                           t.kind == "MODEL_REQUEST_SUCCEEDED"))
+            selected = (branches[0] if len(branches) == 1 else union_all(*branches)).subquery("selected_events")
+            requests = select(selected.c.request_identity).where(
+                selected.c.request_identity.is_not(None)).distinct().subquery("selected_requests")
+            dependency = table.alias("dependency")
+            dependent_sequences = select(dependency.c.sequence).select_from(dependency.join(requests,
+                dependency.c.history_identity == requests.c.request_identity)).where(
+                    dependency.c.store_key == self.state.store_key, dependency.c.run_id == _identity(run_id),
+                    dependency.c.sequence <= high_water, dependency.c.kind.in_(_REQUEST_KINDS))
+            sequences = union(select(selected.c.sequence), dependent_sequences).subquery("selected_sequences")
+            events = select(table).select_from(table.join(sequences, t.sequence == sequences.c.sequence)).where(
+                t.store_key == self.state.store_key, t.run_id == _identity(run_id)).subquery("events")
+            anchor = select(literal(1).label("present")).subquery("anchor")
+            source = anchor.outerjoin(counters, and_(counters.c.store_key == self.state.store_key,
+                counters.c.stream_locator == sha256(event_stream).hexdigest())).outerjoin(events, true())
+            statement = select(counters.c.stream_key.label("counter_stream"),
+                counters.c.value.label("counter_value"), *events.c).select_from(source).order_by(events.c.sequence)
+            for row in await self._rows(transaction, statement):
+                value = row["counter_value"]
+                if value is None:
+                    value = 0
+                elif (row["counter_stream"] != event_stream or type(value) is not int or value < 0):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if value < high_water:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if row["sequence"] is not None:
+                    fact = self.row_to_fact(row)
+                    found[fact.sequence] = fact
+        return tuple(found[key] for key in sorted(found))
+
     async def insert(self, transaction: StateTransaction, facts: Sequence[StoredFact], events: Sequence[StepEvent]) -> None:
         if not facts:
             return
