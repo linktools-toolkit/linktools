@@ -4321,17 +4321,28 @@ class LocalExecutionBackend:
                     exact_recovery_context = False
                 elif self._tool_operations is not None:
                     recovery_operation_ids = await self._tool_operation_references(current, recovery_history_agent_run_id)
-                    unresolved = tuple(
-                        operation
-                        for operation in await self._tool_operations.get_operations(
-                            tuple(recovery_operation_ids.values()), tenant_id=self._tenant_id,
-                        )
-                        if operation.status
-                        not in {
-                            ToolOperationStatus.COMPLETED,
-                            ToolOperationStatus.FAILED,
-                        }
+                    # The effect owner can precede its event in a split publication.
+                    # Reuse these records for reconciliation, including unprojected admissions.
+                    admitted = await self._tool_operations.list_by_agent_run(
+                        recovery_history_agent_run_id, tenant_id=self._tenant_id, execution_id=execution_id,
                     )
+                    operations = {operation.tool_operation_id: operation for operation in admitted}
+                    for operation in admitted:
+                        if (operation.execution_id != execution_id
+                                or operation.agent_run_id != recovery_history_agent_run_id
+                                or operation.tool_call_id in recovery_operation_ids
+                                and recovery_operation_ids[operation.tool_call_id] != operation.tool_operation_id):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        recovery_operation_ids[operation.tool_call_id] = operation.tool_operation_id
+                    missing = tuple(identity for identity in recovery_operation_ids.values() if identity not in operations)
+                    if missing:
+                        for operation in await self._tool_operations.get_operations(missing, tenant_id=self._tenant_id):
+                            if (operation.execution_id != execution_id
+                                    or recovery_operation_ids.get(operation.tool_call_id) != operation.tool_operation_id):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            operations[operation.tool_operation_id] = operation
+                    unresolved = tuple(operation for operation in operations.values()
+                        if operation.status not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED})
                     if unresolved:
                         try:
                             await self._reconcile_unresolved_tool_operations(
