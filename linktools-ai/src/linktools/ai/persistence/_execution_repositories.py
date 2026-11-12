@@ -23,7 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import execution_payload_slots, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -58,6 +58,7 @@ from .state import (
     StateStore,
     StateGroupCallback,
     active_state_scope,
+    active_state_group_transaction,
     StateTransaction,
     StoredFact,
     StoredRecord,
@@ -223,6 +224,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         """
         group = self._store.storage_group
         members = tuple(dict.fromkeys((self._store, *stores)))
+        if active_state_scope() is not None:
+            # Reuse only the stores enlisted by the caller. Another task may
+            # have discovered the archive since this snapshot began; its body
+            # boundary must request an outer retry, not enlarge this snapshot.
+            return await capture(active_state_group_transaction(group, members, writable=False))
         try:
             return await group.read_many(members, capture)
         except _ContentReadRequired as required:
@@ -232,10 +238,32 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return await group.read_many(members, capture)
 
     async def get(self, identity: str, *, tenant_id: str) -> ExecutionRecord | None:
-        return await self.read_content(lambda _group: super(ExecutionRepositoryImpl, self).get(identity, tenant_id=tenant_id))
+        return await self._get_content_observation(identity, tenant_id=tenant_id, fresh=False)
 
     async def get_fresh(self, identity: str, *, tenant_id: str) -> ExecutionRecord | None:
-        return await self.read_content(lambda _group: super(ExecutionRepositoryImpl, self).get_fresh(identity, tenant_id=tenant_id))
+        return await self._get_content_observation(identity, tenant_id=tenant_id, fresh=True)
+
+    async def _get_content_observation(
+        self, identity: str, *, tenant_id: str, fresh: bool,
+    ) -> ExecutionRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key("execution", (identity,))
+        # Keep ordinary inspection's cache capture time and write-through ordering.
+        # A forced read still refreshes that observation through the store API.
+        record = ((await self._refresh_records((key,))).get(key) if fresh
+                  else await self._store.read_record(key))
+        if record is None:
+            return None
+        payload = decode_envelope(record.data).value.get("payload")
+        if any(native_text_reference(item) is not None for _, item in execution_payload_slots(payload)):
+            # The observation only selects this path. Never hydrate its old owner
+            # in a later snapshot: reread owner and Native source together, so GC
+            # or a concurrent owner change cannot leave a dangling source read.
+            return await self.read_content(lambda _group: super(ExecutionRepositoryImpl, self).get(
+                identity, tenant_id=tenant_id,
+            ))
+        return await self._decode(record, ExecutionRecord)
 
     async def _decode_many(self, records: Sequence[StoredRecord]) -> tuple[ExecutionRecord, ...]:
         values = await self._execution_content.decode_many(records)

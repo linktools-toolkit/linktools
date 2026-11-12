@@ -103,17 +103,23 @@ async def test_source_first_rule_admission_survives_deleted_head_before_context(
                 await asyncio.wait_for(entered.wait(), 10)
                 if outcome == "cancelled":
                     await execution.cancel(idempotency_key="cancel-admission")
-                result = (await execution.wait(timeout_seconds=10)).result
-                assert result.status is {
-                    "success": ExecutionStatus.SUCCEEDED, "failure": ExecutionStatus.FAILED,
-                    "cancelled": ExecutionStatus.CANCELLED,
-                }[outcome]
+                if outcome == "failure":
+                    with pytest.raises(AIError) as unavailable:
+                        await execution.wait(timeout_seconds=10)
+                    assert unavailable.value.code is ErrorCode.INPUT_CONTEXT_UNAVAILABLE
+                else:
+                    result = (await execution.wait(timeout_seconds=10)).result
+                    assert result.status is {
+                        "success": ExecutionStatus.SUCCEEDED, "cancelled": ExecutionStatus.CANCELLED,
+                    }[outcome]
                 assert requests == (1 if outcome == "success" else 0)
                 reference, = admitted
                 assert (await backend.load_repository_instructions(reference)).documents[0].content == body
                 if outcome != "success":
                     record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
                     assert record.input_context is None and record.repository_instructions == reference
+                    if outcome == "failure":
+                        assert record.status is ExecutionStatus.STARTED and record.result is None
                     engine = await runtime.tasks.bind()
                     for policy in ("captured", "clean"):
                         captured = await engine.inputs.capture_input(execution.execution_id, CaptureInputRequest(
@@ -121,6 +127,15 @@ async def test_source_first_rule_admission_survives_deleted_head_before_context(
                         restored = await engine.inputs.read_agent(captured, principal=principal)
                         assert restored.repository_instructions["documents"][0]["content"] == body
                         assert (restored.input_context is None) is (policy == "clean")
+                if outcome == "failure":
+                    # A failed storage preparation is not a confirmed business
+                    # terminal. Resolve the retained owner through public control.
+                    monkeypatch.setattr(backend._context_archive, "prepare", original_context)
+                    await execution.cancel(idempotency_key="resolve-failed-admission")
+                    assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.CANCELLED
+                    assert requests == 0
+                    record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+                    assert record.input_context is None and record.repository_instructions == reference
 
 
 async def test_pre_context_admission_reopens_from_asset_and_runtime_snapshots(tmp_path: Path) -> None:

@@ -19,7 +19,7 @@ from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.persistence.codec import decode_envelope, execution_payload_slots, native_text_reference, validate_native_text_payload
 from linktools.ai.persistence.contracts import ExecutionEventAppend, ExecutionRecord, ExecutionTerminalCommit, ExecutionTerminalCommitResult, ResultRecord
-from linktools.ai.persistence.state import StateTransaction
+from linktools.ai.persistence.state import StateTransaction, StoredRecord
 from linktools.ai.persistence._message_root import NativeTextReference
 from linktools.ai.storage import StoredPayload
 
@@ -180,3 +180,35 @@ async def test_native_slice_budget_checks_selected_bodies_before_decompression(t
         with pytest.raises(AIError) as over_budget:
             await native.capture_message_roots((selected,), reserve=reject)
         assert over_budget.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_native_inspection_discards_observed_owner_before_atomic_hydration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.persistence.state import active_state_scope
+
+    async with Persistence.open("native-result", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "observation.db")) as state:
+        commands, commit, current, checkpoint = await _prepare(state, "native " * 12000, "native " * 12000)
+        await _publish(commands, commit, current, checkpoint)
+        repository = state.execution.executions
+        store = repository.state_store
+        original = store.read_record
+        observations = 0
+
+        async def remove_after_observation(key: bytes) -> StoredRecord | None:
+            nonlocal observations
+            record = await original(key)
+            if active_state_scope() is None:
+                observations += 1
+                assert any(native_text_reference(payload) is not None
+                           for _, payload in execution_payload_slots(decode_envelope(record.data).value["payload"]))
+                await store.mutate(lambda tx: tx.delete_record(key))
+            return record
+
+        monkeypatch.setattr(store, "read_record", remove_after_observation)
+        # The cached/ordinary owner only selects the atomic path. Deletion before
+        # that snapshot must yield absence, never hydrate the obsolete owner.
+        assert await repository.get("execution", tenant_id="tenant") is None
+        assert observations == 1
