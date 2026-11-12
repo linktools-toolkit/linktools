@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING
 from pydantic import TypeAdapter
 from pydantic_ai_harness.step_persistence import RunRecord
 
-from ..core import canonical_sha256, validate_page_limit
+from ..core import validate_page_limit
 from ..errors import AIError, ErrorCode
 from ..steps import validate_native_step_ids
-from .codec import decode_envelope, encode_envelope, _encode_step_envelope
+from .codec import decode_envelope, encode_envelope
 from ._official_step_reader import OfficialStepReader
 from ._step_contracts import AgentRunRecord
 from .state import StateStore, StateTransaction, StoredRecord, record_key, active_state_transaction, StateStorageGroup, RecordScanCursor
@@ -233,7 +233,6 @@ class RunRegistrationReference:
     fields: Mapping[str, str | None]
     metadata: Mapping[str, str]
     removed_metadata: tuple[str, ...]
-    projection_digest: str
 
     @classmethod
     def capture(cls, source: RunRecord, projection: AgentRunRecord) -> "RunRegistrationReference":
@@ -250,15 +249,13 @@ class RunRegistrationReference:
         return cls(source.run_id, source.registration_id, changes,
                    {key: value for key, value in projection.metadata.items()
                     if original.metadata.get(key) != value},
-                   tuple(sorted(original.metadata.keys() - projection.metadata.keys())),
-                   canonical_sha256(_encode_step_envelope(projection)))
+                   tuple(sorted(original.metadata.keys() - projection.metadata.keys())))
 
     def to_data(self) -> dict[str, object]:
         return encode_envelope({"type": "run_reference", "payload": {
             "run_id": self.run_id, "registration_id": self.registration_id,
             "fields": dict(self.fields), "metadata": dict(self.metadata),
             "removed_metadata": list(self.removed_metadata),
-            "projection_digest": self.projection_digest,
         }})
 
     @classmethod
@@ -267,7 +264,7 @@ class RunRegistrationReference:
         payload = value.get("payload")
         if (set(value) != {"type", "payload"} or value["type"] != "run_reference"
                 or not isinstance(payload, Mapping)
-                or set(payload) != {"run_id", "registration_id", "fields", "metadata", "removed_metadata", "projection_digest"}):
+                or set(payload) != {"run_id", "registration_id", "fields", "metadata", "removed_metadata"}):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         validate_native_step_ids(run_id=payload["run_id"])
         registration, fields, metadata, removed = (payload[name] for name in
@@ -282,10 +279,7 @@ class RunRegistrationReference:
                 or any(not isinstance(key, str) for key in removed)
                 or list(removed) != sorted(set(removed)) or set(removed).intersection(metadata)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        digest = payload["projection_digest"]
-        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return cls(payload["run_id"], registration, dict(fields), dict(metadata), tuple(removed), digest)
+        return cls(payload["run_id"], registration, dict(fields), dict(metadata), tuple(removed))
 
     def project(self, source: RunRecord) -> AgentRunRecord:
         if (source.run_id != self.run_id or source.registration_id != self.registration_id):
@@ -304,11 +298,7 @@ class RunRegistrationReference:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         metadata = {key: value for key, value in original.metadata.items() if key not in self.removed_metadata}
         metadata.update(self.metadata)
-        projection = replace(original, metadata=metadata, **changes)
-        # Commit to the consumed projection, not source-only or overridden data.
-        if canonical_sha256(_encode_step_envelope(projection)) != self.projection_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return projection
+        return replace(original, metadata=metadata, **changes)
 
 
 __all__ = ["RunRegistrationStore", "RunRegistrationReference", "RunRegistrationCleanupResult"]

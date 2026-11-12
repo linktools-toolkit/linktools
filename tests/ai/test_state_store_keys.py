@@ -235,6 +235,8 @@ async def test_native_publication_checks_scoped_targets_without_owner_edge_queri
     session = SimpleNamespace(info={}, scalar=scalar, execute=execute)
     value = ArchivedContextBlock(root, "d" * 64, 2)
     index.stage_owner(session, kind, store_key, identity, value)
+    index.stage_owner(session, kind, store_key, (*identity, "second-owner"), value)
+    index.stage_owner(session, kind, store_key, (*identity, "third-owner"), value)
     await index.flush_owners(SimpleNamespace(), session, group_id=group_id if known_group else None)
     assert len(scope_reads) == (0 if known_group else 1)
     assert len(target_reads) == 1
@@ -245,8 +247,11 @@ async def test_native_publication_checks_scoped_targets_without_owner_edge_queri
     assert wrong_group.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
     assert len(target_reads) == 1
 
+    # A later flush must revalidate, even in the same session: the previous
+    # write-free validation phase is not a cache for subsequent mutations.
     available = False
     index.stage_owner(session, kind, store_key, identity, value)
+    index.stage_owner(session, kind, store_key, (*identity, "second-owner"), value)
     with pytest.raises(index.NativeContentUnavailable):
         await index.flush_owners(SimpleNamespace(), session, group_id=group_id)
     assert len(target_reads) == 2

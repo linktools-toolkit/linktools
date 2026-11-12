@@ -178,11 +178,16 @@ async def flush_owners(context: "SqlStorageContext", session: "AsyncSession", *,
         ))
         if wire is not None:
             group_id = json.loads(wire)["archive_scope_id"]
+    targets = set()
     for roots in pending.values():
         for root in roots:
             if group_id is None or root.group_id != group_id:
                 raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-            await _owner_targets(session, root.store_key, tuple(span.first for span in root.slices))
+            targets.add((root.store_key, tuple(sorted({span.first for span in root.slices}))))
+    # All owner writes have finished. This validation phase performs no source
+    # writes, so identical dependencies need one check, not one per owner.
+    for store, roots in targets:
+        await _owner_targets(session, store, roots)
 
 
 __all__ = ["NativeContentUnavailable", "PublicationTargetsUnavailable", "stage_owner", "register_recovery",

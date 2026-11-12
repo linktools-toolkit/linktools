@@ -77,6 +77,12 @@ def test_equal_projection_has_no_duplicate_fields_or_metadata() -> None:
     reference = RunRegistrationReference.capture(source, OfficialStepReader.project_run(source))
     assert reference.fields == {} and reference.metadata == {} and reference.removed_metadata == ()
     assert reference.project(source) == OfficialStepReader.project_run(source)
+    from linktools.ai.persistence.codec import decode_envelope
+
+    assert "projection_digest" not in decode_envelope(reference.to_data()).value["payload"]
+    restored = RunRegistrationReference.from_data(reference.to_data())
+    accepted_source = replace(source, metadata={"shared": "canonical owner value"})
+    assert restored.project(accepted_source) == OfficialStepReader.project_run(accepted_source)
 
 
 @pytest.mark.asyncio
