@@ -50,7 +50,7 @@ async def _shared(path: Path):
         await engine.dispose()
 
 
-def _record(data, *, key: bytes = b"r" * 32, state: str = "UNKNOWN") -> StoredRecord:
+def _record(data, *, key: bytes = b"r" * 32, state: str = "DONE") -> StoredRecord:
     return StoredRecord(key, None, None, "owner", b'owner', state, 0, None, 0, None, data)
 
 
@@ -61,37 +61,44 @@ async def _count(engine, table: str) -> int:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ("record", "fact", "operation"))
+@pytest.mark.parametrize("status", ("UNKNOWN", "DONE"))
 async def test_offline_collection_preserves_all_committed_root_owners_including_unknown(
-    tmp_path: Path, owner: str,
+    tmp_path: Path, owner: str, status: str = "UNKNOWN",
 ) -> None:
     async with _shared(tmp_path / "owners.db") as (engine, state, native, root):
         payload = encode_domain(ArchivedContextBlock(root, "c" * 64, 2))
-        record = _record(payload if owner == "record" else {})
+        record = _record(payload if owner == "record" else {}, state=status if owner == "record" else "DONE")
 
         async def publish(tx):
             await tx.insert_record(record)
             if owner == "fact":
-                await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, "UNKNOWN", payload))
+                await tx.insert_fact(StoredFact(b"s" * 32, 1, record.key, "chunk", None, status, payload))
             elif owner == "operation":
-                await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 42 + "xx"), b"s" * 32, 1, "UNKNOWN", False, payload))
+                await tx.insert_operation(StoredOperation(operation_key("steps", "one", "execution", "界" * 42 + "xx"), b"s" * 32, 1, status, False, payload))
 
         await state.mutate(publish)
         current = _snapshot("run", 2, "current")
         await native.save_snapshot(current)
         assert await _count(engine, "ai_step_messages") == 2
-        retained = await native.purge_unreferenced_content(exclusive=_Offline())
-        assert retained.retained_messages == 2
+        if status == "UNKNOWN":
+            with pytest.raises(AIError) as unknown:
+                await native.purge_unreferenced_content(exclusive=_Offline())
+            assert unknown.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            assert await _count(engine, "ai_step_messages") == 2
+        else:
+            retained = await native.purge_unreferenced_content(exclusive=_Offline())
+            assert retained.retained_messages == 2
         assert (await native.read_message_roots((root,)))[0]
         if owner == "operation":
             async def transition(tx):
                 previous = await tx.get_operation(operation_key("steps", "one", "execution", "界" * 42 + "xx"))
-                assert await tx.replace_operation(replace(previous, state="DONE"), expected_state="UNKNOWN")
+                assert await tx.replace_operation(replace(previous, state="DONE"), expected_state=status)
             await state.mutate(transition)
             assert (await native.read_message_roots((root,)))[0]
             await state.mutate(lambda tx: tx.delete_operations(OperationQuery(stream_key=b"s" * 32)))
         elif owner == "record":
             assert await state.mutate(lambda tx: tx.replace_record(
-                replace(record, data={}, storage_revision=1), expected_storage_revision=0,
+                replace(record, data={}, state="DONE", storage_revision=1), expected_storage_revision=0,
             ))
         else:
             assert await state.mutate(lambda tx: tx.delete_record(record.key))

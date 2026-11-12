@@ -270,9 +270,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if record is None:
             return None
         payload = decode_envelope(record.data).value.get("payload")
-        if (runtime_policy_reference(payload) is not None
-                or (isinstance(payload, Mapping)
-                    and binding_reference(payload.get("fields", {}).get("binding")) is not None)
+        if ((fresh and (runtime_policy_reference(payload) is not None
+                        or (isinstance(payload, Mapping)
+                            and binding_reference(payload.get("fields", {}).get("binding")) is not None)))
                 or any(native_text_reference(item) is not None or native_user_input_reference(item) is not None
                        for _, item in execution_payload_slots(payload))):
             # The observation only selects this path. Never hydrate its old owner
@@ -300,6 +300,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             record = ((await self._refresh_records((key,))).get(key) if fresh else
                       await self._store.read_record(key))
+            if record is not None and active_state_scope() is None and any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            ):
+                return await self.read_content(lambda _group: read())
             if record is None:
                 return None
             self._decode_header(record, execution_id)
@@ -311,7 +316,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 payloads = await self._execution_content.read_payloads((record,), result_only=True)
                 metadata = replace(metadata, result_record=decode_execution_content(record.data, payloads, result=True))
             return metadata
-        return await self.read_content(lambda _group: read())
+        return await self.read_content(lambda _group: read()) if fresh else await read()
 
     async def get_result_record(self, execution_id: str, *, tenant_id: str,
                                 fresh: bool = False) -> ExecutionResultRecord | None:
@@ -402,8 +407,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         async def read(_group: object) -> tuple[ResourceRef, ExecutionView] | None:
             await self._execution_content.prefetch_projection_owners((key,), bindings=True, result=True)
             record = ((await self._refresh_records((key,))).get(key) if fresh else await self._store.read_record(key))
+            if record is not None and active_state_scope() is None and any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            ):
+                return await self.read_content(read)
             return None if record is None else await self._decode_view(record, execution_id)
-        return await self.read_content(read)
+        return await self.read_content(read) if fresh else await read(None)
 
     async def _decode_view(self, record: StoredRecord, execution_id: str) -> tuple[ResourceRef, ExecutionView]:
         self._decode_header(record, execution_id)
@@ -470,6 +480,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise ValueError("execution_ids must contain non-empty strings")
             keys = {value: self._key("execution", (value,)) for value in ordered}
             records = await self._store.read_records(tuple(keys.values())) if keys else {}
+            if active_state_scope() is None and any(
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                for record in records.values()
+                for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
+            ):
+                return await self.read_content(read)
             payloads = await self._execution_content.read_payloads(tuple(records.values()))
             expanded = await self._execution_content.expand_policies(tuple(records.values()))
             records = {record.key: record for record in expanded}
@@ -483,7 +499,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[execution_id] = value
             return values
-        return await self.read_content(read)
+        return await read(None)
 
     async def get_recovery(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         execution = await self.get(execution_id, tenant_id=tenant_id)
@@ -627,11 +643,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
             records = (await self._refresh_records(tuple(keys.values())) if refresh else
                        await self._store.read_records(tuple(keys.values())))
-            if active_state_scope() is None and any(
+            if active_state_scope() is None and (refresh or any(
                 native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
                 for record in records.values()
                 for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
-            ):
+            )):
                 return await self.read_content(read)
             decoded = {record.key: value for record, value in zip(records.values(),
                 await self._decode_many(tuple(records.values())), strict=True)}

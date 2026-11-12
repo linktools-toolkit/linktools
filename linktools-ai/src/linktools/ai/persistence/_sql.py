@@ -166,7 +166,7 @@ class _SqlGroupTransaction:
         content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
     ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]] | None:
         from ._archive import archive_scope_parts, validate_archive_content_identity
-        from ._content_reference_sql import content_reference_statement
+        from ._content_reference_sql import content_reference_batch_size, content_reference_statement
         from ._step_payload_owner import payload_record_from_row
 
         active_state_group_transaction(self._group, (owner_store, content_store), writable=False)
@@ -206,25 +206,14 @@ class _SqlGroupTransaction:
                     required.append(key)
                     break
         found: dict[StateStore, dict[bytes, StoredRecord]] = {owner_store: {}, content_store: {}}
-        offset = 0
-        while offset < len(required):
-            size = min(200, len(required) - offset)
-            while True:
-                batch = tuple(required[offset:offset + size])
-                statement = content_reference_statement(
-                    self._group.metadata, dialect=dialect, owner_store_key=owner._store_key, owner_keys=batch,
-                    content_store_key=content._store_key, content_scope_key=content_scope_key, content_paths=paths,
-                    typed_payloads=content._store_key == STATE_GROUP_ARCHIVE_KEY,
-                )
-                compiled = statement.compile(dialect=owner._context.engine.dialect,
-                                             compile_kwargs={"render_postcompile": True})
-                count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
-                if count <= _GROUP_RECORD_BIND_BUDGET:
-                    break
-                if size == 1:
-                    raise ValueError("content reference read exceeds the SQL parameter budget")
-                size = max(1, size // 2)
-            offset += size
+        size = content_reference_batch_size(len(paths))
+        for offset in range(0, len(required), size):
+            batch = tuple(required[offset:offset + size])
+            statement = content_reference_statement(
+                self._group.metadata, dialect=dialect, owner_store_key=owner._store_key, owner_keys=batch,
+                content_store_key=content._store_key, content_scope_key=content_scope_key, content_paths=paths,
+                typed_payloads=content._store_key == STATE_GROUP_ARCHIVE_KEY,
+            )
             for row in (await owner._execute(statement)).mappings():
                 kind = row["source_kind"]
                 if kind == 2:
@@ -317,6 +306,7 @@ class SqlStateStorageGroup:
         read_only: bool = False,
         uses_archive: bool = False,
         native_content_index: bool = False,
+        archive_cache: CacheBackend | None = None,
     ) -> None:
         self._context = context
         self._metadata = metadata
@@ -329,6 +319,7 @@ class SqlStateStorageGroup:
         self._closed = False
         self._initialized = False
         self._members: dict[bytes, SqlStateStore] = {}
+        self._archive_cache = archive_cache
         self._archive_member: SqlStateStore | None = None
         self._opened_archive: tuple[str, SqlStateStore] | None = None
         self._archive_scope_initialized = False
@@ -491,6 +482,7 @@ class SqlStateStorageGroup:
                 self._context.engine, metadata=self._metadata,
                 context=self._context, group=self, store_key=key,
                 runtime_domain="group_internal",
+                cache=self._archive_cache if key == STATE_GROUP_ARCHIVE_KEY else None,
             )
             self._members[key] = store
             self._owned_members.add(store)

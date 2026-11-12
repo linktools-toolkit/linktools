@@ -13,7 +13,7 @@ from sqlalchemy.dialects import mysql, postgresql, sqlite
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence
 from linktools.ai.persistence._archive import ContentArchive, archive_content_scope, archive_scope_key
-from linktools.ai.persistence._content_reference_sql import content_reference_statement
+from linktools.ai.persistence._content_reference_sql import content_reference_batch_size, content_reference_statement
 from linktools.ai.persistence.codec import decode_envelope, encode_envelope
 from linktools.ai.storage import StoredPayload
 
@@ -142,3 +142,24 @@ async def test_projection_join_uses_indexed_owners_and_counts_ctes_as_reads(tmp_
             assert (len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)) <= 999
             if dialect.name == "mysql":
                 assert not str(compiled).lstrip().startswith("WITH")
+
+
+async def test_content_join_batch_bound_covers_all_dialect_path_expansions(tmp_path: Path) -> None:
+    async with Persistence.open(_NAMESPACE, storage=_storage("sqlite", tmp_path), tenant_id="tenant") as state:
+        await _seed(state)
+        repository = state.execution.executions
+        group = repository.state_store.storage_group
+        _, content = await group.open_archive()
+        for path_count in (1, 4, 8, 16):
+            keys = tuple(repository.execution_record_key(str(index))
+                         for index in range(content_reference_batch_size(path_count)))
+            paths = tuple(("value", "payload", "fields", "declared", str(index), "$execution_payload")
+                          for index in range(path_count))
+            for dialect in (sqlite.dialect(), postgresql.dialect(), mysql.dialect(server_version_info=(5, 7, 44))):
+                query = content_reference_statement(group.metadata, dialect=dialect.name,
+                    owner_store_key=repository.state_store.store_key, owner_keys=keys,
+                    content_store_key=content.store_key, content_scope_key=archive_scope_key(_NAMESPACE, "tenant"),
+                    content_paths=paths, typed_payloads=True)
+                compiled = query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+                count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
+                assert count <= 999

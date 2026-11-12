@@ -138,13 +138,13 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
             await archive.state_store.read(lambda tx: tx.scan_facts()),
             key=lambda fact: (fact.stream_key, fact.sequence),
         ))
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace="history", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
         validate_snapshot_domain(
             namespace="history", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-            records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
+            records=records, facts=facts, operations=(), sequences=sequences,
         )
 
         restored = AgentRunRecorder(

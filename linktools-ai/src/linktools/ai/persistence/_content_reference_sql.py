@@ -15,6 +15,16 @@ if TYPE_CHECKING:
     from sqlalchemy.sql import Select
 
 
+def content_reference_batch_size(path_count: int) -> int:
+    """Bound the largest supported positional-bind expansion, including MySQL 5.7."""
+    if type(path_count) is not int or not 1 <= path_count <= 16:
+        raise ValueError("content reference paths must contain between one and sixteen slots")
+    # Derived owner/refs occur in three UNION arms: two identity binds per
+    # owner in each. Each path's JSON/CASE expressions repeat at most 32 binds;
+    # the remaining tagged columns, scope predicates and link guards fit in 80.
+    return min(200, (999 - 80 - 32 * path_count) // 6)
+
+
 def content_reference_statement(
     metadata: "MetaData", *, dialect: str, owner_store_key: bytes, owner_keys: Sequence[bytes],
     content_store_key: bytes, content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
@@ -71,4 +81,4 @@ def content_reference_statement(
     return select(union_all(*selections).subquery("owner_content_rows"))
 
 
-__all__ = ["content_reference_statement"]
+__all__ = ["content_reference_batch_size", "content_reference_statement"]

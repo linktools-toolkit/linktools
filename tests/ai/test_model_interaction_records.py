@@ -247,13 +247,13 @@ async def test_canonical_interaction_pages_and_snapshot_sequences_include_runnin
         records = await archive._project_run_records(records)
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         operations = await archive.state_store.read(lambda tx: tx.scan_operations())
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=operations,
         )
         validate_snapshot_domain(
             namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-            records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
+            records=records, facts=facts, operations=operations, sequences=sequences,
         )
         await archive.release_agent_run("run", execution_id="execution")
         assert await archive.list_model_interactions(agent_run_id="run") == []
@@ -348,12 +348,12 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
         )
         records, facts, operations = captured.records, captured.facts, captured.operations
         records = await archive._project_run_records(records)
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=operations,
         )
         arguments = dict(namespace="request-lifecycle", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                         records=records, aliases=aliases, operations=operations, sequences=sequences)
+                         records=records, operations=operations, sequences=sequences)
         validate_snapshot_domain(**arguments, facts=facts)
         assert not any(record.kind == "history_association" for record in records)
         assert len(facts) == 1

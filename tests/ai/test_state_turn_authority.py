@@ -627,13 +627,13 @@ async def test_state_turn_sort_reuses_identity_across_pages_and_snapshot(tmp_pat
         assert restored == records
         validate_snapshot_domain(
             namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-            records=restored, aliases=(), facts=(), operations=(), sequences={},
+            records=restored, facts=(), operations=(), sequences={},
         )
         invalid = (replace(restored[0], sort_key=b"not-its-identity"), *restored[1:])
         with pytest.raises(AIError) as caught:
             validate_snapshot_domain(
                 namespace="turn-authority", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
-                records=invalid, aliases=(), facts=(), operations=(), sequences={},
+                records=invalid, facts=(), operations=(), sequences={},
             )
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 

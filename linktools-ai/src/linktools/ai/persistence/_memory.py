@@ -104,9 +104,10 @@ class _MemoryGroupTransaction:
 class InMemoryStateStorageGroup:
     """Atomic group coordinator for independent in-memory logical stores."""
 
-    def __init__(self, *, read_only: bool = False) -> None:
+    def __init__(self, *, read_only: bool = False, archive_cache: CacheBackend | None = None) -> None:
         self._lock = asyncio.Lock()
         self._read_only = read_only
+        self._archive_cache = archive_cache
         self._members: list[InMemoryStateStore] = []
         self._archive: tuple[str, InMemoryStateStore] | None = None
         self._partitions: dict[bytes, InMemoryStateStore] = {}
@@ -153,7 +154,7 @@ class InMemoryStateStorageGroup:
         if create and self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
         if self._archive is None and create:
-            store = InMemoryStateStore(self, archive=True)
+            store = InMemoryStateStore(self, archive=True, cache=self._archive_cache)
             await store.initialize()
             self._archive = (uuid4().hex, store)
         return self._archive

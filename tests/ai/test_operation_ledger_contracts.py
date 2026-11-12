@@ -415,7 +415,7 @@ async def test_operation_readers_reject_corrupt_persisted_identity(storage: Pers
     assert listed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     with pytest.raises(AIError) as snapshot:
         validate_snapshot_domain(namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
-                                 records=(), aliases=(), facts=(), operations=(corrupted,),
+                                 records=(), facts=(), operations=(corrupted,),
                                  sequences={corrupted.stream_key: corrupted.sequence})
     assert snapshot.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
@@ -441,5 +441,5 @@ async def test_operation_readers_reject_foreign_physical_scope(storage: Persiste
         decode_ledger_operation(corrupted, namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION)
     with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
         validate_snapshot_domain(namespace="operations", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION,
-                                 records=(), aliases=(), facts=(), operations=(corrupted,),
+                                 records=(), facts=(), operations=(corrupted,),
                                  sequences={corrupted.stream_key: corrupted.sequence})

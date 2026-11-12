@@ -70,13 +70,13 @@ async def test_projected_records_page_completely_and_validate_after_roundtrip(
             assert len(found) <= len(records)
         assert tuple(found) == expected
         scope = dict(namespace="records", tenant_id="tenant", domain=PersistenceDomain.CONVERSATION)
-        aliases, sequences = canonical_snapshot_indexes(**scope, records=expected, facts=(), operations=())
-        validate_snapshot_domain(**scope, records=expected, aliases=aliases, sequences=sequences,
+        sequences = canonical_snapshot_indexes(**scope, records=expected, facts=(), operations=())
+        validate_snapshot_domain(**scope, records=expected, sequences=sequences,
                                  facts=(), operations=())
         with pytest.raises(AIError) as error:
             validate_snapshot_domain(
                 **scope, records=(replace(expected[0], sort_key=b"wrong"), *expected[1:]),
-                aliases=aliases, sequences=sequences, facts=(), operations=(),
+                sequences=sequences, facts=(), operations=(),
             )
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:

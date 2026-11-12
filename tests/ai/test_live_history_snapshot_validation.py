@@ -46,7 +46,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
         records = await archive._project_run_records(records)
         facts = tuple(sorted(await archive.state_store.read(lambda tx: tx.scan_facts()),
                              key=lambda fact: (fact.stream_key, fact.sequence)))
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
@@ -86,13 +86,13 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
             with pytest.raises(AIError) as raised:
                 validate_snapshot_domain(
                     namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                    records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
+                    records=records, facts=facts, operations=(), sequences=sequences,
                 )
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         else:
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
+                records=records, facts=facts, operations=(), sequences=sequences,
             )
             completed = await repository.prepare_observation(
                 "run", (message,), first_message_index=0, pending=None, pending_keys=(),
@@ -102,13 +102,13 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
             records = await archive._project_run_records(records)
             facts = tuple(sorted(await archive.state_store.read(lambda tx: tx.scan_facts()),
                                  key=lambda fact: (fact.stream_key, fact.sequence)))
-            aliases, sequences = canonical_snapshot_indexes(
+            sequences = canonical_snapshot_indexes(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, facts=facts, operations=(),
             )
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
+                records=records, facts=facts, operations=(), sequences=sequences,
             )
 
 
@@ -127,13 +127,13 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
         records = await archive._project_run_records(records)
         facts = tuple(sorted(await archive.state_store.read(lambda tx: tx.scan_facts()),
                              key=lambda fact: (fact.stream_key, fact.sequence)))
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
         validate_snapshot_domain(
             namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-            records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
+            records=records, facts=facts, operations=(), sequences=sequences,
         )
         corrupted = []
         for fact in facts:
@@ -147,7 +147,7 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
         with pytest.raises(AIError) as raised:
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=records, aliases=aliases, facts=tuple(corrupted), operations=(), sequences=sequences,
+                records=records, facts=tuple(corrupted), operations=(), sequences=sequences,
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
@@ -179,13 +179,13 @@ async def test_snapshot_model_interaction_records_validate_identity_and_sequence
         records = (*records, record, archive._stored_interaction(second))
 
         def validate() -> None:
-            aliases, sequences = canonical_snapshot_indexes(
+            sequences = canonical_snapshot_indexes(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
                 records=records, facts=(), operations=(),
             )
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=records, aliases=aliases, facts=(), operations=(), sequences=sequences,
+                records=records, facts=(), operations=(), sequences=sequences,
             )
 
         if corruption is None:
@@ -224,7 +224,7 @@ async def test_snapshot_trace_requires_complete_unique_authoritative_event_prefi
         records = await archive._project_run_records(records)
         assert not any(record.kind == "history_association" for record in records)
         assert len(facts) == 2
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
@@ -244,7 +244,7 @@ async def test_snapshot_trace_requires_complete_unique_authoritative_event_prefi
         def validate() -> None:
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=PersistenceDomain.TRACE,
-                records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
+                records=records, facts=facts, operations=(), sequences=sequences,
             )
 
         if corruption is None:
