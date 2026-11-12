@@ -33,6 +33,7 @@ from ..steps import native_store_key
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from ..model.messages import encode_model_messages
 from ._execution_content import restore_native_text_payload
+from ._native_tool_error import NativeToolErrorReference
 from ._message_root import NativeMessageRoot, NativeTextReference
 from .contracts import ArchivedContextBlock
 from ._archive import ContentArchive, PreparedArchive, archive_content_scope
@@ -2023,6 +2024,7 @@ class StateCommands:
         execution: Observed[ExecutionRecord], observed: Observed[ToolOperationRecord] | None = None,
         result_payload: StoredPayload | None = None, error_code: str | None = None,
         error_payload: StoredPayload | None = None,
+        error_source: NativeToolErrorReference | None = None,
         write: Callable[[StateGroupTransaction], Awaitable[None]] | None = None,
         readback_write: Callable[[], Awaitable[bool]] | None = None,
         stores: Sequence[StateStore] = (),
@@ -2034,6 +2036,8 @@ class StateCommands:
         if (result_payload is None) == (error_code is None or error_payload is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if result_payload is not None and (error_code is not None or error_payload is not None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if error_source is not None and (result_payload is not None or write is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if result_payload is None:
             decode_tool_operation_failure(error_code, error_payload)
@@ -2054,16 +2058,22 @@ class StateCommands:
                 )
             return await tools.fail_in_transaction(
                 transaction, tool_operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
-                observed=observed, error_code=error_code, error_payload=error_payload,
+                observed=observed, error_code=error_code, error_payload=error_payload, error_source=error_source,
             )
 
         async def operation() -> ToolBoundaryReceipt:
             async def mutate(group: StateGroupTransaction) -> ToolBoundaryReceipt:
                 nonlocal write_error
+                if write is not None and error_source is not None:
+                    try:
+                        await write(group)
+                    except BaseException as error:
+                        write_error = error
+                        raise
                 effect = await settle(group.transaction(tools.state_store))
                 if effect.value.execution_id != execution.value.execution_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if write is not None:
+                if write is not None and error_source is None:
                     try:
                         await write(group)
                     except BaseException as error:

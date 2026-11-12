@@ -166,7 +166,7 @@ from ..persistence.commands import RuntimeRecoveryCommands
 from ..persistence.repositories import operation_identity_matches
 from ..persistence.runs import ExecutionTerminalSealPlan, RuntimeAgentRunStore, StateStepArchive
 from ..persistence.state import Observed, SqlStateTransaction, StateGroupTransaction
-from ..persistence import SqlStepStore, StepWriteReceipt
+from ..persistence import NativeToolErrorReference, SqlStepStore, StepWriteReceipt
 from ..storage import SqlStorageContext
 
 
@@ -5655,6 +5655,7 @@ class LocalExecutionBackend:
         async def settle_tool(operation_id, *, tenant_id, owner: str, fence, observed, event,
                               result_payload=None, error_code=None, error_payload=None):
             write, readback = await event_writer(event)
+            source = native.backup_source
             async with turn_owner.boundary:
                 # A known external result remains a fact after cancellation or
                 # producer loss. Its own effect fence protects manual/new decisions.
@@ -5662,6 +5663,8 @@ class LocalExecutionBackend:
                     operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
                     execution=turn_owner.observed or initial_observed, observed=observed,
                     result_payload=result_payload, error_code=error_code, error_payload=error_payload,
+                    error_source=(None if error_payload is None or source is None else NativeToolErrorReference(
+                        source.group_id, source.store_key, event.run_id, event.idempotency_key)),
                     write=write, readback_write=readback, stores=(state,),
                 )
                 return receipt.operation, False

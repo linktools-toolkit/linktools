@@ -27,6 +27,7 @@ from ._payload import decode_payload_bytes
 from ._tool_operation_content import expand_tool_content, expand_native_tool_content
 from ._native_tool_result import restore_native_tool_result_payload
 from ._native_tool_arguments import restore_native_tool_arguments_payload
+from ._native_tool_error import restore_native_tool_error_payload
 from ._archive import archive_content_scope
 from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
 from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
@@ -37,7 +38,7 @@ from ._step_maintenance import inspect_native_message_tables, native_message_par
 from ._capability_marker import has_capability_partition_marker
 from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
                     execution_payload_slots, tool_payload_slots, native_user_input_reference,
-                    native_text_reference, native_tool_result_reference, native_tool_arguments_reference)
+                    native_text_reference, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference)
 from .captures import (
     CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
     capture_record_key, capture_record_scope, capture_record_value, expand_snapshot_capture, input_capture_expiry_key,
@@ -313,13 +314,38 @@ async def _purge_unreferenced_objects(
         protected.add(reference.key)
         return encoded
 
-    async def expand_native_templates(record: StoredRecord, owner_group: StateStorageGroup) -> StoredRecord:
+    async def expand_native_templates(record: StoredRecord, owner_store: StateStore) -> StoredRecord:
         """Resolve fixed leaves before decoding their complete offline templates."""
+        owner_group = owner_store.storage_group
         value = decode_envelope(record.data).value["payload"]
         is_execution = record.kind == "execution"
         slots = execution_payload_slots(value) if is_execution else tool_payload_slots(value)
         restored = {}
         for path, payload in slots:
+            event_reference = None if is_execution else native_tool_error_reference(payload)
+            if event_reference is not None:
+                from ._step_store import SqlStepStore
+                opened = await owner_group.open_archive()
+                if opened is None or opened[0] != event_reference.group_id:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                try:
+                    parts = decode_key_components(record.key, RECORD_KEY_MAX_BYTES)
+                    if len(parts) < 6 or parts[0] != "record" or parts[4] != record.kind:
+                        raise ValueError("invalid typed owner address")
+                    if native_store_key(parts[1], parts[2]) != event_reference.store_key:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    native = SqlStepStore.for_state_store(owner_store, namespace=parts[1], tenant_id=parts[2])
+                    if native is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    key = event_reference.run_id, event_reference.replay_key
+                    events = await owner_store.read(lambda tx: native.read_fixed_events((key,), transaction=tx))
+                    fields = value["fields"]
+                    restored[event_reference] = restore_native_tool_error_payload(event_reference, events[key],
+                        operation_id=fields["tool_operation_id"], tool_name=fields["tool_name"],
+                        tool_call_id=fields["tool_call_id"], fence=record.lease_fence, error_code=fields["error_code"])
+                except (ValueError, TypeError, KeyError, IndexError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                continue
             reference = ((native_user_input_reference(payload) or native_text_reference(payload))
                          if is_execution else (native_tool_arguments_reference(payload) or native_tool_result_reference(payload)))
             if reference is None or reference in restored:
@@ -422,7 +448,7 @@ async def _purge_unreferenced_objects(
                 elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
                     await collect(dict(record.data), domain, owner_group=store.storage_group)
                     if record.kind in {"execution", "tool_operation"}:
-                        native_expanded = await expand_native_templates(record, store.storage_group)
+                        native_expanded = await expand_native_templates(record, store)
                         semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents), binding_contents)
                         await collect(dict(semantic.data), domain, archive_owner=False)
             if len(records) < 1000:

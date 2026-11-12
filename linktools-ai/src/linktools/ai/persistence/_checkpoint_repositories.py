@@ -26,9 +26,10 @@ from ..storage import StoredPayload
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from ._message_root import NativeMessageRoot
+from ._native_tool_error import NativeToolErrorReference, prepare_native_tool_error
 from ._native_tool_result import prepare_native_tool_result
 from ._native_tool_arguments import prepare_native_tool_arguments
-from .codec import decode_envelope, encode_envelope, native_tool_result_reference, native_tool_arguments_reference
+from .codec import decode_envelope, encode_envelope, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference
 from ._archive import PreparedArchive
 from ._payload import decode_payload_bytes
 from .contracts import ToolOperationRecord
@@ -984,6 +985,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         requested_error: str | None = None,
         requested_error_payload: StoredPayload | None = None,
         value: object,
+        error_source: NativeToolErrorReference | None = None,
         transaction: StateTransaction | None = None,
         observed: Observed[ToolOperationRecord] | None = None,
     ) -> Observed[ToolOperationRecord]:
@@ -1032,7 +1034,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             _require_tool_claim(current, owner=owner, fence=fence, allow_unknown=True)
             next_value = value(current, now)
-            await self._replace_tool_in_transaction(transaction, record, next_value)
+            await self._replace_tool_in_transaction(transaction, record, next_value, error_source=error_source)
             return Observed(next_value, record.storage_revision + 1)
 
         if transaction is not None:
@@ -1078,6 +1080,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         fence: int,
         error_code: str,
         error_payload: StoredPayload,
+        error_source: NativeToolErrorReference | None = None,
         observed: Observed[ToolOperationRecord] | None = None,
     ) -> Observed[ToolOperationRecord]:
         return await self._finish_tool(
@@ -1087,6 +1090,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             fence=fence,
             terminal_status=ToolOperationStatus.FAILED,
             requested_error=error_code,
+            error_source=error_source,
             requested_error_payload=error_payload,
             value=lambda current, now: replace(
                 current,
@@ -1098,6 +1102,42 @@ class ToolRepositoryImpl(_RepositoryBase):
             transaction=transaction,
             observed=observed,
         )
+
+    async def share_published_error(
+        self, tool_operation_id: str, *, tenant_id: str, source: NativeToolErrorReference,
+    ) -> None:
+        """Converge a split publication only after its same-group event is durable."""
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        opened = await self.state_store.storage_group.open_archive()
+        if opened is None or opened[0] != source.group_id:
+            return
+
+        async def update(transaction: StateTransaction) -> None:
+            stored = await transaction.get_record(self._tool_key(tool_operation_id))
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            envelope = decode_envelope(stored.data)
+            payload = envelope.value["payload"]
+            current = payload["fields"].get("error_payload")
+            if isinstance(current, Mapping) and native_tool_error_reference(current) is not None:
+                await self._decode(stored, ToolOperationRecord)
+                return
+            value = await self._decode(stored, ToolOperationRecord)
+            if value.status is not ToolOperationStatus.FAILED or value.error_payload is None:
+                return
+            events = await self._tool_content.capture_error_sources((source,))
+            reference = prepare_native_tool_error(source, events[source], value.error_payload,
+                operation_id=value.tool_operation_id, tool_name=value.tool_name, tool_call_id=value.tool_call_id,
+                fence=value.fence, error_code=value.error_code)
+            if reference is None:
+                return
+            fields = {**payload["fields"], "error_payload": {"$dataclass": "stored_payload", "schema": 1,
+                      "fields": {"content": reference.to_json()}}}
+            candidate = replace(stored, storage_revision=stored.storage_revision + 1,
+                                data=encode_envelope({**envelope.value, "payload": {**payload, "fields": fields}}))
+            await _replace_checked(transaction, candidate, stored.storage_revision)
+        await self._mutate_content(update)
 
     async def share_published_arguments(
         self, *, agent_run_id: str, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
@@ -1230,8 +1270,10 @@ class ToolRepositoryImpl(_RepositoryBase):
         transaction: StateTransaction,
         record: StoredRecord,
         value: ToolOperationRecord,
+        *, error_source: NativeToolErrorReference | None = None,
     ) -> None:
-        candidate = await self._tool_content.encode(_projected_record(self, record, value), previous=record)
+        candidate = await self._tool_content.encode(_projected_record(self, record, value),
+                                                    previous=record, error_source=error_source)
         await _replace_checked(transaction, candidate, record.storage_revision)
 
 

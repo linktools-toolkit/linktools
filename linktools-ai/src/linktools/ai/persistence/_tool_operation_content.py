@@ -6,6 +6,10 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic_ai_harness.step_persistence import StepEvent
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
@@ -13,12 +17,13 @@ from ..storage import StoredPayload
 from ._archive import ContentArchive, ContentRecord, PreparedArchive, archive_content_identity
 from ._payload import decode_payload_bytes
 from ._message_root import NativeMessageRoot, NativeToolResultReference, NativeToolArgumentsReference
+from ._native_tool_error import NativeToolErrorReference, prepare_native_tool_error, restore_native_tool_error_payload
 from ._native_tool_result import restore_native_tool_result_payload
 from ._native_tool_arguments import restore_native_tool_arguments_payload
 from ._step_store import SqlStepStore
 from ..steps import native_store_key
 from .codec import (TOOL_PAYLOAD_CODEC, decode_envelope, encode_envelope,
-                    tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference,
+                    tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference,
                     decode_domain, encode_domain, _encode_persisted_domain)
 from .state import StateStore, StoredRecord, active_state_scope
 
@@ -81,18 +86,25 @@ def expand_tool_content(record: StoredRecord, contents: Mapping[tuple[str, str, 
 
 
 def expand_native_tool_content(
-    record: StoredRecord, payloads: Mapping[NativeToolResultReference | NativeToolArgumentsReference, StoredPayload],
+    record: StoredRecord, payloads: Mapping[NativeToolResultReference | NativeToolArgumentsReference | NativeToolErrorReference, StoredPayload],
 ) -> StoredRecord:
     """Expand validated native receipt projections before ordinary domain decoding."""
     if record.kind != "tool_operation":
         return record
     def expand(payload: Mapping) -> JsonValue:
-        reference = (native_tool_arguments_reference(payload) or native_tool_result_reference(payload))
+        reference = (native_tool_arguments_reference(payload) or native_tool_result_reference(payload)
+                     or native_tool_error_reference(payload))
         if reference is None:
             return payload
         value = payloads.get(reference)
-        if (not isinstance(value, StoredPayload) or value.kind != "inline" or value.encoding != "base64"
-                or (value.digest, value.size) != (reference.digest, reference.size)):
+        attached = isinstance(reference, NativeToolResultReference) and reference.attachment_format is not None
+        if (not isinstance(value, StoredPayload) or value.kind != "inline"
+                or value.encoding != ("json-attachments" if attached else "base64")
+                or not isinstance(reference, NativeToolErrorReference)
+                and (value.digest, value.size) != (reference.digest, reference.size)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if attached and (value.value["format"] != reference.attachment_format
+                         or canonical_json_bytes(value.value["attachments"]) != canonical_json_bytes(reference.attachment_entries())):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return _encode_persisted_domain(value)
     return _map_record(record, expand)
@@ -114,15 +126,42 @@ class ToolOperationContent:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return ContentArchive(opened[1], opened[0], namespace=self.namespace, tenant_id=self.tenant_id, object_store=None)
 
-    async def encode(self, record: StoredRecord, *, previous: StoredRecord | None = None) -> StoredRecord:
+    async def encode(
+        self, record: StoredRecord, *, previous: StoredRecord | None = None,
+        error_source: NativeToolErrorReference | None = None,
+    ) -> StoredRecord:
         native_retained = {} if previous is None else {name: reference
             for name, payload in tool_payload_slots(decode_envelope(previous.data).value["payload"])
             if (reference := (native_tool_arguments_reference(payload) or native_tool_result_reference(payload))) is not None}
+        value = decode_envelope(record.data).value["payload"]
+        if error_source is None and previous is not None:
+            error_source = next((reference for name, payload in tool_payload_slots(
+                decode_envelope(previous.data).value["payload"])
+                if name == "error_payload" and (reference := native_tool_error_reference(payload)) is not None), None)
+        error_events = {} if error_source is None else await self.capture_error_sources((error_source,))
+        attached_previous = (await self.read_native_payloads((previous,)) if previous is not None and any(
+            isinstance(reference, NativeToolResultReference) and reference.attachment_format is not None
+            for reference in native_retained.values()) else {})
         retained_fields = {}
         selected = {}
         for name, payload in tool_payload_slots(decode_envelope(record.data).value["payload"]):
             fields = payload.get("fields", {})
+            if name == "error_payload" and error_source is not None:
+                owner = value["fields"]
+                selected_error = prepare_native_tool_error(error_source, error_events[error_source],
+                    decode_domain(payload, StoredPayload), operation_id=owner["tool_operation_id"],
+                    tool_name=owner["tool_name"], tool_call_id=owner["tool_call_id"],
+                    fence=record.lease_fence, error_code=owner["error_code"])
+                if selected_error is not None:
+                    retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
+                                             "fields": {"content": selected_error.to_json()}}
+                    continue
             reference = native_retained.get(name)
+            if (reference in attached_previous and canonical_json_bytes(encode_domain(decode_domain(payload, StoredPayload)))
+                    == canonical_json_bytes(encode_domain(attached_previous[reference]))):
+                retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
+                                         "fields": {"content": reference.to_json()}}
+                continue
             if (reference is not None and fields.get("kind") == "inline" and fields.get("encoding") == "base64"
                     and (fields.get("digest"), fields.get("size")) == (reference.digest, reference.size)):
                 retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
@@ -172,14 +211,45 @@ class ToolOperationContent:
         values = await (await native.capture_message_roots(roots, transaction=transaction))()
         return dict(zip(roots, values, strict=True))
 
+    async def capture_error_sources(
+        self, references: Sequence[NativeToolErrorReference],
+    ) -> dict[NativeToolErrorReference, "StepEvent"]:
+        """Capture complete immutable events in the same scope as their tool owners."""
+        archive = await self._archive()
+        if any(reference.group_id != archive.scope_id
+               or reference.store_key != native_store_key(self.namespace, self.tenant_id)
+               for reference in references):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        native = SqlStepStore.for_state_store(self.store, namespace=self.namespace, tenant_id=self.tenant_id)
+        active = active_state_scope()
+        transaction = None if active is None else active.transactions.get(self.store)
+        if native is None or transaction is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        events = await native.read_fixed_events(tuple((ref.run_id, ref.replay_key) for ref in references),
+                                              transaction=transaction)
+        return {ref: events[(ref.run_id, ref.replay_key)] for ref in references}
+
     async def read_native_payloads(
         self, records: Sequence[StoredRecord], *, reserve: Callable[[int], None] | None = None,
-    ) -> dict[NativeToolResultReference | NativeToolArgumentsReference, StoredPayload]:
+    ) -> dict[NativeToolResultReference | NativeToolArgumentsReference | NativeToolErrorReference, StoredPayload]:
         references = tuple(dict.fromkeys(reference for record in records
             for _, payload in tool_payload_slots(decode_envelope(record.data).value["payload"])
             if (reference := (native_tool_arguments_reference(payload) or native_tool_result_reference(payload))) is not None))
+        errors = tuple((reference, record, decode_envelope(record.data).value["payload"]["fields"])
+            for record in records for _, payload in tool_payload_slots(decode_envelope(record.data).value["payload"])
+            if (reference := native_tool_error_reference(payload)) is not None)
+        values = {}
+        if errors:
+            events = await self.capture_error_sources(tuple(dict.fromkeys(ref for ref, _, _ in errors)))
+            for reference, record, owner in errors:
+                value = restore_native_tool_error_payload(reference, events[reference],
+                    operation_id=owner["tool_operation_id"], tool_name=owner["tool_name"],
+                    tool_call_id=owner["tool_call_id"], fence=record.lease_fence, error_code=owner["error_code"])
+                if reserve is not None:
+                    reserve(value.size)
+                values[reference] = value
         if not references:
-            return {}
+            return values
         archive = await self._archive()
         if any(reference.root.group_id != archive.scope_id
                or reference.root.store_key != native_store_key(self.namespace, self.tenant_id)
@@ -194,7 +264,6 @@ class ToolOperationContent:
         roots = tuple(dict.fromkeys(reference.root for reference in references))
         captured = await native.capture_message_roots(roots, transaction=transaction, reserve=reserve)
         messages = dict(zip(roots, await captured(), strict=True))
-        values = {}
         for reference in references:
             raw = messages[reference.root]
             if len(raw) != 1:

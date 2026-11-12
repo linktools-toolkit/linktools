@@ -3,9 +3,12 @@
 """Exact operation receipt reconstruction from immutable published tool returns."""
 
 from dataclasses import replace
+import json
 
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
+from ..core import canonical_json_bytes
+from ..model.attachments import restore_attachment_payload, validate_attachment_payload
 from ..errors import AIError, ErrorCode
 from ..model.messages import decode_model_messages, encode_model_messages
 from ..storage import StoredPayload
@@ -28,8 +31,10 @@ def restore_native_tool_result_payload(reference: NativeToolResultReference, raw
                 or original.tool_name != "runtime"
                 or source.tool_name != reference.tool_name or source.tool_call_id != reference.tool_call_id):
             raise ValueError("invalid tool return projection")
-        result = StoredPayload.inline_bytes(encode_model_messages((
-            replace(templates[0], parts=[replace(original, content=source.content)]),)))
+        reconstructed = encode_model_messages((replace(templates[0], parts=[replace(original, content=source.content)]),))
+        result = (StoredPayload.inline_bytes(reconstructed) if reference.attachment_format is None else
+                  restore_attachment_payload(reconstructed, format=reference.attachment_format,
+                                             attachments=reference.attachment_entries()))
         if result.digest != reference.digest or result.size != reference.size:
             raise ValueError("native tool receipt checksum mismatch")
         return result
@@ -41,14 +46,32 @@ def prepare_native_tool_result(
     root: NativeMessageRoot, raw: bytes, part_index: int, payload: StoredPayload, *, operation_id: str,
 ) -> NativeToolResultReference | None:
     """Select canonical receipts whose complete bytes reconstruct from one part."""
-    if payload.kind != "inline" or payload.encoding != "base64":
+    if payload.kind != "inline" or payload.encoding not in {"base64", "json-attachments"}:
         return None
-    value = payload.decode()
-    if not isinstance(value, bytes):
-        return None
+    attachments = ()
+    attachment_format = None
     try:
+        if payload.encoding == "json-attachments":
+            manifest = payload.value
+            if manifest["format"] != "model-messages":
+                return None
+            original = manifest["content"]
+            source = json.loads(raw)
+            if (not isinstance(original, list) or len(original) != 1 or len(original[0]["parts"]) != 1
+                    or not isinstance(source, list) or len(source) != 1):
+                return None
+            original[0]["parts"][0]["content"] = source[0]["parts"][part_index]["content"]
+            value = canonical_json_bytes(original)
+            validate_attachment_payload(value, payload)
+            attachment_format = manifest["format"]
+            attachments = tuple((tuple(entry["path"]), ref) for entry, ref in
+                                zip(manifest["attachments"], payload.object_refs(), strict=True))
+        else:
+            value = payload.decode()
+        if not isinstance(value, bytes):
+            return None
         messages = decode_model_messages(value)
-    except (AIError, TypeError, ValueError):
+    except (AIError, TypeError, ValueError, KeyError, IndexError):
         return None
     sources = decode_model_messages(raw)
     if (len(messages) != 1 or not isinstance(messages[0], ModelRequest) or len(messages[0].parts) != 1
@@ -69,9 +92,9 @@ def prepare_native_tool_result(
         return None
     template = encode_model_messages((replace(messages[0], parts=[replace(original, content=None)]),)).decode("utf-8")
     reference = NativeToolResultReference(root, part_index, source.tool_name, source.tool_call_id,
-                                         template, payload.digest, payload.size)
+                                         template, payload.digest, payload.size, attachment_format, attachments)
     restored = restore_native_tool_result_payload(reference, raw)
-    return reference if restored.decode() == value else None
+    return reference if canonical_json_bytes(restored.to_json()) == canonical_json_bytes(payload.to_json()) else None
 
 
 __all__ = ["prepare_native_tool_result", "restore_native_tool_result_payload"]

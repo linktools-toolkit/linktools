@@ -5,6 +5,7 @@
 import hashlib
 import json
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 
 from ..steps import validate_native_store_key
 from ..core import JsonValue, canonical_json_bytes
@@ -13,9 +14,10 @@ from ..storage import ObjectRef, StoredPayload
 from ._archive import (ArchiveRoot, ArchiveSlice, ContentRecord, ImmutableSequenceNode,
                        archive_scope_parts, archive_scope_token, decode_archive_scope,
                        validate_archive_content_identity, validate_archive_group_id)
-from ._message_root import NativeMessageRoot, NativeMessageSlice
+from ._message_root import NativeMessageRoot, NativeMessageSlice, NativeToolResultReference
+from ._native_tool_error import NativeToolErrorReference
 from ._payload import decode_payload_bytes
-from .codec import tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference
+from .codec import tool_payload_slots, tool_payload_reference, map_tool_payload_slots, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -207,6 +209,47 @@ def iter_native_message_roots(value: object) -> Iterator[NativeMessageRoot]:
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from iter_native_message_roots(item)
+
+
+def iter_native_event_references(value: object) -> Iterator[NativeToolErrorReference]:
+    """Read fixed event locators only from declared tool payload slots."""
+    if isinstance(value, Mapping):
+        for _name, payload in tool_payload_slots(value):
+            reference = native_tool_error_reference(payload)
+            if reference is not None:
+                yield reference
+        if value.get("$dataclass") in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
+            return
+        for item in value.values():
+            yield from iter_native_event_references(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from iter_native_event_references(item)
+
+
+def rekey_native_event_references(
+    value: JsonValue, groups: Mapping[str, str],
+    stores: Mapping[tuple[str, bytes], bytes] | None = None,
+) -> JsonValue:
+    """Move typed event locators without interpreting opaque user JSON."""
+    if isinstance(value, dict):
+        if value.get("$dataclass") in {"stored_payload", "stored_user_input", "runtime_payload_ref", "object_ref"}:
+            return value
+        if value.get("$dataclass") == "tool_operation":
+            def rewrite(payload: Mapping) -> JsonValue:
+                reference = native_tool_error_reference(payload)
+                if reference is None:
+                    return payload
+                store = reference.store_key if stores is None else stores.get((reference.group_id, reference.store_key))
+                if reference.group_id not in groups or store is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                moved = replace(reference, group_id=groups[reference.group_id], store_key=store)
+                return {**payload, "fields": {**payload["fields"], "content": moved.to_json()}}
+            value = map_tool_payload_slots(value, rewrite)
+        return {key: rekey_native_event_references(item, groups, stores) for key, item in value.items()}
+    if isinstance(value, list):
+        return [rekey_native_event_references(item, groups, stores) for item in value]
+    return value
 
 
 def require_known_retention(value: object, *, state: object = None) -> None:
@@ -643,7 +686,16 @@ def rekey_native_message_roots(
                 reference = native_tool_arguments_reference(payload) or native_tool_result_reference(payload)
                 if reference is None:
                     return payload
-                content = payload["fields"]["content"]
+                if isinstance(reference, NativeToolResultReference) and reference.attachments:
+                    def rekey_file(ref: ObjectRef) -> ObjectRef:
+                        if not ref.key.startswith("v1/archive/"):
+                            return ref
+                        parts = ref.key[len("v1/archive/"):].split("/", 1)
+                        if len(parts) != 2 or parts[0] not in groups:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        return ObjectRef(ref.store_id, f"v1/archive/{groups[parts[0]]}/{parts[1]}", ref.digest, ref.size)
+                    reference = reference.map_object_refs(rekey_file)
+                content = reference.to_json()
                 marker = "$native_tool_arguments" if "$native_tool_arguments" in content else "$native_tool_result"
                 return {**payload, "fields": {**payload["fields"], "content": {
                     **content, marker: rewrite(reference.root).to_json(),
@@ -740,6 +792,7 @@ def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValu
 
 __all__ = [
     "ArchiveClosure", "NativeMessageClosure", "iter_archive_roots", "iter_archive_content_refs",
+    "iter_native_event_references", "rekey_native_event_references",
     "iter_native_message_roots", "rekey_archive_roots", "rekey_native_message_roots",
     "require_known_retention", "validate_native_message_content",
 ]

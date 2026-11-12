@@ -502,7 +502,7 @@ class SqlStepStore:
             for event in group:
                 row = self._run_values(event.run_id) | self._event_values(event)
                 known = source if source is not None and source.run_id == event.run_id else self._confirmed_runs.get(event.run_id)
-                if event is started:
+                if event is started or event.kind == "tool_call_failed" and event.idempotency_key is not None:
                     row["body_sha256"] = _digest(self._started_body(event))
                     row["fields_sha256"] = _digest(self._started_fields_body(event))
                 row["run_fields"] = 0
@@ -533,12 +533,19 @@ class SqlStepStore:
                     table = self._table("events")
                     identities = or_(*((table.c.run_id == row["run_id"])
                                       & (table.c.idempotency_key == row["idempotency_key"]) for row in batch))
-                    found = (await session.execute(select(table.c.run_id, table.c.idempotency_key, table.c.store_key).where(
+                    found = (await session.execute(select(table.c.run_id, table.c.idempotency_key, table.c.store_key,
+                                                          table.c.body_sha256, table.c.fields_sha256).where(
                         table.c.store_locator == self._store_locator, identities,
                     ))).all()
                     expected = {(row["run_id"], row["idempotency_key"]) for row in batch}
                     if ({(row.run_id, row.idempotency_key) for row in found} != expected
                             or any(row.store_key != self._store_key for row in found)):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    proofs = {(row["run_id"], row["idempotency_key"]):
+                              (row["body_sha256"], row["fields_sha256"])
+                              for row in batch if row.get("body_sha256") is not None}
+                    if any((row.body_sha256, row.fields_sha256) != proofs[(row.run_id, row.idempotency_key)]
+                           for row in found if (row.run_id, row.idempotency_key) in proofs):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _write_lifecycle_event(
@@ -557,6 +564,44 @@ class SqlStepStore:
         # without body proof fails closed rather than adding a speculative read.
         await self._write_events(session, (event,), source=source, started=event)
         return self._with_terminal(source, event)
+
+    async def read_fixed_events(
+        self, keys: Sequence[tuple[str, str]], *, transaction: SqlStateRowReader,
+    ) -> dict[tuple[str, str], StepEvent]:
+        """Read keyed sources and inherited run fields in the owner's actual scope."""
+        from sqlalchemy import and_, or_, select
+
+        if not isinstance(transaction, SqlStateRowReader):
+            raise TypeError("native event reads require a SQL state scope")
+        keys = tuple(dict.fromkeys(keys))
+        for run_id, replay_key in keys:
+            validate_resource_id(run_id)
+            if validate_native_replay_key(replay_key) is None:
+                raise ValueError("fixed events require keyed identities")
+        table, runs = self._table("events"), self._table("runs")
+        result = {}
+        for offset in range(0, len(keys), _BATCH_SIZE):
+            batch = keys[offset:offset + _BATCH_SIZE]
+            query = select(*table.c, *(column.label("source_run_" + column.name) for column in runs.c)).select_from(
+                table.outerjoin(runs, and_(runs.c.store_locator == table.c.store_locator,
+                    runs.c.store_key == table.c.store_key, runs.c.run_id == table.c.run_id)),
+            ).where(table.c.store_locator == self._store_locator, table.c.store_key == self._store_key,
+                or_(*(and_(table.c.run_id == run_id,
+                            table.c.idempotency_key == encode_native_replay_key(replay_key))
+                       for run_id, replay_key in batch)))
+            for row in await transaction.read_sql_rows(self._context, query):
+                run = {column.name: row["source_run_" + column.name] for column in runs.c}
+                try:
+                    event = self.decode_started_row(row, expected_store_key=self._store_key, run=run)
+                except (ValueError, TypeError, KeyError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                key = event.run_id, event.idempotency_key
+                if key not in batch or key in result:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result[key] = event
+        if len(result) != len(keys):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result
 
     async def list_events(
         self, *, run_id: str, started_receipt: StepWriteReceipt | None = None,
@@ -651,8 +696,8 @@ class SqlStepStore:
 
     @classmethod
     def _started_body(cls, event: StepEvent) -> str:
-        if (event.kind != "run_started" and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
-            raise ValueError("managed source requires a keyed lifecycle event")
+        if (event.kind not in {"run_started", "tool_call_failed"} and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
+            raise ValueError("fixed source requires a keyed lifecycle or tool failure event")
         values = cls._event_values(event)
         if isinstance(event, NativeLifecycleEvent):
             cls.decode_event(values)
@@ -660,8 +705,8 @@ class SqlStepStore:
 
     @classmethod
     def _started_fields_body(cls, event: StepEvent) -> str:
-        if (event.kind != "run_started" and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
-            raise ValueError("managed source requires a keyed lifecycle event")
+        if (event.kind not in {"run_started", "tool_call_failed"} and not isinstance(event, NativeLifecycleEvent)) or event.idempotency_key is None:
+            raise ValueError("fixed source requires a keyed lifecycle or tool failure event")
         validate_native_replay_key(event.idempotency_key)
         if event.tool_call_id is not None:
             validate_resource_id(event.tool_call_id)

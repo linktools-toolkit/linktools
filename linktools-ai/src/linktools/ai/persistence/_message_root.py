@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Immutable references to canonical native message occurrence ranges."""
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 
 from ..core import JsonValue
+from ..storage import ObjectRef
 from ..steps import validate_native_store_key, encode_native_store_key, decode_native_store_key
 
 
@@ -207,6 +208,8 @@ class NativeToolResultReference:
     template: str
     digest: str
     size: int
+    attachment_format: str | None = None
+    attachments: tuple[tuple[tuple[str | int, ...], ObjectRef], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
@@ -218,18 +221,62 @@ class NativeToolResultReference:
                (self.tool_name, self.tool_call_id, self.template)):
             raise ValueError("native tool result identity is invalid")
 
+        if self.attachment_format is None:
+            if self.attachments:
+                raise ValueError("attachment format is required")
+        elif self.attachment_format != "model-messages" or not self.attachments:
+            raise ValueError("invalid tool receipt attachment format")
+        if not isinstance(self.attachments, tuple):
+            raise ValueError("attachment entries must be immutable")
+        paths = set()
+        for path, reference in self.attachments:
+            if (not isinstance(path, tuple) or not path or path in paths
+                    or any(not isinstance(item, str) and (type(item) is not int or item < 0) for item in path)
+                    or not isinstance(reference, ObjectRef)):
+                raise ValueError("invalid tool receipt attachment entry")
+            paths.add(path)
+
+    def object_refs(self) -> tuple[ObjectRef, ...]:
+        return tuple(reference for _path, reference in self.attachments)
+
+    def attachment_entries(self) -> list[dict[str, JsonValue]]:
+        return [{"path": list(path), "ref": {"store_id": ref.store_id, "key": ref.key,
+                "digest": ref.digest, "size": ref.size}} for path, ref in self.attachments]
+
+    def map_object_refs(self, mapper: Callable[[ObjectRef], ObjectRef]) -> "NativeToolResultReference":
+        entries = []
+        for path, ref in self.attachments:
+            target = mapper(ref)
+            if (target.digest, target.size) != (ref.digest, ref.size):
+                raise ValueError("relocated receipt attachments must keep their bytes")
+            entries.append((path, target))
+        return replace(self, attachments=tuple(entries))
+
     def to_json(self) -> dict[str, JsonValue]:
-        return {"$native_tool_result": self.root.to_json(), "part_index": self.part_index,
-                "tool_name": self.tool_name, "tool_call_id": self.tool_call_id,
-                "template": self.template, "digest": self.digest, "size": self.size}
+        result = {"$native_tool_result": self.root.to_json(), "part_index": self.part_index,
+                  "tool_name": self.tool_name, "tool_call_id": self.tool_call_id,
+                  "template": self.template, "digest": self.digest, "size": self.size}
+        if self.attachment_format is not None:
+            result.update(attachment_format=self.attachment_format, attachments=self.attachment_entries())
+        return result
 
     @classmethod
     def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeToolResultReference":
-        if not isinstance(value, Mapping) or set(value) != {
-                "$native_tool_result", "part_index", "tool_name", "tool_call_id", "template", "digest", "size"}:
+        required = {"$native_tool_result", "part_index", "tool_name", "tool_call_id", "template", "digest", "size"}
+        if (not isinstance(value, Mapping) or set(value) not in (required, required | {"attachment_format", "attachments"})):
             raise ValueError("native tool result wire is invalid")
+        entries = value.get("attachments", [])
+        if not isinstance(entries, list):
+            raise ValueError("native tool attachment entries are invalid")
+        attachments = []
+        for entry in entries:
+            if (not isinstance(entry, Mapping) or set(entry) != {"path", "ref"} or not isinstance(entry["path"], list)
+                    or not isinstance(entry["ref"], Mapping) or set(entry["ref"]) != {"store_id", "key", "digest", "size"}):
+                raise ValueError("native tool attachment entry is invalid")
+            attachments.append((tuple(entry["path"]), ObjectRef(**entry["ref"])))
         return cls(NativeMessageRoot.from_json(value["$native_tool_result"]), value["part_index"],
-                   value["tool_name"], value["tool_call_id"], value["template"], value["digest"], value["size"])
+                   value["tool_name"], value["tool_call_id"], value["template"], value["digest"], value["size"],
+                   value.get("attachment_format"), tuple(attachments))
 
 
 @dataclass(frozen=True, slots=True)

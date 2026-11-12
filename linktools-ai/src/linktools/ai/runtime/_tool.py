@@ -37,7 +37,7 @@ from ..storage import (
 from ..model.messages import decode_model_messages, encode_model_messages
 from ..persistence.objects import ObjectKeyFactory, put_runtime_object, read_runtime_object
 from ..model.attachments import read_attachment_payload, store_attachment_payload
-from ..persistence import PersistenceDomain
+from ..persistence import NativeToolErrorReference, PersistenceDomain, SqlStepStore
 from ..persistence.state import Observed
 from ..persistence.contracts import ToolOperationAdmission
 from ..spec import CapabilityRef
@@ -135,6 +135,10 @@ from ..persistence.contracts import ToolStateRepository
 
 class _ToolOperationRuntimeRepository(Protocol):
     async def observe_operation(self, tool_operation_id: str, *, tenant_id: str) -> Observed[ToolOperationRecord] | None: ...
+
+    async def share_published_error(
+        self, tool_operation_id: str, *, tenant_id: str, source: NativeToolErrorReference,
+    ) -> None: ...
 
     async def record_tool_effect(
         self, effect: ToolEffectRecord, *, execution_id: str,
@@ -395,6 +399,15 @@ class RuntimeToolOperationBridge:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             cancelled = False
         await self._publish_native_event(event)
+        native = self._native_step_store
+        source = native.backup_source if isinstance(native, SqlStepStore) else None
+        if error_payload is not None and source is not None:
+            await self._repository.share_published_error(tool_operation_id, tenant_id=tenant_id,
+                source=NativeToolErrorReference(source.group_id, source.store_key, event.run_id, event.idempotency_key))
+            current = await self._repository.observe_operation(tool_operation_id, tenant_id=tenant_id)
+            if current is None or current.value != receipt.value:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            receipt = current
         return receipt, cancelled
 
     async def _publish_native_event(self, event: StepEvent, *, readback: bool = False) -> None:
