@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Execution views keep large content out of metadata and authorization reads."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, Princip
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionManager, TaskExecutionService, project_execution_view
 from linktools.ai.persistence import Persistence, PersistenceDomain
-from linktools.ai.persistence._archive import ContentArchive
+from linktools.ai.persistence._archive import ContentArchive, ContentRecord
 from linktools.ai.persistence.commands import StoredExecutionManagementAdapter
 from linktools.ai.storage import StoredPayload
 
@@ -33,14 +34,20 @@ async def test_metadata_reads_do_not_fetch_large_execution_payloads(
         child = replace(parent, execution_id="child", parent_execution_id="execution",
                         parent_invocation_id="invocation", lineage_kind=ExecutionLineageKind.SUBAGENT)
         await state.execution.executions.create_execution(child)
-        read_contents = ContentArchive.read_contents
+        read_content = ContentArchive._read_content
+        decoded = []
 
-        async def binding_only(self, identities, *, codec, **kwargs):
-            if codec != "execution-binding":
-                raise AssertionError("Metadata read fetched execution payload content")
-            return await read_contents(self, identities, codec=codec, **kwargs)
+        async def metadata_only(self: ContentArchive, content: ContentRecord) -> bytes:
+            raw = await read_content(self, content)
+            if content.codec not in {"execution-binding", "runtime-policy"}:
+                value = json.loads(raw)
+                if (content.codec != "execution-payload" or value.get("$dataclass") != "result_record"
+                        or value["fields"]["output"] is not None):
+                    raise AssertionError("Metadata read fetched execution payload content")
+            decoded.append(content.codec)
+            return raw
 
-        monkeypatch.setattr(ContentArchive, "read_contents", binding_only)
+        monkeypatch.setattr(ContentArchive, "_read_content", metadata_only)
         repository = state.execution.executions
         assert (await repository.get_header("execution", tenant_id="tenant")).owner_principal_id is None
         assert (await repository.get_header_fresh("execution", tenant_id="tenant")).owner_principal_id is None
@@ -48,6 +55,7 @@ async def test_metadata_reads_do_not_fetch_large_execution_payloads(
         assert await service.inspect("execution", principal=_PRINCIPAL) == project_execution_view(parent)
         assert await service.list_children("execution", principal=_PRINCIPAL) == (project_execution_view(child),)
         assert (await repository.get_view_fresh("execution", tenant_id="tenant"))[1] == project_execution_view(parent)
+        assert set(decoded) == {"execution-binding", "runtime-policy", "execution-payload"}
         with pytest.raises(AssertionError, match="Metadata read fetched execution payload content"):
             await repository.get_fresh("execution", tenant_id="tenant")
     finally:
@@ -127,7 +135,7 @@ async def test_task_wait_polls_metadata_without_loading_active_payloads(
 
 
 @pytest.mark.parametrize("backend", ("local_sqlite", "sqlite"))
-async def test_cold_children_snapshot_uses_summary_without_content_reads(
+async def test_cold_children_snapshot_reads_fixed_configuration_without_execution_bodies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
     state = Persistence(_storage(backend, tmp_path))
@@ -145,13 +153,20 @@ async def test_cold_children_snapshot_uses_summary_without_content_reads(
     reader = Persistence(_storage(backend, tmp_path))
     await reader.initialize(namespace="cold-metadata", tenant_id="tenant", read_only=True)
     try:
-        async def reject_content(*args, **kwargs):
-            raise AssertionError("metadata must not hydrate binding or payload bodies")
+        read_content = ContentArchive._read_content
+        decoded = []
 
-        monkeypatch.setattr(ContentArchive, "read_contents", reject_content)
+        async def configuration_only(self: ContentArchive, content: ContentRecord) -> bytes:
+            if content.codec not in {"execution-binding", "runtime-policy"}:
+                raise AssertionError("child metadata must not hydrate execution payload bodies")
+            decoded.append(content.codec)
+            return await read_content(self, content)
+
+        monkeypatch.setattr(ContentArchive, "_read_content", configuration_only)
         assert await _service(reader).list_children("execution", principal=_PRINCIPAL) == (
             project_execution_view(child),
         )
+        assert set(decoded) == {"execution-binding", "runtime-policy"}
     finally:
         await reader.close()
 
