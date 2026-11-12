@@ -5,7 +5,7 @@
 import hashlib
 import json
 from collections import Counter
-from weakref import ref
+from weakref import WeakKeyDictionary, ref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 
@@ -20,7 +20,7 @@ from ._archive import archive_content_scope, archive_content_identity, ContentAr
 from ._payload import decode_payload_bytes
 from .codec import (_execution_binding_summary, binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
     encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, map_execution_payload_slots)
-from .state import StateStorageGroup, StateStore, StoredRecord, active_state_scope
+from .state import StateStorageGroup, StateStore, StateTransaction, StoredRecord, active_state_scope
 
 BINDING_CODEC = "execution-binding"
 PAYLOAD_CODEC = "execution-payload"
@@ -161,6 +161,7 @@ class ExecutionContent:
         self._payload_encodings: dict[int, tuple[ref, str, bytes]] = {}
         self._binding_encodings: dict[int, tuple[ref, str, bytes]] = {}
         self._projections: dict[int, tuple[ref, StoredRecord]] = {}
+        self._binding_reads: WeakKeyDictionary[StateTransaction, dict[str, tuple[ContentRecord, bytes]]] = WeakKeyDictionary()
 
     def enable_sharing(self) -> None:
         """Allow immutable Execution content to be prepared at its next write boundary."""
@@ -227,9 +228,39 @@ class ExecutionContent:
         def reserve_content(identity: str, size: int) -> None:
             if reserve is not None:
                 reserve(counts[identity] * size)
-        contents = dict(zip(identities, await archive.read_contents(
-            identities, codec=BINDING_CODEC, reserve=reserve_content if reserve is not None else None,
-        )))
+        active = active_state_scope()
+        transaction = None if active is None else active.transactions.get(archive.store)
+        cached = None
+        if transaction is not None:
+            try:
+                cached = self._binding_reads.setdefault(transaction, {})
+            except TypeError:
+                # Custom transaction objects need not support weak references.
+                pass
+        if cached is None:
+            contents = dict(zip(identities, await archive.read_contents(
+                identities, codec=BINDING_CODEC, reserve=reserve_content if reserve is not None else None,
+            )))
+        else:
+            # Cached bytes never stand in for source existence or integrity.
+            # Recheck current metadata even within a writable transaction, where
+            # an earlier read may precede deletion or replacement of content.
+            records_by_id = dict(zip(identities, await archive.content_records(identities)))
+            contents = {}
+            missing = []
+            for identity, content in records_by_id.items():
+                if content.codec != BINDING_CODEC or content.payload is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                reserve_content(identity, content.raw_size)
+                previous = cached.get(identity)
+                if previous is not None and previous[0] == content:
+                    contents[identity] = previous[1]
+                else:
+                    missing.append(identity)
+            raws = await archive.read_contents(missing, codec=BINDING_CODEC) if missing else ()
+            for identity, raw in zip(missing, raws, strict=True):
+                contents[identity] = raw
+                cached[identity] = records_by_id[identity], raw
         return tuple(record if reference is None else expand_binding(record, contents[reference[2]])
                      for record, reference in zip(records, references))
 

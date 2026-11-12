@@ -555,3 +555,65 @@ def test_archived_binding_view_rejects_invalid_declared_identity(kind: str, iden
     with pytest.raises(AIError) as error:
         decode_execution_view(data, tenant_id="tenant")
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_binding_body_is_decoded_once_per_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    from linktools.ai.persistence._archive import ContentArchive
+
+    async with Persistence.open("bindings", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
+        repository = state.execution.executions
+        execution = _large_execution()
+        await repository.create_execution(execution)
+        calls = []
+        original = ContentArchive._read_content
+
+        async def read(self, content):
+            if content.codec == "execution-binding":
+                calls.append(content.identity)
+            return await original(self, content)
+
+        monkeypatch.setattr(ContentArchive, "_read_content", read)
+
+        async def read_twice(transaction):
+            first = await repository.get_in_transaction(transaction, "execution", tenant_id="tenant")
+            second = await repository.get_in_transaction(transaction, "execution", tenant_id="tenant")
+            assert first.binding == second.binding == execution.binding
+
+        await repository.state_store.mutate(read_twice)
+        assert len(calls) == 1
+        await repository.state_store.mutate(read_twice)
+        assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("corruption", ("missing", "body"))
+async def test_binding_body_reuse_rechecks_current_source(
+    tmp_path: Path, backend: str, corruption: str,
+) -> None:
+    async with Persistence.open("bindings", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
+        repository = state.execution.executions
+        await repository.create_execution(_large_execution())
+        group = repository.state_store.storage_group
+        _, archive = await group.open_archive()
+
+        async def corrupt_after_read(transactions):
+            owner = transactions.transaction(repository.state_store)
+            await repository.get_in_transaction(owner, "execution", tenant_id="tenant")
+            contents = transactions.transaction(archive)
+            records = await contents.list_records(RecordQuery(kind="archive_content"))
+            binding = next(record for record in records if record.data["codec"] == "execution-binding")
+            if corruption == "missing":
+                await contents.delete_record(binding.key)
+            else:
+                await contents.replace_record(replace(binding, payload_bytes=b"corrupt",
+                    storage_revision=binding.storage_revision + 1), expected_storage_revision=binding.storage_revision)
+            with pytest.raises(AIError) as invalid:
+                await repository.get_in_transaction(owner, "execution", tenant_id="tenant")
+            assert invalid.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+        await group.mutate((repository.state_store, archive), corrupt_after_read)
