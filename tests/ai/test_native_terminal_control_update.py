@@ -29,20 +29,21 @@ def _terminal() -> tuple[ExecutionRecord, StoredRecord]:
         result=ResultRecord(StoredPayload.inline_json("answer"), StopReason.END_TURN, UsageMetrics(), initial.updated_at))
     record = project_record(namespace="test", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
         kind="execution", identity=(value.execution_id,), value=value)
-    fields = record.data["value"]["payload"]["fields"]
+    data = deepcopy(dict(record.data))
+    fields = data["value"]["payload"]["fields"]
     root = NativeMessageRoot("source", native_store_key("test", "tenant"),
         (NativeMessageSlice("a" * 64, 1, 0, 1),))
-    fields["stored_user_input"]["fields"]["content"] = NativeUserInputReference(root, 0).to_json()
-    fields["result"]["fields"]["output"]["fields"]["content"] = NativeTextReference(root).to_json()
+    fields["stored_user_input"]["fields"] = {"content": NativeUserInputReference(root, 0).to_json()}
+    fields["result"]["fields"]["output"]["fields"] = {"content": NativeTextReference(root).to_json()}
     assert native_user_input_reference(fields["stored_user_input"]) is not None
     assert native_text_reference(fields["result"]["fields"]["output"]) is not None
-    return value, record
+    return value, replace(record, data=data)
 
 
 @pytest.mark.asyncio
 async def test_unchanged_native_terminal_control_does_not_read_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
     value, current = _terminal()
-    changed = deepcopy(current.data)
+    changed = deepcopy(dict(current.data))
     changed["value"]["payload"]["fields"]["retention_closed"] = True
     candidate = replace(current, data=changed, storage_revision=current.storage_revision + 1)
     content = ExecutionContent(InMemoryStateStore(), namespace="test", tenant_id="tenant")
@@ -60,7 +61,7 @@ async def test_changed_native_terminal_uses_previous_source_validation(
     monkeypatch: pytest.MonkeyPatch, changed_slot: str,
 ) -> None:
     value, current = _terminal()
-    changed = deepcopy(current.data)
+    changed = deepcopy(dict(current.data))
     fields = changed["value"]["payload"]["fields"]
     if changed_slot == "root":
         fields["result"]["fields"]["output"]["fields"]["content"]["$native_text"]["group_id"] = "other"

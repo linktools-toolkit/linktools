@@ -154,8 +154,12 @@ async def test_cold_history_reads_share_one_native_join_and_keep_raw_cache(tmp_p
             assert await archive.get_agent_run(agent_run_id="run") == run
             assert len(statements) == 1
             statements.clear()
-            assert (await archive.capture_history(("run",)))["run"].run == run
-            assert len(statements) == 2
+            captured = (await archive.capture_history(("run",)))["run"]
+            assert captured.run == run
+            assert captured.event_count == 1 and captured.model_interaction_count == 0
+            assert len(statements) == 1
+            assert "ai_step_run_admissions" in statements[0]
+            assert "event_high_water" in statements[0] and "interaction_high_water" in statements[0]
             statements.clear()
             assert await archive.read_model_interactions_with_run(agent_run_id="run") == (run, [])
             assert len(statements) == 2
@@ -454,7 +458,8 @@ async def test_checkpoint_projection_reuses_its_run_read_for_terminal_head(tmp_p
             assert await archive.get_agent_run(agent_run_id="run") == run
             # The untouched interaction sequence is the only remaining read;
             # run/head/projection records must all reuse the write transaction.
-            assert len(statements) == 1 and "ai_state_counters" in statements[0]
+            assert len(statements) == 1 and "ai_step_run_admissions" in statements[0]
+            assert "interaction_high_water" in statements[0] and "payload_json" not in statements[0]
 
         engine = archive.state_store.context.engine
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
@@ -521,7 +526,8 @@ async def test_native_join_batches_full_record_keys_within_bind_budget(dialect_n
         def cached_records(self, requested):
             return {}
 
-        async def read_joined_records(self, context, statement, *, keys=()):
+        async def read_joined_records(self, context, statement, *, keys=(), sequence_keys=()):
+            assert sequence_keys == ()
             compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
             parameters = compiled.params if compiled.positiontup is None else compiled.positiontup
             assert len(parameters) <= 999

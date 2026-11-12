@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence._memory import InMemoryStateStore
 from linktools.ai.persistence._run_counters import RUN_COUNTER_COLUMNS, run_counter_streams
-from linktools.ai.persistence.state import StoredRecord, StateTransaction, record_key, stream_key
+from linktools.ai.persistence.state import StoredRecord, StateTransaction, record_key, stream_key, state_store_key
 
 
 def _admission(run: str = "run") -> StoredRecord:
@@ -19,7 +19,7 @@ def _admission(run: str = "run") -> StoredRecord:
 
 @pytest.mark.asyncio
 async def test_memory_run_counters_follow_admission_cas_and_release() -> None:
-    store = InMemoryStateStore()
+    store = InMemoryStateStore(store_key=state_store_key("run-counter", "tenant", "trace"))
     await store.initialize()
     try:
         record = _admission()
@@ -83,8 +83,8 @@ async def test_memory_run_counters_follow_admission_cas_and_release() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_run_counter_mixed_reservation_rollback_and_logical_restore() -> None:
-    store = InMemoryStateStore()
-    restored = InMemoryStateStore()
+    store = InMemoryStateStore(store_key=state_store_key("run-counter", "tenant", "trace"))
+    restored = InMemoryStateStore(store_key=state_store_key("run-counter", "tenant", "trace"))
     await store.initialize()
     await restored.initialize()
     try:

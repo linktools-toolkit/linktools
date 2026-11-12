@@ -92,7 +92,9 @@ class _MemoryTransaction:
         validate_record: Callable[[StoredRecord], None] = validate_record_identity,
         record_values: Callable[[], Iterator[StoredRecord]] | None = None,
         run_counters: Mapping[bytes, tuple[int | None, ...]] | None = None,
+        store_key: bytes = b"",
     ) -> None:
+        self._store_key = store_key
         self._validate_record = validate_record
         self._record_values = record_values
         self.records = _MemoryOverlay(records, validate=validate_record)
@@ -332,7 +334,7 @@ class _MemoryTransaction:
                 del self.facts[fact_key]
         for key in keys:
             del self.records[key]
-            if self.run_counters is not None and run_counter_streams(key):
+            if self.run_counters is not None and run_counter_streams(key, store_key=self._store_key):
                 self.run_counters[key] = (None, None, None)
             self.guarded_record_keys.discard(key)
 
@@ -404,7 +406,7 @@ class _MemoryTransaction:
 
 
     def _run_counter(self, key: bytes) -> tuple[bytes, int] | None:
-        address = None if self.run_counters is None else run_counter_address(key)
+        address = None if self.run_counters is None else run_counter_address(key, store_key=self._store_key)
         return None if address is None else (address[0], RUN_COUNTER_COLUMNS.index(address[1]))
 
     def _run_counter_value(self, owner: bytes, index: int) -> int | None:
@@ -436,7 +438,7 @@ class _MemoryTransaction:
         values = dict(self.sequences)
         if self.run_counters is not None:
             for owner in self.run_counters:
-                for index, stream in enumerate(run_counter_streams(owner)):
+                for index, stream in enumerate(run_counter_streams(owner, store_key=self._store_key)):
                     value = self._run_counter_value(owner, index)
                     if value is not None:
                         values[stream] = value

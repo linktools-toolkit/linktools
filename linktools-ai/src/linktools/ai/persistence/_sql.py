@@ -1238,7 +1238,7 @@ class _SqlTransaction:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 record = _record_from_row(row)
             if missing_sequences:
-                for key, column in zip(run_counter_streams(record.key), RUN_COUNTER_COLUMNS):
+                for key, column in zip(run_counter_streams(record.key, store_key=self._store_key), RUN_COUNTER_COLUMNS):
                     if key in missing_sequences:
                         if column not in row:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1386,7 +1386,7 @@ class _SqlTransaction:
         )
         if row is None:
             self._record_cache[key] = None
-            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key)})
+            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key, store_key=self._store_key)})
             return None
         if row is not None and row["key"] != key:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2097,7 +2097,7 @@ class _SqlTransaction:
         for key in deleted_keys:
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
-            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key)})
+            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key, store_key=self._store_key)})
         self._log_batch("delete_records", len(deleted_keys), statement_count)
 
     async def delete_record(
@@ -2137,7 +2137,7 @@ class _SqlTransaction:
             self._deleted_records = True
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
-            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key)})
+            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key, store_key=self._store_key)})
             return True
         table = self._table(record_owner_table(key, store_key=self._store_key))
         statement = delete(table).where(
@@ -2166,7 +2166,7 @@ class _SqlTransaction:
             self._deleted_records = True
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
-            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key)})
+            self._sequence_cache.update({stream: 0 for stream in run_counter_streams(key, store_key=self._store_key)})
         return result.rowcount == 1
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
@@ -2235,10 +2235,10 @@ class _SqlTransaction:
 
         unique_keys = tuple(dict.fromkeys(validate_stream_key(key) for key in keys))
         missing = tuple(key for key in unique_keys if key not in self._sequence_cache)
-        run_keys = tuple(key for key in missing if run_counter_address(key) is not None)
+        run_keys = tuple(key for key in missing if run_counter_address(key, store_key=self._store_key) is not None)
         if run_keys:
             self._sequence_cache.update(await self._read_run_sequences(run_keys))
-        missing = tuple(key for key in missing if run_counter_address(key) is None)
+        missing = tuple(key for key in missing if run_counter_address(key, store_key=self._store_key) is None)
         table = self._table("ai_state_counters")
         if missing:
             rows = (
@@ -2270,7 +2270,7 @@ class _SqlTransaction:
     async def _read_run_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
         from sqlalchemy import select
         table = self._table("ai_step_run_admissions")
-        addresses = {key: run_counter_address(key) for key in keys}
+        addresses = {key: run_counter_address(key, store_key=self._store_key) for key in keys}
         owner_keys = tuple(dict.fromkeys(address[0] for address in addresses.values() if address is not None))
         rows = []
         for offset in range(0, len(owner_keys), _RAW_KEY_BATCH_SIZE):
@@ -2303,7 +2303,7 @@ class _SqlTransaction:
         result = {}
         for row in rows:
             _validate_locators(row, "key")
-            streams = run_counter_streams(row["key"])
+            streams = run_counter_streams(row["key"], store_key=self._store_key)
             if not streams:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for key, column in zip(streams, RUN_COUNTER_COLUMNS, strict=True):
@@ -2320,7 +2320,7 @@ class _SqlTransaction:
             _row_store_key(row["store_key"])
             _validate_locators(row, "stream_key")
             key = _row_stream_key(row["stream_key"])
-            if run_counter_address(key) is not None:
+            if run_counter_address(key, store_key=self._store_key) is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values[key] = _row_nonnegative_int(row["value"])
         values.update(await self._scan_run_sequences())
@@ -2341,7 +2341,7 @@ class _SqlTransaction:
         for row in (await self._execute(query.order_by(table.c.stream_key).limit(limit))).mappings():
             _validate_locators(row, "stream_key")
             key = _row_stream_key(row["stream_key"])
-            if run_counter_address(key) is not None:
+            if run_counter_address(key, store_key=self._store_key) is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values[key] = _row_nonnegative_int(row["value"])
         table = self._table("ai_step_run_admissions")
@@ -2356,7 +2356,7 @@ class _SqlTransaction:
                 query = query.where(table.c.key >= start if inclusive else table.c.key > start)
             for row in (await self._execute(query.order_by(table.c.key).limit(limit))).mappings():
                 _validate_locators(row, "key")
-                streams = run_counter_streams(row["key"])
+                streams = run_counter_streams(row["key"], store_key=self._store_key)
                 if not streams or (after is not None and streams[index] <= after):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[streams[index]] = _row_nonnegative_int(row[column])
@@ -2383,13 +2383,13 @@ class _SqlTransaction:
             raise
 
     async def _reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
-        run_requests = {key: count for key, count in requests.items() if run_counter_address(key) is not None}
+        run_requests = {key: count for key, count in requests.items() if run_counter_address(key, store_key=self._store_key) is not None}
         if run_requests:
             from sqlalchemy import func, update
             table = self._table("ai_step_run_admissions")
             owners: dict[bytes, dict[str, object]] = {}
             for key, count in run_requests.items():
-                address = run_counter_address(key)
+                address = run_counter_address(key, store_key=self._store_key)
                 assert address is not None
                 owner, column = address
                 owners.setdefault(owner, {})[column] = func.coalesce(table.c[column], 0) + count
@@ -2453,7 +2453,7 @@ class _SqlTransaction:
             raise ValueError("expected sequence must be a non-negative integer")
         from sqlalchemy import func, update
 
-        address = run_counter_address(validate_stream_key(key))
+        address = run_counter_address(validate_stream_key(key), store_key=self._store_key)
         if address is not None:
             owner, column = address
             table = self._table("ai_step_run_admissions")
@@ -2490,12 +2490,12 @@ class _SqlTransaction:
         from sqlalchemy import delete
 
         from sqlalchemy import func, update
-        run_keys = tuple(key for key in values if run_counter_address(key) is not None)
+        run_keys = tuple(key for key in values if run_counter_address(key, store_key=self._store_key) is not None)
         if run_keys:
             table = self._table("ai_step_run_admissions")
             owners: dict[bytes, dict[str, None]] = {}
             for key in run_keys:
-                owner, column = run_counter_address(key)
+                owner, column = run_counter_address(key, store_key=self._store_key)
                 owners.setdefault(owner, {})[column] = None
             for owner, columns in sorted(owners.items()):
                 await self._execute(update(table).where(

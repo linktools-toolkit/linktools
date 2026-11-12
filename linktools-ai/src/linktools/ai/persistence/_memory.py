@@ -178,7 +178,7 @@ class InMemoryStateStorageGroup:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
             store = self._partitions.get(key)
             if store is None and create:
-                store = InMemoryStateStore(self)
+                store = InMemoryStateStore(self, store_key=key)
                 await store.initialize()
                 self._partitions[key] = store
             return store
@@ -322,6 +322,7 @@ class InMemoryStateStorageGroup:
             validate_record=store._record_owners.validate,
             record_values=store._record_owners.iter_records,
             run_counters=store._record_owners.run_counter_values,
+            store_key=store._store_key,
         )
 
     def _ensure_member(self, store: "InMemoryStateStore") -> None:
@@ -335,7 +336,8 @@ class InMemoryStateStorageGroup:
 class InMemoryStateStore:
     """Atomic process-local StateStore used by tests and volatile routes."""
 
-    def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: CacheBackend | None = None, archive: bool = False) -> None:
+    def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: CacheBackend | None = None, archive: bool = False, store_key: bytes | None = None) -> None:
+        self._store_key = b"" if store_key is None else validate_store_key(store_key)
         owners: dict[str, dict[bytes, StoredRecord]] = {name: {} for name in RECORD_OWNER_TABLES}
         self._records = owners["ai_state_records"]
         self._step_tool_operations = owners["ai_step_tool_operations"]

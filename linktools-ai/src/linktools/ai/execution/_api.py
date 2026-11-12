@@ -48,6 +48,7 @@ class _ExecutionViewSource(Protocol):
     task_deadline_at: datetime | None
     task_next_attempt_at: datetime | None
     event_seq: int
+    revision: int
     started_at: datetime | None
     result: "ResultRecord | None"
     durable_trace: bool
@@ -78,6 +79,7 @@ class ExecutionView:
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
     event_seq: int = 0
+    revision: int = 0
     started_at: datetime | None = None
     terminal_at: datetime | None = None
     durable_trace: bool = False
@@ -106,6 +108,7 @@ def project_execution_view(source: object) -> ExecutionView:
         task_deadline_at=value.task_deadline_at,
         task_next_attempt_at=value.task_next_attempt_at,
         event_seq=value.event_seq,
+        revision=value.revision,
         started_at=value.started_at,
         terminal_at=None if value.result is None else value.result.created_at,
     )

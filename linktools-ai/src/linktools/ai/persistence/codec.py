@@ -1909,6 +1909,8 @@ def decode_execution_control(value: Mapping[str, JsonValue]) -> ExecutionControl
 
 def _validate_execution_view(view: ExecutionView, summary: Mapping[str, JsonValue]) -> None:
     # Preserve the owner's invariants for fields consumed by this projection.
+    if view.revision < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if summary["kind"] == "agent":
         if view.task_attempt != 0 or view.task_deadline_at is not None or view.task_next_attempt_at is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1930,7 +1932,7 @@ def decode_execution_view(value: Mapping[str, JsonValue], *, tenant_id: str) -> 
     source, codec = _execution_projection_fields(value)
     names = ("execution_id", "status", "lineage_kind", "parent_execution_id", "root_execution_id",
              "parent_invocation_id", "session_id", "task_attempt", "task_deadline_at",
-             "task_next_attempt_at", "event_seq", "started_at", "agent_run_seq", "durable_trace", "restart_checkpoints", "created_at")
+             "task_next_attempt_at", "event_seq", "revision", "started_at", "agent_run_seq", "durable_trace", "restart_checkpoints", "created_at")
     values = {name: _execution_projection_field(source, name, codec) for name in names}
     summary = _execution_binding_summary(_execution_projection_field(source, "binding", codec))
     principal_id = _execution_projection_field(source, "principal_id", codec)

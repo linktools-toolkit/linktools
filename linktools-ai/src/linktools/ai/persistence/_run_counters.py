@@ -4,13 +4,13 @@
 
 from ._record_key import decode_key_components, encode_key_components
 from ._record_owner import RUN_COUNTER_COLUMNS
-from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, record_key, stream_key
+from .state import RECORD_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, record_key, stream_key, state_store_key
 
 _FAMILIES = ("event", "checkpoint", "interaction")
 _DOMAINS = {"trace", "checkpoint", "conversation"}
 
 
-def run_counter_address(key: bytes) -> tuple[bytes, str] | None:
+def run_counter_address(key: bytes, *, store_key: bytes | None = None) -> tuple[bytes, str] | None:
     """Recognize reserved run streams; opaque State keys keep their own owner."""
     try:
         parts = decode_key_components(key, STREAM_KEY_MAX_BYTES)
@@ -18,10 +18,16 @@ def run_counter_address(key: bytes) -> tuple[bytes, str] | None:
         return None
     if len(parts) != 6 or parts[0] != "stream" or parts[3] not in _DOMAINS or parts[4] not in _FAMILIES:
         return None
+    if store_key is not None:
+        try:
+            if store_key != state_store_key(parts[1], parts[2], parts[3]):
+                return None
+        except ValueError:
+            return None
     return record_key(parts[1], parts[2], parts[3], "agent_run", (parts[5],)), RUN_COUNTER_COLUMNS[_FAMILIES.index(parts[4])]
 
 
-def run_counter_streams(key: bytes) -> tuple[bytes, ...]:
+def run_counter_streams(key: bytes, *, store_key: bytes | None = None) -> tuple[bytes, ...]:
     """Project the three logical sequence addresses of an admission owner."""
     try:
         parts = decode_key_components(key, RECORD_KEY_MAX_BYTES)
@@ -29,6 +35,12 @@ def run_counter_streams(key: bytes) -> tuple[bytes, ...]:
         return ()
     if len(parts) != 6 or parts[0] != "record" or parts[3] not in _DOMAINS or parts[4] != "agent_run":
         return ()
+    if store_key is not None:
+        try:
+            if store_key != state_store_key(parts[1], parts[2], parts[3]):
+                return ()
+        except ValueError:
+            return ()
     return tuple(stream_key(parts[1], parts[2], parts[3], family, (parts[5],)) for family in _FAMILIES)
 
 

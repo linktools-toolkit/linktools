@@ -2784,11 +2784,9 @@ class DefaultExecutionService(TaskExecutionService):
         principal: Principal,
         idempotency_key: str | None = None,
     ) -> ExecutionHandle:
-        execution = await self.manager.load_view_authorized(
-            execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_RECOVER,
-        )
+        read = (self.manager.load_view_authorized if type(self._state.executions) is ExecutionRepositoryImpl
+                else self.load_authorized)
+        execution = await read(execution_id, principal, AuthorizationAction.EXECUTION_RECOVER)
         if idempotency_key is None:
             if execution.status not in {
                 ExecutionStatus.RECOVERY_REQUIRED,

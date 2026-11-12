@@ -12,7 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage
 from linktools.ai.persistence._run_counters import run_counter_address, run_counter_streams
 from linktools.ai.persistence.snapshots import SnapshotLimits
-from linktools.ai.persistence.state import StateTransaction, stream_key
+from linktools.ai.persistence.state import StateTransaction, stream_key, state_store_key
 from linktools.ai.storage import InMemoryObjectStore
 
 from .test_memory_run_counter_owner import _admission
@@ -22,7 +22,9 @@ from .test_native_text_result_runtime import _prepare, _publish
 
 @pytest.mark.asyncio
 async def test_sql_admission_counters_cas_rollback_delete_and_global_pages(tmp_path: Path) -> None:
-    async with _open_store("sql", tmp_path) as store:
+    async with _open_store("sql", tmp_path) as bare:
+        store = await bare.storage_group.open_partition(state_store_key("run-counter", "tenant", "trace"), create=True)
+        assert store is not None
         record = _admission()
         event, checkpoint, interaction = run_counter_streams(record.key)
         await store.mutate(lambda tx: tx.insert_record(record))
@@ -115,7 +117,9 @@ def test_run_counter_cursor_mapping_preserves_arbitrary_binary_order() -> None:
 async def test_sql_run_counter_pages_bound_each_physical_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from linktools.ai.persistence._sql import _SqlTransaction
     from linktools.ai.persistence.state import record_key
-    async with _open_store("sql", tmp_path) as store:
+    async with _open_store("sql", tmp_path) as bare:
+        store = await bare.storage_group.open_partition(state_store_key("a", "tenant", "trace"), create=True)
+        assert store is not None
         records = tuple(replace(_admission(run), key=record_key(namespace, "tenant", domain, "agent_run", (run,)))
             for namespace, domain, run in (("a", "trace", "one"), ("long", "checkpoint", "two"),
                                             ("é", "conversation", "three")))
@@ -142,3 +146,28 @@ async def test_sql_run_counter_pages_bound_each_physical_source(tmp_path: Path, 
             expected = dict(tuple((key, value) for key, value in all_values.items() if after is None or key > after)[:2])
             assert actual == expected
             assert 1 <= len(reads) <= 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sql"))
+async def test_run_counter_routing_requires_matching_step_partition(backend: str, tmp_path: Path) -> None:
+    async with _open_store(backend, tmp_path) as bare:
+        store = await bare.storage_group.open_partition(
+            state_store_key("run-counter", "tenant", "trace"), create=True,
+        )
+        assert store is not None
+        owned = stream_key("run-counter", "tenant", "trace", "event", ("run",))
+        foreign = tuple(stream_key(namespace, tenant, domain, "event", ("run",))
+                        for namespace, tenant, domain in (("other", "tenant", "trace"),
+                            ("run-counter", "other", "trace"), ("run-counter", "tenant", "checkpoint")))
+        # A generic State owner accepts all legal stream tuples without Step admissions.
+        assert await bare.mutate(lambda tx: tx.reserve_sequence(owned, 1)) == 1
+        with pytest.raises(AIError) as caught:
+            await store.mutate(lambda tx: tx.reserve_sequence(owned, 1))
+        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await store.mutate(lambda tx: tx.reserve_sequences(dict.fromkeys(foreign, 2))) == dict.fromkeys(foreign, 2)
+        await store.mutate(lambda tx: tx.insert_record(_admission()))
+        assert await store.mutate(lambda tx: tx.reserve_sequence(owned, 3)) == 3
+        await store.mutate(lambda tx: tx.delete_record(_admission().key))
+        assert await store.read(lambda tx: tx.scan_sequences()) == dict(sorted(dict.fromkeys(foreign, 2).items()))
+        assert await bare.read(lambda tx: tx.get_sequence(owned)) == 1

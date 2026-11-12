@@ -162,7 +162,8 @@ async def materialize_runtime_storage(
         cache = selected if isinstance(selected, CacheBackend) else None
         store: StateStore
         if isinstance(resource, MemoryResource):
-            store = InMemoryStateStore(resource.group, cache=cache)
+            store = InMemoryStateStore(resource.group, cache=cache,
+                                       store_key=state_store_key(namespace, tenant_id, domain.value))
         else:
             store = SqlStateStore(
                 resource.context.engine,
