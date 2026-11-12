@@ -215,3 +215,38 @@ async def test_native_inspection_discards_observed_owner_before_atomic_hydration
         # that snapshot must yield absence, never hydrate the obsolete owner.
         assert await repository.get("execution", tenant_id="tenant") is None
         assert observations == 1
+
+
+@pytest.mark.asyncio
+async def test_native_equality_check_reads_only_native_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.persistence._archive import ContentArchive
+
+    async with Persistence.open("native-result", tenant_id="tenant",
+            storage=PersistenceStorage.sqlite(tmp_path / "native-only.db")) as state:
+        commands, commit, current, checkpoint = await _prepare(state, "source", "source")
+        await _publish(commands, commit, current, checkpoint)
+        repository = state.execution.executions
+        value = await repository.get_fresh("execution", tenant_id="tenant")
+        raw = await repository.state_store.read_record(repository.execution_record_key("execution"))
+
+        async def reject_unrelated(*args: object, **kwargs: object) -> object:
+            raise AssertionError("Native equality must not hydrate unrelated templates or input")
+
+        monkeypatch.setattr(ContentArchive, "read_contents", reject_unrelated)
+        async def encode(_transaction: StateTransaction) -> object:
+            return await repository._execution_content.encode(value, previous=raw)
+
+        encoded = await repository.state_store.mutate(encode)
+        before = tuple((path, reference) for path, payload in execution_payload_slots(decode_envelope(raw.data).value["payload"])
+                       if (reference := native_text_reference(payload)) is not None)
+        after = tuple((path, reference) for path, payload in execution_payload_slots(encoded)
+                      if (reference := native_text_reference(payload)) is not None)
+        assert before and after == before
+        # The narrow path still authenticates source bytes on every transaction.
+        async with repository.state_store.storage_group.context.engine.begin() as connection:
+            await connection.execute(sql_text(
+                "UPDATE ai_step_messages SET message = :body WHERE store_key = :store"),
+                {"body": b"corrupt", "store": native_store_key("native-result", "tenant")})
+        with pytest.raises(AIError) as damaged:
+            await repository.state_store.mutate(encode)
+        assert damaged.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

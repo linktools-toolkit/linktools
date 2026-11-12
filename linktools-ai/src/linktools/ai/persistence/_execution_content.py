@@ -588,7 +588,7 @@ class ExecutionContent:
                 else:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
-            previous_native = (await self.read_payloads((previous,)) if previous is not None and any(
+            previous_native = (await self.read_payloads((previous,), native_only=True) if previous is not None and any(
                 native_user_input_reference(payload) is not None or native_text_reference(payload) is not None
                 for _, payload in _payloads(previous)) else {})
         if result_source is None and previous is not None and output is not None:
@@ -823,6 +823,7 @@ class ExecutionContent:
 
     async def read_payloads(self, records: Sequence[StoredRecord], *,
                             reserve: Callable[[int], None] | None = None, result_only: bool = False,
+                            native_only: bool = False,
                             reserve_native: Callable[[int], None] | None = None) -> dict[tuple[str, str, str] | NativeTextReference | NativeUserInputReference, StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping]:
         native_references = []
         for record in records:
@@ -853,6 +854,10 @@ class ExecutionContent:
                 payload = (restore_native_user_input(source, raw_messages[0]) if isinstance(source, NativeUserInputReference)
                            else restore_native_text_payload(source, raw_messages[0]))
                 native_values[source] = payload
+        if native_only:
+            # The writer compares only fixed Native values. Unrelated immutable
+            # templates and pending tool arguments are not consumed here.
+            return native_values
         references = [reference for record in records for path, payload in _payloads(record)
                       if (not result_only or path in {("result",), ("result", "fields", "output")})
                       if (reference := payload_reference(payload)) is not None]
