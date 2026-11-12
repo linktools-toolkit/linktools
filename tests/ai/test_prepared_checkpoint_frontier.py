@@ -122,7 +122,7 @@ async def run_payload(payload):
         return ModelResponse([TextPart('complete')])
     async def main():
         features = RuntimeFeatures('coalesce-crash')
-        checkpoint = native_checkpoint()
+        checkpoint = native_checkpoint(database=root/'native.db')
         checkpoint.capture_frontier = capture_frontier
         features.capability(checkpoint,scope='runtime')
         features.capability(ExecutionCapability(retain_history=True),scope='runtime')
