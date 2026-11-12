@@ -182,10 +182,16 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     from linktools.ai.persistence._history import TranscriptRepository
     phase = ContextVar('review_phase', default='other')
     observed = []
+    owner_reads = []
     details = []
     original_read = ContentArchive._read_content
     async def read(self, content):
-        observed.append((phase.get(), content.identity, content.raw_size, "body" if content.payload is None else content.payload.kind))
+        if content.codec == "model-message":
+            observed.append((phase.get(), content.identity, content.raw_size, "body" if content.payload is None else content.payload.kind))
+        else:
+            from linktools.ai.persistence.state import active_state_transaction
+            assert content.codec in {"execution-binding", "runtime-policy", "execution-payload"}
+            owner_reads.append((active_state_transaction(self.store), content.identity, content.raw_size))
         return await original_read(self, content)
     def wrap(method, label):
         async def invoke(self, *args, **kwargs):
@@ -224,6 +230,16 @@ async def test_projection_boundary_read_budget(tmp_path: Path, monkeypatch: pyte
     Path(f'/tmp/review-boundary-counts-{rounds}.json').write_text(json.dumps({'summary':summary,'projection_calls':details}, sort_keys=True))
     assert summary['projection']['calls'] <= 6 * rounds + 5
     assert summary['other']['calls'] <= 3 * rounds + 2
+    # Whole-kind owners are a separate cost from model-history hydration.
+    # Both measured workloads (2 and 4 rounds) have 17 distinct scope/owner
+    # decodes, 4 immutable identities and 5503 decoded bytes. More tool rounds
+    # must not add repeated configuration/input/template decodes.
+    from collections import Counter
+    assert len(owner_reads) <= 17
+    assert sum(item[2] for item in owner_reads) <= 5503
+    assert len({item[1] for item in owner_reads}) <= 4
+    assert all(transaction is not None for transaction, _, _ in owner_reads)
+    assert max(Counter((transaction, identity) for transaction, identity, _ in owner_reads).values(), default=0) <= 1
 
 
 @pytest.mark.asyncio

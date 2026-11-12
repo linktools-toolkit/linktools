@@ -5,7 +5,7 @@
 import hashlib
 import json
 from collections import Counter
-from weakref import WeakKeyDictionary, ref
+from weakref import ref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 
@@ -232,7 +232,6 @@ class ExecutionContent:
         self._payload_encodings: dict[int, tuple[ref, str, bytes]] = {}
         self._binding_encodings: dict[int, tuple[ref, str, bytes]] = {}
         self._projections: dict[int, tuple[ref, StoredRecord]] = {}
-        self._binding_reads: WeakKeyDictionary[StateTransaction, dict[str, tuple[ContentRecord, bytes]]] = WeakKeyDictionary()
 
     def bind_pending_operation_source(self, source: StateStore) -> None:
         if source.storage_group is not self._store.storage_group:
@@ -375,30 +374,12 @@ class ExecutionContent:
         # querying binding metadata again just to load its inline bytes.
         captured, load = await archive.capture_content_records(identities)
         records_by_id = dict(zip(identities, captured, strict=True))
-        active = active_state_scope()
-        transaction = None if active is None else active.transactions.get(archive.store)
-        cached = None
-        if transaction is not None:
-            try:
-                cached = self._binding_reads.setdefault(transaction, {})
-            except TypeError:
-                pass
-        contents, missing = {}, []
         for identity, content in records_by_id.items():
             if content.codec != codecs[identity] or content.payload is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if reserve is not None:
                 reserve(counts[identity] * content.raw_size)
-            previous = None if cached is None else cached.get(identity)
-            if previous is not None and previous[0] == content:
-                contents[identity] = previous[1]
-            else:
-                missing.append(identity)
-        raws = await load(missing)
-        for identity, raw in zip(missing, raws, strict=True):
-            contents[identity] = raw
-            if cached is not None:
-                cached[identity] = records_by_id[identity], raw
+        contents = dict(zip(identities, await load(identities), strict=True))
         if policies:
             records = expand_policy_records(records, {reference: contents[reference[2]]
                 for reference in policy_refs if reference is not None})

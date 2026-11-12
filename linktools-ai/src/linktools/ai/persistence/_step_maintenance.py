@@ -58,6 +58,16 @@ async def inspect_native_message_tables(
     content = {"ai_step_sequences", "ai_step_messages"}
     if require_content:
         required.update(content)
+    if actual == {"ai_step_messages"} and required.issubset(actual):
+        # Typed archive payloads share the message relation without owning a
+        # Native sequence tree. Never skip a Native or malformed partition.
+        from ._step_schema import build_step_sql_metadata
+        table = build_step_sql_metadata().tables["ai_step_messages"]
+        async with context.sessions() as session:
+            await context.dialect.begin_consistent_read(session)
+            if await native_message_partitions(context, session, table):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return ()
     if (not required.issubset(actual)
             or bool(actual.intersection(content)) != content.issubset(actual)
             or "ai_step_snapshots" in actual and not content.issubset(actual)):

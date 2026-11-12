@@ -8,35 +8,28 @@ performance, restore, or corruption-test pass is asserted by this document.
 The in-memory `ExecutionRecord` remains a hydrated API contract; its fields do
 not imply that those values are duplicated in the physical execution row.
 
-Implementation status: base `3093c958` and completion `d3e56ff8` are
-integrated (all written, not validated):
+The first-version code is published. Full CI, whole-change review and final
+matched cost verification remain separate and are not claimed complete here.
 
-- Canonical `agent_run` admissions and `tool_operation` rows have Step-owned
-  physical owners; generic State reads retain their logical interface.
-- Tool arguments, result and error payloads reference the same immutable Step
-  payload owner used by execution payloads. This supersedes the intermediate
-  Step-ledger-inline representation; there is no body-size cutoff.
-- Execution input/output values of every type and size have fixed Step payload
-  references. Eligible exact Native input/output locations omit duplicate
-  digest/size fields.
-- Binding references no longer carry a second binding summary.
-- All eight Runtime policy fields use a fixed accepted policy owner plus actual
-  changed-field overrides. The policy owner is Runtime content, not Step content.
-- Complete pending-continuation, terminal-handoff and result templates, and
-  terminal-details references, have been written and integrated.
+- `agent_run` and `tool_operation` have Step-owned physical owners. Accepted
+  execution/tool payload bytes reuse `ai_step_messages`, not a parallel table.
+- Exact fixed Native parts cover plain/text-list inputs, default text-object and
+  structured outputs, canonical tool arguments and complete tool receipts.
+  Attached receipts retain their original format, file references and paths.
+- Exact tool failures can reference immutable keyed Step events. Ordinary keyed
+  events retain first-wins; only explicitly referenced failure sources receive
+  full source proofs. A different accepted representation keeps its own owner.
+- Binding references carry no second summary. Eight Runtime policies share one
+  accepted policy owner plus actual overrides.
+- Admitted pending calls reference immutable checkpoint-operation fields when
+  exact and supported; metadata and unadmitted approval facts stay owned.
+  Explicit same-group source dependencies cover distinct partitions and cold
+  snapshot restore. Cross-group restrictions are the pre-existing contract.
+- Terminal outcome/handoff templates share accepted content and diagnostics.
+- Reclamation is only offline under complete inventory and exclusive access;
+  no Native edges, alias table or online orphan queue remains.
 
-Completion commit `d3e56ff8` is also integrated:
-
-- Arguments nested inside the pending template use fixed references to the same
-  shared Step payload owner, rather than remaining duplicate inline arguments.
-- Terminal-handoff error data shares the terminal-details owner instead of
-  retaining an exact second error copy.
-
-These two boundaries are implemented, not still implementation tasks. Their
-combined publication and runtime validation have not been established here.
-
-This is a code-status snapshot, not evidence that publication, CI, or the combined
-runtime paths have passed. The publication commit and CI result are separate.
+The detailed map below describes ownership, not a blanket verification result.
 
 ## Complete ExecutionRecord field map
 
@@ -106,7 +99,7 @@ owner, not eight owners.
 | Nested value | Ownership boundary | Status |
 | --- | --- | --- |
 | `recovery.agent_run_id`, `source_agent_run_id` | Fixed run identities selected by recovery | Retained identifiers, not run copies. |
-| `recovery.pending_tools` | Entire pending continuation owner | Complete template reference is integrated. Nested argument references to the shared Step payload owner are integrated from `d3e56ff8`, not validated. |
+| `recovery.pending_tools` | Entire pending continuation owner | Complete template reference is integrated. Exact admitted fields use the fixed checkpoint operation; unadmitted facts retain a unique template/payload owner. |
 | `recovery.repository_instruction_overlay` | Fixed instruction content with retained Asset sources where applicable | Existing reference implementation; preserve exact accepted semantics. |
 | `recovery.repository_instruction_barriers` | Runtime observation/approval frontier | Keep authoritative frontier facts unless the new fixed owner explicitly includes them; never recompute from current Asset heads. |
 | `recovery.handoff_phase` | Runtime recovery state-machine coordination | Retained control. |

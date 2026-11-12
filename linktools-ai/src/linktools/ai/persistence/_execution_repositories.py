@@ -317,7 +317,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 payloads = await self._execution_content.read_payloads((record,), result_only=True)
                 metadata = replace(metadata, result_record=decode_execution_content(record.data, payloads, result=True))
             return metadata
-        return await self.read_content(lambda _group: read()) if fresh else await read()
+        from ._sql import SqlStateStore
+        source_scope = fresh or isinstance(self._store, SqlStateStore) and not self._store.record_cache_enabled
+        return await self.read_content(lambda _group: read()) if source_scope else await read()
 
     async def get_result_record(self, execution_id: str, *, tenant_id: str,
                                 fresh: bool = False) -> ExecutionResultRecord | None:

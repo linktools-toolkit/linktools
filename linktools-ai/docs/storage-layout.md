@@ -19,8 +19,10 @@ preserve their exact original bytes, including non-JSON or already encoded
 bodies. They are not reserialized as model messages. Metadata-only reads do not
 hydrate these bodies.
 
-Generic archived content uses `ai_state_records.payload_bytes` with the existing
-content metadata in `payload_json`. Other records remain structured JSON. This
+Accepted execution and tool payload bytes use the existing `ai_step_messages`
+content owner in a separate typed partition. Other archive families use
+`ai_state_records.payload_bytes` with content metadata in `payload_json`; ordinary
+control records remain structured JSON. This
 avoids compressing, Base64-encoding and then decoding the same body just to pass
 through a JSON database column. Portable JSON snapshots still encode binary at
 the transport boundary; that is not the database representation.
@@ -50,10 +52,12 @@ production DBA approval or a deployed migration.
 | `ai_metric_observations` | JSON measurements, facets and correlation remain available for SQL filtering and aggregation. |
 | `ai_step_runs` | Run lineage and shared metadata remain structured. |
 | `ai_step_events` | Event fields and native run references remain queryable; no second message body. |
-| `ai_step_messages` | Deduplicated raw/compressed binary message bodies and typed attachment manifests. |
+| `ai_step_messages` | Deduplicated Native and accepted execution/tool payload bytes in disjoint typed partitions; attachment manifests retain file references. |
+| `ai_step_run_admissions` | Domain membership and actual admitted projection differences, referencing canonical run registration. |
+| `ai_step_tool_operations` | Authoritative tool effect state, fencing and stable operation identity; payloads reference fixed content owners. |
+| `ai_trace_events` | Trace correlation and event fields or fixed Native event sources. |
 | `ai_step_sequences` | Immutable message-sequence links and counts, not copied bodies. |
 | `ai_step_snapshots` | Bounded descriptor and sequence root; the descriptor is not the whole conversation. |
-| `ai_native_content_edges` | Rebuildable dependency and collection queue metadata, not another durable semantic owner. |
 
 Identity, sequence, state, lease, CAS, revision, ordering and time columns are not
 compressed. Snapshot pruning uses the `(store_key, run_id, pruned)` index and
@@ -372,7 +376,6 @@ compilation is distinct from validation on a deployed database server.
 | `ai_step_snapshots` | `sequence_root` | The sole stored root of the immutable message sequence. The bounded descriptor stores its count and checkpoint control, not another root. |
 | `ai_step_messages` | `store_key`, `sha256` | Raw scope plus anonymous-content addressing and integrity of original uncompressed canonical message bytes. |
 | `ai_step_sequences` | `store_key`, `sha256`, `message_sha256`, `left_sha256`, `right_sha256`, `next_sha256` | Raw scope plus immutable ordered sequence addressing and references to its content, subtrees and next forest. Repeated messages remain distinct occurrences. |
-| `ai_native_content_edges` | Physical row IDs and revisions | Rebuildable publication/collection index, not another hashed content identity. |
 
 ContentArchive uses the existing StateStore tables rather than another SQL
 schema. Its `raw_digest` authenticates original content bytes across raw and
@@ -429,18 +432,12 @@ Snapshots include and budget the referenced content before decoding it, rekey
 physical archive scopes on restore, and verify the same typed attachment closure.
 Offline collection keeps content while its Execution owner is retained.
 
-Archived execution bindings carry a derived view summary (kind, declared ID and
-revision, Task attempt limit, binding digest and Agent capability references)
-beside their scoped content address. These small fields serve diagnostic metadata
-without copying capability configuration. State
-views read this projection without opening or decoding the immutable contract;
-recovery and snapshot expansion still load the complete bytes, verify their
-content identity, and compare the summary with the decoded contract. The summary
-is not a new behavior identity or a replacement for declaration validation.
-Sharing-enabled execution repositories archive every Agent/Task binding, without
-a size threshold. State views do not load those bodies; cold recovery still does.
-Standalone repositories that have not enabled content sharing, and caller-owned
-transactions that have not enlisted the archive, retain their inline contract.
+Execution bindings retain only their fixed complete-contract reference, not a
+second ID/revision/capability summary. Explicit metadata/control readers select
+current owners and their required fixed configuration using bounded queries.
+Full recovery still verifies and restores the admitted contract. Binding and
+policy content shared within one batch is decoded and validated once per unique
+owner; actual per-execution policy overrides are validated for each execution.
 
 ## Configuration and large-record ownership
 
@@ -449,9 +446,9 @@ transactions that have not enlisted the archive, retain their inline contract.
   alone does not reconstruct output schemas, resolved Agent declarations or
   captured child bindings. Identical bindings share one scoped archive content record across executions,
   including configurations below the former payload limit. Each execution keeps
-  a content reference and the derived view summary. A different complete contract
+  a fixed content reference without a second summary. A different complete contract
   with the same declared ID/revision remains a different immutable content value.
-  The view summary avoids body reads for state views, not for recovery.
+  Read projections select only the content their public contract requires.
 - Task graph headers contain no node-definition body. Immutable node definitions
   and mutable node states are separate records. The prepared submission retains
   the initial graph until admission or cancellation, then deletes its payload;
@@ -463,7 +460,7 @@ transactions that have not enlisted the archive, retain their inline contract.
   independently of a source execution's lifetime. They cannot be replaced by
   looking up the caller's current mutable configuration.
 - Execution input, result and prepared terminal output use existing immutable
-  content references when large. The persisted codec omits repository
+  content references at every size. The persisted codec omits repository
   instructions already owned by input context and replaces an identical
   terminal-handoff outcome with a reference to the final result. Step message
   bodies and sequence references have their own canonical owner.
@@ -491,17 +488,19 @@ and hot owner rows are the intended space benefit. A regression workload counts
 all record JSON and binary bytes for twenty repeated sub-64KiB Agent/Task bindings,
 including the archive row, rather than measuring only the shortened owner JSON.
 Its runtime results remain subject to CI; no production storage saving is claimed.
-The archive remains in `ai_state_records`: sharing reduces duplicate bodies and
-hot owner-row width, not the count of logical kinds in that physical table.
+Accepted execution/tool payload content physically reuses `ai_step_messages`.
+The `agent_run` and `tool_operation` logical interfaces route to their Step
+owners, not generic record rows. Other archive families retain their existing
+owner; moving rows alone is not evidence of a smaller whole database.
 
 ## Cost boundaries
 
 Removing duplicate content and Base64 database bodies reduces those specific
 writes and stored bytes. It does not prove fewer database operations in every
-workload: timeline pages need an Execution projection read, native collection
-adds dependency writes and bounded maintenance transactions, and even a small
-Asset file now has one ObjectStore write. The derived dependency index itself
-uses linear space. Compare matched workloads by reads, writes, transactions,
+workload: timeline pages need an Execution projection read, offline collection
+scans complete owner inventories under caller-enforced exclusion. There is no
+online dependency-edge table or collection queue. Real Asset files retain
+their ObjectStore cost. Compare matched workloads by reads, writes, transactions,
 scanned rows, returned bytes and retained bytes before claiming an overall gain.
 
 See [native boundary details](atomic-native-step-boundaries.md) for append,
@@ -518,8 +517,8 @@ for the Runtime handle and explicit-ID APIs.
 | Domain-specific names | Tool calls use canonical operation IDs, shared `ai_state_counters`; `ai_step_runs` unchanged | Metadata/DDL/readers/writers and schema tests updated together |
 | Execution Agent/Task configuration duplication | All sharing-enabled bindings use the existing complete-contract content archive | Repeated small/large configurations, changed same-revision contracts, cold recovery and CAS regressions |
 | Other configuration duplication | Nonempty Task/Expander declaration sets share existing archive bytes; graph definitions already separate from node state | Small/large declaration load and collection regressions; empty sets create no archive |
-| Hot state query cost | Execution views use a derived binding summary, not full configuration bytes | Agent/Task and child-view regressions reject contract-body reads |
-| Input/result/message bodies | Existing large-body archive, Native messages, and handoff/result references retain their owners | Existing attachment, snapshot, recovery and cleanup coverage; no deletion of effect or user facts |
+| Hot state query cost | Narrow control/membership/result projections and bounded owner-content queries; no copied binding summary | Existing authorization, cache and query-budget regressions |
+| Input/result/message bodies | All-size fixed payload owners; exact Native part/event reuse, preserving receipt format and real file references | Byte-exact restoration and owner-lifetime closure; non-equivalent accepted facts are retained |
 | No historical baggage | Current writer/reader/schema evolve together; no legacy migration or new config registry | Current-shape round trips and explicit malformed-data rejection |
 | Space and I/O trade-off | Reuse removes repeated contract bodies and shrinks hot rows; initial publication and cold recovery still cost reads | Matched SQLite synthetic measurements below; formal regression gates and MySQL/PostgreSQL latency remain separate |
 

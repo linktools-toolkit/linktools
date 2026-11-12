@@ -375,9 +375,6 @@ async def _purge_unreferenced_objects(
                 content_scope=archive_content_scope(parts[1], parts[2]))
             encoded = (content.body if content.payload is None else
                        await read_attachment_payload(content.payload, read_object=read_native_object))
-            if content.payload is not None and (len(encoded) != content.payload.size
-                    or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             raw = decode_payload_bytes(encoded, codec=content.compression,
                                        raw_digest=content.raw_digest, raw_size=content.raw_size)
             if is_execution:
