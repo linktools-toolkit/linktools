@@ -51,6 +51,8 @@ from ..observe.journal import (
     REPLAYED_TOOL_CALL_INDICES_METADATA_KEY,
 )
 from ..persistence.runs import StagedModelInteraction, project_public_messages
+from ..persistence.repositories import ToolRepositoryImpl
+from ..persistence.contracts import ToolOperationMetadata
 from ..execution import (
     AttachmentFact,
     ExecutionHistoryItem,
@@ -1732,12 +1734,13 @@ class StepExecutionHistoryReader:
                     if occurrence.item.tool_call_id in tool_metadata
                 ))
                 operation_refs = tool_operation_references(events)
-                operations: dict[str, ToolOperationRecord] = {}
+                operations: dict[str, ToolOperationRecord | ToolOperationMetadata] = {}
                 requested = {call_id: operation_refs[call_id] for call_id in selected_calls if call_id in operation_refs}
                 if self._tool_operations is not None and requested:
-                    for operation in await self._tool_operations.get_operations(
-                        tuple(requested.values()), tenant_id=tenant_id,
-                    ):
+                    read_operations = (self._tool_operations.get_operation_metadata
+                        if isinstance(self._tool_operations, ToolRepositoryImpl)
+                        else self._tool_operations.get_operations)
+                    for operation in await read_operations(tuple(requested.values()), tenant_id=tenant_id):
                         if (operation.execution_id != source.record.execution_id
                                 or operation.tool_call_id in operations
                                 or requested.get(operation.tool_call_id) != operation.tool_operation_id):

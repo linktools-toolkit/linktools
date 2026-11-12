@@ -100,8 +100,10 @@ def expand_native_tool_content(
         attached = isinstance(reference, NativeToolResultReference) and reference.attachment_format is not None
         if (not isinstance(value, StoredPayload) or value.kind != "inline"
                 or value.encoding != ("json-attachments" if attached else "base64")
-                or not isinstance(reference, NativeToolErrorReference)
-                and (value.digest, value.size) != (reference.digest, reference.size)):
+                or isinstance(reference, NativeToolResultReference)
+                and (value.digest, value.size) != (reference.digest, reference.size)
+                or isinstance(reference, NativeToolArgumentsReference)
+                and value.digest != decode_envelope(record.data).value["payload"]["fields"]["arguments_digest"]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if attached and (value.value["format"] != reference.attachment_format
                          or canonical_json_bytes(value.value["attachments"]) != canonical_json_bytes(reference.attachment_entries())):
@@ -171,7 +173,9 @@ class ToolOperationContent:
             if (reference is not None
                     and (not isinstance(reference, NativeToolResultReference) or reference.attachment_format is None)
                     and fields.get("kind") == "inline" and fields.get("encoding") == "base64"
-                    and (fields.get("digest"), fields.get("size")) == (reference.digest, reference.size)):
+                    and (fields.get("digest") == decode_envelope(previous.data).value["payload"]["fields"]["arguments_digest"]
+                         if isinstance(reference, NativeToolArgumentsReference)
+                         else (fields.get("digest"), fields.get("size")) == (reference.digest, reference.size))):
                 retained_fields[name] = {"$dataclass": "stored_payload", "schema": 1,
                                          "fields": {"content": reference.to_json()}}
                 continue

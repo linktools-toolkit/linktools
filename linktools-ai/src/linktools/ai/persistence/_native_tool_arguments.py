@@ -30,8 +30,6 @@ def restore_native_tool_arguments_payload(reference: NativeToolArgumentsReferenc
         if not isinstance(arguments, dict):
             raise ValueError("tool arguments must be a mapping")
         payload = StoredPayload.inline_bytes(canonical_json_bytes(arguments))
-        if (payload.digest, payload.size) != (reference.digest, reference.size):
-            raise ValueError("tool argument checksum mismatch")
         return payload
     except (TypeError, ValueError, IndexError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -44,8 +42,7 @@ def prepare_native_tool_arguments(
     if payload.kind != "inline" or payload.encoding != "base64":
         return None
     source = _source(raw, part_index)
-    reference = NativeToolArgumentsReference(root, part_index, source.tool_name, source.tool_call_id,
-                                            payload.digest, payload.size)
+    reference = NativeToolArgumentsReference(root, part_index, source.tool_name, source.tool_call_id)
     try:
         restored = restore_native_tool_arguments_payload(reference, raw)
     except AIError:

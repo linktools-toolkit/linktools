@@ -287,31 +287,26 @@ class NativeToolArgumentsReference:
     part_index: int
     tool_name: str
     tool_call_id: str
-    digest: str
-    size: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.root, NativeMessageRoot) or self.root.count != 1:
             raise ValueError("native tool arguments requires one message")
         _count(self.part_index)
-        _digest(self.digest)
-        _count(self.size)
         if any(not isinstance(value, str) or not value for value in
                (self.tool_name, self.tool_call_id)):
             raise ValueError("native tool arguments identity is invalid")
 
     def to_json(self) -> dict[str, JsonValue]:
         return {"$native_tool_arguments": self.root.to_json(), "part_index": self.part_index,
-                "tool_name": self.tool_name, "tool_call_id": self.tool_call_id,
-                "digest": self.digest, "size": self.size}
+                "tool_name": self.tool_name, "tool_call_id": self.tool_call_id}
 
     @classmethod
     def from_json(cls, value: Mapping[str, JsonValue]) -> "NativeToolArgumentsReference":
         if not isinstance(value, Mapping) or set(value) != {
-                "$native_tool_arguments", "part_index", "tool_name", "tool_call_id", "digest", "size"}:
+                "$native_tool_arguments", "part_index", "tool_name", "tool_call_id"}:
             raise ValueError("native tool arguments wire is invalid")
         return cls(NativeMessageRoot.from_json(value["$native_tool_arguments"]), value["part_index"],
-                   value["tool_name"], value["tool_call_id"], value["digest"], value["size"])
+                   value["tool_name"], value["tool_call_id"])
 
 
 @dataclass(frozen=True, slots=True)

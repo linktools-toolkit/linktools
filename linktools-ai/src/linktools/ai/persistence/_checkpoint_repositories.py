@@ -29,10 +29,10 @@ from ._message_root import NativeMessageRoot
 from ._native_tool_error import NativeToolErrorReference, prepare_native_tool_error
 from ._native_tool_result import prepare_native_tool_result
 from ._native_tool_arguments import prepare_native_tool_arguments
-from .codec import decode_envelope, encode_envelope, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference
+from .codec import decode_tool_operation_metadata, decode_envelope, encode_envelope, native_tool_result_reference, native_tool_arguments_reference, native_tool_error_reference
 from ._archive import PreparedArchive
 from ._payload import decode_payload_bytes
-from .contracts import ToolOperationRecord
+from .contracts import ToolOperationRecord, ToolOperationMetadata
 from .contracts import (
     ApprovalRecord,
     ExternalCallRecord,
@@ -756,6 +756,34 @@ class ToolRepositoryImpl(_RepositoryBase):
             limit=1,
         )
         return bool(records)
+
+    async def get_operation_metadata(
+        self, operation_ids: Sequence[str], *, tenant_id: str,
+    ) -> tuple[ToolOperationMetadata, ...]:
+        """Read canonical history identity/status without hydrating receipt bodies."""
+        if tenant_id != self._tenant_id:
+            return ()
+        if isinstance(operation_ids, (str, bytes)):
+            raise TypeError("operation_ids must be a sequence")
+        ordered = tuple(dict.fromkeys(operation_ids))
+        keys = tuple(self._tool_key(validate_resource_id(identity)) for identity in ordered)
+        if not keys:
+            return ()
+        async def read(transaction: StateTransaction) -> tuple[ToolOperationMetadata, ...]:
+            records = await transaction.get_records(keys)
+            values = []
+            for identity, key in zip(ordered, keys, strict=True):
+                record = records.get(key)
+                if record is None:
+                    continue
+                value = decode_tool_operation_metadata(record.data)
+                if (record.kind != "tool_operation" or record.key != key
+                        or value.tool_operation_id != identity or record.subject_id != value.tool_call_id
+                        or record.state != value.status.value):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values.append(value)
+            return tuple(values)
+        return await self._store.read(read)
 
     async def get_operations(
         self, operation_ids: Sequence[str], *, tenant_id: str,

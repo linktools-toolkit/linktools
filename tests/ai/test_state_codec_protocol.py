@@ -474,14 +474,22 @@ def test_record_tuple_is_injective_and_bounds_encoded_bytes() -> None:
     assert len(operation_key("n" * 128, "t" * 128, "conversation", "o" * 128)) == 405
 
 
-@pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * RECORD_KEY_MAX_BYTES,
-                                  record_key("namespace", "tenant", "checkpoint", "tool_operation", ("é", "e\u0301"))))
-def test_record_binary_address_roundtrips_without_repr_disclosure(key: bytes) -> None:
-    record = replace(decode_record(_fixture()["stored_primitives"]["record"]), key=key)
+@pytest.mark.parametrize("key,kind", (
+    (b"x", "golden"), (b"x" * 32, "golden"), (b"x" * RECORD_KEY_MAX_BYTES, "golden"),
+    (record_key("namespace", "tenant", "checkpoint", "tool_operation", ("é", "e\u0301")), "tool_operation"),
+))
+def test_record_binary_address_roundtrips_without_repr_disclosure(key: bytes, kind: str) -> None:
+    record = replace(decode_record(_fixture()["stored_primitives"]["record"]), key=key, kind=kind)
     wire = encode_record(record)
     assert wire["key"] == key.hex()
     assert decode_record(wire) == record
     assert "key=" not in repr(record)
+    if kind == "tool_operation":
+        with pytest.raises(ValueError, match="requires kind"):
+            replace(record, kind="golden")
+        with pytest.raises(AIError) as mismatch:
+            decode_record({**wire, "kind": "golden"})
+        assert mismatch.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.parametrize("wire", ("", "AB", "aa ", "a", "gg", "aa" * (RECORD_KEY_MAX_BYTES + 1), 1))

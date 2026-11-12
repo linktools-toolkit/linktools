@@ -61,6 +61,7 @@ def test_native_arguments_identity_schema_and_slot_are_strict() -> None:
     payload = StoredPayload.inline_bytes(canonical_json_bytes({"x": 1}))
     reference = prepare_native_tool_arguments(root, raw, 0, payload)
     assert reference is not None
+    assert set(reference.to_json()) == {"$native_tool_arguments", "part_index", "tool_name", "tool_call_id"}
     assert restore_native_tool_arguments_payload(reference, raw) == payload
     with pytest.raises(AIError) as rejected:
         restore_native_tool_arguments_payload(replace(reference, tool_call_id="foreign"), raw)
@@ -119,3 +120,34 @@ async def test_argument_owner_and_step_publication_rollback_together(
         assert native_tool_arguments_reference(wire) is None
         assert (await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).arguments_payload == payload
         assert (await state.execution.executions.get_fresh("execution", tenant_id="tenant")).status == current.status
+
+
+@pytest.mark.asyncio
+async def test_fixed_arguments_still_reject_corrupt_owner_digest(tmp_path: Path) -> None:
+    from copy import deepcopy
+    from linktools.ai.persistence.state import StateTransaction
+
+    async with Persistence.open("native-result", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "owner-digest.db")) as state:
+        commands, commit, current, checkpoint = await _prepare(state, "done", "done")
+        args = {"x": 1}
+        payload = StoredPayload.inline_bytes(canonical_json_bytes(args))
+        operation = await state.checkpoint.tools.admit(replace(
+            _request(), arguments_payload=payload, arguments_digest=payload.digest))
+        checkpoint = replace(checkpoint, messages=[ModelResponse(parts=[ToolCallPart("tool", args, tool_call_id="call")]),
+                                                   *checkpoint.messages])
+        await _publish(commands, commit, current, checkpoint)
+
+        async def corrupt(transaction: StateTransaction) -> None:
+            records = await transaction.scan_records()
+            record = next(value for value in records if value.kind == "tool_operation")
+            data = deepcopy(dict(record.data))
+            fields = data["value"]["payload"]["fields"]
+            assert native_tool_arguments_reference(fields["arguments_payload"]) is not None
+            fields["arguments_digest"] = "0" * 64
+            assert await transaction.replace_record(replace(record, data=data,
+                storage_revision=record.storage_revision + 1), expected_storage_revision=record.storage_revision)
+
+        await state.checkpoint.tools.state_store.mutate(corrupt)
+        with pytest.raises(AIError, match=ErrorCode.STORAGE_INTEGRITY_ERROR.value):
+            await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")

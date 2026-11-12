@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import replace
 
 import pytest
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 
 from linktools.ai.errors import AIError
 from linktools.ai.model import StoredUserInput
@@ -25,11 +25,17 @@ from linktools.ai.storage import StoredPayload
 from .test_native_text_snapshot_closure import _projection as _terminal_projection
 
 
-def _projection(*, structured: bool = False) -> tuple[StoredRecord, dict, NativeUserInputReference, StoredUserInput, dict, dict]:
+def _projection(*, structured: bool = False, media: bool = False) -> tuple[StoredRecord, dict, NativeUserInputReference, StoredUserInput, dict, dict]:
     text = "用户 input\n" * 6000
-    raw = encode_model_messages((ModelRequest(parts=[UserPromptPart("unrelated"),
-        UserPromptPart([text] if structured else text)]),))
+    content = [text, "", text] if structured else text
+    if media:
+        content = [text, BinaryContent(b"file bytes", media_type="text/plain")]
+    raw = encode_model_messages((ModelRequest(parts=[UserPromptPart("unrelated"), UserPromptPart(content)]),))
     expected = StoredUserInput("text", StoredPayload.inline_text(text))
+    if structured:
+        items = [{"kind": "text", "text": item} for item in content]
+        expected = StoredUserInput("user-content-v1", StoredPayload.inline_json({"items": items}),
+            {"version": 1, "prompt": {"kind": "items", "items": items}, "files": [], "attachments": []})
     digest = hashlib.sha256(raw).hexdigest()
     node = ImmutableSequenceNode(digest)
     store = native_store_key("test", "tenant")
@@ -48,8 +54,9 @@ def _projection(*, structured: bool = False) -> tuple[StoredRecord, dict, Native
     return record, value, reference, expected, {group: ([sequence], [body])}, {group: {(store, digest): raw}}
 
 
-def test_native_input_snapshot_restores_exact_utf8_semantics() -> None:
-    record, value, reference, expected, rows, payloads = _projection()
+@pytest.mark.parametrize("structured", (False, True))
+def test_native_input_snapshot_restores_exact_utf8_semantics(structured: bool) -> None:
+    record, value, reference, expected, rows, payloads = _projection(structured=structured)
     restored = _expand_snapshot_native_content(record, rows, payloads, namespace="test", tenant_id="tenant")
     actual = decode_envelope(restored.data).value["payload"]["fields"]["stored_user_input"]
     assert actual == _encode_persisted_domain(expected)
@@ -57,9 +64,9 @@ def test_native_input_snapshot_restores_exact_utf8_semantics() -> None:
     assert native_user_input_reference(value["fields"]["stored_user_input"]) == reference
 
 
-@pytest.mark.parametrize("damage", ["bytes", "digest", "part", "missing", "group", "partition", "schema", "structured"])
+@pytest.mark.parametrize("damage", ["bytes", "digest", "part", "missing", "group", "partition", "schema", "media"])
 def test_native_input_snapshot_rejects_invalid_projection(damage: str) -> None:
-    record, value, reference, expected, rows, payloads = _projection(structured=damage == "structured")
+    record, value, reference, expected, rows, payloads = _projection(media=damage == "media")
     wrapper = value["fields"]["stored_user_input"]
     content = wrapper["fields"]["content"]
     if damage == "bytes":
