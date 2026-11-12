@@ -82,3 +82,77 @@ async def test_tool_publication_shares_eligible_slots_in_one_cas(
         assert after.storage_revision - before.storage_revision == int(case in {"arguments", "result", "both"})
         value = await repository.get_operation(operation.tool_operation_id, tenant_id="tenant")
         assert value.arguments_payload == argument_payload and value.result_payload == result_payload
+
+
+@pytest.mark.asyncio
+async def test_publication_expands_distinct_archived_tools_as_one_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections.abc import Callable
+    from linktools.ai.persistence._archive import ContentArchive
+    from linktools.ai.persistence.codec import TOOL_PAYLOAD_CODEC, tool_payload_reference
+
+    async with Persistence.open("native-result", tenant_id="tenant",
+                                storage=PersistenceStorage.sqlite(tmp_path / "batch.db")) as state:
+        commands, commit, current, checkpoint = await _prepare(state, "done", "done")
+        repository = state.checkpoint.tools
+        expected = {}
+        calls, returns = [], []
+        for index in range(2):
+            args = {"count": index}
+            argument = StoredPayload.inline_bytes(canonical_json_bytes(args))
+            operation = await repository.admit(replace(_request(), tool_operation_id=f"operation-{index}",
+                tool_call_id=f"call-{index}", arguments_payload=argument, arguments_digest=canonical_sha256(args)))
+            text = f"receipt-{index}"
+            result = StoredPayload.inline_bytes(encode_model_messages((ModelRequest(parts=[
+                ToolReturnPart("runtime", text, tool_call_id=operation.tool_operation_id)]),)))
+            await repository.complete_payload(operation.tool_operation_id, tenant_id="tenant", owner=operation.owner,
+                                              fence=operation.fence, result_payload=result)
+            expected[operation.tool_operation_id] = (argument, result)
+            calls.append(ToolCallPart("tool", args, tool_call_id=operation.tool_call_id))
+            returns.append(ToolReturnPart("tool", text, tool_call_id=operation.tool_call_id))
+        before = [record for record in await repository.state_store.read(lambda tx: tx.scan_records())
+                  if record.kind == "tool_operation"]
+        assert len(before) == 2
+        for record in before:
+            fields = decode_envelope(record.data).value["payload"]["fields"]
+            assert tool_payload_reference(fields["arguments_payload"]) is not None
+            assert tool_payload_reference(fields["result_payload"]) is not None
+        checkpoint = replace(checkpoint, messages=[ModelResponse(parts=calls), ModelRequest(parts=returns),
+                                                   *checkpoint.messages])
+        batches = []
+        expansions = []
+        expanding_tools = False
+        original_expand = ToolOperationContent.expand_many
+        async def expand_many(self: ToolOperationContent, records: Sequence[StoredRecord]) -> tuple[StoredRecord, ...]:
+            nonlocal expanding_tools
+            previous = expanding_tools
+            expanding_tools = True
+            expansions.append(len(records))
+            try:
+                return await original_expand(self, records)
+            finally:
+                expanding_tools = previous
+        original = ContentArchive.read_contents
+        async def read_contents(self: ContentArchive, identities: Sequence[str], *, codec: str,
+                                reserve: Callable[[str, int], None] | None = None) -> tuple[bytes, ...]:
+            if expanding_tools and codec == TOOL_PAYLOAD_CODEC:
+                batches.append(tuple(identities))
+            return await original(self, identities, codec=codec, reserve=reserve)
+        with monkeypatch.context() as patch:
+            patch.setattr(ContentArchive, "read_contents", read_contents)
+            patch.setattr(ToolOperationContent, "expand_many", expand_many)
+            await _publish(commands, commit, current, checkpoint)
+        assert expansions == [2]
+        assert len(batches) == 1 and len(set(batches[0])) == 4
+        after = [record for record in await repository.state_store.read(lambda tx: tx.scan_records())
+                 if record.kind == "tool_operation"]
+        revisions = {record.key: record.storage_revision for record in before}
+        for record in after:
+            fields = decode_envelope(record.data).value["payload"]["fields"]
+            assert native_tool_arguments_reference(fields["arguments_payload"]) is not None
+            assert native_tool_result_reference(fields["result_payload"]) is not None
+            assert record.storage_revision == revisions[record.key] + 1
+        for identity, (argument, result) in expected.items():
+            recovered = await repository.get_operation(identity, tenant_id="tenant")
+            assert recovered.arguments_payload == argument and recovered.result_payload == result

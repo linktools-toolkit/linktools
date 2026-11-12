@@ -4,6 +4,39 @@ These are statement counts, not latency or physical disk I/O. The original PR
 base is `bd5e38ab9da0f8b5c487917693c812723ecfb058`, not the intermediate
 `6e907b06` revision.
 
+## Latest fixed-sample results
+
+Matched local `f731303b` (tree `968cff3d`, published as `2dac1a25`)
+reduces cold reads to **44** and warm reads to **41**, from original-base
+46 and 43. Runtime reads are **318**, down from 363 and intermediate 339/322,
+but still 14 above the original 304. Runtime DML remains 254 versus 463;
+commits remain 124 versus 144. Both 32-byte and 65536-byte workloads have
+identical counts and pass recovery, offline-GC and exactly-two-effects assertions.
+Scripts, logical inputs, interpreter and full dependencies are matched.
+
+The cold change is History's two correlation-index branches combined with a
+bounded UNION ALL in the same snapshot. Each of two History calls uses 13 reads
+instead of 14; other cold APIs are unchanged. Independent index predicates,
+sequence deduplication, sorting, high-water and limit behavior are preserved.
+This is not a claim that 44 is the minimum possible query count.
+
+| Cold API (two calls each) | Reads | Purpose |
+|---|---:|---|
+| execution result | 6 | result/source join, retention owner, associated session |
+| full History | 26 | authorization, execution/children, run/history/trace facts and referenced messages/tools |
+| tool execution-list | 2 | scoped operation and fixed content join |
+| tool get | 2 | keyed operation and fixed content join |
+| tool agent-run-list | 2 | scoped operation and fixed content join |
+| latest Native snapshot | 4 | snapshot owner then bounded recursive sequence/messages |
+| agent run get | 2 | admission and run join |
+| Total | 44 | 42 SELECT plus 2 WITH |
+
+Subsequent `622dde08` preserves batch expansion for multi-tool publication,
+fixing an incremental review finding not exercised by this one-tool-per-turn
+sample. Its new multi-tool regression is separate evidence, not a relabeling
+of the frozen `f731303b` measurement. These read measurements do not replace
+or update the earlier frozen whole-database byte/page measurements.
+
 ## Matched workload
 
 SQLite file storage with default configuration and no explicitly configured
