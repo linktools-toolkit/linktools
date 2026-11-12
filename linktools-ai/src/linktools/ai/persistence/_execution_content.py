@@ -225,6 +225,7 @@ def expand_native_execution_content(
 class ExecutionContent:
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         self._store, self._namespace, self._tenant_id = store, namespace, tenant_id
+        self._pending_source = store
         self._content_archive: ContentArchive | None = None
         self._share_content = True
         # This cache saves immutable encoding work, never proves source existence.
@@ -232,6 +233,15 @@ class ExecutionContent:
         self._binding_encodings: dict[int, tuple[ref, str, bytes]] = {}
         self._projections: dict[int, tuple[ref, StoredRecord]] = {}
         self._binding_reads: WeakKeyDictionary[StateTransaction, dict[str, tuple[ContentRecord, bytes]]] = WeakKeyDictionary()
+
+    @property
+    def pending_operation_stores(self) -> tuple[StateStore, ...]:
+        return () if self._pending_source is self._store else (self._pending_source,)
+
+    def bind_pending_operation_source(self, source: StateStore) -> None:
+        if source.storage_group is not self._store.storage_group:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        self._pending_source = source
 
     def enable_sharing(self) -> None:
         """Allow immutable Execution content to be prepared at its next write boundary."""
@@ -281,6 +291,7 @@ class ExecutionContent:
     async def prefetch_projection_owners(
         self, keys: Sequence[bytes], *, bindings: bool = False, result: bool = False,
         result_body: bool = False, recovery: bool = False, terminal_details: bool = False,
+        input_body: bool = False, additional_records: Mapping | None = None,
     ) -> None:
         """Capture current control rows and only the immutable slots consumed next."""
         active = active_state_scope()
@@ -289,6 +300,8 @@ class ExecutionContent:
                 or self._store.storage_group.opened_archive is None):
             return
         paths = [("runtime_policy", "$runtime_policy")]
+        if input_body:
+            paths.append(("stored_user_input", "fields", "content", "$execution_payload"))
         if bindings:
             paths.append(("binding", "$execution_binding"))
         if result:
@@ -308,6 +321,7 @@ class ExecutionContent:
             owner_store=self._store, owner_keys=keys, content_store=archive.store,
             content_scope_key=archive_scope_key(self._namespace, self._tenant_id),
             content_paths=tuple(("value", "payload", "fields", *path) for path in paths),
+            additional_records=additional_records,
         )
 
     async def prefetch_configuration_owner(self, hint: StoredRecord) -> None:
@@ -478,7 +492,11 @@ class ExecutionContent:
                       if (identity := pending_operation_reference(payload)) is not None}
         if not references:
             return {}
-        values = await read_pending_operations(self._store, tuple(references), namespace=self._namespace, tenant_id=self._tenant_id)
+        from ._tool_operation_content import ToolContentReadRequired
+        try:
+            values = await read_pending_operations(self._pending_source, tuple(references), namespace=self._namespace, tenant_id=self._tenant_id)
+        except ToolContentReadRequired as error:
+            raise _ContentReadRequired(self._store.storage_group) from error
         result = {}
         for value in values:
             fields = decode_envelope(references[value.tool_operation_id].data).value["payload"]["fields"]
@@ -499,11 +517,15 @@ class ExecutionContent:
         from ._pending_operation_reference import read_pending_operations
         pending = None if value.recovery is None else value.recovery.pending_tools
         active = active_state_scope()
-        if pending is None or active is None or not active.writable or self._store not in active.transactions:
+        if (pending is None or active is None or not active.writable or self._store not in active.transactions
+                or self._pending_source not in active.transactions):
+            return {}
+        from .state import StateContentDependencies
+        if self._pending_source is not self._store and not isinstance(self._store, StateContentDependencies):
             return {}
         calls = (*pending.approvals, *pending.calls)
         sources = {source.tool_operation_id: source for source in
-                   await read_pending_operations(self._store, tuple(call.operation_id for call in calls),
+                   await read_pending_operations(self._pending_source, tuple(call.operation_id for call in calls),
                                                  namespace=self._namespace, tenant_id=self._tenant_id)}
         result = {}
         occurrences = Counter(id(call.arguments_payload) for call in calls)
@@ -662,7 +684,7 @@ class ExecutionContent:
             encoded_payloads[id(value.stored_user_input)] = {"$dataclass": "stored_user_input", "schema": 1,
                                                            "fields": {"content": input_source.to_json()}}
         encoded_payloads.update({key: {"$dataclass": "stored_payload", "schema": 1,
-            "fields": {"content": {"$pending_operation": identity}}} for key, identity in admitted.items()})
+            "fields": {"content": {"$pending_operation": identity, "source": "checkpoint"}}} for key, identity in admitted.items()})
         missing = []
         for payload, (identity, raw) in selected:
             reference = archive.scope_id, archive.content_scope, identity

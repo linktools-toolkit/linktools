@@ -251,7 +251,7 @@ async def test_official_terminal_hook_uses_committed_receipt(state: Persistence,
     async def unexpected_storage(*args, **kwargs):
         raise AssertionError("a confirmed same-owner receipt must not be reread or rewritten")
 
-    monkeypatch.setattr(state.checkpoint.tools, "get_tool_effect", unexpected_storage)
+    monkeypatch.setattr(state.checkpoint.tools, "get_operation", unexpected_storage)
     monkeypatch.setattr(state.checkpoint.tools, "record_tool_effect", unexpected_storage)
     result = await capability.after_tool_execute(context, call=call, tool_def=definition,
                                                  args={"count": 3}, result={"item": 42})
@@ -341,6 +341,9 @@ async def test_new_recovery_call_belongs_only_to_its_first_observing_attempt(
         ))
     decision = await first.begin(tool_run_context(), call, definition, {}, False)
     assert decision is not None
+    assert await first.get_tool_effect(run_id="run", tool_call_id="new-call") is None
+    assert await first.list_unresolved_tool_effects(run_id="run") == []
+    assert len(await first.list_unresolved_tool_effects(run_id="resumed")) == 1
     await first.complete(decision, {"created": True})
     if native_observation:
         prior = await first.get_tool_effect(run_id="resumed", tool_call_id="new-call")
@@ -411,7 +414,7 @@ async def test_bound_leaf_callbacks_keep_native_event_identity_and_permitted_pay
     assert all(event.run_id == "run" and event.step_index == 7 and event.conversation_id == "conversation"
                and event.tool_name == "inspect" and event.tool_call_id == "call" for event in events)
     assert all(event.parent_run_id == "parent" and event.agent_name == "worker"
-               and event.metadata == {"native": "metadata"} for event in events)
+               and event.metadata == {"native": "metadata", "linktools.operation_id": decision.operation_id} for event in events)
     assert len({event.idempotency_key for event in events}) == 2
     assert (await bridge.get_tool_effect(run_id="run", tool_call_id="call")).effect_summary == "Authorized provider call"
     assert len(await repository.list_by_execution("execution", tenant_id="tenant")) == 1

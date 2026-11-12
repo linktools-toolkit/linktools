@@ -3,7 +3,7 @@
 """Indexed source/content joins for explicitly declared immutable references."""
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Sequence, Mapping
 from typing import TYPE_CHECKING
 
 from ._record_owner import record_owner_rows
@@ -28,7 +28,7 @@ def content_reference_batch_size(path_count: int) -> int:
 def content_reference_statement(
     metadata: "MetaData", *, dialect: str, owner_store_key: bytes, owner_keys: Sequence[bytes],
     content_store_key: bytes, content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
-    typed_payloads: bool,
+    typed_payloads: bool, additional_records: Mapping[bytes, Sequence[bytes]] | None = None,
 ) -> "Select":
     from sqlalchemy import JSON, LargeBinary, and_, case, cast, func, literal, select, true, type_coerce, union_all
     from sqlalchemy.dialects.mysql import BINARY
@@ -78,7 +78,19 @@ def content_reference_statement(
         selections.append(select(literal(2).label("source_kind"),
             *(literal(None, type_=column.type).label(column.name) for column in owners.c),
             *(column.label("typed_" + column.name) for column in native.c)).select_from(joined_native))
-    return select(union_all(*selections).subquery("owner_content_rows"))
+    for store_key, keys in (additional_records or {}).items():
+        extra = record_owner_rows(metadata, keys=keys)
+        selections.append(select(literal(3).label("source_kind"), *extra.c, *native_nulls).where(
+            extra.c.store_key == store_key,
+            extra.c.key_locator.in_(tuple(hashlib.sha256(key).hexdigest() for key in keys)),
+            extra.c.key.in_(tuple(keys))))
+    statement = select(union_all(*selections).subquery("owner_content_rows"))
+    if dialect != "mysql":
+        # Keep CTE materialization within this SELECT so callers can compose the
+        # complete read plan without hoisting its private source names.
+        statement = statement.add_cte(owners, references, nest_here=True)
+        return select(statement.subquery("captured_content"))
+    return statement
 
 
 __all__ = ["content_reference_batch_size", "content_reference_statement"]

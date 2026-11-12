@@ -235,6 +235,14 @@ async def materialize_runtime_storage(
         for bundle in bundles.values()
         for value in bundle.values()
     )
+    from .state import StateContentDependencies
+    checkpoint_store = stores[PersistenceDomain.CHECKPOINT]
+    if checkpoint_store is not execution_store:
+        if isinstance(execution_store, StateContentDependencies):
+            execution_store.bind_content_dependency(checkpoint_store)
+    if checkpoint_store is execution_store or isinstance(execution_store, StateContentDependencies):
+        for component in bundles[PersistenceDomain.EXECUTION].values():
+            component.bind_pending_operation_source(checkpoint_store)
     for component in _unique(components):
         register_cleanup((component.close,))
     for component in _unique(components):

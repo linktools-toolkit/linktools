@@ -1181,6 +1181,32 @@ class StateStorageGroup(Protocol):
     ) -> ValueT: ...
 
 
+@runtime_checkable
+class StateContentDependencies(Protocol):
+    """Explicit immutable-owner participants bound before transaction entry."""
+
+    @property
+    def content_dependencies(self) -> tuple["StateStore", ...]: ...
+
+    def bind_content_dependency(self, source: "StateStore") -> None: ...
+
+
+def state_content_members(stores: Sequence["StateStore"]) -> tuple["StateStore", ...]:
+    """Expand only declared dependencies; never discover arbitrary group members."""
+    members = list(dict.fromkeys(stores))
+    index = 0
+    while index < len(members):
+        store = members[index]
+        if isinstance(store, StateContentDependencies):
+            for source in store.content_dependencies:
+                if source.storage_group is not store.storage_group:
+                    raise StateTransactionNestingError("content owners must share their StateStorageGroup")
+                if source not in members:
+                    members.append(source)
+        index += 1
+    return tuple(members)
+
+
 class StateStore(Protocol):
     """Physical StateStore contract with retry-safe, transaction-local callbacks.
 
@@ -1444,4 +1470,4 @@ STATE_GROUP_METADATA_KEY = _encode_key_components(("state-group-metadata",), STO
 STATE_GROUP_ARCHIVE_KEY = _encode_key_components(("state-group-archive",), STORE_KEY_MAX_BYTES)
 
 
-__all__ = ['STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ["StateContentDependencies", "state_content_members", 'STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

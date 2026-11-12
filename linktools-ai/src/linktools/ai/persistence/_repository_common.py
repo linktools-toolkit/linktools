@@ -88,6 +88,10 @@ class _RepositoryBase:
         self._domain = domain
         self._execution_content = ExecutionContent(store, namespace=namespace, tenant_id=tenant_id)
 
+    def bind_pending_operation_source(self, source: StateStore) -> None:
+        """Bind the configured checkpoint domain before repositories are used."""
+        self._execution_content.bind_pending_operation_source(source)
+
     async def initialize(self) -> None:
         return None
 

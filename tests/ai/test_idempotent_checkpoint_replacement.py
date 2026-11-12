@@ -150,12 +150,13 @@ async def test_recovered_idempotent_call_preserves_existing_receipt(tmp_path: Pa
     await state.initialize(namespace="receipt-compat", tenant_id="tenant")
     objects = InMemoryObjectStore()
     try:
-        def bridge(run, owner, recovery=None):
+        def bridge(run, owner, recovery=None, operation_id=None):
             return RuntimeToolOperationBridge(
                 state.checkpoint.tools, objects, namespace="receipt-compat", tenant_id="tenant",
                 execution_id="execution", agent_run_id=run, binding_digest="b" * 64,
                 owner=owner, background_tasks=set(),
                 recovery_agent_run_id=recovery,
+                operation_ids=None if operation_id is None else {"call": operation_id},
             )
         original = bridge("old-run", "old-worker")
         decision = await original.begin(
@@ -175,7 +176,7 @@ async def test_recovered_idempotent_call_preserves_existing_receipt(tmp_path: Pa
 
         async def effect():
             raise AssertionError("persisted receipt must not execute the leaf again")
-        recovered = bridge("new-run", "new-worker", "old-run")
+        recovered = bridge("new-run", "new-worker", "old-run", operation_id)
         descriptor = ManagedToolDescriptor("tool_operation", "replay_safe", "business")
         if outcome == "completed":
             result, _ = await _call(effect, descriptor, bridge=recovered)

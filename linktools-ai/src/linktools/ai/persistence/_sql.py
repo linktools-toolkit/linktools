@@ -28,6 +28,7 @@ from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
 from ._record_owner import RECORD_OWNER_TABLES, record_owner_table, record_owner_edge, record_owner_rows, record_owner_values
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
+from .state import state_content_members
 from .state import (
     FactQuery,
     FactScanCursor,
@@ -164,12 +165,13 @@ class _SqlGroupTransaction:
     async def read_content_references(
         self, *, owner_store: StateStore, owner_keys: Sequence[bytes], content_store: StateStore,
         content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
+        additional_records: Mapping[StateStore, Sequence[bytes]] | None = None,
     ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]] | None:
         from ._archive import archive_scope_parts, validate_archive_content_identity
         from ._content_reference_sql import content_reference_batch_size, content_reference_statement
         from ._step_payload_owner import payload_record_from_row
 
-        active_state_group_transaction(self._group, (owner_store, content_store), writable=False)
+        active_state_group_transaction(self._group, (owner_store, content_store, *(additional_records or {})), writable=False)
         active = active_state_scope()
         if active is None or active.record_reader is not self:
             raise StateTransactionNestingError("content source reader is outside its transaction")
@@ -205,18 +207,34 @@ class _SqlGroupTransaction:
                 if target not in content._record_cache:
                     required.append(key)
                     break
+        extras = {store: tuple(dict.fromkeys(validate_record_key(key) for key in requested
+                    if key not in self.transaction(store)._record_cache))
+                  for store, requested in (additional_records or {}).items()}
+        extras = {store: requested for store, requested in extras.items() if requested}
+        if sum(map(len, extras.values())) > 32:
+            await self.get_records(extras)
+            extras = {}
+        extra_stores = {self.transaction(store)._store_key: store for store in extras}
         found: dict[StateStore, dict[bytes, StoredRecord]] = {owner_store: {}, content_store: {}}
-        size = content_reference_batch_size(len(paths))
+        found.update({store: {} for store in extras if store not in found})
+        size = max(1, content_reference_batch_size(len(paths)) - (sum(map(len, extras.values())) * 3 + 5) // 6)
         for offset in range(0, len(required), size):
             batch = tuple(required[offset:offset + size])
             statement = content_reference_statement(
                 self._group.metadata, dialect=dialect, owner_store_key=owner._store_key, owner_keys=batch,
                 content_store_key=content._store_key, content_scope_key=content_scope_key, content_paths=paths,
                 typed_payloads=content._store_key == STATE_GROUP_ARCHIVE_KEY,
+                additional_records={self.transaction(store)._store_key: requested for store, requested in extras.items()} if offset == 0 else None,
             )
             for row in (await owner._execute(statement)).mappings():
                 kind = row["source_kind"]
-                if kind == 2:
+                if kind == 3:
+                    target_store = extra_stores.get(row["store_key"])
+                    if target_store is None or row["key"] not in extras[target_store]:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    transaction = self.transaction(target_store)
+                    record = _record_from_row(row)
+                elif kind == 2:
                     record = payload_record_from_row({key.removeprefix("typed_"): value
                         for key, value in row.items() if key.startswith("typed_")})
                     target_store, transaction = content_store, content
@@ -231,6 +249,12 @@ class _SqlGroupTransaction:
                 found[target_store][record.key] = record
             for key in batch:
                 owner._record_cache.setdefault(key, None)
+        if required:
+            for store, requested in extras.items():
+                for key in requested:
+                    self.transaction(store)._record_cache.setdefault(key, None)
+        elif extras:
+            await self.get_records(extras)
         found[owner_store].update((key, record) for key in keys if (record := owner._record_cache.get(key)) is not None)
         for record in tuple(found[owner_store].values()):
             for path in paths:
@@ -564,7 +588,7 @@ class SqlStateStorageGroup:
         stores: Sequence["SqlStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
-        members = tuple(dict.fromkeys((*stores, *((self._archive_member,) if self._archive_member else ()))))
+        members = state_content_members((*stores, *((self._archive_member,) if self._archive_member else ())))
         if not stores:
             raise ValueError("StateStorageGroup read requires a store")
         for store in members:
@@ -617,7 +641,7 @@ class SqlStateStorageGroup:
         # writer's first publication; mutation callbacks are never replayed.
         if active_state_scope() is None and self._archive_on_mutation and self._archive_member is None:
             self._archive_member = await self._open_partition(STATE_GROUP_ARCHIVE_KEY)
-        members = tuple(dict.fromkeys((*stores, *((self._archive_member,) if self._archive_member else ()))))
+        members = state_content_members((*stores, *((self._archive_member,) if self._archive_member else ())))
         active = active_state_transaction(members[0], writable=True)
         if active is not None:
             return await fn(active_state_group_transaction(self, members))
@@ -815,7 +839,20 @@ class SqlStateStore:
         self._closed = False
         self._initialized = False
         self._reads = StateRecordCache(self, cache, scope=f"sql:{self._store_key.hex()}")
+        self._content_dependencies: tuple[StateStore, ...] = ()
         self._storage_group.add_member(self)
+
+    @property
+    def content_dependencies(self) -> tuple[StateStore, ...]:
+        return self._content_dependencies
+
+    def bind_content_dependency(self, source: StateStore) -> None:
+        if source.storage_group is not self.storage_group:
+            raise ValueError("content dependency must share its owning group")
+        if active_state_scope() is not None:
+            raise StateTransactionNestingError("content dependency must be bound before transaction entry")
+        if source is not self and source not in self._content_dependencies:
+            self._content_dependencies = (*self._content_dependencies, source)
 
     @property
     def context(self) -> SqlStorageContext:

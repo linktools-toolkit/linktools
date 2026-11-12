@@ -507,6 +507,7 @@ class RuntimeSnapshotOperations:
             if PersistenceDomain.EXECUTION in {domain for domain, _ in members}:
                 execution_bindings = ExecutionContent(self._resources.stores[PersistenceDomain.EXECUTION],
                     namespace=self._resources.namespace, tenant_id=self._resources.tenant_id)
+                execution_bindings.bind_pending_operation_source(self._resources.stores[PersistenceDomain.CHECKPOINT])
                 await execution_bindings.initialize(create=False)
 
             async def capture_group(transaction: object) -> None:
@@ -1447,10 +1448,18 @@ async def restore_snapshot(
             for record in decoded_domains.get(PersistenceDomain.EXECUTION, ((), (), (), ()))[0]
             if record.kind == "execution"
             for _, payload in execution_payload_slots(decode_envelope(record.data).value["payload"]))
-        if (pending_references and resources.stores.get(PersistenceDomain.EXECUTION)
-                is not resources.stores.get(PersistenceDomain.CHECKPOINT)):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
-                          "Pending admission references require their original shared execution and checkpoint owner")
+        if pending_references:
+            from .state import StateContentDependencies
+            execution_store = resources.stores[PersistenceDomain.EXECUTION]
+            checkpoint_store = resources.stores[PersistenceDomain.CHECKPOINT]
+            if execution_store.storage_group is not checkpoint_store.storage_group:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
+                              "Execution and checkpoint must retain their shared transaction group")
+            if execution_store is not checkpoint_store:
+                if not isinstance(execution_store, StateContentDependencies):
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED,
+                                  "Split content owners require explicit dependency support")
+                execution_store.bind_content_dependency(checkpoint_store)
         if run_registrations:
             if resources.run_registrations is None:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)

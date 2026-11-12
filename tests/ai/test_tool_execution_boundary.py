@@ -59,8 +59,8 @@ async def test_tool_result_after_cancellation_never_republishes_control(tmp_path
         assert result.operation.value.status is ToolOperationStatus.COMPLETED
         assert result.operation.value.result_payload.value == "known"
         assert await repository.get("execution", tenant_id="tenant") == stopped
-        assert await state.checkpoint.tools.get_by_call("run", "call", tenant_id="tenant") == result.operation.value
-        assert (await state.checkpoint.tools.get_tool_effect(run_id="run", tool_call_id="call")).status == "completed"
+        assert await state.checkpoint.tools.get_operation(result.operation.value.tool_operation_id, tenant_id="tenant") == result.operation.value
+        assert result.operation.value.to_tool_effect("run").status == "completed"
         with pytest.raises(AIError) as stale:
             await _commands(state).commit_tool_admission_boundary(
                 replace(_request(), tool_operation_id="next", tool_call_id="next"),

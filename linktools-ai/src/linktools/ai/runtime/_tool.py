@@ -299,6 +299,7 @@ class RuntimeToolOperationBridge:
         self._background_tasks = background_tasks
         self._recovery_agent_run_id = recovery_agent_run_id
         self._operation_ids = dict(operation_ids or {})
+        self._operation_observer: Callable[[str, str], None] | None = None
         self._fresh_execution = fresh_execution
         self._terminal_commands = terminal_commands
         self._budget_scope_id = budget_scope_id
@@ -550,6 +551,8 @@ class RuntimeToolOperationBridge:
                 await self._pending_tools.materialize_tool_operations()
             staged = await self._pending_tools.stage_tool_operation(admission)
             if staged is not None:
+                if self._operation_observer is not None:
+                    self._operation_observer(staged.tool_call_id, staged.tool_operation_id)
                 decision = replace(await self._decision_from_record(staged, replay_safe), staged=True)
                 self._decisions[key] = decision
                 self._decision_fingerprints[key] = fingerprint
@@ -596,6 +599,8 @@ class RuntimeToolOperationBridge:
         if existing.tool_call_id != call.tool_call_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._effect_receipts[existing.tool_call_id] = confirmed
+        if self._operation_observer is not None:
+            self._operation_observer(existing.tool_call_id, existing.tool_operation_id)
         if event is not None:
             self._tool_events[existing.tool_operation_id] = event
         if event is not None and existing.status is ToolOperationStatus.EFFECT_UNKNOWN:
@@ -620,6 +625,10 @@ class RuntimeToolOperationBridge:
             else "claimed",
         )
         return decision
+
+    def bind_operation_observer(self, observer: Callable[[str, str], None]) -> None:
+        """Expose confirmed admission identity to this run's trace recorder."""
+        self._operation_observer = observer
 
     def _operation_id(self, run_id: str, tool_call_id: str) -> str:
         return tool_operation_id(tenant_id=self._tenant_id, execution_id=self._execution_id,
@@ -668,7 +677,8 @@ class RuntimeToolOperationBridge:
         source_run_id = self._effect_source_run(run_id)
         staged = None if self._pending_tools is None else self._pending_tools.pending_tool_operations()
         if staged is not None:
-            operation = next((value for value in staged if value.tool_call_id == tool_call_id), None)
+            operation = next((value for value in staged if value.tool_call_id == tool_call_id
+                              and (run_id == self._agent_run_id or value.agent_run_id == run_id)), None)
             return None if operation is None else operation.to_tool_effect(run_id)
         observed = self._effect_receipts.get(tool_call_id)
         receipt = None if observed is None else observed.value
@@ -692,7 +702,9 @@ class RuntimeToolOperationBridge:
         source_run_id = self._effect_source_run(run_id)
         staged = None if self._pending_tools is None else self._pending_tools.pending_tool_operations()
         if staged is not None:
-            return [effect for value in staged if (effect := value.to_tool_effect(run_id)).status == "started"]
+            return [effect for value in staged
+                    if (run_id == self._agent_run_id or value.agent_run_id == run_id)
+                    and (effect := value.to_tool_effect(run_id)).status == "started"]
         values = await self._repository.get_operations(tuple(self._operation_ids.values()), tenant_id=self._tenant_id)
         if any(value.execution_id != self._execution_id for value in values):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)

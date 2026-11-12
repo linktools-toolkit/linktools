@@ -457,10 +457,13 @@ async def _purge_unreferenced_objects(
                             decode_envelope(record.data).value.get("payload"))
                             if (identity := pending_operation_reference(payload)) is not None)
                         keys = tuple(record_key(parts[1], parts[2], "checkpoint", "tool_operation", (identity,)) for identity in identities)
-                        rows = await store.read(lambda tx: tx.get_records(keys)) if keys else {}
+                        checkpoint_store = stores[PersistenceDomain.CHECKPOINT]
+                        if keys and checkpoint_store.storage_group is not store.storage_group:
+                            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                        rows = await checkpoint_store.read(lambda tx: tx.get_records(keys)) if keys else {}
                         owners = {}
                         for key, row in rows.items():
-                            owners[key] = expand_tool_content(await expand_native_templates(row, store), binding_contents)
+                            owners[key] = expand_tool_content(await expand_native_templates(row, checkpoint_store), binding_contents)
                         operations = pending_operation_values(record, owners, namespace=parts[1], tenant_id=parts[2])
                         semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents,
                             operations=operations), binding_contents)

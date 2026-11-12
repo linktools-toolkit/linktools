@@ -10,7 +10,8 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.agent import AssistantTextOutput
-from linktools.ai.errors import AIError
+from linktools.ai.core import ExecutionStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model.messages import encode_model_messages
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._execution_content import restore_native_text_payload
@@ -43,7 +44,13 @@ async def test_actual_runtime_output_selects_exact_native_projection(tmp_path: P
     ) as runtime:
         result = (await runtime.agents.get().run("review", output=AssistantTextOutput if case == "assistant" else _Count,
                                                 timeout_seconds=10)).result
-        assert result.output == expected
+        if case == "coerced":
+            assert result.status is ExecutionStatus.FAILED
+            assert result.error_code == ErrorCode.MODEL_RESPONSE_INVALID.value
+            assert result.output is None
+        else:
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert result.output == expected
         records = await state.execution.executions.state_store.read(lambda tx: tx.scan_records())
         stored, = (record for record in records if record.kind == "execution")
         value = decode_envelope(stored.data).value["payload"]
@@ -56,7 +63,9 @@ async def test_actual_runtime_output_selects_exact_native_projection(tmp_path: P
             assert refs[0].projection == ("assistant-text-output" if case == "assistant" else "tool-call-output")
     async with Persistence.open("native-output", tenant_id="tenant", storage=config, read_only=True) as cold:
         restored = await cold.execution.executions.get_result_record(identity, tenant_id="tenant", fresh=True)
-        assert restored.result.output == StoredPayload.inline_json(expected)
+        assert restored.result.output == (None if case == "coerced" else StoredPayload.inline_json(expected))
+        if case == "coerced":
+            assert restored.error_code == ErrorCode.MODEL_RESPONSE_INVALID.value
 
 
 def test_output_projection_rejects_wrong_part_kind_and_tool_identity() -> None:
@@ -71,3 +80,24 @@ def test_output_projection_rejects_wrong_part_kind_and_tool_identity() -> None:
             restore_native_text_payload(invalid, raw)
     with pytest.raises(ValueError):
         NativeTextReference.from_json({"$native_text": root.to_json(), "projection": "unknown"})
+
+
+@pytest.mark.asyncio
+async def test_terminal_output_projection_preserves_json_value_types(tmp_path: Path) -> None:
+    from .test_native_text_result_runtime import _prepare, _publish
+
+    config = PersistenceStorage.sqlite(tmp_path / "typed-output.db")
+    async with Persistence.open("native-result", tenant_id="tenant", storage=config) as state:
+        commands, commit, current, checkpoint = await _prepare(state, "placeholder", "placeholder")
+        accepted = StoredPayload.inline_json({"count": 3})
+        commit = replace(commit, result=replace(commit.result, output=accepted))
+        checkpoint = replace(checkpoint, messages=[ModelResponse(parts=[
+            ToolCallPart("final_result", {"count": "3"}, tool_call_id="output-call")])])
+        await _publish(commands, commit, current, checkpoint)
+        repository = state.execution.executions
+        raw = await repository.state_store.read_record(repository.execution_record_key("execution"))
+        assert not any(native_text_reference(payload) is not None
+                       for _, payload in execution_payload_slots(decode_envelope(raw.data).value["payload"]))
+    async with Persistence.open("native-result", tenant_id="tenant", storage=config, read_only=True) as cold:
+        assert (await cold.execution.executions.get_result_record(
+            "execution", tenant_id="tenant", fresh=True)).result.output == accepted

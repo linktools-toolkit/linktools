@@ -2051,7 +2051,7 @@ def pending_operation_reference(value: Mapping) -> str | None:
         return None
     _validate_dataclass_wrapper(value, StoredPayload, _CURRENT_CODEC, persisted=True)
     identity = content["$pending_operation"]
-    if (set(fields) != {"content"} or set(content) != {"$pending_operation"}
+    if (set(fields) != {"content"} or set(content) != {"$pending_operation", "source"} or content.get("source") != "checkpoint"
             or not isinstance(identity, str) or not identity):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return identity

@@ -23,7 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskBindingContract
 from ..execution import ExecutionMetadataRecord, ExecutionControlRecord, ExecutionResultRecord, ExecutionRetentionRecord, ExecutionTimelineRecord, ExecutionView
-from .codec import decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
+from .codec import pending_operation_reference, decode_execution_producer_authority, runtime_policy_reference, binding_reference, execution_payload_slots, native_user_input_reference, native_text_reference, decode_execution_metadata, decode_execution_control, decode_execution_retention, encode_envelope, encode_domain, decode_execution_producer_control, decode_execution_timeline, decode_execution_header, decode_execution_view, decode_envelope, decode_execution_content
 from ._archive import ContentArchive, PreparedArchive
 from ._execution_content import _ContentReadRequired
 from ._budget import BudgetRepositoryImpl
@@ -237,7 +237,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         Inline-only captures do not discover or open archive storage.
         """
         group = self._store.storage_group
-        members = tuple(dict.fromkeys((self._store, *stores)))
+        members = tuple(dict.fromkeys((self._store, *stores, *self._execution_content.pending_operation_stores)))
         if active_state_scope() is not None:
             # Reuse only the stores enlisted by the caller. Another task may
             # have discovered the archive since this snapshot began; its body
@@ -273,7 +273,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if ((fresh and (runtime_policy_reference(payload) is not None
                         or (isinstance(payload, Mapping)
                             and binding_reference(payload.get("fields", {}).get("binding")) is not None)))
-                or any(native_text_reference(item) is not None or native_user_input_reference(item) is not None
+                or any(native_text_reference(item) is not None or native_user_input_reference(item) is not None or pending_operation_reference(item) is not None
                        for _, item in execution_payload_slots(payload))):
             # The observation only selects this path. Never hydrate its old owner
             # in a later snapshot: reread owner and Native source together, so GC
@@ -301,7 +301,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             record = ((await self._refresh_records((key,))).get(key) if fresh else
                       await self._store.read_record(key))
             if record is not None and active_state_scope() is None and any(
-                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
                 for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
             ):
                 return await self.read_content(lambda _group: read())
@@ -408,7 +408,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await self._execution_content.prefetch_projection_owners((key,), bindings=True, result=True)
             record = ((await self._refresh_records((key,))).get(key) if fresh else await self._store.read_record(key))
             if record is not None and active_state_scope() is None and any(
-                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
                 for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
             ):
                 return await self.read_content(read)
@@ -468,6 +468,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         return candidate
 
+    async def prefetch_timeline_records(self, execution_ids: Sequence[str], *,
+                                        additional_records: Mapping[StateStore, Sequence[bytes]]) -> None:
+        """Capture timeline owners, immutable content and sibling membership together."""
+        await self._execution_content.prefetch_projection_owners(
+            tuple(self.execution_record_key(identity) for identity in execution_ids),
+            result=True, result_body=True, terminal_details=True, input_body=True,
+            additional_records=additional_records)
+
     async def get_timeline_many(
         self, execution_ids: Sequence[str], *, tenant_id: str,
     ) -> Mapping[str, ExecutionTimelineRecord]:
@@ -479,9 +487,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if any(not isinstance(value, str) or not value for value in ordered):
                 raise ValueError("execution_ids must contain non-empty strings")
             keys = {value: self._key("execution", (value,)) for value in ordered}
+            await self.prefetch_timeline_records(ordered, additional_records={})
             records = await self._store.read_records(tuple(keys.values())) if keys else {}
             if active_state_scope() is None and any(
-                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
                 for record in records.values()
                 for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
             ):
@@ -644,7 +653,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             records = (await self._refresh_records(tuple(keys.values())) if refresh else
                        await self._store.read_records(tuple(keys.values())))
             if active_state_scope() is None and (refresh or any(
-                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None
+                native_text_reference(payload) is not None or native_user_input_reference(payload) is not None or pending_operation_reference(payload) is not None
                 for record in records.values()
                 for _, payload in execution_payload_slots(decode_envelope(record.data).value.get("payload"))
             )):

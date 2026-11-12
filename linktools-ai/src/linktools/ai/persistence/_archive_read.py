@@ -52,6 +52,7 @@ class ContentReferenceReader(Protocol):
     async def read_content_references(
         self, *, owner_store: "StateStore", owner_keys: Sequence[bytes], content_store: "StateStore",
         content_scope_key: bytes, content_paths: Sequence[tuple[str, ...]],
+        additional_records: Mapping["StateStore", Sequence[bytes]] | None = None,
     ) -> "Mapping[StateStore, Mapping[bytes, StoredRecord]] | None":
         """Capture current owners and declared references in their enlisted snapshot."""
         ...

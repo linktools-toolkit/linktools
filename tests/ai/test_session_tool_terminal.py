@@ -1894,6 +1894,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             execution_id="execution",
             agent_run_id="run-2",
             recovery_agent_run_id="run-1",
+            operation_ids={"call-1": decision.operation_id},
             binding_digest="a" * 64,
             owner="worker-2",
             background_tasks=set(),

@@ -16,6 +16,7 @@ from ..storage import InMemoryObjectStore
 from ._memory_transaction import _MemoryTransaction, _validate_transaction_integrity
 from ._record_cache import StateRecordCache
 from ._record_owner import RECORD_OWNER_TABLES, record_owner_table
+from .state import StateStore, state_content_members
 from .state import (
     StateCallback,
     StateGroupCallback,
@@ -202,7 +203,7 @@ class InMemoryStateStorageGroup:
         stores: Sequence["InMemoryStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
-        members = tuple(dict.fromkeys((*stores, *((self._archive[1],) if self._archive else ()))))
+        members = state_content_members((*stores, *((self._archive[1],) if self._archive else ())))
         if not stores:
             raise ValueError("StateStorageGroup read requires a store")
         for store in members:
@@ -229,7 +230,7 @@ class InMemoryStateStorageGroup:
     ) -> ValueT:
         if self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
-        members = tuple(dict.fromkeys((*stores, *((self._archive[1],) if self._archive else ()))))
+        members = state_content_members((*stores, *((self._archive[1],) if self._archive else ())))
         if not stores:
             raise ValueError("StateStorageGroup mutation requires a store")
         for store in members:
@@ -305,7 +306,20 @@ class InMemoryStateStore:
         self._initialized = False
         self._reads = StateRecordCache(self, cache, scope=f"memory:{uuid4().hex}")
         self._storage_group = group or InMemoryStateStorageGroup()
+        self._content_dependencies: tuple[StateStore, ...] = ()
         self._storage_group.add_member(self)
+
+    @property
+    def content_dependencies(self) -> tuple[StateStore, ...]:
+        return self._content_dependencies
+
+    def bind_content_dependency(self, source: StateStore) -> None:
+        if source.storage_group is not self.storage_group:
+            raise ValueError("content dependency must share its owning group")
+        if active_state_scope() is not None:
+            raise StateTransactionNestingError("content dependency must be bound before transaction entry")
+        if source is not self and source not in self._content_dependencies:
+            self._content_dependencies = (*self._content_dependencies, source)
 
     @property
     def storage_group(self) -> StateStorageGroup:
