@@ -204,9 +204,10 @@ class ContainerManager:
 
     @cached_property
     def containers(self) -> "dict[str, BaseContainer]":
+        from .registry.loader import ContainerLoadError
+
         result = dict()
         load_result = self.loader.load_all()
-        self.container_load_errors = load_result.errors
         for container in load_result.containers:
             existing = result.get(container.name)
             if existing is not None:
@@ -214,17 +215,34 @@ class ContainerManager:
                     "Duplicate container name %r: %s and %s"
                     % (container.name, describe_origin(existing), describe_origin(container)))
             result[container.name] = container
-        # Raw persisted names only -- resolving them to container objects here
-        # would recurse back into this same property via InstalledStateStore.
-        errors_by_name = {e.expected_name: e for e in load_result.errors if e.expected_name}
-        for name in self.installed_state.load_names():
-            if name not in result:
-                error = errors_by_name.get(name)
-                if error is not None:
-                    self.logger.warning(
-                        f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
-                else:
-                    self.logger.warning(f"Not found installed container `{name}`, skip.")
+
+        installed_names = self.installed_state.load_names()
+        # Publish every constructed container before invoking on_init so hooks
+        # can resolve each other through the regular manager property.
+        self.containers = result
+        try:
+            for container in tuple(result.values()):
+                try:
+                    container.on_init()
+                except Exception as error:
+                    self.logger.warning(f"Failed to load container from `{container.root_path}`: {error}")
+                    load_result.errors.append(ContainerLoadError(
+                        path=str(container.root_path), message=str(error), expected_name=container.name))
+                    del result[container.name]
+
+            self.container_load_errors = load_result.errors
+            errors_by_name = {e.expected_name: e for e in load_result.errors if e.expected_name}
+            for name in installed_names:
+                if name not in result:
+                    error = errors_by_name.get(name)
+                    if error is not None:
+                        self.logger.warning(
+                            f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
+                    else:
+                        self.logger.warning(f"Not found installed container `{name}`, skip.")
+        except BaseException:
+            self.__dict__.pop("containers", None)
+            raise
         return result
 
     @cached_property

@@ -42,11 +42,7 @@ class ContainerLoadError:
 
 @dataclass(frozen=True)
 class ContainerLoadResult:
-    """``ContainerLoader.load_all()``'s return value: the containers that
-    loaded successfully, plus every
-    load failure as a structured
-    ``ContainerLoadError`` instead of a log-only warning that leaves
-    callers unable to tell "not installed" apart from "failed to load"."""
+    """Discovered containers awaiting ``on_init``, plus load errors."""
     containers: "list[BaseContainer]"
     errors: "list[ContainerLoadError]" = field(default_factory=list)
 
@@ -153,7 +149,6 @@ class ContainerLoader:
                             container = value(manager, path)
                             container.repo_context = repository
                             manager.logger.debug(f"Load container {container.name} in {path}")
-                            container.on_init()
                             yield container
                             return
             except Exception as e:
@@ -168,6 +163,5 @@ class ContainerLoader:
                 container = SimpleContainer(manager, path)
                 container.repo_context = repository
                 manager.logger.debug(f"Load container {container.name} in {path}")
-                container.on_init()
                 yield container
                 return
