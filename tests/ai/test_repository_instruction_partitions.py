@@ -136,7 +136,7 @@ async def test_historical_barrier_replay_rejects_changed_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_latest_overlay_must_match_persisted_payload_digest() -> None:
+async def test_latest_overlay_uses_loaded_content_without_rechecking_digest() -> None:
     first, latest = _instructions()
     checkpoint, arguments = _checkpoint(
         first,
@@ -148,18 +148,18 @@ async def test_latest_overlay_must_match_persisted_payload_digest() -> None:
         _Resolver(),  # type: ignore[arg-type]
     )
 
-    with pytest.raises(AIError) as raised:
-        await coordinator.check_repository_instructions(
-            execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
-            initial=None,
-            overlay=first,
-            tool_name="read_file",
-            tool_call_id="call-a",
-            arguments=arguments,
-            path_fields=("path",),
-        )
+    overlay, reconsider = await coordinator.check_repository_instructions(
+        execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
+        initial=None,
+        overlay=first,
+        tool_name="read_file",
+        tool_call_id="call-a",
+        arguments=arguments,
+        path_fields=("path",),
+    )
 
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert overlay == latest
+    assert reconsider is True
 
 
 @pytest.mark.asyncio

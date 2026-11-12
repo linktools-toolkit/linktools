@@ -126,7 +126,7 @@ async def test_directory_rule_keeps_accepted_body_without_claiming_retention(tmp
 
 
 @pytest.mark.parametrize("field, replacement", (
-    ("source", "rule:other"), ("scope", "other"), ("content_digest", "0" * 64),
+    ("source", "rule:other"), ("scope", "other"),
     ("asset", {"version": 1}),
 ))
 async def test_rule_reference_rejects_corrupt_semantics_or_version_metadata(

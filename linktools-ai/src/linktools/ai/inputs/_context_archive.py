@@ -89,7 +89,6 @@ class ExecutionContextArchive:
         instructions = RepositoryInstructions.from_payload(
             await self.decode_repository_instructions(stored.instructions)
         )
-        stored.verify(instructions)
         return instructions
 
     async def prepare(

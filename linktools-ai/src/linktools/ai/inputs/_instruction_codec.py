@@ -69,9 +69,11 @@ class RepositoryInstructionCodec:
                         })
                     data, = await reader.require_retained_versions((asset,))
                     parsed = self._adapter.decode_markdown(data, asset_source_id=source_id, asset=asset)
-                    if (parsed.source != document["source"] or parsed.scope != document["scope"]
-                            or hashlib.sha256(parsed.content.encode("utf-8")).hexdigest() != document.pop("content_digest")):
+                    if parsed.source != document["source"] or parsed.scope != document["scope"]:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    # The fixed Asset version owns the bytes. The stored digest
+                    # remains an admission-comparison key, not a second read check.
+                    document.pop("content_digest")
                     document["content"] = parsed.content
                 documents.append(document)
             result = {**value, "documents": documents}

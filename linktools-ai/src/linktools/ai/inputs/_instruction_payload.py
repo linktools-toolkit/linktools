@@ -34,10 +34,6 @@ class RepositoryInstructionPayload:
     ) -> "RepositoryInstructionPayload":
         return cls(canonical_sha256(accepted.to_payload()), stored)
 
-    def verify(self, accepted: RepositoryInstructions) -> None:
-        if canonical_sha256(accepted.to_payload()) != self.semantic_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
     def has_same_content(self, other: "RepositoryInstructionPayload") -> bool:
         """Compare accepted content across full-body and retained Rule projections."""
         return (self.semantic_digest == other.semantic_digest

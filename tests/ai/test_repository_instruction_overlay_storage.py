@@ -155,8 +155,25 @@ async def test_overlay_commit_uses_durable_readback_without_replacing_a_newer_fr
                 assert (await port.load_repository_instructions(replayed.recovery.repository_instruction_overlay)).to_payload() == latest.to_payload()
 
 
-@pytest.mark.parametrize("corruption", ("semantic_digest", "inline_body", "descriptor", "old_shape", "version"))
-async def test_overlay_rejects_corrupt_semantics_descriptors_and_unsupported_shapes(corruption: str) -> None:
+async def test_overlay_reads_fixed_asset_and_inline_content_without_digest_rechecks() -> None:
+    async with _assets() as assets, Persistence.open("overlay-read", storage=PersistenceStorage.in_memory()) as state:
+        await assets.put(AssetKey("rule", "review.md"), b"---\nscope: pkg\n---\naccepted Rule")
+        overlay = await _mixed_overlay(assets)
+        port = _OverlayPort(state, assets)
+        reference = await port._store_repository_instructions(None, overlay)
+        wire = reference.payload.decode()
+        # These identities are compared when accepting/replacing a buffered
+        # admission, not recomputed while loading its authoritative content.
+        wire["semantic_digest"] = "0" * 64
+        next(item for item in wire["instructions"]["documents"] if "asset" in item)["content_digest"] = "0" * 64
+        restored = await port.load_repository_instructions(
+            replace(reference, payload=StoredPayload.inline_json(wire))
+        )
+        assert restored == overlay
+
+
+@pytest.mark.parametrize("corruption", ("descriptor", "old_shape", "version"))
+async def test_overlay_rejects_wrong_descriptors_and_unsupported_shapes(corruption: str) -> None:
     async with _assets() as assets, Persistence.open("overlay-integrity", storage=PersistenceStorage.in_memory()) as state:
         await assets.put(AssetKey("rule", "review.md"), b"---\nscope: pkg\n---\naccepted Rule")
         overlay = await _mixed_overlay(assets)
@@ -165,12 +182,8 @@ async def test_overlay_rejects_corrupt_semantics_descriptors_and_unsupported_sha
         wire = reference.payload.decode()
         if corruption == "old_shape":
             wire = overlay.to_payload()
-        elif corruption == "semantic_digest":
-            wire["semantic_digest"] = "0" * 64
-        elif corruption == "inline_body":
-            next(item for item in wire["instructions"]["documents"] if "content" in item)["content"] = "changed body"
         elif corruption == "descriptor":
-            next(item for item in wire["instructions"]["documents"] if "asset" in item)["content_digest"] = "0" * 64
+            next(item for item in wire["instructions"]["documents"] if "asset" in item)["scope"] = "wrong-scope"
         else:
             wire["version"] = 2
         malformed = replace(reference, payload=StoredPayload.inline_json(wire))

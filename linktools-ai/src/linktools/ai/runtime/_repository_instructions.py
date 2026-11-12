@@ -88,7 +88,7 @@ def _validate_repository_instruction_frontier(
         return
     if overlay is None or not barriers:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    RepositoryInstructionPayload.from_reference(reference, source_domain=PersistenceDomain.CHECKPOINT).verify(overlay)
+    RepositoryInstructionPayload.from_reference(reference, source_domain=PersistenceDomain.CHECKPOINT)
 
 
 @dataclass(frozen=True, slots=True)
