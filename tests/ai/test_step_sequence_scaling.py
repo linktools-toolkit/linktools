@@ -3,6 +3,7 @@
 """Persistent snapshot sequences share prefixes without extra read round trips."""
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,17 +37,26 @@ class _ReadTraffic:
     ) -> dict[str, list[tuple[object, ...]]]:
         batches = {"ai_step_sequences": [], "ai_step_messages": []}
         for statement, parameters in self.reads[start:]:
-            projection = " ".join(statement.split("FROM", 1)[0].split())
-            columns = set(projection.removeprefix("SELECT ").split(", "))
-            for table in batches:
-                if columns == {f"{table}.sha256", f"{table}.id"}:
-                    assert f"{table}.store_key =" in statement and f"{table}.sha256 IN" in statement
-                    assert parameters[:2] == (native_store_locator(store_key), store_key)
-                    assert 0 < len(parameters) - 2 <= 128
-                    batches[table].append(parameters[2:])
-                    break
-            else:
-                pytest.fail(f"Unexpected publication SQL: {statement}")
+            branches = " ".join(statement.split()).split(" UNION ALL ")
+            assert 1 <= len(branches) <= 2
+            offset = 0
+            for branch in branches:
+                match = re.fullmatch(
+                    r"SELECT \? AS anon_[0-9]+, (ai_step_sequences|ai_step_messages)\.sha256, \1\.id "
+                    r"FROM \1 WHERE \1\.store_locator = \? AND \1\.store_key = \? AND \1\.sha256 IN \([?, ]+\)",
+                    branch,
+                )
+                assert match is not None, f"Unexpected publication SQL: {statement}"
+                table = match.group(1)
+                count = branch.count("?")
+                bound = parameters[offset:offset + count]
+                assert bound[:3] == ("sequence" if table == "ai_step_sequences" else "message",
+                                     native_store_locator(store_key), store_key)
+                assert 0 < len(bound) - 3 <= 128
+                batches[table].append(bound[3:])
+                offset += count
+            assert offset == len(parameters)
+        assert len(self.reads[start:]) == max(len(values) for values in batches.values())
         for table, bound in (("ai_step_sequences", node_bound), ("ai_step_messages", message_bound)):
             identities = [identity for batch in batches[table] for identity in batch]
             assert 0 < len(identities) <= bound
@@ -76,7 +86,7 @@ async def test_cumulative_snapshot_sequences_grow_linearly_and_reopen_in_two_rea
             traffic.assert_publication_metadata(
                 start, store_key=store.store_key, node_bound=4, message_bound=1,
             )
-        assert traffic.count == 2 * size
+        assert traffic.count == size
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == size
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == size
@@ -193,7 +203,7 @@ async def test_sequence_sharing_preserves_repetition_branches_truncation_and_cro
             assert "ai_step_snapshots.store_locator =" in statement
             assert parameters == (native_store_locator(store.store_key), snapshot.run_id,
                                   encode_native_replay_key(snapshot.idempotency_key))
-        assert traffic.count == 3 * len(cases)
+        assert traffic.count == 2 * len(cases)
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots")) == len(cases)
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
@@ -401,9 +411,9 @@ async def test_publication_ids_are_reused_only_within_their_live_owner_transacti
                 await store.save_snapshot(snapshot)
             projections.clear()
         await store.save_snapshot(snapshot)
-        # Two bounded ID lookups verify node/message publication. Offline GC
-        # adds no online candidate scan or dependency revision update.
-        assert len(projections) == 2
+        # One bounded UNION verifies both node/message publication owners.
+        # Offline GC adds no online scan or dependency revision update.
+        assert len(projections) == 1
         assert not any("ai_step_messages.message" in sql or "ai_step_messages.payload_json" in sql
                        for sql in projections)
         for receipt, session in zip(receipts, sessions):

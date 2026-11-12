@@ -1038,7 +1038,8 @@ async def test_terminal_unknown_verification_checks_pending_source_in_original_r
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", baseline.capture)
             baseline.report(record_property, "terminal_without_pending_source")
-            assert baseline.statements["SELECT"] == 3
+            # Run header and its counters share the same owner capture.
+            assert baseline.statements["SELECT"] == 2
             if damage != "none":
                 tables = build_step_sql_metadata().tables
                 table = tables["ai_step_runs" if damage == "registration" else "ai_step_events"]
