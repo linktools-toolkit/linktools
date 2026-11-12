@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Ordinary budget queries consume authority and scope, not recovery bodies."""
 
+import asyncio
 from contextvars import ContextVar
 from dataclasses import replace
 from types import SimpleNamespace
@@ -15,7 +16,9 @@ from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._execution_content import ExecutionContent
+from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.runtime import Runtime
+from linktools.ai.runtime._local import LocalExecutionBackend
 
 from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel, model_features
 from .test_run_budget_public_api import _capabilities
@@ -29,14 +32,41 @@ class _LargeModels(RuntimeUsageModels):
 
 
 @pytest.mark.asyncio
-async def test_budget_usage_view_skips_bodies_and_preserves_pending_and_custom_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("session", (False, True))
+async def test_budget_usage_view_skips_bodies_and_preserves_pending_and_custom_scope(monkeypatch: pytest.MonkeyPatch, session: bool) -> None:
+    terminal_errors: list[BaseException] = []
+    track = LocalExecutionBackend._track_checkpoint_task
+
+    def track_terminal(self: LocalExecutionBackend, task: asyncio.Task[object], label: str,
+                       execution_id: str | None = None) -> None:
+        def completed(done: asyncio.Task[object]) -> None:
+            if label == "terminal" and not done.cancelled():
+                error = done.exception()
+                if error is not None:
+                    terminal_errors.append(error)
+        task.add_done_callback(completed)
+        track(self, task, label, execution_id)
+
+    monkeypatch.setattr(LocalExecutionBackend, "_track_checkpoint_task", track_terminal)
+    confirmations = []
+    confirm = StateCommands._confirm_conversation_context
+
+    async def confirm_context(self: StateCommands, *args: object, **kwargs: object) -> None:
+        await confirm(self, *args, **kwargs)
+        confirmations.append(True)
+
+    monkeypatch.setattr(StateCommands, "_confirm_conversation_context", confirm_context)
     features = _capabilities()
     features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Persistence.open("budget-view", storage=PersistenceStorage.in_memory()) as persistence:
         async with Runtime.attach(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
-            handle = await runtime.agents.get().start("large accepted input " * 10000, budget=RunBudget(model_requests=10))
+            agent = runtime.agents.get()
+            target = agent.session("budget-session") if session else agent
+            handle = await target.start("large accepted input " * 10000, budget=RunBudget(model_requests=10))
             assert (await handle.wait()).result.status is ExecutionStatus.SUCCEEDED
             execution_id = handle.execution_id
+        assert terminal_errors == []
+        assert bool(confirmations) is session
         async with Runtime.attach(persistence=persistence, features=model_features(_LargeModels(), features)) as runtime:
             handle = await runtime.executions.get(execution_id, principal=runtime.default_principal)
             repository = persistence.execution.executions

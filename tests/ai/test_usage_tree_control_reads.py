@@ -7,7 +7,7 @@ import pytest
 from linktools.ai.core import Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.history import History
-from linktools.ai.persistence import Persistence
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 
 from .test_runtime_execution_query import _record
@@ -20,7 +20,7 @@ from .test_runtime_usage_summary import _GraphUsageHistory, _UsageService
 async def test_usage_tree_reads_only_membership_after_initial_authorization(
     monkeypatch: pytest.MonkeyPatch, graph: bool, outcome: str,
 ) -> None:
-    async with Persistence.open("execution-query", tenant_id="tenant") as state:
+    async with Persistence.open("execution-query", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as state:
         repository = state.execution.executions
         for record in (_record("root", agent_id="agent"),
                        _record("child", agent_id="agent", parent_execution_id="root")):

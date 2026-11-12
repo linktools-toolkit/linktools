@@ -3544,7 +3544,7 @@ class StateCommands:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if prepared is not None:
                         await prepared.settle()
-                    if publication_confirmed and next_cursor is not None and prepared_conversation:
+                    if publication_confirmed and publish_turn and next_cursor is not None and prepared_conversation:
                         await self._confirm_conversation_context(self._conversation_run_store, next_cursor, prepared_conversation[0], archive_records=shared_archive)
                     if result.cancelled:
                         raise asyncio.CancelledError
