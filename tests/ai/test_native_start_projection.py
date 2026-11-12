@@ -1096,9 +1096,9 @@ async def test_start_sharing_matches_inline_workload_sql_budget(
     for backend in ("owned", "subclass"):
         directory = tmp_path / backend
         directory.mkdir()
+        # Allocation telemetry is opt-in (e.g. PYTHONTRACEMALLOC=1); the
+        # default contract still checks real SQL and byte budgets below.
         was_tracing = tracemalloc.is_tracing()
-        if not was_tracing:
-            tracemalloc.start()
         started_wall, started_cpu = time.perf_counter_ns(), time.process_time_ns()
         try:
             async with _runtime_start(directory, outcome=outcome, backend=backend,
@@ -1124,9 +1124,7 @@ async def test_start_sharing_matches_inline_workload_sql_budget(
         finally:
             elapsed_wall = time.perf_counter_ns() - started_wall
             elapsed_cpu = time.process_time_ns() - started_cpu
-            _, peak = tracemalloc.get_traced_memory()
-            if not was_tracing:
-                tracemalloc.stop()
+            peak = tracemalloc.get_traced_memory()[1] if was_tracing else None
             record_property(f"{backend}_scenario_wall_ns", elapsed_wall)
             record_property(f"{backend}_scenario_cpu_ns", elapsed_cpu)
             record_property(f"{backend}_tracemalloc_session_peak_bytes", peak)

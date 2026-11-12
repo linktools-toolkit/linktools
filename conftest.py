@@ -171,6 +171,8 @@ class _StorageCostReports:
     def _start_value(cls, name: str, value: object) -> bool:
         if name in cls._START_FLAGS:
             return type(value) is bool
+        if name in {"owned_tracemalloc_session_peak_bytes", "subclass_tracemalloc_session_peak_bytes"}:
+            return value is None or cls._count(value)
         if name == "shared_start_signed_logical_byte_delta":
             return type(value) is int and -(2 ** 63) <= value <= 2 ** 63 - 1
         return cls._count(value)
@@ -375,7 +377,7 @@ class _StorageCostReports:
         }, sort_keys=True))
         terminalreporter.write_line(
             "CPU: event process_time seconds; replay/START process_time_ns. "
-            "Replay and START lifecycle enable tracemalloc. "
+            "Replay enables tracemalloc; START samples only an externally enabled session (null means not measured). "
             "Not strictly comparable across machines. "
             "Bytes: counted fields/parameters/results, not database-file or network-wire size."
         )
