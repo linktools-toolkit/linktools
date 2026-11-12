@@ -105,30 +105,42 @@ async def test_public_read_evidence_fetches_its_source_once_on_every_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("publish", (False, True))
 async def test_snapshot_rechecks_authorization_after_all_evidence_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publish: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         get_cases = storage.evaluation.records.get_cases
-        revoked = False
+        for publish in (False, True):
+            revoked = False
+            denied = False
+            policy.calls.clear()
 
-        async def revoke(refs):
-            nonlocal revoked
-            cases = await get_cases(refs)
-            revoked = True
-            policy.reject = lambda action, resource: (
-                action is AuthorizationAction.EVALUATION_EVIDENCE_READ
-                and resource.id == run.experiment_id
-                and resource.owner_principal_id == PRINCIPAL.principal_id)
-            return cases
+            def reject(action: AuthorizationAction, resource: ResourceRef) -> bool:
+                nonlocal denied
+                matched = (
+                    revoked and action is AuthorizationAction.EVALUATION_EVIDENCE_READ
+                    and resource.id == run.experiment_id
+                    and resource.owner_principal_id == PRINCIPAL.principal_id
+                )
+                if matched:
+                    denied = True
+                return matched
 
-        monkeypatch.setattr(storage.evaluation.records, "get_cases", revoke)
-        with pytest.raises(AIError) as caught:
-            await (run.create_report() if publish else run.preview_report())
-        assert revoked and caught.value.code is ErrorCode.AUTHORIZATION_DENIED
-        assert await report_count(storage) == 0
+            async def revoke(refs):
+                nonlocal revoked
+                cases = await get_cases(refs)
+                revoked = True
+                return cases
+
+            policy.reject = reject
+            with monkeypatch.context() as patch:
+                patch.setattr(storage.evaluation.records, "get_cases", revoke)
+                with pytest.raises(AIError) as caught:
+                    await (run.create_report() if publish else run.preview_report())
+            assert revoked and denied, publish
+            assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED, publish
+            assert await report_count(storage) == 0
 
 
 @pytest.mark.asyncio
@@ -173,31 +185,40 @@ async def test_snapshot_full_source_reads_are_bounded_and_source_owner_is_preser
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ("evidence", "source", "owner"))
 @sqlite_failure_evidence
-async def test_snapshot_checks_each_evidence_policy_after_revocation(tmp_path: Path, boundary: str) -> None:
+async def test_snapshot_checks_each_evidence_policy_after_revocation(tmp_path: Path) -> None:
     async with completed(tmp_path) as (evaluations, storage, run, _scorer, policy):
         await evaluations.close()
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         second = record.evidence[1].evidence_ref.evidence_id
-        revoked = False
+        for boundary in ("evidence", "source", "owner"):
+            revoked = False
+            denied = False
+            policy.calls.clear()
 
-        def reject(action, resource):
-            nonlocal revoked
-            if action is not AuthorizationAction.EVALUATION_EVIDENCE_READ:
-                return False
-            if resource.id == second:
-                revoked = True
-            return revoked and (
-                boundary == "evidence" and resource.id == second
-                or boundary == "source" and resource.id == run.experiment_id and resource.owner_principal_id is None
-                or boundary == "owner" and resource.id == run.experiment_id and resource.owner_principal_id == PRINCIPAL.principal_id)
+            def reject(action: AuthorizationAction, resource: ResourceRef, boundary: str = boundary) -> bool:
+                nonlocal revoked, denied
+                if action is not AuthorizationAction.EVALUATION_EVIDENCE_READ:
+                    return False
+                if resource.id == second:
+                    revoked = True
+                matched = revoked and (
+                    boundary == "evidence" and resource.id == second
+                    or boundary == "source" and resource.id == run.experiment_id
+                    and resource.owner_principal_id is None
+                    or boundary == "owner" and resource.id == run.experiment_id
+                    and resource.owner_principal_id == PRINCIPAL.principal_id
+                )
+                if matched:
+                    denied = True
+                return matched
 
-        policy.reject = reject
-        with pytest.raises(AIError) as caught:
-            await run.create_report()
-        assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
-        assert await report_count(storage) == 0
+            policy.reject = reject
+            with pytest.raises(AIError) as caught:
+                await run.create_report()
+            assert revoked and denied, boundary
+            assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED, boundary
+            assert await report_count(storage) == 0
 
 
 @pytest.mark.asyncio
