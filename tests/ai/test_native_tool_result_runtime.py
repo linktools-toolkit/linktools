@@ -32,7 +32,7 @@ async def _settle(state: Persistence, body: str) -> tuple[ToolOperationRecord, S
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ("large_equal", "small_equal", "different"))
-async def test_tool_receipt_reuses_only_exact_large_published_text(tmp_path: Path, case: str) -> None:
+async def test_tool_receipt_reuses_only_exact_published_text(tmp_path: Path, case: str) -> None:
     body = "tool body " * (9000 if case != "small_equal" else 1)
     config = PersistenceStorage.sqlite(tmp_path / "tool.db")
     async with Persistence.open("native-result", tenant_id="tenant", storage=config) as state:
@@ -47,11 +47,11 @@ async def test_tool_receipt_reuses_only_exact_large_published_text(tmp_path: Pat
         records = await state.checkpoint.tools.state_store.read(lambda tx: tx.scan_records())
         record = next(record for record in records if record.kind == "tool_operation")
         reference = native_tool_result_reference(decode_envelope(record.data).value["payload"]["fields"]["result_payload"])
-        assert (reference is not None) is (case == "large_equal")
+        assert (reference is not None) is (case != "different")
         assert (await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
     async with Persistence.open("native-result", tenant_id="tenant", storage=config, read_only=True) as state:
         assert (await state.checkpoint.tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
-        values = await state.checkpoint.tools.get_by_call_ids("run", ("call",), tenant_id="tenant")
+        values = await state.checkpoint.tools.get_operations((operation.tool_operation_id,), tenant_id="tenant")
         assert values[0].result_payload == payload
 
 

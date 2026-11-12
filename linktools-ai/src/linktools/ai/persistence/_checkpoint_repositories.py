@@ -22,7 +22,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import PayloadPolicy, StoredPayload
+from ..storage import StoredPayload
 from ..model.messages import decode_model_messages
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 from ._message_root import NativeMessageRoot
@@ -1102,18 +1102,18 @@ class ToolRepositoryImpl(_RepositoryBase):
         self, *, agent_run_id: str, execution_id: str, roots: Sequence[NativeMessageRoot], archive: PreparedArchive,
     ) -> None:
         """Replace settled receipts only after their immutable Step source is published."""
-        # Ordinary/small boundaries do not perform extra SQL. Inspect only new,
-        # already-prepared large ordinary message bodies before selecting roots.
+        # Inspect newly prepared ordinary messages before reading their verified
+        # published roots. Size does not change whether a receipt has one owner.
         possible = False
         for prepared in archive.native_messages.values():
             for _identity, content in prepared.messages:
-                if content.payload is not None or content.raw_size <= PayloadPolicy().inline_limit_bytes:
+                if content.payload is not None:
                     continue
                 raw = decode_payload_bytes(content.body, codec=content.compression,
                                            raw_digest=content.raw_digest, raw_size=content.raw_size)
                 messages = decode_model_messages(raw)
                 if any(isinstance(message, ModelRequest) and any(isinstance(part, ToolReturnPart)
-                       and isinstance(part.content, str) and len(part.content.encode("utf-8")) > PayloadPolicy().inline_limit_bytes
+                       and isinstance(part.content, str)
                        for part in message.parts) for message in messages):
                     possible = True
                     break
@@ -1127,8 +1127,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 if len(decoded) != 1 or not isinstance(decoded[0], ModelRequest):
                     continue
                 for part_index, part in enumerate(decoded[0].parts):
-                    if (isinstance(part, ToolReturnPart) and isinstance(part.content, str)
-                            and len(part.content.encode("utf-8")) > PayloadPolicy().inline_limit_bytes):
+                    if isinstance(part, ToolReturnPart) and isinstance(part.content, str):
                         candidates[part.tool_call_id] = (root.slice(index, index + 1), raw, part_index, part.tool_name)
         if not candidates:
             return

@@ -8,7 +8,7 @@ from pydantic_ai.messages import ModelRequest, ToolReturnPart
 
 from ..errors import AIError, ErrorCode
 from ..model.messages import decode_model_messages, encode_model_messages
-from ..storage import PayloadPolicy, StoredPayload
+from ..storage import StoredPayload
 from ._message_root import NativeMessageRoot, NativeToolResultReference
 
 
@@ -40,8 +40,8 @@ def restore_native_tool_result_payload(reference: NativeToolResultReference, raw
 def prepare_native_tool_result(
     root: NativeMessageRoot, raw: bytes, part_index: int, payload: StoredPayload, *, operation_id: str,
 ) -> NativeToolResultReference | None:
-    """Select only large ordinary text receipts whose complete original bytes survive."""
-    if payload.kind != "inline" or payload.encoding != "base64" or payload.size <= PayloadPolicy().inline_limit_bytes:
+    """Select exact ordinary text receipts whose complete original bytes survive."""
+    if payload.kind != "inline" or payload.encoding != "base64":
         return None
     value = payload.decode()
     if not isinstance(value, bytes):
