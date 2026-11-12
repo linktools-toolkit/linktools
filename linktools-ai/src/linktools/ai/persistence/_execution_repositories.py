@@ -435,7 +435,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             ):
                 return await self.read_content(read)
             return None if record is None else await self._decode_view(record, execution_id)
-        return await self.read_content(read) if fresh else await read(None)
+        from ._sql import SqlStateStore
+        source_scope = fresh or isinstance(self._store, SqlStateStore) and not self._store.record_cache_enabled
+        return await self.read_content(read) if source_scope else await read(None)
 
     async def _decode_view(self, record: StoredRecord, execution_id: str) -> tuple[ResourceRef, ExecutionView]:
         self._decode_header(record, execution_id)
