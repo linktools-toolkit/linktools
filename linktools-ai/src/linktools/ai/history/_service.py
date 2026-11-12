@@ -91,8 +91,11 @@ class DefaultExecutionHistoryService:
         )
         views: list[ExecutionView] = []
         scanned = 0
+        builtin_views = type(self._executions) is ExecutionRepositoryImpl
+        list_candidates = (self._executions.list_view_candidates if builtin_views
+                           else self._executions.list_candidates)
         while scanned < 1000:
-            page = await self._executions.list_candidates(
+            page = await list_candidates(
                 tenant_id=request.principal.tenant_id,
                 session_id=request.session_id,
                 parent_execution_id=request.parent_execution_id,
@@ -103,7 +106,7 @@ class DefaultExecutionHistoryService:
                 break
             for index, candidate in enumerate(page.items):
                 scanned += 1
-                record = candidate.record
+                record = candidate.view if builtin_views else candidate.record
                 if request.session_id is not None and (
                     record.session_id != request.session_id
                 ):
@@ -129,7 +132,7 @@ class DefaultExecutionHistoryService:
                     if error.code is not ErrorCode.AUTHORIZATION_DENIED:
                         raise
                     continue
-                views.append(project_execution_view(record))
+                views.append(record if builtin_views else project_execution_view(record))
                 if len(views) == request.limit:
                     has_more = page.has_more or index + 1 < len(page.items)
                     return Page(

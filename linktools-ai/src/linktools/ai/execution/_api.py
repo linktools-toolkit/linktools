@@ -51,6 +51,7 @@ class _ExecutionViewSource(Protocol):
     started_at: datetime | None
     result: "ResultRecord | None"
     durable_trace: bool
+    restart_checkpoints: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,7 @@ class ExecutionView:
     started_at: datetime | None = None
     terminal_at: datetime | None = None
     durable_trace: bool = False
+    restart_checkpoints: bool = False
 
 
 def project_execution_view(source: object) -> ExecutionView:
@@ -96,6 +98,7 @@ def project_execution_view(source: object) -> ExecutionView:
         agent_run_seq=value.agent_run_seq,
         created_at=value.created_at,
         durable_trace=value.durable_trace,
+        restart_checkpoints=value.restart_checkpoints,
         session_id=value.session_id,
         binding_kind=value.binding_kind,
         task_id=value.task_id,

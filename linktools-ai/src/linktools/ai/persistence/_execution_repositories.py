@@ -30,6 +30,8 @@ from ._budget import BudgetRepositoryImpl
 from .contracts import (
     ExecutionCandidate,
     ExecutionCandidatePage,
+    ExecutionViewCandidate,
+    ExecutionViewCandidatePage,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionEventRecord,
@@ -822,62 +824,52 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return await self._decode_many(records)
         return await self.read_content(read)
 
+    async def _candidate_records(
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
+    ) -> tuple[Sequence[StoredRecord], bool]:
+        if tenant_id != self._tenant_id:
+            return (), False
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        scope = (None if session_id is None or parent_execution_id is not None
+                 else self._scope("execution", "session", (session_id,)))
+        parent = (None if parent_execution_id is None
+                  else self._parent("execution", "execution", (parent_execution_id,)))
+        records = await self._records("execution", scope=scope, parent=parent, cursor=cursor, limit=limit)
+        has_more = (len(records) == limit and await self._has_records(
+            "execution", scope=scope, parent=parent, cursor=_record_cursor(records[-1])))
+        return records[:limit], has_more
+
     async def list_candidates(
-        self,
-        *,
-        tenant_id: str,
-        session_id: str | None,
-        parent_execution_id: str | None,
-        cursor: str | None,
-        limit: int,
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
     ) -> ExecutionCandidatePage:
         async def read(_group):
-            if tenant_id != self._tenant_id:
-                return ExecutionCandidatePage((), False)
-            if (
-                isinstance(limit, bool)
-                or not isinstance(limit, int)
-                or not 1 <= limit <= 1000
-            ):
-                raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-            scope = (
-                None
-                if session_id is None or parent_execution_id is not None
-                else self._scope("execution", "session", (session_id,))
-            )
-            parent = (
-                None
-                if parent_execution_id is None
-                else self._parent("execution", "execution", (parent_execution_id,))
-            )
-            records = await self._records(
-                "execution",
-                scope=scope,
-                parent=parent,
-                cursor=cursor,
-                limit=limit,
-            )
-            selected = records[:limit]
-            candidates: list[ExecutionCandidate] = []
-            for record, value in zip(selected, await self._decode_many(selected), strict=True):
-                candidates.append(
-                    ExecutionCandidate(
-                        value,
-                        _record_cursor(record),
-                    )
-                )
-            has_more = False
-            if len(records) == limit:
-                has_more = await self._has_records(
-                    "execution",
-                    scope=scope,
-                    parent=parent,
-                    cursor=_record_cursor(records[-1]),
-                )
-            return ExecutionCandidatePage(
-                tuple(candidates),
-                has_more,
-            )
+            selected, has_more = await self._candidate_records(tenant_id=tenant_id, session_id=session_id,
+                parent_execution_id=parent_execution_id, cursor=cursor, limit=limit)
+            values = await self._decode_many(selected)
+            return ExecutionCandidatePage(tuple(ExecutionCandidate(value, _record_cursor(record))
+                for record, value in zip(selected, values, strict=True)), has_more)
+        return await self.read_content(read)
+
+    async def list_view_candidates(
+        self, *, tenant_id: str, session_id: str | None, parent_execution_id: str | None,
+        cursor: str | None, limit: int,
+    ) -> ExecutionViewCandidatePage:
+        """List control views without restoring accepted input or output bodies."""
+        async def read(_group):
+            selected, has_more = await self._candidate_records(tenant_id=tenant_id, session_id=session_id,
+                parent_execution_id=parent_execution_id, cursor=cursor, limit=limit)
+            expanded = await self._execution_content.expand_bindings(selected)
+            expanded = await self._execution_content.expand_projection_components(expanded, result=True)
+            candidates = []
+            for stored, record in zip(selected, expanded, strict=True):
+                header = decode_execution_header(record.data, tenant_id=tenant_id)
+                self._decode_header(stored, header.id)
+                _owner, view = decode_execution_view(record.data, tenant_id=tenant_id)
+                candidates.append(ExecutionViewCandidate(view, _record_cursor(stored)))
+            return ExecutionViewCandidatePage(tuple(candidates), has_more)
         return await self.read_content(read)
 
     async def get_in_transaction(

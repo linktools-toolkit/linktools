@@ -569,6 +569,8 @@ class StepExecutionHistoryReader:
             "part_index": part_index,
         }
         limit = validate_page_limit(limit)
+        metadata_only = type(self._executions) is ExecutionRepositoryImpl
+        record: ExecutionRecord | ExecutionView | None
         if authorized_executions is self._executions and type(authorized_executions) is ExecutionRepositoryImpl:
             pending = (None if self._pending_execution is None else
                        await self._pending_execution(execution_id, tenant_id=tenant_id))
@@ -578,17 +580,19 @@ class StepExecutionHistoryReader:
                 record = pending
             else:
                 # Authorization has completed; this owner read also checks continued existence.
-                record = await authorized_executions.get(execution_id, tenant_id=tenant_id)
+                value = await authorized_executions.get_view(execution_id, tenant_id=tenant_id)
+                record = None if value is None else value[1]
                 if record is None:
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         else:
             if (authorized_executions is not None
                     and await authorized_executions.get_header(execution_id, tenant_id=tenant_id) is None):
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            record = await self._read_execution(execution_id, tenant_id=tenant_id)
+            record = (await self._read_execution_metadata(execution_id, tenant_id=tenant_id)
+                      if metadata_only else await self._read_execution(execution_id, tenant_id=tenant_id))
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        entries = await self._history_tree(record, tenant_id)
+        entries = await self._history_tree(record, tenant_id, metadata_only=metadata_only)
         current_sources = await self._capture_sources(entries, tenant_id, agent_run_seq, include_pending=True)
         source_by_identity = {
             (source.record.execution_id, source.agent_run_seq): source
@@ -1790,7 +1794,7 @@ class StepExecutionHistoryReader:
             # Resuming a completed native snapshot can finish a new attempt
             # without a model request. Its own Trace lifecycle remains evidence;
             # native context is never substituted for missing Trace messages.
-            events = (() if not cast(ExecutionRecord, source.record).restart_checkpoints or source.agent_run_seq < 2
+            events = (() if not source.record.restart_checkpoints or source.agent_run_seq < 2
                       or source.capture.model_interaction_count or event_high_water != 2
                       else await self._store_for(source.record).list_event_range(
                           agent_run_id=agent_run_id, start=0, end=event_high_water,
@@ -1999,8 +2003,8 @@ class StepExecutionHistoryReader:
         return sources
 
     async def _history_tree(
-        self, selected: ExecutionRecord, tenant_id: str
-    ) -> list[tuple[ExecutionRecord, int]]:
+        self, selected: ExecutionRecord | ExecutionView, tenant_id: str, *, metadata_only: bool = False,
+    ) -> list[tuple[ExecutionRecord | ExecutionView, int]]:
         if selected.lineage_kind.value == "SUBAGENT":
             if (
                 selected.parent_execution_id is None
@@ -2015,11 +2019,12 @@ class StepExecutionHistoryReader:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        result = [(selected, 0)]
+        result: list[tuple[ExecutionRecord | ExecutionView, int]] = [(selected, 0)]
         visited = {selected.execution_id}
-        for child in await self._executions.list_children(
-            selected.execution_id, tenant_id=tenant_id
-        ):
+        children = (await self._executions.list_child_views(selected.execution_id, tenant_id=tenant_id)
+                    if metadata_only else
+                    await self._executions.list_children(selected.execution_id, tenant_id=tenant_id))
+        for child in children:
             if (
                 child.execution_id in visited
                 or child.lineage_kind.value != "SUBAGENT"

@@ -910,6 +910,18 @@ class ExecutionCandidatePage:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionViewCandidate:
+    view: ExecutionView
+    cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionViewCandidatePage:
+    items: tuple[ExecutionViewCandidate, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionRunSealHead:
     agent_run_id: str
     event_count: int
