@@ -813,6 +813,9 @@ class History:
             )
 
         executions, _authorization = self._require_direct_reader()
+        builtin = type(executions) is ExecutionRepositoryImpl
+        read_execution = executions.get_header if builtin else executions.get
+        read_children = executions.list_child_views if builtin else executions.list_children
         await self._authorized_record(execution_id, principal)
         explicit_ids = (
             None if cutoffs is None else {value.execution_id for value in cutoffs}
@@ -824,7 +827,7 @@ class History:
             current_id = pending.pop(0)
             if current_id in seen:
                 continue
-            record = await executions.get(
+            record = await read_execution(
                 current_id,
                 tenant_id=principal.tenant_id,
             )
@@ -839,7 +842,7 @@ class History:
                         cutoffs=_execution_cutoffs(cutoffs, current_id),
                     )
                 )
-            children = await executions.list_children(
+            children = await read_children(
                 current_id,
                 tenant_id=principal.tenant_id,
             )
@@ -864,6 +867,9 @@ class History:
             principal=principal,
         )
         executions, _authorization = self._require_direct_reader()
+        builtin = type(executions) is ExecutionRepositoryImpl
+        read_execution = executions.get_header if builtin else executions.get
+        read_children = executions.list_child_views if builtin else executions.list_children
         roots = tuple(sorted({
             state.execution_id
             for state in graph.node_states
@@ -885,7 +891,7 @@ class History:
             current_id = pending.pop(0)
             if current_id in seen:
                 continue
-            record = await executions.get(
+            record = await read_execution(
                 current_id,
                 tenant_id=principal.tenant_id,
             )
@@ -900,7 +906,7 @@ class History:
                         cutoffs=_execution_cutoffs(cutoffs, current_id),
                     )
                 )
-            children = await executions.list_children(
+            children = await read_children(
                 current_id,
                 tenant_id=principal.tenant_id,
             )

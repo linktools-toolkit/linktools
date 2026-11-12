@@ -55,6 +55,7 @@ class _Candidates:
             created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             durable_trace=True,
             restart_checkpoints=False,
+            budget_scope_id=None,
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             result=SimpleNamespace(created_at=datetime(2026, 1, 2, tzinfo=timezone.utc)),
         )
