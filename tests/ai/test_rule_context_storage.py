@@ -227,6 +227,15 @@ async def test_rule_references_and_input_captures_recover_from_separate_asset_an
                 records = await restored.task.tasks.state_store.read(lambda transaction: transaction.scan_records())
                 captures = [capture_record_value(item) for item in records if item.kind == "input_capture"]
                 assert captures and b"ORIGINAL_SNAPSHOT_RULE" not in canonical_json_bytes(captures)
+                stored_capture = next(item["payload"] for item in captures if item.get("kind") == "agent")
+                stored_rule, = stored_capture["repository_instructions"]["documents"]
+                assert "content" not in stored_rule and "content_digest" in stored_rule
+                assert stored_rule["asset"] == original.repository_instructions["documents"][0]["asset"]
+                assert stored_rule["asset_source_id"] == "rules"
+                if context_policy == "captured":
+                    assert stored_capture["input_context"]["repository_instructions"] == stored_capture["repository_instructions"]
+                else:
+                    assert stored_capture["input_context"] is None
             async with TaskEngine.open(persistence=restored, asset_sources={"rules": reopened}) as cold:
                 recaptured = await cold.inputs.read_agent(capture, principal=principal)
                 assert recaptured.input_context == imported.input_context

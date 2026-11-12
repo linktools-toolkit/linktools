@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Scoped state ownership and reference closure for immutable input captures."""
 
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -17,8 +18,13 @@ from ..model import StoredUserInput
 from ..model.attachments import store_attachment_payload, read_attachment_payload
 from ._archive import archive_content_scope, decode_archive_scope, validate_archive_content_identity, validate_archive_group_id, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
-from .codec import decode_domain, encode_domain, decode_envelope, encode_envelope
-from .state import StateStore, StoredRecord, record_key, scope_key
+from ._capture_binding_content import (
+    BINDING_CODEC, capture_binding_references, expand_capture_bindings, map_capture_binding_slots,
+    prepare_capture_bindings, restore_capture_bindings,
+)
+from .codec import binding_reference, decode_domain, encode_domain, decode_envelope, encode_envelope
+from .state import (StateGroupTransaction, StateStore, StoredRecord, active_state_scope,
+                    active_state_group_transaction, record_key, scope_key)
 
 _CAPTURE_TYPES = {
     "agent_input_capture_ref": (AgentInputCaptureRef, "agent"),
@@ -75,11 +81,74 @@ async def read_capture_record(store: StateStore, *, namespace: str, tenant_id: s
     return await store.read(lambda transaction: transaction.get_record(identity))
 
 
+async def read_capture_value(store: StateStore, *, namespace: str, tenant_id: str, key: str,
+                             read_object: Callable[[ObjectRef], Awaitable[bytes]]) -> JsonValue | None:
+    """Capture an owner and its binding bytes together before reading attachments."""
+    group = store.storage_group
+
+    async def capture(_transactions: StateGroupTransaction) -> tuple[StoredRecord | None, bool]:
+        record = await read_capture_record(store, namespace=namespace, tenant_id=tenant_id, key=key)
+        if record is None:
+            return None, False
+        if capture_record_scope(record) != (namespace, tenant_id):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = capture_record_value(record)
+        if not capture_binding_references(key, value):
+            return record, False
+        opened, active = group.opened_archive, active_state_scope()
+        if opened is None or active is None or opened[1] not in active.transactions:
+            return None, True
+        archive = ContentArchive(opened[1], opened[0], namespace=namespace, tenant_id=tenant_id, object_store=None)
+        value = await restore_capture_bindings(key, value, archive)
+        return capture_record(namespace, tenant_id, key, value, storage_revision=record.storage_revision,
+                              source_digest=capture_record_digest(record)), False
+
+    if active_state_scope() is None:
+        record, requires_archive = await group.read_many((store,), capture)
+    else:
+        record, requires_archive = await capture(active_state_group_transaction(group, (store,), writable=False))
+    if requires_archive:
+        if active_state_scope() is not None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
+                          safe_details={"reason": "capture_archive_not_enlisted"})
+        if await group.open_archive(create=False) is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        record, requires_archive = await group.read_many((store,), capture)
+        if requires_archive:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return None if record is None else await restore_capture_value(record, read_object=read_object)
+
+
 async def publish_capture_record(store: StateStore, *, namespace: str, tenant_id: str,
-                                 key: str, value: JsonValue, source_digest: str | None = None) -> StoredRecord:
+                                 key: str, value: JsonValue, source_digest: str | None = None,
+                                 share_bindings: bool = False) -> StoredRecord:
     record = capture_record(namespace, tenant_id, key, value, source_digest=source_digest)
+    bindings = []
+    if share_bindings:
+        def collect(binding: Mapping[str, JsonValue]) -> JsonValue:
+            bindings.append(binding)
+            return binding
+        map_capture_binding_slots(key, value, collect)
     try:
-        await store.mutate(lambda transaction: transaction.insert_record(record))
+        if bindings:
+            group = store.storage_group
+            opened = group.opened_archive or await group.open_archive(create=True)
+            if opened is None:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            archive = ContentArchive(opened[1], opened[0], namespace=namespace, tenant_id=tenant_id, object_store=None)
+
+            async def publish(transactions: StateGroupTransaction) -> StoredRecord:
+                prepared = PreparedArchive()
+                projected = await prepare_capture_bindings(key, value, archive, prepared)
+                projected_record = capture_record(namespace, tenant_id, key, projected,
+                    source_digest=capture_record_digest(record))
+                await archive.publish(transactions.transaction(archive.store), prepared)
+                await transactions.transaction(store).insert_record(projected_record)
+                return projected_record
+
+            record = await group.mutate((store, archive.store), publish)
+        else:
+            await store.mutate(lambda transaction: transaction.insert_record(record))
     except AIError as error:
         if error.code is not ErrorCode.STORAGE_CONFLICT:
             raise
@@ -253,7 +322,10 @@ async def restore_capture_value(record: StoredRecord, *,
         content = json.loads(await read_attachment_payload(payload, read_object=read_object))
         return encode_domain(content) if encoded else content
     value = capture_record_value(record)
-    value = await _transform_capture_attachments(capture_record_key(record), value, transform)
+    key = capture_record_key(record)
+    if capture_binding_references(key, value):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    value = await _transform_capture_attachments(key, value, transform)
     if canonical_sha256(value) != capture_record_digest(record):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
@@ -281,6 +353,8 @@ def map_capture_references(record: StoredRecord, transform: Callable[[JsonValue]
         return content
 
     value = _map_capture_attachments(capture_record_key(record), value, attachment, transform)
+    value = map_capture_binding_slots(capture_record_key(record), value,
+        lambda binding: transform(binding) if binding_reference(binding) is not None else binding)
     if record.kind == "task_graph_binding_capture" and isinstance(value, Mapping) and "declarations" in value:
         value = {**value, "declarations": transform(value["declarations"])}
     envelope = decode_envelope(record.data).value
@@ -427,6 +501,25 @@ def _expand_task_binding_value(value: Mapping[str, JsonValue], raw: bytes) -> Js
 
 def expand_snapshot_capture(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord], *,
                             namespace: str, tenant_id: str, reserve: Callable[[int], None] | None = None) -> StoredRecord:
+    if record.kind == "input_capture":
+        key, value = capture_record_key(record), capture_record_value(record)
+        references = capture_binding_references(key, value)
+        if not references:
+            return record
+        counts = _capture_binding_counts(key, value)
+        raws = {}
+        for reference in references:
+            content = contents.get(reference)
+            if (reference[1] != archive_content_scope(namespace, tenant_id) or content is None
+                    or content.codec != BINDING_CODEC or content.identity != reference[2]
+                    or content.payload is not None or content.body is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if reserve is not None:
+                reserve(content.raw_size * counts[reference])
+            raws[reference] = decode_payload_bytes(content.body, codec=content.compression,
+                raw_digest=content.raw_digest, raw_size=content.raw_size)
+        return capture_record(namespace, tenant_id, key, expand_capture_bindings(key, value, raws),
+            storage_revision=record.storage_revision, source_digest=capture_record_digest(record))
     if record.kind != "task_graph_binding_capture":
         return record
     value = capture_record_value(record)
@@ -447,7 +540,27 @@ def expand_snapshot_capture(record: StoredRecord, contents: Mapping[tuple[str, s
                           storage_revision=record.storage_revision)
 
 
+def _capture_binding_counts(key: str, value: JsonValue) -> Counter[tuple[str, str, str]]:
+    counts = Counter()
+    def count(binding: Mapping[str, JsonValue]) -> JsonValue:
+        reference = binding_reference(binding)
+        if reference is not None:
+            counts[reference] += 1
+        return binding
+    map_capture_binding_slots(key, value, count)
+    return counts
+
+
 def snapshot_capture_size(record: StoredRecord, contents: Mapping[tuple[str, str, str], ContentRecord]) -> int:
+    if record.kind == "input_capture":
+        total = 0
+        for reference, count in _capture_binding_counts(capture_record_key(record), capture_record_value(record)).items():
+            content = contents.get(reference)
+            if (content is None or content.codec != BINDING_CODEC or content.identity != reference[2]
+                    or content.payload is not None or content.body is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            total += content.raw_size * count
+        return total
     if record.kind != "task_graph_binding_capture":
         return 0
     value = capture_record_value(record)
@@ -583,4 +696,4 @@ from ._task_graph_binding_capture import (
     task_expander_declaration_identity,
 )
 
-__all__ = ['CAPTURE_RECORD_KINDS', 'TASK_BINDING_CODEC', 'capture_record', 'capture_record_key', 'capture_record_value', 'capture_record_digest', 'prepare_capture_value', 'restore_capture_value', 'capture_record_scope', 'capture_retention_value', 'map_capture_references', 'capture_state_closure', 'read_capture_record', 'publish_capture_record', 'task_binding_content_reference', 'prepare_task_binding_value', 'read_task_binding_value', 'expand_snapshot_capture', 'snapshot_capture_size', 'validate_capture_record', 'validate_task_binding_payload', 'TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION', 'TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS', 'input_capture_expiry_key', 'input_capture_key', 'input_capture_state_dependency', 'iter_input_capture_dependencies', 'read_task_graph_binding_capture_declarations', 'task_declaration_identity', 'task_expander_declaration_identity', 'task_graph_binding_capture_key', 'validate_input_capture_payload']
+__all__ = ['CAPTURE_RECORD_KINDS', 'TASK_BINDING_CODEC', 'capture_record', 'capture_record_key', 'capture_record_value', 'capture_record_digest', 'prepare_capture_value', 'restore_capture_value', 'capture_record_scope', 'capture_retention_value', 'map_capture_references', 'capture_state_closure', 'read_capture_record', 'read_capture_value', 'publish_capture_record', 'task_binding_content_reference', 'prepare_task_binding_value', 'read_task_binding_value', 'expand_snapshot_capture', 'snapshot_capture_size', 'validate_capture_record', 'validate_task_binding_payload', 'TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION', 'TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS', 'input_capture_expiry_key', 'input_capture_key', 'input_capture_state_dependency', 'iter_input_capture_dependencies', 'read_task_graph_binding_capture_declarations', 'task_declaration_identity', 'task_expander_declaration_identity', 'task_graph_binding_capture_key', 'validate_input_capture_payload']

@@ -826,11 +826,10 @@ async def _export_snapshot(
                 raw_domain["records"].append(accept(encoded))
                 if value.kind in CAPTURE_RECORD_KINDS:
                     if value.kind == "input_capture":
-                        await restore_capture_value(value, read_object=lambda ref: read_object(
+                        await restore_capture_value(semantic_value, read_object=lambda ref: read_object(
                             source.object_stores[PersistenceDomain.TASK], ref.key,
                             expected_digest=ref.digest, expected_size=ref.size))
-                    if value.kind == "task_graph_binding_capture":
-                        _mark_archive_value(archive_closures, capture_retention_value(value))
+                    _mark_archive_value(archive_closures, capture_retention_value(value))
                     await copy_references(capture_retention_value(semantic_value), domain, archive_owner=False)
                 elif value.kind != "evaluation_cleanup":
                     await copy_references(encoded, domain)

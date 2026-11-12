@@ -45,7 +45,7 @@ from ..persistence import PersistenceDomain
 from ..persistence.contracts import ExecutionRepositories, TaskRepositories
 from ..persistence.captures import (
     input_capture_key, input_capture_expiry_key, capture_record, capture_record_key, capture_record_value, capture_retention_value,
-    read_capture_record, publish_capture_record, prepare_capture_value, restore_capture_value,
+    read_capture_record, read_capture_value, publish_capture_record, prepare_capture_value,
 )
 from ..persistence.codec import decode_domain, encode_domain, iter_runtime_object_refs
 from ..persistence.state import RecordQuery, StateTransaction, scope_key
@@ -194,16 +194,15 @@ class InputCaptures:
             PersistenceDomain.TASK, self._tenant_id, raw))
         await publish_capture_record(self._state_store, namespace=self._namespace,
             tenant_id=self._tenant_id, key=key, value=stored,
-            source_digest=digest if stored != value else None)
+            source_digest=digest if stored != value else None, share_bindings=True)
         return digest
 
     async def _get(self, key: str, digest: str | None = None) -> JsonValue | None:
-        record = await read_capture_record(self._state_store, namespace=self._namespace,
-                                           tenant_id=self._tenant_id, key=key)
-        if record is None:
+        value = await read_capture_value(self._state_store, namespace=self._namespace,
+            tenant_id=self._tenant_id, key=key, read_object=lambda ref: read_runtime_object(
+                self._object_stores[PersistenceDomain.TASK], ref))
+        if value is None:
             return None
-        value = await restore_capture_value(record, read_object=lambda ref: read_runtime_object(
-            self._object_stores[PersistenceDomain.TASK], ref))
         if digest is not None and canonical_sha256(value) != digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value

@@ -82,7 +82,10 @@ async def test_nonterminal_input_reference_survives_terminal_cas(tmp_path: Path,
         record = await repository.state_store.read_record(repository.execution_record_key("execution"))
         reference = native_user_input_reference(decode_envelope(record.data).value["payload"]["fields"]["stored_user_input"])
         assert reference is not None
-        await _publish(commands, commit, current, checkpoint)
+        # Keep the admitted run identity, including its original started_at.
+        # The generic helper creates a new run and is only for first publication.
+        await commands.commit_terminal_checkpoint(commit, expected_execution=current,
+            execution_run=run, execution_checkpoints=(checkpoint,))
         record = await repository.state_store.read_record(repository.execution_record_key("execution"))
         assert native_user_input_reference(decode_envelope(record.data).value["payload"]["fields"]["stored_user_input"]) == reference
         assert (await repository.get_fresh("execution", tenant_id="tenant")).stored_user_input == original

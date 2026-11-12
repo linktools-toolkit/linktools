@@ -336,8 +336,7 @@ async def _purge_unreferenced_objects(
                         scope_namespace, scope_tenant = capture_record_scope(record)
                         semantic = expand_snapshot_capture(record, binding_contents,
                             namespace=scope_namespace, tenant_id=scope_tenant)
-                        if record.kind == "task_graph_binding_capture":
-                            await collect(capture_retention_value(record), domain, owner_group=store.storage_group)
+                        await collect(capture_retention_value(record), domain, owner_group=store.storage_group)
                         await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
                 elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
                     await collect(dict(record.data), domain, owner_group=store.storage_group)
