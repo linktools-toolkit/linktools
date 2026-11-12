@@ -182,8 +182,10 @@ async def test_native_database_integrity_and_attachment_group_boundaries_fail_cl
     content = ContentRecord("model-message", digest, len(raw), "raw", body=raw)
     row = dict(store_key=native_store_key("a", "tenant"), sha256=digest, **content.to_native_values())
     assert validate_native_message_content(row) == content
-    with pytest.raises(AIError):
-        validate_native_message_content({**row, "sha256": "f" * 64})
+    # A fixed address is not rehashed from its bytes during restoration.
+    assert validate_native_message_content({**row, "sha256": "f" * 64}) == replace(
+        content, raw_digest="f" * 64,
+    )
     with pytest.raises(AIError):
         validate_native_message_content({**row, "message": b"corrupt"})
 

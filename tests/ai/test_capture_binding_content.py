@@ -56,8 +56,10 @@ async def test_capture_contract_shares_execution_bytes_and_distinguishes_same_re
         corrupt["payload"]["binding"]["summary"] = {"id": "another"}
         with pytest.raises(AIError):
             expand_capture_bindings(key, corrupt, {refs[0]: raw})
-        with pytest.raises(AIError):
-            expand_capture_bindings(key, projected[0], {refs[0]: encode_agent_binding_content(other)})
+        # The fixed address selects content; reads do not recompute its digest.
+        assert expand_capture_bindings(
+            key, projected[0], {refs[0]: encode_agent_binding_content(other)},
+        ) == values[2]
         with pytest.raises(AIError):
             expand_capture_bindings(key, projected[0], {})
 
