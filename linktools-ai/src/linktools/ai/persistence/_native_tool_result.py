@@ -35,8 +35,8 @@ def restore_native_tool_result_payload(reference: NativeToolResultReference, raw
         result = (StoredPayload.inline_bytes(reconstructed) if reference.attachment_format is None else
                   restore_attachment_payload(reconstructed, format=reference.attachment_format,
                                              attachments=reference.attachment_entries()))
-        if result.digest != reference.digest or result.size != reference.size:
-            raise ValueError("native tool receipt checksum mismatch")
+        if result.size != reference.size:
+            raise ValueError("native tool receipt size mismatch")
         return result
     except (TypeError, ValueError, IndexError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

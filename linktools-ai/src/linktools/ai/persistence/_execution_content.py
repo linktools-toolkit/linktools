@@ -67,9 +67,7 @@ def _content(record: StoredRecord, contents: Mapping[tuple[str, str, str], Conte
         yield reference, content
 
 
-def _decode_payload(raw: bytes, identity: str) -> StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping:
-    if archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()) != identity:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+def _decode_payload(raw: bytes) -> StoredPayload | StoredUserInput | PendingToolContinuation | RecoveryTerminalHandoff | ResultRecord | Mapping:
     try:
         value = json.loads(raw)
         if not isinstance(value, Mapping):
@@ -110,9 +108,9 @@ def _with_binding(record: StoredRecord, binding: JsonValue) -> StoredRecord:
 
 
 def expand_binding(record: StoredRecord, raw: bytes) -> StoredRecord:
-    """Restore the original wire bytes only after checking their content identity."""
+    """Restore typed binding fields from the selected content owner."""
     reference = binding_reference(_binding(record))
-    if reference is None or archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest()) != reference[2]:
+    if reference is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         binding = json.loads(raw)
@@ -161,7 +159,7 @@ def _expand_execution_content(record: StoredRecord, contents: Mapping[tuple[str,
     binding = binding_reference(_binding(record))
     if binding is not None:
         record = expand_binding(record, decoded[binding])
-    values = {reference: _decode_payload(raw, reference[2]) for reference, raw in decoded.items()
+    values = {reference: _decode_payload(raw) for reference, raw in decoded.items()
               if reference != binding and reference != policy}
     values.update(operations)
     def expand(payload: Mapping) -> JsonValue:
@@ -716,7 +714,7 @@ class ExecutionContent:
                 policy_overrides = {}
             else:
                 policy_raw, = await archive.read_contents((previous_policy[2],), codec=POLICY_CODEC)
-                base_policy = decode_policy(previous_policy, policy_raw)
+                base_policy = decode_policy(policy_raw)
                 policy_overrides = {name: item for name, item in effective_policy.items()
                                     if canonical_json_bytes(item) != canonical_json_bytes(base_policy[name])}
         encoded_policy = {"$runtime_policy": policy_identity, "archive_scope": archive.scope_id,
@@ -767,7 +765,7 @@ class ExecutionContent:
             if reference[:2] != (archive.scope_id, archive.content_scope):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             raw, = await archive.read_contents((reference[2],), codec=PAYLOAD_CODEC)
-            original = _decode_payload(raw, reference[2])
+            original = _decode_payload(raw)
             from .codec import encode_domain
             if raw != canonical_json_bytes(encode_domain(original)):
                 return None
@@ -882,7 +880,7 @@ class ExecutionContent:
             reserve=reserve_content if reserve is not None else None)
         values = dict(native_values)
         for identity, raw in zip(identities, raws, strict=True):
-            value = _decode_payload(raw, identity)
+            value = _decode_payload(raw)
             if not isinstance(value, Mapping):
                 key = id(value)
                 self._payload_encodings[key] = (ref(value, lambda _value, key=key: self._payload_encodings.pop(key, None)), identity, raw)
@@ -937,7 +935,7 @@ class ExecutionContent:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             ordered = tuple(references)
             raws = await archive.read_contents(tuple(reference[2] for reference in ordered), codec=PAYLOAD_CODEC)
-            decoded = {reference: _decode_payload(raw, reference[2]) for reference, raw in zip(ordered, raws, strict=True)}
+            decoded = {reference: _decode_payload(raw) for reference, raw in zip(ordered, raws, strict=True)}
         operations = await self.pending_operations(records) if recovery else {}
         values = []
         for record in records:

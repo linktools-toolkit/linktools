@@ -31,9 +31,7 @@ def encode_policy(values: Mapping[str, JsonValue]) -> tuple[str, bytes]:
     return archive_content_identity(POLICY_CODEC, hashlib.sha256(raw).hexdigest()), raw
 
 
-def decode_policy(reference: tuple[str, str, str], raw: bytes) -> Mapping[str, JsonValue]:
-    if archive_content_identity(POLICY_CODEC, hashlib.sha256(raw).hexdigest()) != reference[2]:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+def decode_policy(raw: bytes) -> Mapping[str, JsonValue]:
     try:
         value = json.loads(raw)
         if (not isinstance(value, Mapping) or set(value) != {"version", "fields"}
@@ -54,7 +52,7 @@ def expand_policy(record: StoredRecord, raw: bytes) -> StoredRecord:
 
 
 def expand_policy_records(records: Sequence[StoredRecord], contents: Mapping[tuple[str, str, str], bytes]) -> tuple[StoredRecord, ...]:
-    """Verify each immutable policy once, then apply each execution's own overrides."""
+    """Decode each immutable policy once, then apply each execution's own overrides."""
     decoded = {}
     expanded = []
     for record in records:
@@ -63,7 +61,7 @@ def expand_policy_records(records: Sequence[StoredRecord], contents: Mapping[tup
             expanded.append(record)
             continue
         if reference not in decoded:
-            decoded[reference] = decode_policy(reference, contents[reference])
+            decoded[reference] = decode_policy(contents[reference])
         values = decoded[reference]
         envelope = decode_envelope(record.data)
         payload = envelope.value["payload"]

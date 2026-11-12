@@ -39,9 +39,7 @@ def _map_record(record: StoredRecord, mapper: Callable[[Mapping], JsonValue]) ->
         "payload": map_tool_payload_slots(envelope.value["payload"], mapper)}))
 
 
-def _decode(raw: bytes, identity: str) -> Mapping:
-    if archive_content_identity(TOOL_PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest()) != identity:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+def _decode(raw: bytes) -> Mapping:
     try:
         value = json.loads(raw)
         if not isinstance(value, Mapping) or value.get("$dataclass") != "stored_payload":
@@ -82,7 +80,7 @@ def expand_tool_content(record: StoredRecord, contents: Mapping[tuple[str, str, 
             reserve(content.raw_size)
         raw = decode_payload_bytes(content.body, codec=content.compression,
                                    raw_digest=content.raw_digest, raw_size=content.raw_size)
-        return _decode(raw, reference[2])
+        return _decode(raw)
     return _map_record(record, expand)
 
 
@@ -102,7 +100,7 @@ def expand_native_tool_content(
         if (not isinstance(value, StoredPayload) or value.kind != "inline"
                 or value.encoding != ("json-attachments" if attached else "base64")
                 or isinstance(reference, NativeToolResultReference)
-                and (value.digest, value.size) != (reference.digest, reference.size)
+                and value.size != reference.size
                 or isinstance(reference, NativeToolArgumentsReference)
                 and value.digest != decode_envelope(record.data).value["payload"]["fields"].get("arguments_digest")):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -326,7 +324,7 @@ class ToolOperationContent:
         if any(reference[:2] != (archive.scope_id, archive.content_scope) for reference in references):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         raw = await archive.read_contents(tuple(reference[2] for reference in references), codec=TOOL_PAYLOAD_CODEC)
-        values = {reference: _decode(body, reference[2]) for reference, body in zip(references, raw, strict=True)}
+        values = {reference: _decode(body) for reference, body in zip(references, raw, strict=True)}
         return tuple(_map_record(record, lambda payload: values.get(tool_payload_reference(payload), payload)) for record in records)
 
 

@@ -374,12 +374,12 @@ compilation is distinct from validation on a deployed database server.
 | `ai_step_events` | `body_sha256`, `fields_sha256` | Managed lifecycle source integrity. Full recovery authenticates metadata too; metadata-free Trace projections authenticate their fields without reading the large metadata body. |
 | `ai_step_snapshots` | `store_key`, `run_id`, `idempotency_key` | Direct scoped replay identity. Snapshot pruning uses the original run ID. |
 | `ai_step_snapshots` | `sequence_root` | The sole stored root of the immutable message sequence. The bounded descriptor stores its count and checkpoint control, not another root. |
-| `ai_step_messages` | `store_key`, `sha256` | Raw scope plus anonymous-content addressing and integrity of original uncompressed canonical message bytes. |
+| `ai_step_messages` | `store_key`, `sha256` | Raw scope plus anonymous-content addressing generated from original uncompressed canonical message bytes. Reads do not recompute that address digest. |
 | `ai_step_sequences` | `store_key`, `sha256`, `message_sha256`, `left_sha256`, `right_sha256`, `next_sha256` | Raw scope plus immutable ordered sequence addressing and references to its content, subtrees and next forest. Repeated messages remain distinct occurrences. |
 
 ContentArchive uses the existing StateStore tables rather than another SQL
-schema. Its `raw_digest` authenticates original content bytes across raw and
-compressed representations. Its content ID is the exact codec plus `:` plus
+schema. Its `raw_digest` identifies content across raw and compressed representations;
+reads do not recompute it from the selected bytes. Its content ID is the exact codec plus `:` plus
 that 64-character lowercase checksum, split at the final 65 ASCII characters.
 Codecs retain exact UTF-8 (including colons and slashes), bounded to 64 bytes
 and excluding NUL so JSON links are readable as PostgreSQL text;
@@ -644,3 +644,15 @@ immutable publication still add work: all-phase SELECT rises from 362 to 487
 and DML from 141 to 201. This is a measured space/read trade-off, not an overall
 SQL reduction. The final code head is measured here; formal CI and complete runtime workloads
 remain separate verification requirements.
+
+### Fixed content reads
+
+Fixed content addresses select Runtime binding, policy, payload, capture and
+Native/history message bytes. Reading or restoring those bytes does not recompute
+their address hash. Valid changed bytes at the same address can therefore be
+accepted, including through snapshot restoration. Declared sizes, bounded
+decompression, codecs, schemas, types, source existence and namespace/tenant/scope
+checks still apply. Business identity and idempotency checks, lifecycle/source
+associations, and independent Artifact/ObjectRef integrity contracts remain in
+force. Writers still generate content addresses from the original bytes and
+reject conflicting publication at an existing address.

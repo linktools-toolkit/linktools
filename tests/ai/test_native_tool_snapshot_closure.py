@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Native tool receipt snapshots preserve exact original wrappers and roots."""
 
+import base64
 import hashlib
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -60,7 +61,7 @@ def test_native_tool_snapshot_recovers_original_receipt_not_source_wrapper() -> 
     assert "native tool receipt" not in reference.template
 
 
-@pytest.mark.parametrize("damage", ["bytes", "digest", "missing", "part", "call", "template", "partition"])
+@pytest.mark.parametrize("damage", ["bytes", "missing", "part", "call", "template", "partition"])
 def test_native_tool_snapshot_rejects_invalid_projection(damage: str) -> None:
     record, value, reference, expected, rows, payloads = _projection()
     content = value["fields"]["result_payload"]["fields"]["content"]
@@ -76,8 +77,6 @@ def test_native_tool_snapshot_rejects_invalid_projection(damage: str) -> None:
         content["template"] = content["template"].replace("operation", "other-operation")
     elif damage == "partition":
         content["$native_tool_result"] = replace(reference.root, store_key=native_store_key("test", "other")).to_json()
-    else:
-        content["digest"] = "e" * 64
     record = replace(record, data=encode_envelope({"type": "tool_operation", "payload": value}))
     with pytest.raises(AIError):
         _expand_snapshot_native_content(record, rows, payloads, namespace="test", tenant_id="tenant")
@@ -93,3 +92,15 @@ def test_native_tool_rekey_keeps_template_and_business_json_opaque() -> None:
     assert rekey_native_message_roots(opaque, {}) == opaque
     with pytest.raises(AIError):
         rekey_native_message_roots(value, {})
+
+
+def test_native_tool_snapshot_reads_changed_bytes_at_fixed_source_address() -> None:
+    record, value, reference, expected, rows, payloads = _projection()
+    sources = payloads[reference.root.group_id]
+    key = next(iter(sources))
+    sources[key] = sources[key].replace(b"native tool receipt", b"Native tool receipt")
+    assert hashlib.sha256(sources[key]).hexdigest() != key[1]
+    restored = _expand_snapshot_native_content(record, rows, payloads, namespace="test", tenant_id="tenant")
+    output = decode_envelope(restored.data).value["payload"]["fields"]["result_payload"]
+    changed = StoredPayload.inline_bytes(base64.b64decode(expected.value).replace(b"native tool receipt", b"Native tool receipt"))
+    assert output == _encode_persisted_domain(changed)

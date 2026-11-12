@@ -326,8 +326,6 @@ async def restore_capture_value(record: StoredRecord, *,
     if capture_binding_references(key, value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     value = await _transform_capture_attachments(key, value, transform)
-    if canonical_sha256(value) != capture_record_digest(record):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
 

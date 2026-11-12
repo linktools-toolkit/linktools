@@ -3323,7 +3323,7 @@ class StateStepArchive(AgentRunStore):
                 namespace=self._namespace, tenant_id=self._tenant_id)) if isinstance(root, NativeMessageRoot)
                 else root.scope_id == archive.scope_id and root.content_scope == archive.content_scope)
             if (not valid_scope
-                    or root.count != len(messages) or hashlib.sha256(raw).hexdigest() != block.raw_digest
+                    or root.count != len(messages)
                     or projection != ContextProjection((block,))):
                 return None
             frontier = tuple(decode_record(record) for record in value["frontier"])

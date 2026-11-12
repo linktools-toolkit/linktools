@@ -99,7 +99,7 @@ def expand_capture_bindings(
         if reference is None:
             return binding
         raw = contents.get(reference)
-        if raw is None or archive_content_identity(BINDING_CODEC, hashlib.sha256(raw).hexdigest()) != reference[2]:
+        if raw is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         contract = decode_agent_binding_content(raw)
         return contract.to_payload()
