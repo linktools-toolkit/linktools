@@ -23,6 +23,7 @@ from linktools.ai.execution import ExecutionEvent, ExecutionStreamEvent
 from linktools.ai.persistence.contracts import ExecutionRecord
 from linktools.ai.storage import InMemoryStreamBackend, StreamBatch, StreamWriter
 
+from .test_runtime_shared_stream import authority_clock as authority_clock
 from .test_runtime_stream_order import _execution
 
 
@@ -243,7 +244,9 @@ async def test_closing_pending_remote_reader_preserves_owner_and_resume_position
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ("lost", "replaced", "sql_replaced"))
-async def test_pending_owner_change_resets_buffered_preview_before_durable_fallback(change: str) -> None:
+async def test_pending_owner_change_resets_buffered_preview_before_durable_fallback(
+    change: str, authority_clock,
+) -> None:
     store, backend = _PendingStore(), _Streams()
     store.activate()
     service = _service(store, backend)
@@ -260,7 +263,7 @@ async def test_pending_owner_change_resets_buffered_preview_before_durable_fallb
                 store.owner = None if change == "lost" else "replacement"
                 if change == "replaced":
                     store.pending = replace(store.pending, producer_claim_id=store.owner)
-            await asyncio.sleep(1.01)
+            authority_clock.now = 1.01
             reset = await asyncio.wait_for(anext(stream), 2)
             assert reset.event_type == "STREAM_RESET" and reset.durable_seq is None
             store.commit()
@@ -292,7 +295,7 @@ async def test_pending_invalid_cursor_resets_without_using_pending_event_sequenc
 
 
 @pytest.mark.asyncio
-async def test_pending_promotion_keeps_same_shared_owner_until_sql_terminal() -> None:
+async def test_pending_promotion_keeps_same_shared_owner_until_sql_terminal(authority_clock) -> None:
     store, backend = _PendingStore(), _Streams()
     store.activate()
     service = _service(store, backend)
@@ -303,7 +306,7 @@ async def test_pending_promotion_keeps_same_shared_owner_until_sql_terminal() ->
         async with aclosing(service.stream("execution", principal=_PRINCIPAL)) as stream:
             assert (await anext(stream)).payload["text"] == "pending"
             store.promote()
-            await asyncio.sleep(1.01)
+            authority_clock.now = 1.01
             promoted = await asyncio.wait_for(anext(stream), 2)
             assert promoted.payload["text"] == "promoted" and promoted.durable_seq is None
             store.commit()
@@ -347,7 +350,7 @@ async def test_pending_durable_only_observer_waits_for_canonical_events() -> Non
 
 
 @pytest.mark.asyncio
-async def test_lost_pending_execution_resets_then_reports_recovery_required() -> None:
+async def test_lost_pending_execution_resets_then_reports_recovery_required(authority_clock) -> None:
     store, backend = _PendingStore(), _Streams()
     store.activate()
     service = _service(store, backend)
@@ -358,7 +361,7 @@ async def test_lost_pending_execution_resets_then_reports_recovery_required() ->
         async with aclosing(service.stream("execution", principal=_PRINCIPAL)) as stream:
             assert (await anext(stream)).payload["text"] == "first"
             store.pending = None
-            await asyncio.sleep(1.01)
+            authority_clock.now = 1.01
             assert (await anext(stream)).event_type == "STREAM_RESET"
             with pytest.raises(AIError) as failure:
                 await anext(stream)
