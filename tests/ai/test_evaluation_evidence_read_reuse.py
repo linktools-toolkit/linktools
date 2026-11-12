@@ -323,9 +323,8 @@ async def test_snapshot_keeps_evidence_integrity_checks_with_reused_source(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", (False, True))
 async def test_snapshot_checks_retained_attachment_integrity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with completed(tmp_path, count=1) as (evaluations, storage, run, _scorer, _policy):
         await evaluations.close()
@@ -342,19 +341,23 @@ async def test_snapshot_checks_retained_attachment_integrity(
         await repository.update(run.experiment_id, lambda value: replace(value,
             evidence=(replace(value.evidence[0], evidence_ref=bundle.ref),)))
         stat = objects.stat
-        checked = False
+        for missing in (False, True):
+            checked = False
 
-        async def changed(key):
-            nonlocal checked
-            result = await stat(key)
-            if key != reference.key:
-                return result
-            checked = True
-            return None if missing else replace(result, size=result.size + 1)
+            async def changed(key):
+                nonlocal checked
+                result = await stat(key)
+                if key != reference.key:
+                    return result
+                checked = True
+                return None if missing else replace(result, size=result.size + 1)
 
-        monkeypatch.setattr(objects, "stat", changed)
-        with pytest.raises(AIError) as caught:
-            await run.create_report()
-        assert checked
-        assert caught.value.code is (ErrorCode.INPUT_CAPTURE_UNAVAILABLE if missing else ErrorCode.STORAGE_INTEGRITY_ERROR)
-        assert await report_count(storage) == 0
+            with monkeypatch.context() as patch:
+                patch.setattr(objects, "stat", changed)
+                with pytest.raises(AIError) as caught:
+                    await run.create_report()
+            assert checked, missing
+            assert caught.value.code is (
+                ErrorCode.INPUT_CAPTURE_UNAVAILABLE if missing else ErrorCode.STORAGE_INTEGRITY_ERROR
+            ), missing
+            assert await report_count(storage) == 0
