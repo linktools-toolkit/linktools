@@ -40,6 +40,7 @@ from .state import (
     RecordScanCursor,
     StateCallback,
     StateGroupCallback,
+    StateGroupTransaction,
     StateStorageGroup,
     StateStore,
     StateTransaction,
@@ -509,6 +510,15 @@ class SqlStateStorageGroup:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
         metadata_key = STATE_GROUP_METADATA_KEY
         metadata_store = await self._open_partition(metadata_key)
+        if create and self._archive_on_mutation and not self._archive_scope_initialized:
+            # The mutation already establishes and confirms the archive identity.
+            # Do not repeat its absence/content checks in separate read snapshots.
+            async def prepare(_group: StateGroupTransaction) -> None:
+                pass
+            await self.mutate((metadata_store,), prepare)
+            if self._opened_archive is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return self._opened_archive
         key = record_key("", "", "archive", "archive_scope", ("archive_scope_id",))
         record = await metadata_store.read(lambda tx: tx.get_record(key))
         archive_key = STATE_GROUP_ARCHIVE_KEY
@@ -565,11 +575,17 @@ class SqlStateStorageGroup:
             if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return scope, True
-        archive = _SqlTransaction(
-            session, self._metadata, self._context,
-            STATE_GROUP_ARCHIVE_KEY, clock=clock,
-        )
-        if await archive.scan_records_page(after=None, limit=1):
+        from sqlalchemy import func, literal, select, union_all
+
+        # Only existence matters here; never hydrate an orphan's stored body.
+        statements = [select(literal(1)).select_from(self._metadata.tables[name]).where(
+            self._metadata.tables[name].c.store_key == STATE_GROUP_ARCHIVE_KEY)
+            for name in RECORD_OWNER_TABLES]
+        messages = _payload_table(self._metadata)
+        statements.append(select(literal(1)).select_from(messages).where(
+            func.substr(messages.c.store_key, 1, 14) == b"\x00\x0cstep_payload"))
+        occupied = await self._context.run_statement(session.execute(union_all(*statements).limit(1)))
+        if occupied.first() is not None:
             # Under READ COMMITTED another writer can publish between the two
             # reads. Recheck identity before treating visible content as orphaned.
             metadata = _SqlTransaction(
