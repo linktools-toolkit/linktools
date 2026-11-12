@@ -17,6 +17,7 @@ from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary
+from ._repository_instruction_overlay import RepositoryInstructionOverlay
 from ..execution import ExecutionRecord
 
 if TYPE_CHECKING:
@@ -87,9 +88,7 @@ def _validate_repository_instruction_frontier(
         return
     if overlay is None or not barriers:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    overlay_digest = canonical_sha256(overlay.to_payload())
-    if reference.payload.digest != overlay_digest:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    RepositoryInstructionOverlay.from_reference(reference).verify(overlay)
 
 
 @dataclass(frozen=True, slots=True)

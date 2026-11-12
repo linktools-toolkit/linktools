@@ -220,6 +220,7 @@ from ._agent_run import (
     _WorkerFailure,
 )
 from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator
+from ._repository_instruction_overlay import RepositoryInstructionOverlay
 from ._repository_instructions import (
     _RepositoryInstructionBoundary,
     _repository_instructions_contain,
@@ -2386,11 +2387,14 @@ class LocalExecutionBackend:
             PersistenceDomain.CHECKPOINT,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        objects = (
-            self._execution_objects
-            if reference.source_domain is PersistenceDomain.EXECUTION
-            else self._checkpoint_objects
-        )
+        if reference.source_domain is PersistenceDomain.CHECKPOINT:
+            stored = RepositoryInstructionOverlay.from_reference(reference)
+            instructions = RepositoryInstructions.from_payload(
+                await self._context_archive.decode_repository_instructions(stored.instructions)
+            )
+            stored.verify(instructions)
+            return instructions
+        objects = self._execution_objects
         payload = reference.payload
         if payload.kind == "inline":
             if payload.encoding != "json":
@@ -6564,9 +6568,8 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
         instructions: RepositoryInstructions,
     ) -> RuntimePayloadRef:
-        return RuntimePayloadRef(
-            StoredPayload.inline_json(instructions.to_payload()), PersistenceDomain.CHECKPOINT,
-        )
+        stored = await self._context_archive.encode_repository_instructions(instructions.to_payload())
+        return RepositoryInstructionOverlay.capture(instructions, stored).to_reference()
 
     async def commit_repository_instruction_barrier(
         self,

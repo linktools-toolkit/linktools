@@ -54,7 +54,8 @@ Asset-backed Rule documents retain `asset_source_id` and the exact
 `RuleInstructionAdapter.decode_markdown()` is the shared public parser for
 loading declarations and reconstructing their Markdown frontmatter.
 
-Accepted execution-context and input-capture storage omit the Rule body only
+Accepted execution-context, input-capture, and dynamic instruction-overlay
+storage omit the Rule body only
 when the configured source implements `RetainedAssetReader`, the exact version
 is available, and parsing it reproduces the accepted source, scope, and body.
 The stored document contains the Asset reference and the parsed body's SHA-256.
@@ -62,6 +63,15 @@ Reading verifies the Asset's original size/digest, parses that version, checks
 source/scope/body digest, and restores the same public instruction payload.
 The complete execution-context semantic digest is checked after reconstruction.
 No current Asset head is consulted to replace a missing historical version.
+
+Dynamic instruction overlays retain their existing checkpoint owner and use a
+small database envelope containing the projected documents and the original
+full instruction payload's semantic digest. The envelope's stored-byte digest
+is checked separately. Recovery resolves the fixed Asset references before
+checking that semantic digest. Tool-argument barrier digests and the approval
+frontier's ordered source/scope/body digest are unchanged. Barrier compare-and-
+swap, historical replay, and uncertain-write readback continue to select the
+durable cumulative frontier rather than a newly resolved instruction set.
 
 Runtime supplies its configured Asset readers automatically. Standalone
 `TaskEngine.open(..., asset_sources={"rules": asset_store})`,
@@ -80,10 +90,11 @@ contents without verified retained provenance keep their accepted bodies in
 Runtime records. Reopening them does not reread mutable source files. Ordinary
 instruction text remains database content, not a Runtime ObjectStore file.
 
-Persistence snapshots and garbage collection retain the instruction component
-through the existing execution-context archive reference. Asset version bytes
-remain with their original Asset owner, as with preloaded Skills and MCP
-resources. A Runtime snapshot does not include those external Asset bytes.
+Persistence snapshots and garbage collection retain initial instructions
+through the existing execution-context archive reference and dynamic overlays
+through their checkpoint recovery record. Neither adds Runtime ObjectStore
+files. Asset version bytes remain with their original Asset owner, as with
+preloaded Skills and MCP resources. A Runtime snapshot does not include those external Asset bytes.
 Retain or separately snapshot that Asset owner and supply it when reopening the
 Runtime, reading a captured input, or replaying the context. Runtime does not
 create a duplicate Asset version store or a new Asset cleanup lifecycle.
@@ -96,7 +107,7 @@ create a duplicate Asset version store or a new Asset cleanup lifecycle.
 | Captured Rule instructions and captured input context | Input-capture record; accepted execution context | The same retained-source projection is stored. Capture reads return the full accepted public payload through explicitly supplied Asset readers. |
 | Workspace instructions and custom resolver documents | Accepted context/capture records; mutable Workspace or arbitrary resolver | Accepted body remains in the database. There is no independently retained Asset version to recover it from. |
 | Pre-context admission instructions | Execution admission record; accepted resolver result | Body remains until an accepted context takes ownership. Records with `input_context` do not persist a second `repository_instructions` payload. |
-| Dynamically discovered instruction overlay | Checkpoint recovery record; accepted tool-boundary frontier | Body remains. Its current payload digest participates directly in barrier validation; changing this representation also requires separating stored-byte integrity from the accepted frontier's semantic digest and updating recovery together. |
+| Dynamically discovered instruction overlay | Checkpoint recovery record; accepted tool-boundary frontier | Verified retained Rules use fixed Asset references; Workspace/custom bodies remain inline. An envelope preserves the original full semantic digest separately from stored-byte integrity. Recovery restores the original frontier before validating barriers and approvals. |
 | Preloaded Skill root | Asset owner; `SkillInput` declaration version | Already reference-only. Recovery requires the retained Asset source. |
 | Agent and Task bindings | Their execution/graph binding stores; compiled declarations | Accepted normalized contracts remain. They do not carry a sufficient Asset version plus compiler inputs to reconstruct the contract from raw authoring Assets. |
 | Model contract and actual model requests | Execution/evaluation and model-history owners | Retained evaluation semantics and actual model-visible messages remain. A declaration reference alone does not recover what a provider actually received. |
