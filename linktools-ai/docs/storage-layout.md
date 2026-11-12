@@ -431,6 +431,59 @@ Snapshots include and budget the referenced content before decoding it, rekey
 physical archive scopes on restore, and verify the same typed attachment closure.
 Offline collection keeps content while its Execution owner is retained.
 
+Archived execution bindings carry a derived view summary (kind, declared ID and
+revision, and the Task attempt limit) beside their scoped content address. State
+views read this projection without opening or decoding the immutable contract;
+recovery and snapshot expansion still load the complete bytes, verify their
+content identity, and compare the summary with the decoded contract. The summary
+is not a new behavior identity or a replacement for declaration validation.
+Small bindings remain inline. This removes contract reads from archived-binding
+state views, not from cold recovery, and does not change the archive threshold or
+claim that every configuration is now stored by reference.
+
+## Configuration and large-record ownership
+
+- Execution Agent and Task bindings retain the complete admitted contract for
+  declaration validation, cold recovery and portable snapshots. Named ID/revision
+  alone does not reconstruct output schemas, resolved Agent declarations or
+  captured child bindings. Identical bindings above the existing payload limit
+  share one scoped archive content record; smaller bindings remain inline per
+  execution. Those inline copies are real duplication, retained to avoid an
+  additional content lookup for small executions. The view summary above removes
+  that lookup from state views of archived bindings, not from recovery.
+- Task graph headers contain no node-definition body. Immutable node definitions
+  and mutable node states are separate records. The prepared submission retains
+  the initial graph until admission or cancellation, then deletes its payload;
+  it is not a permanent second graph copy.
+- Task graph binding captures deduplicate declarations within a graph. Large
+  task/expander declaration sets share content-addressed archive bytes; small
+  sets remain inline in the capture. These are the admitted restore contract,
+  while input captures and invocation captures preserve frozen input/provenance
+  independently of a source execution's lifetime. They cannot be replaced by
+  looking up the caller's current mutable configuration.
+- Execution input, result and prepared terminal output use existing immutable
+  content references when large. The persisted codec omits repository
+  instructions already owned by input context and replaces an identical
+  terminal-handoff outcome with a reference to the final result. Step message
+  bodies and sequence references have their own canonical owner.
+- Tool operations retain a capability reference and binding/argument digests,
+  not a full Tool/Skill/MCP configuration copy. Their argument/result/error
+  payloads, approval requests and external-call results are effect/recovery
+  facts. Memory and artifact content are user data. No safe deletion follows
+  merely from these fields being large or sharing the records table.
+
+For content-only publication, archive preparation performs an existence/body
+integrity read; publication uses the existing byte-exact immutable insert/upsert
+without another preceding SELECT. Reads repeated within the same SQL transaction
+already reuse its record read set. The existence read also preserves the stored
+compression or object representation, so constructing another encoding and
+skipping verification is not an equivalent optimization. Preparations outside
+publication cannot be treated as current-transaction existence proof. Sharing
+all small configurations would still add content reads and publication work;
+this audit does not establish an improved threshold or a measured SQL saving.
+The archive remains in `ai_state_records`: sharing reduces duplicate bodies and
+hot owner-row width, not the count of logical kinds in that physical table.
+
 ## Cost boundaries
 
 Removing duplicate content and Base64 database bodies reduces those specific

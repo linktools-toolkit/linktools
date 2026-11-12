@@ -271,15 +271,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
 
     async def _decode_view(self, record: StoredRecord, execution_id: str) -> tuple[ResourceRef, ExecutionView]:
         self._decode_header(record, execution_id)
-        expanded, = await self._execution_content.expand_bindings((record,))
-        return decode_execution_view(expanded.data, tenant_id=self._tenant_id)
+        return decode_execution_view(record.data, tenant_id=self._tenant_id)
 
     async def list_child_views(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionView, ...]:
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records("execution", parent=self._parent("execution", "execution", (execution_id,)))
         values = []
-        for record in await self._execution_content.expand_bindings(records):
+        for record in records:
             header = decode_execution_header(record.data, tenant_id=tenant_id)
             self._decode_header(record, header.id)
             _owner, view = decode_execution_view(record.data, tenant_id=tenant_id)
@@ -291,7 +290,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     async def get_view_with_children(
         self, execution_id: str, *, tenant_id: str,
     ) -> tuple[tuple[ResourceRef, ExecutionView] | None, tuple[ExecutionView, ...]]:
-        """Capture parent and child rows together before reading immutable bindings."""
+        """Capture parent and child view projections in the same read scope."""
         if tenant_id != self._tenant_id:
             return None, ()
 
@@ -307,10 +306,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         parent, children = await self._store.read(capture)
         if parent is None:
             return None, ()
-        expanded = await self._execution_content.expand_bindings((parent, *children))
-        owner = await self._decode_view(expanded[0], execution_id)
+        owner = await self._decode_view(parent, execution_id)
         views = []
-        for record in expanded[1:]:
+        for record in children:
             header = decode_execution_header(record.data, tenant_id=tenant_id)
             _principal, view = await self._decode_view(record, header.id)
             if view.parent_execution_id != execution_id:

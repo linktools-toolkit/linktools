@@ -16,7 +16,7 @@ from linktools.ai.persistence._archive_closure import iter_archive_content_refs,
 from linktools.ai.persistence._execution_content import expand_snapshot_execution_content
 from linktools.ai.persistence._payload import encode_payload_bytes
 from linktools.ai.persistence._repository_common import project_record
-from linktools.ai.persistence.codec import _decode_enveloped_domain, iter_runtime_object_refs
+from linktools.ai.persistence.codec import _decode_enveloped_domain, _execution_binding_summary, iter_runtime_object_refs
 from linktools.ai.persistence.contracts import ExecutionRecord, RuntimePayloadRef
 from linktools.ai.persistence.state import RecordQuery
 from linktools.ai.storage import StoredPayload
@@ -42,7 +42,8 @@ def _shared_record():
     digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
     content = ContentRecord("execution-binding", digest, size, compression, body=encoded)
     scope = archive_content_scope("bindings", "tenant")
-    reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope}
+    reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope,
+                 "summary": _execution_binding_summary(execution.binding)}
     compact = replace(record, data={**data, "value": {**data["value"], "payload": {
         **data["value"]["payload"], "fields": {**data["value"]["payload"]["fields"], "binding": reference},
     }}})
@@ -442,3 +443,80 @@ def test_binding_capture_detaches_live_declarations_without_freezing_sources() -
     assert tuple(ref.id for ref in old.selected) == ("first",)
     assert current.output_schema["description"] == "new"
     assert tuple(ref.id for ref in current.selected) == ("first", "second")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("kind", ("agent", "task"))
+async def test_archived_binding_views_do_not_read_contract_bodies(tmp_path: Path, monkeypatch, backend: str, kind: str) -> None:
+    from linktools.ai.execution import project_execution_view
+    from linktools.ai.core import ExecutionLineageKind
+    from linktools.ai.persistence._archive import ContentArchive
+    from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
+    from linktools.ai.task import TaskBindingContract
+
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace="bindings", tenant_id="tenant")
+    try:
+        repository = state.execution.executions
+        execution = _large_execution()
+        if kind == "task":
+            execution = replace(execution, mode=None, planning=None, thinking=None, agent_run_seq=0,
+                binding=TaskBindingContract("task", 1, "none", execution.binding.output_schema,
+                    None, 3, 0), task_attempt=2)
+        await repository.create_execution(execution)
+        child = None
+        if kind == "agent":
+            child = replace(execution, execution_id="child", parent_execution_id="execution",
+                parent_invocation_id="invocation", lineage_kind=ExecutionLineageKind.SUBAGENT)
+            await repository.create_execution(child)
+        cold = ExecutionRepositoryImpl(repository.state_store, namespace="bindings", tenant_id="tenant")
+
+        async def reject_contract_read(*args, **kwargs):
+            raise AssertionError("execution views must not hydrate immutable contracts")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ContentArchive, "read_contents", reject_contract_read)
+            expected = project_execution_view(execution)
+            assert (await cold.get_view("execution", tenant_id="tenant"))[1] == expected
+            assert (await cold.get_view_fresh("execution", tenant_id="tenant"))[1] == expected
+            expected_children = () if child is None else (project_execution_view(child),)
+            assert await cold.list_child_views("execution", tenant_id="tenant") == expected_children
+            parent, children = await cold.get_view_with_children("execution", tenant_id="tenant")
+            assert parent[1] == expected and children == expected_children
+        assert await cold.get("execution", tenant_id="tenant") == execution
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("field,value", (("id", "other"), ("revision", 2),
+    ("kind", "task"), ("max_attempts", 3)))
+def test_binding_recovery_rejects_inconsistent_view_summary(field: str, value: object) -> None:
+    import json
+
+    _, _, compact, content, key = _shared_record()
+    data = json.loads(canonical_json_bytes(compact.data))
+    data["value"]["payload"]["fields"]["binding"]["summary"][field] = value
+    compact = replace(compact, data=data)
+    with pytest.raises(AIError) as error:
+        expand_snapshot_execution_content(compact, {key: content}, namespace="bindings", tenant_id="tenant")
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("kind,identity,revision", (
+    ("agent", "bad*id", 1), ("task", "bad/id", 1),
+    ("agent", "agent", True), ("task", "task", 0),
+))
+def test_archived_binding_view_rejects_invalid_declared_identity(kind: str, identity: str, revision: object) -> None:
+    import json
+    from linktools.ai.persistence.codec import decode_execution_view
+
+    _, _, compact, _, _ = _shared_record()
+    data = json.loads(canonical_json_bytes(compact.data))
+    data["value"]["payload"]["fields"]["binding"]["summary"] = {
+        "kind": kind, "id": identity, "revision": revision,
+        "max_attempts": None if kind == "agent" else 3,
+    }
+    with pytest.raises(AIError) as error:
+        decode_execution_view(data, tenant_id="tenant")
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

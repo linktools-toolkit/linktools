@@ -36,7 +36,7 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from ..asset import AssetVersionRef
-from ..spec import CapabilityRef
+from ..spec import CapabilityRef, validate_logical_id
 from ..evaluation import (
     CandidateContract,
     CandidateSlotRef,
@@ -1767,16 +1767,16 @@ def decode_execution_producer_control(
     return generation, status, durable_trace, seal
 
 
-def _validate_execution_view(view: ExecutionView, binding: AgentBindingContract | TaskBindingContract) -> None:
+def _validate_execution_view(view: ExecutionView, summary: Mapping[str, JsonValue]) -> None:
     # Preserve the owner's invariants for fields consumed by this projection.
-    if isinstance(binding, AgentBindingContract):
+    if summary["kind"] == "agent":
         if view.task_attempt != 0 or view.task_deadline_at is not None or view.task_next_attempt_at is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     else:
         if (view.session_id is not None or view.lineage_kind is not ExecutionLineageKind.RUN
                 or view.parent_execution_id is not None or view.parent_invocation_id is not None
                 or view.agent_run_seq != 0
-                or view.task_attempt < 0 or view.task_attempt > binding.max_attempts):
+                or view.task_attempt < 0 or view.task_attempt > summary["max_attempts"]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if view.lineage_kind is ExecutionLineageKind.SUBAGENT:
         if not view.parent_execution_id or not view.parent_invocation_id:
@@ -1786,13 +1786,15 @@ def _validate_execution_view(view: ExecutionView, binding: AgentBindingContract 
 
 
 def decode_execution_view(value: Mapping[str, JsonValue], *, tenant_id: str) -> tuple[ResourceRef, ExecutionView]:
-    """Decode the public view and admitted principal from an expanded binding row."""
+    """Decode state using the binding reference projection, without loading content."""
     source, codec = _execution_projection_fields(value)
     names = ("execution_id", "status", "lineage_kind", "parent_execution_id", "root_execution_id",
              "parent_invocation_id", "session_id", "task_attempt", "task_deadline_at",
              "task_next_attempt_at", "event_seq", "started_at", "agent_run_seq", "durable_trace", "created_at")
     values = {name: _execution_projection_field(source, name, codec) for name in names}
-    binding = _execution_projection_field(source, "binding", codec)
+    binding = source.get("binding")
+    summary = (_binding_view_summary(binding["summary"]) if binding_reference(binding) is not None
+               else _execution_binding_summary(_execution_projection_field(source, "binding", codec)))
     principal_id = _execution_projection_field(source, "principal_id", codec)
     if not isinstance(principal_id, str) or not principal_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1812,11 +1814,11 @@ def decode_execution_view(value: Mapping[str, JsonValue], *, tenant_id: str) -> 
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         view = ExecutionView(**values,
-            agent_id=binding.agent_spec.id if isinstance(binding, AgentBindingContract) else None,
-            task_id=binding.id if isinstance(binding, TaskBindingContract) else None,
-            binding_kind="agent" if isinstance(binding, AgentBindingContract) else "task",
+            agent_id=summary["id"] if summary["kind"] == "agent" else None,
+            task_id=summary["id"] if summary["kind"] == "task" else None,
+            binding_kind=summary["kind"],
             terminal_at=terminal_at)
-        _validate_execution_view(view, binding)
+        _validate_execution_view(view, summary)
         return ResourceRef(ResourceKind.EXECUTION, view.execution_id, tenant_id, principal_id), view
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -1900,8 +1902,7 @@ def execution_payload_reference(value: object) -> tuple[str, str, str] | None:
     """Recognize a storage reference only in a typed StoredPayload slot."""
     if not isinstance(value, Mapping) or "$execution_payload" not in value:
         return None
-    return binding_reference({"$execution_binding": value["$execution_payload"],
-        **{key: item for key, item in value.items() if key != "$execution_payload"}})
+    return _execution_content_reference(value, "$execution_payload")
 
 
 def decode_execution_content(
@@ -2013,17 +2014,55 @@ def _decode_enveloped_domain(
     return _decode_domain(payload, target, codec, persisted=True)
 
 
-def binding_reference(value: object) -> tuple[str, str, str] | None:
-    """Recognize only the typed complete-binding content reference."""
-    if not isinstance(value, Mapping) or "$execution_binding" not in value:
-        return None
-    if set(value) != {"$execution_binding", "archive_scope", "content_scope"}:
+def _execution_binding_summary(binding: AgentBindingContract | TaskBindingContract) -> dict[str, JsonValue]:
+    """Derive read-only view fields from the complete admitted contract."""
+    if isinstance(binding, AgentBindingContract):
+        return {"kind": "agent", "id": binding.agent_spec.id,
+                "revision": binding.agent_spec.revision, "max_attempts": None}
+    return {"kind": "task", "id": binding.id, "revision": binding.revision,
+            "max_attempts": binding.max_attempts}
+
+
+def _binding_view_summary(value: object) -> Mapping[str, JsonValue]:
+    if (not isinstance(value, Mapping)
+            or set(value) != {"kind", "id", "revision", "max_attempts"}
+            or not isinstance(value["kind"], str) or value["kind"] not in {"agent", "task"}
+            or not isinstance(value["id"], str) or not value["id"].strip()
+            or type(value["revision"]) is not int or value["revision"] < 1
+            or (value["kind"] == "agent" and value["max_attempts"] is not None)
+            or (value["kind"] == "task" and
+                (type(value["max_attempts"]) is not int or value["max_attempts"] < 1))):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    identity, scope, content_scope = value["$execution_binding"], value["archive_scope"], value["content_scope"]
+    try:
+        if value["kind"] == "agent":
+            validate_logical_id(value["id"])
+        else:
+            TaskRef(value["id"], value["revision"])
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return value
+
+
+def _execution_content_reference(value: Mapping, marker: str) -> tuple[str, str, str]:
+    expected = {marker, "archive_scope", "content_scope"}
+    if marker == "$execution_binding":
+        expected.add("summary")
+    if set(value) != expected:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    identity, scope, content_scope = value[marker], value["archive_scope"], value["content_scope"]
     validate_archive_group_id(scope)
     decode_archive_scope(content_scope)
     validate_archive_content_identity(identity)
     return scope, content_scope, identity
+
+
+def binding_reference(value: object) -> tuple[str, str, str] | None:
+    """Recognize the complete-binding reference and its derived view fields."""
+    if not isinstance(value, Mapping) or "$execution_binding" not in value:
+        return None
+    reference = _execution_content_reference(value, "$execution_binding")
+    _binding_view_summary(value["summary"])
+    return reference
 
 
 def iter_runtime_object_refs(

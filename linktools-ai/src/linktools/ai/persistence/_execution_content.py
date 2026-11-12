@@ -18,7 +18,7 @@ from ..agent import AgentBindingContract
 from ..task import TaskBindingContract
 from ._archive import archive_content_scope, archive_content_identity, ContentArchive, ContentRecord, PreparedArchive
 from ._payload import decode_payload_bytes
-from .codec import (binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
+from .codec import (_execution_binding_summary, binding_reference, decode_envelope, encode_envelope, _encode_persisted_domain,
     encode_execution_content, decode_execution_content, execution_payload_reference, decode_domain, execution_payload_slots, payload_reference, map_execution_payload_slots)
 from .state import StateStorageGroup, StateStore, StoredRecord, active_state_scope
 
@@ -106,6 +106,9 @@ def expand_binding(record: StoredRecord, raw: bytes) -> StoredRecord:
     except (UnicodeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(binding, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    decoded = decode_domain(binding, AgentBindingContract | TaskBindingContract)
+    if _binding(record)["summary"] != _execution_binding_summary(decoded):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _with_binding(record, binding)
 
@@ -325,7 +328,8 @@ class ExecutionContent:
             if previous_binding != (archive.scope_id, archive.content_scope, identity):
                 missing.append((BINDING_CODEC, raw))
             encoded_binding = {"$execution_binding": identity, "archive_scope": archive.scope_id,
-                               "content_scope": archive.content_scope}
+                               "content_scope": archive.content_scope,
+                               "summary": _execution_binding_summary(value.binding)}
         if missing:
             await archive.prepare_content(tuple(missing), prepared)
             await archive.store.mutate(lambda transaction: archive.publish(transaction, prepared))
