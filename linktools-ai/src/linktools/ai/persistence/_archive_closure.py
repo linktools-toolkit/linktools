@@ -15,6 +15,7 @@ from ._archive import (ArchiveRoot, ArchiveSlice, ContentRecord, ImmutableSequen
                        validate_archive_content_identity, validate_archive_group_id)
 from ._message_root import NativeMessageRoot, NativeMessageSlice
 from ._payload import decode_payload_bytes
+from ._tool_operation_content import tool_payload_slots, tool_payload_reference, map_tool_payload_slots
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -117,6 +118,10 @@ def iter_archive_content_refs(value: object) -> Iterator[tuple[str, str, str]]:
             return
         for _path, payload in execution_payload_slots(value):
             reference = payload_reference(payload)
+            if reference is not None:
+                yield reference
+        for _name, payload in tool_payload_slots(value):
+            reference = tool_payload_reference(payload)
             if reference is not None:
                 yield reference
         reference = binding_reference(value) or task_binding_content_reference(value)
@@ -397,7 +402,7 @@ class ArchiveClosure(_SequenceClosure):
         """Expose immutable binding metadata for complete offline validation."""
         return {(self.scope_id, scope, identity): ContentRecord.from_record(record)
                 for (scope, kind, identity), record in self._records.items()
-                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "task-graph-binding", "execution-payload"}}
+                if kind == "archive_content" and record.data.get("codec") in {"execution-binding", "task-graph-binding", "execution-payload", "tool-operation-payload"}}
 
     @property
     def has_roots(self) -> bool:
@@ -640,6 +645,16 @@ def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValu
                 return {**payload, "fields": {"content": {**payload["fields"]["content"],
                     "archive_scope": scopes[reference[0]]}}}
             value = map_execution_payload_slots(value, rekey_payload)
+        if value.get("$dataclass") == "tool_operation":
+            def rekey_tool(payload: Mapping) -> JsonValue:
+                reference = tool_payload_reference(payload)
+                if reference is None:
+                    return payload
+                if reference[0] not in scopes:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return {**payload, "fields": {"content": {**payload["fields"]["content"],
+                    "archive_scope": scopes[reference[0]]}}}
+            value = map_tool_payload_slots(value, rekey_tool)
         reference = binding_reference(value) or task_binding_content_reference(value)
         if reference is not None:
             if reference[0] not in scopes:

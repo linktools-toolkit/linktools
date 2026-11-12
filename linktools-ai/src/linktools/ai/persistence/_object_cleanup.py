@@ -24,6 +24,7 @@ from ._archive_closure import (
     iter_native_message_roots, require_known_retention, validate_native_message_content,
 )
 from ._payload import decode_payload_bytes
+from ._tool_operation_content import expand_tool_content
 from ._execution_content import expand_retained_execution_content
 from ._sql import SqlStateStorageGroup
 from ._step_schema import build_step_sql_metadata
@@ -336,8 +337,8 @@ async def _purge_unreferenced_objects(
                         await collect(capture_retention_value(semantic), PersistenceDomain.TASK, archive_owner=False)
                 elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
                     await collect(dict(record.data), domain)
-                    if record.kind == "execution":
-                        semantic = expand_retained_execution_content(record, binding_contents)
+                    if record.kind in {"execution", "tool_operation"}:
+                        semantic = expand_tool_content(expand_retained_execution_content(record, binding_contents), binding_contents)
                         await collect(dict(semantic.data), domain, archive_owner=False)
             if len(records) < 1000:
                 break

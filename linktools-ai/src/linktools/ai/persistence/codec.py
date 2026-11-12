@@ -2240,6 +2240,13 @@ def _iter_runtime_object_refs(
                     and isinstance(prompt, Mapping) and prompt.get("kind") == "stored-user-content-v1"):
                 stored = cast(StoredUserInput, _decode_domain(prompt.get("value"), StoredUserInput, codec))
                 yield from _iter_runtime_object_refs(stored.payload, PersistenceDomain.TASK, codec)
+        if dataclass_name == codec.wire_ids.get(ToolOperationRecord):
+            from ._tool_operation_content import map_tool_payload_slots, tool_payload_reference
+            fields_value = map_tool_payload_slots(value,
+                lambda payload: None if tool_payload_reference(payload) is not None else payload)["fields"]
+            for item in fields_value.values():
+                yield from _iter_runtime_object_refs(item, domain, codec)
+            return
         if dataclass_name == codec.wire_ids.get(ExecutionRecord):
             fields_value = value.get("fields")
             if not isinstance(fields_value, Mapping):
