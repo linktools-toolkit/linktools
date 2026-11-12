@@ -272,7 +272,17 @@ class DefaultExecutionHistoryService:
         message_seq: int | None = None,
         part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
-        await self._authorize_metadata(execution_id, principal)
+        authorized_executions: dict[str, ExecutionRepository] = {}
+        if (type(self) is DefaultExecutionHistoryService
+                and type(self._reader) is StepExecutionHistoryReader
+                and type(self._executions) is ExecutionRepositoryImpl):
+            await self._authorize_header(execution_id, principal)
+            pending = (None if self._pending_execution is None else
+                       await self._pending_execution(execution_id, tenant_id=principal.tenant_id))
+            if pending is None:
+                authorized_executions["authorized_executions"] = self._executions
+        else:
+            await self._authorize_metadata(execution_id, principal)
         filters = {
             "agent_run_seq": agent_run_seq,
             "model_request_seq": model_request_seq,
@@ -303,6 +313,7 @@ class DefaultExecutionHistoryService:
             tool_call_id=tool_call_id,
             message_seq=message_seq,
             part_index=part_index,
+            **authorized_executions,
         )
         items = (
             page.items

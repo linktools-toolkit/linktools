@@ -558,6 +558,7 @@ class StepExecutionHistoryReader:
         tool_call_id: str | None = None,
         message_seq: int | None = None,
         part_index: int | None = None,
+        authorized_executions: ExecutionRepository | None = None,
     ) -> "Page[ExecutionHistoryItem]":
         filters = {
             "agent_run_seq": agent_run_seq,
@@ -568,9 +569,22 @@ class StepExecutionHistoryReader:
             "part_index": part_index,
         }
         limit = validate_page_limit(limit)
-        record = await self._read_execution(execution_id, tenant_id=tenant_id)
-        if record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if authorized_executions is self._executions and type(authorized_executions) is ExecutionRepositoryImpl:
+            # Authorization has completed; this owner read also checks continued existence.
+            record = await authorized_executions.get(execution_id, tenant_id=tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if self._pending_execution is not None:
+                pending = await self._pending_execution(execution_id, tenant_id=tenant_id)
+                if pending is not None:
+                    record = pending
+        else:
+            if (authorized_executions is not None
+                    and await authorized_executions.get_header(execution_id, tenant_id=tenant_id) is None):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            record = await self._read_execution(execution_id, tenant_id=tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._history_tree(record, tenant_id)
         current_sources = await self._capture_sources(entries, tenant_id, agent_run_seq, include_pending=True)
         source_by_identity = {
