@@ -92,12 +92,25 @@ async def test_nonterminal_input_reference_survives_terminal_cas(tmp_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_native_input_and_output_use_one_range_batch_metadata_uses_none(tmp_path: Path) -> None:
+async def test_native_input_and_output_use_one_range_batch_metadata_uses_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     body = "input and output " * 9000
     async with Persistence.open("native-result", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "input.db")) as state:
         commands, commit, current, checkpoint = await _prepare_input(state, StoredUserInput("text", StoredPayload.inline_text(body)), body, body)
         await _publish(commands, commit, current, checkpoint)
         counts: Counter[str] = Counter()
+        from linktools.ai.persistence._sql import _SqlGroupTransaction
+
+        capture_content = _SqlGroupTransaction.read_content_references
+        captured_rows = []
+
+        async def capture_native_rows(group: _SqlGroupTransaction, **kwargs: object) -> object:
+            value = await capture_content(group, **kwargs)
+            captured_rows.append(sum(len(rows) for rows in group._native_message_rows.values()))
+            return value
+
+        monkeypatch.setattr(_SqlGroupTransaction, "read_content_references", capture_native_rows)
         def sql(connection: object, cursor: object, statement: str, parameters: object,
                 context: object, executemany: bool) -> None:
             counts[statement.split()[0]] += 1
@@ -107,10 +120,15 @@ async def test_native_input_and_output_use_one_range_batch_metadata_uses_none(tm
         try:
             loaded = await repository.get_fresh("execution", tenant_id="tenant")
             assert loaded.stored_user_input == current.stored_user_input and loaded.result == commit.result
-            assert counts["WITH"] == 1
+            # The owner/content join now includes both Native roots directly;
+            # count all read statements, not the former range query's WITH prefix.
+            assert counts["SELECT"] + counts["WITH"] == 1
+            assert captured_rows == [2]
             counts.clear()
+            captured_rows.clear()
             await repository.get_metadata_record("execution", tenant_id="tenant")
             assert counts["SELECT"] == 1 and counts["WITH"] == 0
+            assert captured_rows == [0]
         finally:
             event.remove(engine, "before_cursor_execute", sql)
 

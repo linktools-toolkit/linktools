@@ -188,15 +188,27 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
 
         monkeypatch.setattr(NativeMessageContent, "hydrate_ranges", forbid_body_read)
         monkeypatch.setattr(SqlObjectStore, "open", forbid_body_read)
+        from linktools.ai.persistence._sql import _SqlGroupTransaction
+
+        capture_content = _SqlGroupTransaction.read_content_references
+        native_checks = []
+
+        async def metadata_content(group: _SqlGroupTransaction, **kwargs: object) -> object:
+            values = await capture_content(group, **kwargs)
+            # The fused query can contain a conditional Native branch. Metadata
+            # owners here have no Native roots, so it must return no Native rows.
+            assert group._native_message_rows == {}
+            native_checks.append(True)
+            return values
+
+        monkeypatch.setattr(_SqlGroupTransaction, "read_content_references", metadata_content)
         engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
         statements, begins = [], []
 
         def statement(_connection, _cursor, sql, _parameters, _context, _many):
             if "ai_step_messages" in sql:
                 from linktools.ai.persistence._step_payload_owner import payload_store_key
-                from linktools.ai.steps import native_store_key
                 assert payload_store_key("timeline-owner", "tenant") in _parameters
-                assert native_store_key("timeline-owner", "tenant") not in _parameters
                 assert "ai_step_messages.store_key =" in sql
             statements.append(sql)
 
@@ -212,6 +224,7 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(
             event.remove(engine, "begin", begin)
         assert [turn.execution_id for turn in result.items] == ["failed", "active"]
         assert len(begins) == 2  # Fresh authorization header, then one metadata snapshot.
+        assert native_checks
         assert [turn.conversation_committed for turn in result.items] == [True, False]
         selects = [sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))]
         # Execution and conversation records may share one metadata batch.
