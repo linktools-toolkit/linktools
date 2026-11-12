@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Native receipt roots survive portable restore and retire with their last owner."""
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,23 +10,24 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
 from sqlalchemy import text
 
+from linktools.ai.core import canonical_json_bytes
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive_closure import iter_native_message_roots
-from linktools.ai.persistence.codec import decode_envelope, native_tool_result_reference
+from linktools.ai.persistence.codec import decode_envelope, encode_domain, native_tool_result_reference
 from linktools.ai.persistence.snapshots import SnapshotLimits
 from linktools.ai.persistence.state import StoredRecord
-from linktools.ai.storage import InMemoryObjectStore
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 
 from .test_native_result_portable_gc import Guard
 from .test_native_text_result_runtime import _prepare, _publish
 from .test_native_tool_result_runtime import _settle
 
 
-async def _old_receipts(state: Persistence) -> tuple[StoredRecord, ...]:
+async def _old_receipts(state: Persistence, payload: StoredPayload) -> tuple[StoredRecord, ...]:
     _, archive = await state.checkpoint.tools.state_store.storage_group.open_archive()
     records = await archive.read(lambda tx: tx.scan_records())
-    return tuple(row for row in records if row.kind == "archive_content"
-                 and row.data.get("codec") == "tool-operation-payload")
+    identity = "execution-payload:" + hashlib.sha256(canonical_json_bytes(encode_domain(payload))).hexdigest()
+    return tuple(row for row in records if row.kind == "archive_content" and row.sort_key == identity.encode())
 
 
 @pytest.mark.asyncio
@@ -45,10 +47,10 @@ async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path:
         record = next(row for row in records if row.kind == "tool_operation")
         assert native_tool_result_reference(
             decode_envelope(record.data).value["payload"]["fields"]["result_payload"]) is not None
-        # Initial settlement belongs to the Step ledger, not a generic archive.
-        assert await _old_receipts(state) == ()
+        # Native conversion releases the original shared Step content on the next GC.
+        assert len(await _old_receipts(state, payload)) == 1
         await state.purge_unreferenced_objects((), exclusive=Guard())
-        assert await _old_receipts(state) == ()
+        assert await _old_receipts(state, payload) == ()
         assert (await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
     async with Persistence.open("native-result", tenant_id="tenant", storage=storage, read_only=True) as state:
         snapshot = await state.export_snapshot(object_store=objects, limits=limits)
@@ -57,6 +59,9 @@ async def test_native_tool_readonly_snapshot_and_last_owner_collection(tmp_path:
     async with Persistence.open("native-result", tenant_id="tenant", storage=PersistenceStorage.from_root(target)) as state:
         tools = state.checkpoint.tools
         store = tools.state_store
+        async with store.storage_group.context.engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_tool_operations")) == 1
+            assert await connection.scalar(text("SELECT count(*) FROM ai_state_records WHERE kind='tool_operation'")) == 0
         assert (await tools.get_operation(operation.tool_operation_id, tenant_id="tenant")).result_payload == payload
         for partition in await store.storage_group.scan_stores():
             records = await partition.read(lambda tx: tx.scan_records_page(after=None, limit=1000))

@@ -62,3 +62,45 @@ async def test_result_projection_reads_its_fixed_conversation_policy(tmp_path: P
         result = await state.execution.executions.get_result_record(value.execution_id, tenant_id="tenant", fresh=fresh)
         assert result is not None and result.conversation is False
         assert result.result == value.result and result.completed_at == value.completed_at
+
+
+def test_scope_remap_preserves_typed_component_children_and_runtime_policy() -> None:
+    from copy import deepcopy
+    from linktools.ai.persistence._archive import archive_content_scope
+    from linktools.ai.persistence._archive_closure import iter_archive_content_refs, rekey_archive_roots
+    from linktools.ai.persistence.codec import _encode_persisted_domain
+
+    scope = archive_content_scope("policy-remap", "tenant")
+
+    def reference(index: int) -> dict[str, str]:
+        return {"$execution_payload": "execution-payload:" + f"{index:064x}",
+                "archive_scope": "source", "content_scope": scope}
+
+    def payload(index: int) -> dict[str, object]:
+        return {"$dataclass": "stored_payload", "schema": 1, "fields": {"content": reference(index)}}
+
+    original = _encode_persisted_domain(_record(ExecutionStatus.STARTED, 0))
+    original["fields"]["runtime_policy"] = {"$runtime_policy": "runtime-policy:" + "f" * 64,
+        "archive_scope": "source", "content_scope": scope}
+    original["fields"]["result"] = {"$dataclass": "result_record", "schema": 1,
+        "fields": {"content": reference(1), "output": payload(2)}}
+    original["fields"]["recovery"] = {"$dataclass": "execution_recovery_detail", "schema": 1, "fields": {
+        "pending_tools": {"$dataclass": "pending_tool_continuation", "schema": 1,
+            "fields": {"content": reference(3), "arguments": {"0": payload(4), "1": payload(5)}}},
+        "terminal_handoff": {"$dataclass": "recovery_terminal_handoff", "schema": 1,
+            "fields": {"content": reference(6), "output": payload(7), "terminal_details": payload(8)}},
+    }}
+    before = deepcopy(original)
+    remapped = rekey_archive_roots(original, {"source": "target"})
+    assert original == before
+    assert remapped["fields"]["runtime_policy"]["archive_scope"] == "target"
+    result = remapped["fields"]["result"]["fields"]
+    pending = remapped["fields"]["recovery"]["fields"]["pending_tools"]["fields"]
+    handoff = remapped["fields"]["recovery"]["fields"]["terminal_handoff"]["fields"]
+    assert set(result) == {"content", "output"}
+    assert set(pending) == {"content", "arguments"} and set(pending["arguments"]) == {"0", "1"}
+    assert set(handoff) == {"content", "output", "terminal_details"}
+    refs = tuple(iter_archive_content_refs(remapped))
+    assert len(refs) == 9 and {item[0] for item in refs} == {"target"}
+    assert {item[2] for item in refs} == {"runtime-policy:" + "f" * 64,
+                                       *("execution-payload:" + f"{index:064x}" for index in range(1, 9))}
