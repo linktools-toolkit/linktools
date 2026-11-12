@@ -105,3 +105,88 @@ async def test_history_preserves_pending_checks(tmp_path: Path, pending: bool) -
             pending_execution=service_pending)
         assert (await service.history("execution", principal=Principal("principal", "tenant"))).items == ()
         assert calls == ["service", "service", "reader"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ("custom_reader", "different_repository"))
+@pytest.mark.parametrize("deleted", (False, True))
+async def test_history_keeps_custom_and_different_repository_header_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, deleted: bool,
+) -> None:
+    async with Persistence.open("history", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "owner.db")) as state:
+        async with Persistence.open("history", tenant_id="tenant", storage=PersistenceStorage.in_memory()) as other:
+            repository = state.execution.executions
+            await repository.create_execution(_record(ExecutionStatus.STARTED, 0))
+            await other.execution.executions.create_execution(_record(ExecutionStatus.STARTED, 0))
+            headers = 0
+            original = repository.get_header
+
+            async def header(identity: str, *, tenant_id: str) -> object:
+                nonlocal headers
+                headers += 1
+                return await original(identity, tenant_id=tenant_id)
+
+            monkeypatch.setattr(repository, "get_header", header)
+
+            class CustomReader(StepExecutionHistoryReader):
+                pass
+
+            reader_state = other if mode == "different_repository" else state
+            reader = (CustomReader if mode == "custom_reader" else StepExecutionHistoryReader)(
+                namespace="history", executions=reader_state.execution.executions,
+                store=reader_state.run_store.read_store(PersistenceDomain.TRACE),
+                cursor_signer=HmacCursorSigner("history", b"history-key"))
+
+            class Authorization(TenantAuthorizationPolicy):
+                async def authorize(self, principal: object, action: object, resource: object) -> None:
+                    await super().authorize(principal, action, resource)
+                    if deleted:
+                        await repository.state_store.mutate(lambda tx: tx.delete_record(
+                            repository.execution_record_key("execution")))
+
+            service = DefaultExecutionHistoryService(repository, Authorization(), reader)
+            if deleted:
+                with pytest.raises(AIError) as caught:
+                    await service.history("execution", principal=Principal("principal", "tenant"))
+                assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
+            else:
+                assert (await service.history("execution", principal=Principal("principal", "tenant"))).items == ()
+            assert headers == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_owner", (False, True))
+async def test_late_pending_history_does_not_consume_durable_body(
+    tmp_path: Path, delete_owner: bool,
+) -> None:
+    async with Persistence.open("history", tenant_id="tenant", storage=PersistenceStorage.sqlite(tmp_path / "late.db")) as state:
+        repository = state.execution.executions
+        record = _record(ExecutionStatus.STARTED, 0)
+        await repository.create_execution(record)
+        async with repository.state_store.storage_group.context.engine.begin() as connection:
+            await connection.execute(text("DELETE FROM ai_step_messages"))
+        calls = 0
+
+        async def pending(execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return None
+            if delete_owner:
+                await repository.state_store.mutate(lambda tx: tx.delete_record(
+                    repository.execution_record_key("execution")))
+            return record
+
+        reader = StepExecutionHistoryReader(namespace="history", executions=repository,
+            store=state.run_store.read_store(PersistenceDomain.TRACE),
+            cursor_signer=HmacCursorSigner("history", b"history-key"))
+        reader.bind_pending_execution_reader(pending)
+        service = DefaultExecutionHistoryService(repository, TenantAuthorizationPolicy(), reader,
+            pending_execution=pending)
+        if delete_owner:
+            with pytest.raises(AIError) as caught:
+                await service.history("execution", principal=Principal("principal", "tenant"))
+            assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
+        else:
+            assert (await service.history("execution", principal=Principal("principal", "tenant"))).items == ()
+        assert calls == 3
