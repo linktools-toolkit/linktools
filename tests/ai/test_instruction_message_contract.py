@@ -164,12 +164,32 @@ def _is_deferred_instruction_return(part: ToolReturnPart, messages: list[object]
     ):
         return False
     assert "instructions" not in part.content
+    contexts = {
+        f'<system><{tag} id="capability:deferred">\nActivated instruction.\n</{tag}></system>'
+        for tag in ("context", "pyai:context")
+    }
     return any(
-        isinstance(item, UserPromptPart) and item.content == (
-            '<system><context id="capability:deferred">\nActivated instruction.\n</context></system>'
-        )
+        isinstance(item, UserPromptPart) and isinstance(item.content, str) and item.content in contexts
         for message in messages for item in message.parts
     )
+
+
+@pytest.mark.parametrize("tag", ("context", "pyai:context"))
+@pytest.mark.parametrize("identity,content,expected", (
+    ("capability:deferred", "Activated instruction.", True),
+    ("capability:other", "Activated instruction.", False),
+    ("capability:deferred", "Different instruction.", False),
+))
+def test_deferred_instruction_return_requires_exact_source_and_content(
+    tag: str, identity: str, content: str, expected: bool,
+) -> None:
+    returned = ToolReturnPart("load_capability", {
+        "message": "Capability 'deferred' loaded. Its instructions, if any, follow.",
+    }, tool_call_id="load-deferred")
+    messages = [ModelRequest(parts=[returned, UserPromptPart(
+        f'<system><{tag} id="{identity}">\n{content}\n</{tag}></system>',
+    )])]
+    assert _is_deferred_instruction_return(returned, messages) is expected
 
 
 class _DeferredInstructions(AbstractCapability):
