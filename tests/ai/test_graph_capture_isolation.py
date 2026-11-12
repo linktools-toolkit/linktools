@@ -123,7 +123,7 @@ async def test_graph_capture_applies_context_policy_to_all_agent_input_forms(
     pytest.param("reproject_input", "captured", "graph", marks=pytest.mark.merge),
 ))
 async def test_capture_context_policy_remains_authoritative_when_reprojecting(
-    tmp_path: Path, source_kind: str, context_policy: str, input_mode: str,
+    source_kind: str, context_policy: str, input_mode: str,
 ) -> None:
     from linktools.ai.evaluation import (
         CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
@@ -136,7 +136,7 @@ async def test_capture_context_policy_remains_authoritative_when_reprojecting(
         ModelRequest(parts=[SystemPromptPart("PRIOR INSTRUCTIONS"), UserPromptPart("HISTORICAL INPUT TO REMOVE")]),
         ModelResponse(parts=[TextPart("prior answer")]),
     ), session_metadata={"secret": "prior metadata"})
-    async with Persistence.open('capture-reproject', storage=PersistenceStorage.from_root(tmp_path, exclusive_writer=True), tenant_id='evaluation-consumers') as persistence_139, Runtime.attach(persistence=persistence_139, context=CONTEXT, features=model_features(FixtureModels(), _agents())) as runtime, TaskEngine.open(persistence=persistence_139, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
+    async with Persistence.open('capture-reproject', storage=PersistenceStorage.in_memory(), tenant_id='evaluation-consumers') as persistence_139, Runtime.attach(persistence=persistence_139, context=CONTEXT, features=model_features(FixtureModels(), _agents())) as runtime, TaskEngine.open(persistence=persistence_139, context=runtime.context, authorization=runtime._execution_service._authorization) as runtime_engine:
         task = Task.from_agent("capture.agent", runtime.agents.get())
         scorer = Task("capture.scorer", exact, effect_policy="none")
         engine = runtime_engine.with_definitions(task, scorer)
@@ -160,7 +160,7 @@ async def test_capture_context_policy_remains_authoritative_when_reprojecting(
             )), principal=PRINCIPAL, idempotency_key="publish")
             run = await evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("agent", task=task.ref),), (rule_scorer(scorer),), input_mode=input_mode,
-                policy=EvaluationPolicy(model_fixtures=(FixtureModels.contract,))), PRINCIPAL, "evaluate"))
+                policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(FixtureModels.contract,))), PRINCIPAL, "evaluate"))
             assert ((await run.wait(timeout_seconds=20)).result).completion == "complete"
             trial = (await run.trials()).items[0]
             interactions = await runtime.executions.model_interactions(trial.subject.execution_id,
