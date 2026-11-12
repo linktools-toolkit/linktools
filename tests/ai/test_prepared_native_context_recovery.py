@@ -5,6 +5,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import fields
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from linktools.ai.execution import ExecutionInputContext
 from linktools.ai.inputs import AgentTaskInput, AgentTaskInputContext
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.runtime import Runtime, RuntimeFeatures
+from linktools.ai.storage._dialects import SQLiteDialect
 from linktools.ai.task import Task, TaskGraph, TaskNode
 from linktools.ai.task import _local as task_local
 
@@ -37,8 +39,6 @@ _RESPONSE_FIELDS = frozenset(field.name for field in fields(ModelResponse))
 async def test_prepared_native_context_reopens_without_rebuilding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direct: bool,
 ) -> None:
-    monkeypatch.setattr(task_local, "_LEASE_SECONDS", 1)
-    monkeypatch.setattr(task_local, "_HEARTBEAT_SECONDS", 0.1)
     prior = ModelResponse(
         [TextPart("previous answer")], model_name="previous-model",
         provider_name="openai", provider_response_id="previous-response",
@@ -135,10 +135,29 @@ async def test_prepared_native_context_reopens_without_rebuilding(
             assert builds == ["worker"] and requests == [] and observations == []
             await runtime.close()
 
-    await asyncio.sleep(1.1)
     async with Persistence.open("prepared-native", storage=storage) as persistence, Runtime.attach(
         persistence=persistence, features=features(),
     ) as runtime, task_engine_scope(runtime, persistence) as engine:
+        snapshot = await persistence.task.tasks.graph_state(graph_id, tenant_id=runtime.tenant_id)
+        assert snapshot is not None
+        abandoned = next(node for node in snapshot.node_states if node.node_id == "worker")
+        assert abandoned.status is TaskStatus.RUNNING
+        assert abandoned.owner is not None and abandoned.fence > 0
+        assert abandoned.lease_expires_at is not None
+        expired_at = max(abandoned.lease_expires_at, datetime.now(timezone.utc)) + timedelta(seconds=1)
+
+        class AfterLeaseExpiry:
+            @classmethod
+            def now(cls, tz: timezone | None = None) -> datetime:
+                return expired_at.astimezone(tz)
+
+        async def database_after_expiry(self: SQLiteDialect, session: object) -> datetime:
+            return expired_at
+
+        # The original TaskEngine has stopped; expire its abandoned lease without shortening live leases.
+        monkeypatch.setattr(task_local, "datetime", AfterLeaseExpiry)
+        monkeypatch.setattr(SQLiteDialect, "database_now", database_after_expiry)
+        monkeypatch.setattr(SQLiteDialect, "database_current_time", database_after_expiry)
         worker = Task.from_agent("prepared-native-worker", runtime.agents.get(), build_input=build_input)
         recovered_engine = engine.with_definitions(worker)
         await recovered_engine.recover_pending()
@@ -149,6 +168,7 @@ async def test_prepared_native_context_reopens_without_rebuilding(
         assert requests == ([] if direct else ["provider"])
         assert observations == ["restored native context"]
         state, = result.node_states
+        assert state.fence > abandoned.fence
         assert state.execution_id is not None
         stored_prepared = await persistence.task.tasks.get_prepared_input(
             graph_id, "worker", tenant_id=runtime.tenant_id,
