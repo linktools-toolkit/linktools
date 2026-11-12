@@ -43,7 +43,6 @@ from .state import (
     StateStore,
     StateTransaction,
     StateTransactionNestingError,
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
@@ -58,7 +57,6 @@ from .state import (
     standalone_store_key,
     STATE_GROUP_METADATA_KEY,
     STATE_GROUP_ARCHIVE_KEY,
-    validate_alias_key,
     validate_relation_key,
     validate_record_key,
     record_key,
@@ -260,7 +258,7 @@ class SqlStateStorageGroup:
                 select(self._metadata.tables[name].c.store_key).where(
                     self._metadata.tables[name].c.store_key == key,
                 )
-                for name in (*RECORD_OWNER_TABLES, "ai_tool_operation_aliases", "ai_state_facts",
+                for name in (*RECORD_OWNER_TABLES, "ai_state_facts",
                              "ai_state_counters", "ai_state_operations")
             ]
             if key == STATE_GROUP_ARCHIVE_KEY:
@@ -399,7 +397,7 @@ class SqlStateStorageGroup:
         await self.initialize()
         statements = [
             select(self._metadata.tables[name].c.store_key)
-            for name in (*RECORD_OWNER_TABLES, "ai_tool_operation_aliases", "ai_state_facts",
+            for name in (*RECORD_OWNER_TABLES, "ai_state_facts",
                          "ai_state_counters", "ai_state_operations")
         ]
         messages = self._metadata.tables["ai_step_messages"]
@@ -819,7 +817,6 @@ class SqlStateStore:
             from sqlalchemy import and_, select
 
             records = record_owner_rows(self._metadata)
-            aliases = transaction._table("ai_tool_operation_aliases")
             facts = transaction._table("ai_state_facts")
             sequences = transaction._table("ai_state_counters")
             sequence_rows = (
@@ -837,40 +834,6 @@ class SqlStateStore:
                 _validate_locators(row, "stream_key")
                 _row_stream_key(row["stream_key"])
                 _row_nonnegative_int(row["value"])
-            alias_rows = (
-                (
-                    await transaction._execute(
-                        select(aliases.c.alias_key, aliases.c.alias_locator, aliases.c.record_key, aliases.c.record_locator).where(
-                            aliases.c.store_key == transaction._store_key
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            for row in alias_rows:
-                _validate_locators(row, "alias_key", "record_key")
-                _row_alias_key(row["alias_key"])
-                _row_record_key(row["record_key"])
-            possible_alias_keys = (await transaction._execute(
-                select(aliases.c.record_key).distinct()
-                .select_from(
-                    aliases.outerjoin(
-                        records,
-                        and_(
-                            aliases.c.record_locator == records.c.key_locator,
-                            aliases.c.record_key == records.c.key,
-                            records.c.store_key == transaction._store_key,
-                        ),
-                    )
-                )
-                .where(
-                    aliases.c.store_key == transaction._store_key,
-                    records.c.id.is_(None),
-                )
-            )).scalars().all()
-            alias_owners = await transaction.get_records(tuple(possible_alias_keys))
-            orphan_alias = next((key for key in possible_alias_keys if key not in alias_owners), None)
             possible_orphan_keys = (await transaction._execute(
                 select(facts.c.owner_key).distinct()
                 .select_from(
@@ -890,7 +853,7 @@ class SqlStateStore:
             )).scalars().all()
             missing_owners = await transaction.get_records(tuple(possible_orphan_keys))
             orphan_fact = next((key for key in possible_orphan_keys if key not in missing_owners), None)
-            if orphan_alias is not None or orphan_fact is not None:
+            if orphan_fact is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         fact_cursor: FactScanCursor | None = None
@@ -976,7 +939,6 @@ class _SqlTransaction:
         self._guarded_record_revisions: dict[bytes, int] = {}
         self._deleted_records = False
         self._record_cache: dict[bytes, StoredRecord | None] = {}
-        self._alias_cache: dict[bytes, bytes | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
         self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
@@ -1835,7 +1797,6 @@ class _SqlTransaction:
         from sqlalchemy import delete, tuple_, update
 
         table = self._table(owners[0])
-        aliases = self._table("ai_tool_operation_aliases")
         facts = self._table("ai_state_facts")
         deleted_keys: set[bytes] = set()
         statement_count = 0
@@ -1864,7 +1825,7 @@ class _SqlTransaction:
                 await self._retire_native_facts(record_keys)
                 await self._retire_native_rows(record_owner_edge(record_keys[0]), table,
                     table.c.store_key == self._store_key, _keys_match(table.c.key, record_keys))
-                # Deleting the CAS-matched owners fences concurrent alias/fact writers.
+                # Deleting the CAS-matched owners fences concurrent fact writers.
                 result = await self._execute(
                     delete(table).where(
                         table.c.store_key == self._store_key,
@@ -1875,12 +1836,6 @@ class _SqlTransaction:
                 if result.rowcount != len(current):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await self._execute(
-                    delete(aliases).where(
-                        aliases.c.store_key == self._store_key,
-                        _keys_match(aliases.c.record_key, record_keys),
-                    )
-                )
-                await self._execute(
                     delete(facts).where(
                         facts.c.store_key == self._store_key,
                         _keys_match(facts.c.owner_key, record_keys),
@@ -1889,7 +1844,7 @@ class _SqlTransaction:
                 for key in current:
                     self._stage_native_owner(record_owner_edge(key), (validate_record_key(key),), None)
                 deleted_keys.update(current)
-                statement_count += 3
+                statement_count += 2
         except BaseException as error:
             # A caught partial deletion must still abort the owning transaction.
             self._abort_mutation(error)
@@ -1898,9 +1853,6 @@ class _SqlTransaction:
         for key in deleted_keys:
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
-        for alias, record_key in tuple(self._alias_cache.items()):
-            if record_key in deleted_keys:
-                self._alias_cache[alias] = None
         self._log_batch("delete_records", len(deleted_keys), statement_count)
 
     async def delete_record(
@@ -1930,10 +1882,9 @@ class _SqlTransaction:
         if self._is_payload_key(key):
             try:
                 await self._retire_native_facts((key,))
-                for name, column in (("ai_tool_operation_aliases", "record_key"), ("ai_state_facts", "owner_key")):
-                    child = self._table(name)
-                    await self._execute(delete(child).where(child.c.store_key == self._store_key,
-                                                           _key_matches(child.c[column], key)))
+                facts = self._table("ai_state_facts")
+                await self._execute(delete(facts).where(facts.c.store_key == self._store_key,
+                                                       _key_matches(facts.c.owner_key, key)))
                 if not await self._payload_owner().delete(key, guarded.storage_revision):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
             except BaseException as error:
@@ -1942,9 +1893,6 @@ class _SqlTransaction:
             self._deleted_records = True
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
-            for alias, target in tuple(self._alias_cache.items()):
-                if target == key:
-                    self._alias_cache[alias] = None
             return True
         table = self._table(record_owner_table(key, store_key=self._store_key))
         statement = delete(table).where(
@@ -1957,12 +1905,6 @@ class _SqlTransaction:
             await self._retire_native_facts((validate_record_key(key),))
             await self._retire_native_rows(record_owner_edge(key), table,
                 table.c.store_key == self._store_key, _key_matches(table.c.key, validate_record_key(key)))
-            await self._execute(
-                delete(self._table("ai_tool_operation_aliases")).where(
-                    self._table("ai_tool_operation_aliases").c.store_key == self._store_key,
-                    _key_matches(self._table("ai_tool_operation_aliases").c.record_key, validate_record_key(key)),
-                )
-            )
             children_changed = True
             await self._execute(
                 delete(self._table("ai_state_facts")).where(
@@ -1982,9 +1924,6 @@ class _SqlTransaction:
             self._deleted_records = True
             self._guarded_record_revisions.pop(key, None)
             self._record_cache[key] = None
-            for alias, record_key in tuple(self._alias_cache.items()):
-                if record_key == key:
-                    self._alias_cache[alias] = None
         return result.rowcount == 1
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
@@ -2080,169 +2019,6 @@ class _SqlTransaction:
         self._record_cache.update({value.key: value for value in values})
         return values
 
-    async def resolve_alias(self, alias: bytes) -> bytes | None:
-        return (await self.resolve_aliases((alias,))).get(alias)
-
-    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        unique_aliases = tuple(dict.fromkeys(validate_alias_key(alias) for alias in aliases))
-        missing = tuple(
-            alias for alias in unique_aliases if alias not in self._alias_cache
-        )
-        if missing:
-            from sqlalchemy import and_, select
-
-            table = self._table("ai_tool_operation_aliases")
-            records = record_owner_rows(self._metadata)
-            rows = (
-                (
-                    await self._execute(
-                        select(
-                            table.c.alias_key,
-                            table.c.alias_locator,
-                            table.c.record_key,
-                            table.c.record_locator,
-                            records.c.id,
-                        )
-                        .select_from(
-                            table.outerjoin(
-                                records,
-                                and_(
-                                    table.c.record_locator == records.c.key_locator,
-                                    table.c.record_key == records.c.key,
-                                    records.c.store_key == self._store_key,
-                                ),
-                            )
-                        )
-                        .where(
-                            table.c.store_key == self._store_key,
-                            _locator_column(table.c.alias_key).in_(tuple(_key_locator(key) for key in missing)),
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            if any(row["alias_key"] not in missing for row in rows):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for row in rows:
-                _validate_locators(row, "alias_key", "record_key")
-            unresolved = tuple(row["record_key"] for row in rows if row["id"] is None)
-            resolved = await self.get_records(unresolved) if unresolved else {}
-            if any(key not in resolved for key in unresolved):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values = {
-                _row_alias_key(row["alias_key"]): _row_record_key(row["record_key"])
-                for row in rows
-            }
-            self._alias_cache.update(values)
-            for alias in missing:
-                self._alias_cache.setdefault(alias, None)
-        values = {
-            alias: value
-            for alias in unique_aliases
-            if (value := self._alias_cache[alias]) is not None
-        }
-        return values
-
-    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
-        from sqlalchemy import select
-
-        table = self._table("ai_tool_operation_aliases")
-        rows = (
-            await self._execute(
-                select(table)
-                .where(table.c.store_key == self._store_key)
-                .order_by(table.c.alias_key)
-            )
-        ).mappings().all()
-        for row in rows:
-            _row_store_key(row["store_key"])
-            _validate_locators(row, "alias_key", "record_key")
-        return tuple(
-            StoredAlias(
-                _row_alias_key(row["alias_key"]),
-                _row_record_key(row["record_key"]),
-            )
-            for row in rows
-        )
-
-    async def scan_aliases_page(
-        self,
-        *,
-        after: bytes | None,
-        limit: int,
-    ) -> tuple[StoredAlias, ...]:
-        _require_scan_limit(limit)
-        from sqlalchemy import select
-
-        table = self._table("ai_tool_operation_aliases")
-        statement = select(table).where(table.c.store_key == self._store_key)
-        if after is not None:
-            statement = statement.where(table.c.alias_key > validate_alias_key(after))
-        rows = (
-            await self._execute(
-                statement.order_by(table.c.alias_key).limit(limit)
-            )
-        ).mappings().all()
-        for row in rows:
-            _row_store_key(row["store_key"])
-            _validate_locators(row, "alias_key", "record_key")
-        return tuple(
-            StoredAlias(
-                _row_alias_key(row["alias_key"]),
-                _row_record_key(row["record_key"]),
-            )
-            for row in rows
-        )
-
-    async def insert_alias(self, alias: StoredAlias) -> None:
-        await self.insert_aliases((alias,))
-
-    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
-        if not aliases:
-            return
-        by_alias: dict[bytes, StoredAlias] = {}
-        for alias in aliases:
-            current = by_alias.get(alias.alias_key)
-            if (
-                current is not None
-                and current.record_key != alias.record_key
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            by_alias[alias.alias_key] = alias
-        values = tuple(sorted(by_alias.values(), key=lambda value: value.alias_key))
-        if any(
-            alias.record_key not in self._guarded_record_revisions for alias in values
-        ):
-            raise RuntimeError("alias owner must be guarded in the current transaction")
-        existing = await self.resolve_aliases(
-            tuple(alias.alias_key for alias in values)
-        )
-        rows: list[dict[str, object]] = []
-        for alias in values:
-            current = existing.get(alias.alias_key)
-            if current is not None:
-                if current != alias.record_key:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                continue
-            rows.append(
-                {
-                    "store_key": self._store_key,
-                    "alias_key": alias.alias_key,
-                    "alias_locator": _key_locator(alias.alias_key),
-                    "record_locator": _key_locator(alias.record_key),
-                    "record_key": validate_record_key(alias.record_key),
-                }
-            )
-        if rows:
-            from sqlalchemy import insert
-
-            await self._execute(
-                insert(self._table("ai_tool_operation_aliases")).values(rows)
-            )
-        self._log_batch("insert_aliases", len(values), 1 if rows else 0)
-        for alias in values:
-            self._alias_cache[alias.alias_key] = alias.record_key
 
     async def get_sequence(self, key: bytes) -> int:
         validate_stream_key(key)
@@ -2943,15 +2719,6 @@ def _row_stream_key(value: object) -> bytes:
 def _row_record_key(value: object) -> bytes:
     try:
         return validate_record_key(value)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _row_alias_key(value: object) -> bytes:
-    if not isinstance(value, bytes):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        return validate_alias_key(value)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 

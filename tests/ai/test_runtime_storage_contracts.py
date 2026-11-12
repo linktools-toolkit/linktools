@@ -424,9 +424,8 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
         ]
 
         for call_id in call_ids:
-            operation = await state.checkpoint.tools.get_by_call(
-                agent_run_id,
-                call_id,
+            operation = await state.checkpoint.tools.get_operation(
+                bridge._operation_id(agent_run_id, call_id),
                 tenant_id="tenant",
             )
             assert operation is not None

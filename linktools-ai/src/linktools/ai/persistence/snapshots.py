@@ -69,7 +69,6 @@ from .state import (
     StateTransaction,
     SqlStateRowReader,
     SqlStateTransaction,
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
@@ -93,7 +92,6 @@ from ._snapshot_validation import (
     validate_snapshot_references,
 )
 from .codec import (
-    decode_alias,
     _decode_enveloped_domain,
     iter_runtime_object_dependencies,
     decode_fact,
@@ -780,7 +778,6 @@ async def _export_snapshot(
         store = source.readers[domain]
         raw_domain: dict[str, list[object]] = {
             "records": [],
-            "aliases": [],
             "facts": [],
             "operations": [],
             "sequences": [],
@@ -869,7 +866,7 @@ async def _export_snapshot(
             if len(page) < 128:
                 break
 
-        aliases, sequences = canonical_snapshot_indexes(
+        sequences = canonical_snapshot_indexes(
             namespace=source.namespace,
             tenant_id=source.tenant_id,
             domain=domain,
@@ -877,15 +874,6 @@ async def _export_snapshot(
             facts=tuple(domain_facts),
             operations=tuple(domain_operations),
         )
-        for value in aliases:
-            raw_domain["aliases"].append(
-                accept(
-                    {
-                        "alias_key": value.alias_key.hex(),
-                        "record_key": value.record_key.hex(),
-                    }
-                )
-            )
         for key in sorted(sequences):
             raw_domain["sequences"].append(
                 accept({"stream_key": key.hex(), "value": sequences[key]})
@@ -1109,7 +1097,6 @@ async def restore_snapshot(
         PersistenceDomain,
         tuple[
             tuple[StoredRecord, ...],
-            tuple[StoredAlias, ...],
             tuple[StoredFact, ...],
             tuple[StoredOperation, ...],
             Mapping[bytes, int],
@@ -1182,7 +1169,6 @@ async def restore_snapshot(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         expected_domain_fields = {
             "records",
-            "aliases",
             "facts",
             "operations",
             "sequences",
@@ -1193,7 +1179,6 @@ async def restore_snapshot(
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         raw_records = raw_domain["records"]
-        raw_aliases = raw_domain["aliases"]
         raw_facts = raw_domain["facts"]
         raw_operations = raw_domain["operations"]
         raw_sequences = raw_domain["sequences"]
@@ -1201,7 +1186,6 @@ async def restore_snapshot(
             isinstance(value, list)
             for value in (
                 raw_records,
-                raw_aliases,
                 raw_facts,
                 raw_operations,
                 raw_sequences,
@@ -1212,7 +1196,6 @@ async def restore_snapshot(
             len(value)
             for value in (
                 raw_records,
-                raw_aliases,
                 raw_facts,
                 raw_operations,
                 raw_sequences,
@@ -1231,7 +1214,6 @@ async def restore_snapshot(
         semantic_records = tuple(expand_tool_content(record, binding_contents,
             content_scope=archive_content_scope(namespace, tenant_id)) for record in semantic_records)
         semantic_domains[domain] = semantic_records
-        aliases = _decode_snapshot_aliases(raw_aliases)
         facts = tuple(decode_fact(value) for value in raw_facts)
         operations = tuple(decode_operation(value) for value in raw_operations)
         sequences = _decode_snapshot_sequences(raw_sequences)
@@ -1240,7 +1222,6 @@ async def restore_snapshot(
             tenant_id=tenant_id,
             domain=domain,
             records=semantic_records,
-            aliases=aliases,
             facts=facts,
             operations=operations,
             sequences=sequences,
@@ -1257,7 +1238,6 @@ async def restore_snapshot(
                 closure.mark(native_root.store_key, native_root.slices)
         decoded_domains[domain] = (
             records,
-            aliases,
             facts,
             operations,
             sequences,
@@ -1433,7 +1413,7 @@ async def restore_snapshot(
                 )
 
         for domain, values in decoded_domains.items():
-            records, aliases, facts, operations, sequences = values
+            records, facts, operations, sequences = values
             referenced_scopes = set()
             reference_values = tuple(capture_retention_value(value) if value.kind in CAPTURE_RECORD_KINDS else value.data
                                      for value in records) + tuple(value.data for value in (*facts, *operations))
@@ -1571,7 +1551,7 @@ async def restore_snapshot(
                         for value in facts if value.kind == "step_event")
                     await trace_events.restore(transaction, rows)
                     state_facts = tuple(value for value in facts if value.kind != "step_event")
-                await _insert_snapshot_values(transaction, records, aliases, state_facts, operations, sequences)
+                await _insert_snapshot_values(transaction, records, state_facts, operations, sequences)
                 if domain is PersistenceDomain.TRACE and not isinstance(store, SqlStateStore):
                     from ._model_interaction_store import ModelInteractionStateStepArchive
                     from ._step_contracts import AgentRunRecord, StepEvent
@@ -1614,7 +1594,7 @@ def snapshot_manifest_usage(
     for raw_domain in domains.values():
         if not isinstance(raw_domain, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for name in ("records", "aliases", "facts", "operations", "sequences"):
+        for name in ("records", "facts", "operations", "sequences"):
             values = raw_domain.get(name)
             if not isinstance(values, list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1794,7 +1774,6 @@ def snapshot_manifest_identity(manifest: Mapping[str, object]) -> str:
         "native_messages": ordered_unique(list(native_messages.values())),
         "objects": ordered_unique(normalized_objects),
     })
-
 
 
 _RUN_REGISTRATION_ADAPTER = TypeAdapter(RunRecord)
@@ -2112,28 +2091,6 @@ def _decode_snapshot_stream_key(value: object) -> bytes:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _decode_snapshot_aliases(value: object) -> tuple[StoredAlias, ...]:
-    if not isinstance(value, list):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    aliases: list[StoredAlias] = []
-    seen: set[bytes] = set()
-    for raw in value:
-        if not isinstance(raw, Mapping) or set(raw) != {
-            "alias_key",
-            "record_key",
-        }:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        alias = decode_alias({
-            "alias": raw["alias_key"],
-            "record": raw["record_key"],
-        })
-        if alias.alias_key in seen:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        seen.add(alias.alias_key)
-        aliases.append(alias)
-    return tuple(sorted(aliases, key=lambda item: item.alias_key))
-
-
 def _decode_snapshot_sequences(value: object) -> Mapping[bytes, int]:
     if not isinstance(value, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2157,13 +2114,11 @@ def _decode_snapshot_sequences(value: object) -> Mapping[bytes, int]:
 async def _insert_snapshot_values(
     transaction: StateTransaction,
     records: tuple[StoredRecord, ...],
-    aliases: tuple[StoredAlias, ...],
     facts: tuple[StoredFact, ...],
     operations: tuple[StoredOperation, ...],
     sequences: Mapping[bytes, int],
 ) -> None:
     await transaction.insert_records(records)
-    await transaction.insert_aliases(aliases)
     await transaction.insert_facts(facts)
     for operation in operations:
         await transaction.insert_operation(operation)

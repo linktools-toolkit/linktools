@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 ValueT = TypeVar("ValueT")
 
-ALIAS_KEY_MAX_BYTES = 768
 OPERATION_KEY_MAX_BYTES = 768
 STREAM_KEY_MAX_BYTES = 768
 STORE_KEY_MAX_BYTES = 128
@@ -371,16 +370,6 @@ class StoredRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class StoredAlias:
-    alias_key: bytes = field(repr=False)
-    record_key: bytes = field(repr=False)
-
-    def __post_init__(self) -> None:
-        validate_alias_key(self.alias_key)
-        validate_record_key(self.record_key)
-
-
-@dataclass(frozen=True, slots=True)
 class StoredFact:
     stream_key: bytes = field(repr=False)
     sequence: int
@@ -705,17 +694,6 @@ class StateTransaction(Protocol):
         after: RecordScanCursor | None,
         limit: int,
     ) -> tuple[StoredRecord, ...]: ...
-    async def resolve_alias(self, alias: bytes) -> bytes | None: ...
-    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
-    async def scan_aliases(self) -> tuple[StoredAlias, ...]: ...
-    async def scan_aliases_page(
-        self,
-        *,
-        after: bytes | None,
-        limit: int,
-    ) -> tuple[StoredAlias, ...]: ...
-    async def insert_alias(self, alias: StoredAlias) -> None: ...
-    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None: ...
     async def get_sequence(self, key: bytes) -> int: ...
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
     async def scan_sequences(self) -> Mapping[bytes, int]: ...
@@ -939,22 +917,6 @@ class _ReadOnlyStateTransaction(StateTransaction):
     ) -> tuple[StoredRecord, ...]:
         return await self._transaction.scan_records_page(after=after, limit=limit)
 
-    async def resolve_alias(self, alias: bytes) -> bytes | None:
-        return await self._transaction.resolve_alias(alias)
-
-    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        return await self._transaction.resolve_aliases(aliases)
-
-    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
-        return await self._transaction.scan_aliases()
-
-    async def scan_aliases_page(
-        self,
-        *,
-        after: bytes | None,
-        limit: int,
-    ) -> tuple[StoredAlias, ...]:
-        return await self._transaction.scan_aliases_page(after=after, limit=limit)
 
     async def get_sequence(self, key: bytes) -> int:
         return await self._transaction.get_sequence(key)
@@ -1066,13 +1028,6 @@ class _ReadOnlyStateTransaction(StateTransaction):
         del keys
         self._reject("delete_records")
 
-    async def insert_alias(self, alias: StoredAlias) -> None:
-        del alias
-        self._reject("insert_alias")
-
-    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
-        del aliases
-        self._reject("insert_aliases")
 
     async def next_sequence(self, key: bytes) -> int:
         del key
@@ -1362,32 +1317,6 @@ def validate_relation_key(value: bytes) -> bytes:
     return value
 
 
-def alias_key(
-    namespace: str,
-    tenant_id: str,
-    runtime_domain: str,
-    relation: str,
-    identity: Sequence[str],
-) -> bytes:
-    """Encode an exact scoped relation tuple, including for shared StateStores."""
-    if not isinstance(relation, str) or not relation:
-        raise ValueError("alias relation must be a non-empty string")
-    if not isinstance(identity, Sequence) or isinstance(identity, (str, bytes)):
-        raise TypeError("alias identity must be a sequence of strings")
-    return _encode_key_components(
-        (validate_persistence_namespace(namespace), validate_tenant_id(tenant_id),
-         runtime_domain, relation, *identity),
-        ALIAS_KEY_MAX_BYTES,
-    )
-
-
-def validate_alias_key(value: bytes) -> bytes:
-    """Validate the bounded physical alias address, including custom keys."""
-    if type(value) is not bytes or not 0 < len(value) <= ALIAS_KEY_MAX_BYTES:
-        raise ValueError(f"alias key must contain 1 to {ALIAS_KEY_MAX_BYTES} bytes")
-    return value
-
-
 def stream_key(
     namespace: str,
     tenant_id: str,
@@ -1515,4 +1444,4 @@ STATE_GROUP_METADATA_KEY = _encode_key_components(("state-group-metadata",), STO
 STATE_GROUP_ARCHIVE_KEY = _encode_key_components(("state-group-archive",), STORE_KEY_MAX_BYTES)
 
 
-__all__ = ['STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'ALIAS_KEY_MAX_BYTES', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredAlias', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'alias_key', 'validate_alias_key', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']
+__all__ = ['STORE_KEY_MAX_BYTES', 'validate_store_key', 'capability_store_key', 'standalone_store_key', 'STATE_GROUP_METADATA_KEY', 'STATE_GROUP_ARCHIVE_KEY', 'STREAM_KEY_MAX_BYTES', 'validate_stream_key', 'capability_receipt_key', 'RECORD_KEY_MAX_BYTES', 'PARENT_KEY_MAX_BYTES', 'validate_record_key', 'validate_parent_key', 'RELATION_KEY_MAX_BYTES', 'validate_relation_key', 'OPERATION_KEY_MAX_BYTES', 'SqlMutationObserver', 'SqlStateRowReader', 'RecordSubjectReader', 'FactReader', 'FactQuery', 'FactScanCursor', 'GroupRecordReader', 'Observed', 'OperationQuery', 'OperationScanCursor', 'RecordLeaseTransition', 'RecordQuery', 'RecordReplacement', 'RecordScanCursor', 'StateGroupTransaction', 'StateLockOrderError', 'StateStorageGroup', 'StateStore', 'StateTransaction', 'SqlStateTransaction', 'SqlStateRecordReader', 'SqlStateFactReader', 'StateTransactionNestingError', 'StoredFact', 'StoredOperation', 'StoredRecord', 'active_state_scope', 'is_active_state_transaction', 'validate_sort_key', 'enter_run_history_lock', 'exit_run_history_lock', 'operation_key', 'parent_key', 'record_key', 'require_no_run_history_lock', 'scope_key', 'sortable_timestamp', 'state_store_key', 'stream_key', 'validate_operation_replacement', 'validate_record_identity', 'validate_record_replacement']

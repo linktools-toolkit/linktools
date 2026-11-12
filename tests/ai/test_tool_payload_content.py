@@ -97,7 +97,7 @@ async def test_tool_content_cold_lookup_and_snapshot_preserve_exact_result(tmp_p
     objects = InMemoryObjectStore()
     limits = SnapshotLimits(max_entries=1000, max_bytes=10_000_000)
     async with Persistence.open("tool-content", tenant_id="tenant", storage=config, read_only=True) as state:
-        loaded = await state.checkpoint.tools.get_by_call_ids(operation.agent_run_id, (operation.tool_call_id,), tenant_id="tenant")
+        loaded = await state.checkpoint.tools.get_operations((operation.tool_operation_id,), tenant_id="tenant")
         assert loaded[0].result_payload == payload
         snapshot = await state.export_snapshot(object_store=objects, limits=limits)
     await Persistence.restore_snapshot(snapshot, object_store=objects, root=tmp_path / "restored", limits=limits)

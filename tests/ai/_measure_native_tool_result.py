@@ -62,7 +62,7 @@ async def main() -> None:
             assert loaded.result_payload == payload
             report["cold_tool_read"] = dict(counts)
             counts.clear()
-            values = await state.checkpoint.tools.get_by_call_ids("run", ("call",), tenant_id="tenant")
+            values = await state.checkpoint.tools.get_operations((operation.tool_operation_id,), tenant_id="tenant")
             assert values[0].result_payload == payload
             report["warm_tool_batch_read"] = dict(counts)
         finally:

@@ -33,22 +33,6 @@ CREATE TABLE ai_state_records (
 	UNIQUE KEY uk_store_key_key_locator (store_key, key_locator)
 )ENGINE=InnoDB COMMENT='Current durable state for runtime and step resources persisted as versioned records.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
 
-CREATE TABLE ai_tool_operation_aliases (
-	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
-	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',
-	alias_key VARBINARY(768) NOT NULL COMMENT 'Binary secondary lookup address with a maximum of 768 bytes.',
-	record_key VARBINARY(768) NOT NULL COMMENT 'Exact bounded binary identity of the runtime record resolved by this alias.',
-	alias_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete alias_key; raw identity must also match.',
-	record_locator CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Single SHA-256 lookup projection of the complete record_key; raw identity must also match.',
-	updated_at DATETIME NOT NULL COMMENT 'Update timestamp' DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	created_at DATETIME NOT NULL COMMENT 'Creation timestamp' DEFAULT CURRENT_TIMESTAMP,
-	PRIMARY KEY (id),
-	KEY ix_created_at (created_at),
-	KEY ix_store_key_record_locator (store_key, record_locator),
-	KEY ix_updated_at (updated_at),
-	UNIQUE KEY uk_store_key_alias_locator (store_key, alias_locator)
-)ENGINE=InnoDB COMMENT='Tool-call and recovery lookup identities that resolve to canonical tool operations.' CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC COLLATE utf8mb4_bin;
-
 CREATE TABLE ai_state_facts (
 	id BIGINT NOT NULL COMMENT 'Surrogate row identifier used only by the SQL backend.' AUTO_INCREMENT,
 	store_key VARBINARY(128) NOT NULL COMMENT 'Exact bounded binary identity of the physical State store partition.',

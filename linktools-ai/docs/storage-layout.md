@@ -37,7 +37,6 @@ production DBA approval or a deployed migration.
 | Table | Owner and retained representation |
 | --- | --- |
 | `ai_state_records` | Domain state, CAS/leases and query projections stay structured. Archive content alone can carry a binary body. |
-| `ai_tool_operation_aliases` | Checkpoint tool-call and recovery identities pointing to their tool operation; no duplicate result body. |
 | `ai_state_facts` | Ordered facts, native references and query projections stay JSON. Transcript bodies already have archive/native owners; no unused binary column is added. |
 | `ai_state_counters` | Monotonic counters shared by execution, task, conversation and trace domains; not message sequences. |
 | `ai_state_operations` | Replay/control ledger and references stay JSON. No separate compressed copy. |
@@ -83,7 +82,7 @@ less storage.
 
 ## State record addresses
 
-`StoredRecord.key`, alias `record_key`, and fact `owner_key` are exact binary
+`StoredRecord.key` and fact `owner_key` are exact binary
 addresses of 1..1152 bytes. Built-in addresses frame `record`, namespace,
 tenant, domain, kind and each explicit owner component with a two-byte
 big-endian UTF-8 byte length. Owners render their integer indices explicitly;
@@ -154,7 +153,7 @@ The record cache's string transport uses an injective hex rendering of the
 same raw address. Raw partition names are not included in mutation log context.
 
 Store plus record or operation consumes at most 1920 index field bytes; store
-plus alias 1792; store plus stream and sequence 2056. These bounded identity
+plus stream and sequence 2056. These bounded identity
 budgets fit MySQL's 3072-byte limit and ordinary PostgreSQL approximately
 2704-byte B-tree tuples with overhead, not every PostgreSQL page configuration.
 The MySQL store/kind/sort index declares 768 + 128 + 128 = 1024 field bytes
@@ -193,13 +192,12 @@ Capability receipts retain all original identity components under their owning
 bounds, as detailed below. All streams remain globally scoped, and repository
 reads verify the key, stream and payload against the bound scope.
 
-SQL stores operation and alias addresses directly: MySQL `VARBINARY(1152)` and `VARBINARY(1024)`,
+SQL stores operation addresses directly: MySQL bounded `VARBINARY`,
 PostgreSQL `BYTEA`, SQLite `BLOB`. Each unique `(store_key, address)` index
 declares at most 1920 field bytes on MySQL and PostgreSQL before index tuple overhead. Binary comparison defines scan ordering on
 all backends. Current snapshot wire encodes the key as canonical lowercase hex
 and decodes the same bounded bytes. Native content ownership uses that binary
-address to select the existing operation row ID. Snapshot aliases are rebuilt
-from the manifest scope and their durable record identities; restore retains
+address to select the existing operation row ID. Tool recovery carries canonical operation identities, without a second alias index. Restore retains
 the manifest namespace and tenant when moving state to another backend.
 
 This removes ordinary physical-key JSON serialization and hashing, with no
@@ -517,7 +515,7 @@ for the Runtime handle and explicit-ID APIs.
 | --- | --- | --- |
 | Trace events outside generic facts | `ai_trace_events`; native body references and bounded identity lookup | Existing Trace/source/recovery regressions; real-backend plans still require validation |
 | Remove duplicate complete run metadata | Canonical `ai_step_runs` or non-SQL run registration; domain membership/CAS only | Routing, publication and portable snapshot coverage; no automatic shared-owner deletion |
-| Domain-specific names | `ai_tool_operation_aliases`, shared `ai_state_counters`; `ai_step_runs` unchanged | Metadata/DDL/readers/writers and schema tests updated together |
+| Domain-specific names | Tool calls use canonical operation IDs, shared `ai_state_counters`; `ai_step_runs` unchanged | Metadata/DDL/readers/writers and schema tests updated together |
 | Execution Agent/Task configuration duplication | All sharing-enabled bindings use the existing complete-contract content archive | Repeated small/large configurations, changed same-revision contracts, cold recovery and CAS regressions |
 | Other configuration duplication | Nonempty Task/Expander declaration sets share existing archive bytes; graph definitions already separate from node state | Small/large declaration load and collection regressions; empty sets create no archive |
 | Hot state query cost | Execution views use a derived binding summary, not full configuration bytes | Agent/Task and child-view regressions reject contract-body reads |

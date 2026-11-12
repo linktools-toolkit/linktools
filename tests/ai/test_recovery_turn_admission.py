@@ -128,7 +128,7 @@ async def test_deferred_resume_claim_requires_turn_admission() -> None:
     port.execution = replace(
         port.execution, status=ExecutionStatus.WAITING_DEFERRED,
         recovery=replace(port.execution.recovery, pending_tools=PendingToolContinuation(
-            "run", approvals=(PendingDeferredCall("call", "tool", payload),),
+            "run", approvals=(PendingDeferredCall("call", "tool", payload, operation_id="test-operation"),),
         )),
     )
     port.load_execution.return_value = port.execution
@@ -246,7 +246,7 @@ async def test_explicit_resume_and_nested_relaunch_share_owner_task() -> None:
 async def test_deferred_recovery_does_not_replay_an_already_advanced_attempt() -> None:
     port = _port(_TurnAdmission())
     pending = PendingToolContinuation("run", approvals=(
-        PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),
+        PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation"),
     ))
     waiting = replace(port.execution, status=ExecutionStatus.WAITING_DEFERRED,
                       recovery=replace(port.execution.recovery, pending_tools=pending))

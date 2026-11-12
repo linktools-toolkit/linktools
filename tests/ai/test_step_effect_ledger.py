@@ -25,7 +25,7 @@ async def test_effect_ledger_is_the_only_physical_owner(tmp_path: Path, backend:
         admitted = await tools.admit(_request())
         done = await tools.complete_payload("operation", tenant_id="tenant", owner=admitted.owner,
                                             fence=admitted.fence, result_payload=StoredPayload.inline_text("result"))
-        assert await tools.get_by_call("run", "call", tenant_id="tenant") == done
+        assert await tools.get_operation("operation", tenant_id="tenant") == done
         key = tools._tool_key("operation")
         records = await store.read(lambda transaction: transaction.scan_records())
         assert sum(record.kind == "tool_operation" for record in records) == 1
@@ -53,7 +53,7 @@ async def test_effect_ledger_is_the_only_physical_owner(tmp_path: Path, backend:
         assert await tools.get_operation("operation", tenant_id="tenant") == done
         await store.validate_integrity()
         await store.mutate(lambda transaction: transaction.delete_records((key,)))
-        assert await tools.get_by_call("run", "call", tenant_id="tenant") is None
+        assert await tools.get_operation("operation", tenant_id="tenant") is None
 
 
 @pytest.mark.asyncio

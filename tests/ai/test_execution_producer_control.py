@@ -65,7 +65,7 @@ async def test_source_control_status_distinguishes_dispatch_and_settlement(tmp_p
         await repo.create_execution(replace(_execution(), revision=4, producer_generation=2,
                                                     producer_claim_id='owner', status=status, recovery=(
             ExecutionRecoveryDetail(agent_run_id='run', pending_tools=PendingToolContinuation('run', calls=(
-                PendingDeferredCall('call', 'tool', StoredPayload.inline_json({})),
+                PendingDeferredCall('call', 'tool', StoredPayload.inline_json({}), operation_id="test-operation"),
             ))) if status is ExecutionStatus.WAITING_DEFERRED else None)))
         statements = []
         engine = repo.state_store.storage_group.context.engine.sync_engine

@@ -270,7 +270,6 @@ class InMemoryStateStorageGroup:
     ) -> _MemoryTransaction:
         return _MemoryTransaction(
             store._record_owners,
-            store._aliases,
             store._sequences,
             store._facts,
             store._operations,
@@ -296,7 +295,6 @@ class InMemoryStateStore:
         self._step_tool_operations = owners["ai_step_tool_operations"]
         self._step_run_admissions = owners["ai_step_run_admissions"]
         self._record_owners = _MemoryRecordOwners(owners, archive=archive)
-        self._aliases: dict[bytes, bytes] = {}
         self._sequences: dict[bytes, int] = {}
         self._facts: dict[tuple[bytes, int], StoredFact] = {}
         self._operations: dict[bytes, StoredOperation] = {}
@@ -372,7 +370,6 @@ class InMemoryStateStore:
 
     def _apply_transaction(self, transaction: _MemoryTransaction) -> None:
         transaction.records.apply_to(self._record_owners)
-        transaction.aliases.apply_to(self._aliases)
         transaction.sequences.apply_to(self._sequences)
         transaction.facts.apply_to(self._facts)
         transaction.operations.apply_to(self._operations)

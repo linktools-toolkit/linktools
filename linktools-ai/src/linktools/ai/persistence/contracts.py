@@ -2282,14 +2282,6 @@ class ToolStateRepository(Protocol):
         self, tool_operation_id: str, *, tenant_id: str,
     ) -> "Observed[ToolOperationRecord] | None": ...
 
-    async def get_tool_effect(
-        self, *, run_id: str, tool_call_id: str, source_run_id: str | None = None,
-    ) -> ToolEffectRecord | None: ...
-
-    async def list_unresolved_tool_effects(
-        self, *, execution_id: str, run_id: str, source_run_id: str | None = None,
-    ) -> list[ToolEffectRecord]: ...
-
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
     async def get_operation(
@@ -2298,8 +2290,8 @@ class ToolStateRepository(Protocol):
     async def list_by_execution(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ToolOperationRecord, ...]: ...
-    async def get_by_call_ids(
-        self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
+    async def get_operations(
+        self, operation_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]: ...
     async def list_by_agent_run(
         self, agent_run_id: str, *, tenant_id: str,

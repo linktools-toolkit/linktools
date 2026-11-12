@@ -68,11 +68,9 @@ from ._step_contracts import TOOL_ERROR_CODE_METADATA_KEY, AgentRunRecord, StepE
 from .turns import validate_turn_records
 from .captures import CAPTURE_RECORD_KINDS, capture_record_value, validate_capture_record
 from .state import (
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
-    alias_key,
     operation_key,
     parent_key,
     record_key,
@@ -200,13 +198,12 @@ def canonical_snapshot_indexes(
     records: tuple[StoredRecord, ...],
     facts: tuple[StoredFact, ...],
     operations: tuple[StoredOperation, ...],
-) -> tuple[tuple[StoredAlias, ...], Mapping[bytes, int]]:
+) -> Mapping[bytes, int]:
     """Rebuild derived snapshot indexes from their durable semantic owners."""
     validate_turn_records(records, namespace=namespace, tenant_id=tenant_id)
     _records_by_key, values = _decode_snapshot_records(domain, records)
     _validate_budget_projections(values)
     _validate_trace_events(domain, facts, values)
-    aliases = _canonical_aliases(namespace, tenant_id, domain, values)
     try:
         sequences = _canonical_sequences(
             namespace,
@@ -218,7 +215,7 @@ def canonical_snapshot_indexes(
         )
     except (AIError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    return aliases, sequences
+    return sequences
 
 
 def validate_snapshot_domain(
@@ -227,7 +224,6 @@ def validate_snapshot_domain(
     tenant_id: str,
     domain: PersistenceDomain,
     records: tuple[StoredRecord, ...],
-    aliases: tuple[StoredAlias, ...],
     facts: tuple[StoredFact, ...],
     operations: tuple[StoredOperation, ...],
     sequences: Mapping[bytes, int],
@@ -278,9 +274,6 @@ def validate_snapshot_domain(
         if not _same_physical_identity(record, expected):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    expected_aliases = _canonical_aliases(namespace, tenant_id, domain, values)
-    if aliases != expected_aliases:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     try:
         _validate_facts(
@@ -391,32 +384,6 @@ def _decode_snapshot_records(
         records_by_key[record.key] = record
         values[record.key] = _decode_record(record)
     return records_by_key, values
-
-
-def _canonical_aliases(
-    namespace: str,
-    tenant_id: str,
-    domain: PersistenceDomain,
-    values: Mapping[bytes, object],
-) -> tuple[StoredAlias, ...]:
-    if domain is not PersistenceDomain.CHECKPOINT:
-        return ()
-    aliases: dict[bytes, bytes] = {}
-    for record_key, value in values.items():
-        if not isinstance(value, ToolOperationRecord):
-            continue
-        try:
-            key = alias_key(namespace, tenant_id, domain.value, "tool_call", (value.agent_run_id, value.tool_call_id))
-        except (AIError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        current = aliases.get(key)
-        if current is not None and current != record_key:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        aliases[key] = record_key
-    return tuple(
-        StoredAlias(alias, aliases[alias])
-        for alias in sorted(aliases)
-    )
 
 
 def _decode_record(record: StoredRecord) -> object:
@@ -1083,7 +1050,6 @@ def _fact_storage_identity(
     if isinstance(owner, TaskGraphView):
         return "task_event", (owner.graph_id,)
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
 
 
 def _canonical_sequences(

@@ -18,11 +18,9 @@ from .state import (
     RecordReplacement,
     RecordScanCursor,
     StateTransaction,
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
-    validate_alias_key,
     validate_stream_key,
     validate_relation_key,
     validate_operation_replacement,
@@ -83,7 +81,6 @@ class _MemoryTransaction:
     def __init__(
         self,
         records: Mapping[bytes, StoredRecord],
-        aliases: Mapping[bytes, bytes],
         sequences: Mapping[bytes, int],
         facts: Mapping[tuple[bytes, int], StoredFact],
         operations: Mapping[bytes, StoredOperation],
@@ -94,7 +91,6 @@ class _MemoryTransaction:
     ) -> None:
         self._validate_record = validate_record
         self.records = _MemoryOverlay(records, validate=validate_record)
-        self.aliases = _MemoryOverlay(aliases)
         self.sequences = _MemoryOverlay(sequences)
         self.facts = _MemoryOverlay(facts)
         self.operations = _MemoryOverlay(operations)
@@ -324,9 +320,6 @@ class _MemoryTransaction:
     def _delete_record_owners(self, keys: frozenset[bytes]) -> None:
         if not keys:
             return
-        for alias, record_key in tuple(self.aliases.items()):
-            if record_key in keys:
-                del self.aliases[alias]
         for fact_key, fact in tuple(self.facts.items()):
             if fact.owner_key in keys:
                 del self.facts[fact_key]
@@ -389,53 +382,6 @@ class _MemoryTransaction:
             ]
         return tuple(values[:limit])
 
-    async def resolve_alias(self, alias: bytes) -> bytes | None:
-        return (await self.resolve_aliases((alias,))).get(alias)
-
-    async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
-        values = {
-            alias: self.aliases[alias]
-            for alias in dict.fromkeys(validate_alias_key(alias) for alias in aliases)
-            if alias in self.aliases
-        }
-        for value in values.values():
-            if value not in self.records:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return values
-
-    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
-        return tuple(
-            StoredAlias(alias, record_key)
-            for alias, record_key in sorted(self.aliases.items())
-        )
-
-    async def scan_aliases_page(
-        self,
-        *,
-        after: bytes | None,
-        limit: int,
-    ) -> tuple[StoredAlias, ...]:
-        _require_scan_limit(limit)
-        if after is not None:
-            validate_alias_key(after)
-        values = [
-            StoredAlias(alias, record_key)
-            for alias, record_key in sorted(self.aliases.items())
-            if after is None or alias > after
-        ]
-        return tuple(values[:limit])
-
-    async def insert_alias(self, alias: StoredAlias) -> None:
-        await self.insert_aliases((alias,))
-
-    async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None:
-        for alias in sorted(aliases, key=lambda value: value.alias_key):
-            current = self.aliases.get(alias.alias_key)
-            if current is not None and current != alias.record_key:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if alias.record_key not in self.guarded_record_keys:
-                raise RuntimeError("alias owner must be guarded in the current transaction")
-            self.aliases[alias.alias_key] = alias.record_key
 
     async def get_sequence(self, key: bytes) -> int:
         validate_stream_key(key)
@@ -706,11 +652,6 @@ async def _validate_transaction_integrity(
         record.key
         for record in await transaction.scan_records()
     }
-    if any(
-        alias.record_key not in records
-        for alias in await transaction.scan_aliases()
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     facts = await transaction.scan_facts()
     for fact in facts:
         if fact.owner_key not in records:

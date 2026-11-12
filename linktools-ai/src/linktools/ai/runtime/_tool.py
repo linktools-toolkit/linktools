@@ -43,6 +43,7 @@ from ..persistence.contracts import ToolOperationAdmission
 from ..spec import CapabilityRef
 from ..persistence.durability import CommitObservation, DurableCommitState, await_owned_task, run_durable_commit
 from ..persistence.contracts import ToolOperationRecord, decode_tool_operation_failure
+from ..execution import tool_operation_id, TOOL_OPERATION_ID_METADATA_KEY
 
 if TYPE_CHECKING:
     from ..execution import ExecutionRecord
@@ -142,14 +143,6 @@ class _ToolOperationRuntimeRepository(Protocol):
         observed: Observed[ToolOperationRecord] | None = None,
     ) -> Observed[ToolOperationRecord]: ...
 
-    async def get_tool_effect(
-        self, *, run_id: str, tool_call_id: str, source_run_id: str | None = None,
-    ) -> ToolEffectRecord | None: ...
-
-    async def list_unresolved_tool_effects(
-        self, *, execution_id: str, run_id: str, source_run_id: str | None = None,
-    ) -> list[ToolEffectRecord]: ...
-
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
 
     async def has_by_agent_run(self, agent_run_id: str, *, tenant_id: str) -> bool: ...
@@ -158,21 +151,8 @@ class _ToolOperationRuntimeRepository(Protocol):
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ToolOperationRecord, ...]: ...
 
-    async def existing_call_ids(
-        self,
-        agent_run_id: str,
-        tool_call_ids: Sequence[str],
-        *,
-        tenant_id: str,
-    ) -> frozenset[str]: ...
-
-    async def get_by_call(
-        self,
-        agent_run_id: str,
-        tool_call_id: str,
-        *,
-        tenant_id: str,
-    ) -> "ToolOperationRecord | None": ...
+    async def get_operations(self, operation_ids: Sequence[str], *, tenant_id: str) -> tuple[ToolOperationRecord, ...]: ...
+    async def get_operation(self, operation_id: str, *, tenant_id: str) -> ToolOperationRecord | None: ...
 
     async def list_by_agent_run(
         self,
@@ -302,6 +282,7 @@ class RuntimeToolOperationBridge:
         fresh_execution: bool = False,
         budget_scope_id: str | None = None,
         pending_tools: PendingToolOperations | None = None,
+        operation_ids: Mapping[str, str] | None = None,
     ) -> None:
         self._repository = repository
         self._checkpoint_objects = checkpoint_objects
@@ -313,6 +294,7 @@ class RuntimeToolOperationBridge:
         self._owner = owner
         self._background_tasks = background_tasks
         self._recovery_agent_run_id = recovery_agent_run_id
+        self._operation_ids = dict(operation_ids or {})
         self._fresh_execution = fresh_execution
         self._terminal_commands = terminal_commands
         self._budget_scope_id = budget_scope_id
@@ -518,14 +500,19 @@ class RuntimeToolOperationBridge:
         observed = self._effect_receipts.get(call.tool_call_id)
         receipt = None if observed is None else observed.value
         replay_agent_run_id = None if receipt is None else receipt.agent_run_id
-        if replay_agent_run_id is None and self._recovery_agent_run_id is not None:
-            source = await self._repository.get_by_call(
-                self._recovery_agent_run_id, call.tool_call_id, tenant_id=self._tenant_id,
-            )
-            if source is not None:
-                replay_agent_run_id = source.agent_run_id
+        operation_id = self._operation_ids.get(call.tool_call_id)
+        if receipt is None and operation_id is not None:
+            observed = await self._repository.observe_operation(operation_id, tenant_id=self._tenant_id)
+            receipt = None if observed is None else observed.value
+            if receipt is not None:
+                if receipt.execution_id != self._execution_id or receipt.tool_call_id != call.tool_call_id:
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                replay_agent_run_id = receipt.agent_run_id
+                self._effect_receipts[call.tool_call_id] = observed
+        operation_id = (receipt.tool_operation_id if receipt is not None else operation_id
+                        or self._operation_id(self._run_id(ctx), call.tool_call_id))
+        self._operation_ids[call.tool_call_id] = operation_id
         replay_agent_run_id = replay_agent_run_id or self._run_id(ctx)
-        operation_id = self._operation_id(replay_agent_run_id, call.tool_call_id)
         admission = ToolOperationAdmission(
             execution_id=self._execution_id,
             tool_operation_id=operation_id,
@@ -561,7 +548,8 @@ class RuntimeToolOperationBridge:
                 agent_name=(self._native_run.agent_name if self._native_run is not None
                             else None if ctx.agent is None else ctx.agent.name),
                 parent_run_id=None if self._native_run is None else self._native_run.parent_run_id,
-                metadata={} if self._native_run is None else dict(self._native_run.metadata),
+                metadata={**({} if self._native_run is None else dict(self._native_run.metadata)),
+                          TOOL_OPERATION_ID_METADATA_KEY: operation_id},
                 tool_call_id=call.tool_call_id, tool_name=tool_def.name,
                 idempotency_key=deterministic_id("tool", operation_id, ctx.run_step, "started"),
             )
@@ -621,12 +609,9 @@ class RuntimeToolOperationBridge:
         return decision
 
     def _operation_id(self, run_id: str, tool_call_id: str) -> str:
-        return canonical_sha256({
-            "tenant_id": self._tenant_id,
-            "execution_id": self._execution_id,
-            "agent_run_id": run_id,
-            "tool_call_id": tool_call_id,
-        })
+        return tool_operation_id(tenant_id=self._tenant_id, execution_id=self._execution_id,
+                                 agent_run_id=run_id, tool_call_id=tool_call_id)
+
 
     def _effect_source_run(self, run_id: str) -> str:
         if run_id not in {self._agent_run_id, self._recovery_agent_run_id}:
@@ -655,7 +640,8 @@ class RuntimeToolOperationBridge:
             record,
             execution_id=self._execution_id,
             tool_operation_id=(receipt.tool_operation_id if receipt is not None
-                               else self._operation_id(record.run_id, record.tool_call_id)),
+                               else self._operation_ids.get(record.tool_call_id)
+                               or self._operation_id(record.run_id, record.tool_call_id)),
             binding_digest=self._binding_digest,
             recovery_agent_run_id=(receipt.agent_run_id if receipt is not None and receipt.agent_run_id != record.run_id
                                    else source_run_id if source_run_id != record.run_id else None),
@@ -679,18 +665,23 @@ class RuntimeToolOperationBridge:
             and run_id == self._agent_run_id
         ):
             return receipt.to_tool_effect(run_id)
-        return await self._repository.get_tool_effect(
-            run_id=run_id, tool_call_id=tool_call_id, source_run_id=source_run_id,
-        )
+        identity = self._operation_ids.get(tool_call_id)
+        if identity is None:
+            identity = self._operation_id(run_id, tool_call_id)
+        receipt = await self._repository.get_operation(identity, tenant_id=self._tenant_id)
+        if receipt is not None and (receipt.execution_id != self._execution_id or receipt.tool_call_id != tool_call_id):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return None if receipt is None else receipt.to_tool_effect(run_id)
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
         source_run_id = self._effect_source_run(run_id)
         staged = None if self._pending_tools is None else self._pending_tools.pending_tool_operations()
         if staged is not None:
             return [effect for value in staged if (effect := value.to_tool_effect(run_id)).status == "started"]
-        return await self._repository.list_unresolved_tool_effects(
-            execution_id=self._execution_id, run_id=run_id, source_run_id=source_run_id,
-        )
+        values = await self._repository.get_operations(tuple(self._operation_ids.values()), tenant_id=self._tenant_id)
+        if any(value.execution_id != self._execution_id for value in values):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return [effect for value in values if (effect := value.to_tool_effect(run_id)).status == "started"]
 
     async def existing_call_ids(self, tool_call_ids: Sequence[str]) -> frozenset[str]:
         staged = None if self._pending_tools is None else self._pending_tools.pending_tool_operations()
@@ -703,12 +694,12 @@ class RuntimeToolOperationBridge:
                             if self._operation_id(self._agent_run_id, call_id) in self._admission_attempts)
         if not missing:
             return known
-        for run_id in dict.fromkeys((self._agent_run_id, self._recovery_agent_run_id)):
-            if run_id is not None:
-                known |= await self._repository.existing_call_ids(run_id, missing, tenant_id=self._tenant_id)
-                missing = tuple(call_id for call_id in missing if call_id not in known)
-                if not missing:
-                    break
+        identities = tuple(self._operation_ids.get(call_id) or self._operation_id(self._agent_run_id, call_id)
+                           for call_id in missing)
+        values = await self._repository.get_operations(identities, tenant_id=self._tenant_id)
+        if any(value.execution_id != self._execution_id for value in values):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        known |= frozenset(value.tool_call_id for value in values)
         return known
 
     def confirmed_terminal_operations(
@@ -740,12 +731,10 @@ class RuntimeToolOperationBridge:
         confirmed = self.confirmed_terminal_operations()
         if confirmed is not None:
             return confirmed
-        return await self._repository.list_by_agent_run(
-            self._agent_run_id,
-            tenant_id=self._tenant_id,
-            execution_id=self._execution_id if self._recovery_agent_run_id is not None else None,
-            recovery_agent_run_id=self._recovery_agent_run_id,
-        )
+        values = await self._repository.get_operations(tuple(self._operation_ids.values()), tenant_id=self._tenant_id)
+        if any(value.execution_id != self._execution_id for value in values):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return values
 
     async def _decision_from_record(
         self,

@@ -93,6 +93,8 @@ from ..storage import (
     TurnCoordination,
     TurnScope,
 )
+from ..execution import tool_operation_id, tool_operation_references
+
 from ..execution.events import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
 from ..observe.service import (
@@ -2394,6 +2396,22 @@ class LocalExecutionBackend:
             current.execution_id,
         )
 
+    async def _tool_operation_references(
+        self, execution: ExecutionRecord, source_agent_run_id: str,
+    ) -> dict[str, str]:
+        domain = (PersistenceDomain.CHECKPOINT if execution.restart_checkpoints else
+                  PersistenceDomain.TRACE if execution.durable_trace else PersistenceDomain.CONVERSATION)
+        events = await self._get_run_store(domain).list_events(agent_run_id=source_agent_run_id)
+        result = tool_operation_references(events)
+        pending = None if execution.recovery is None else execution.recovery.pending_tools
+        if pending is not None and pending.source_agent_run_id == source_agent_run_id:
+            for call in (*pending.approvals, *pending.calls):
+                if call.operation_id is None or (call.tool_call_id in result
+                        and result[call.tool_call_id] != call.operation_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result[call.tool_call_id] = call.operation_id
+        return result
+
     async def materialize_deferred_call(
         self,
         execution: ExecutionRecord,
@@ -2448,6 +2466,11 @@ class LocalExecutionBackend:
             raw_metadata["linktools"] = {
                 "repository_instruction_frontier": repository_instruction_frontier,
             }
+        references = await self._tool_operation_references(execution, source_agent_run_id)
+        operation_id = references.get(call.tool_call_id) or tool_operation_id(
+            tenant_id=self._tenant_id, execution_id=execution.execution_id,
+            agent_run_id=source_agent_run_id, tool_call_id=call.tool_call_id,
+        )
         arguments_payload = StoredPayload.inline_json(arguments)
         return PendingDeferredCall(
             call.tool_call_id,
@@ -2455,6 +2478,7 @@ class LocalExecutionBackend:
             arguments_payload,
             raw_metadata,
             capability_ref=capability_ref,
+            operation_id=operation_id,
         )
 
     async def commit_deferred_frontier(
@@ -4116,6 +4140,7 @@ class LocalExecutionBackend:
         checkpoint: ExecutionRecord | None = None
         agent_run_id: str | None = None
         recovery_history_agent_run_id: str | None = None
+        recovery_operation_ids: dict[str, str] = {}
         metric_recorder = self._metric_recorder
         metric_id = uuid.uuid4().hex if metric_recorder is not None else None
         metric_started = monotonic_ns() if metric_id is not None else None
@@ -4290,11 +4315,11 @@ class LocalExecutionBackend:
                     recovery_history_agent_run_id = None
                     exact_recovery_context = False
                 elif self._tool_operations is not None:
+                    recovery_operation_ids = await self._tool_operation_references(current, recovery_history_agent_run_id)
                     unresolved = tuple(
                         operation
-                        for operation in await self._tool_operations.list_by_agent_run(
-                            recovery_history_agent_run_id,
-                            tenant_id=self._tenant_id, execution_id=execution_id,
+                        for operation in await self._tool_operations.get_operations(
+                            tuple(recovery_operation_ids.values()), tenant_id=self._tenant_id,
                         )
                         if operation.status
                         not in {
@@ -4585,6 +4610,7 @@ class LocalExecutionBackend:
                     owner=current.producer_claim_id,
                     background_tasks=execution_tasks,
                     recovery_agent_run_id=recovery_history_agent_run_id,
+                    operation_ids=recovery_operation_ids,
                     fresh_execution=original.agent_run_seq == 0 and current.agent_run_seq == 1,
                     producer_generation=producer_generation,
                     terminal_commands=self._runtime_commands,
@@ -6386,9 +6412,11 @@ class LocalExecutionBackend:
     ) -> None:
         if self._tool_operations is None:
             return
-        operation = await self._tool_operations.get_by_call(
-            source_agent_run_id, tool_call_id, tenant_id=self._tenant_id,
-        )
+        references = await self._tool_operation_references(execution, source_agent_run_id)
+        operation_id = references.get(tool_call_id)
+        if operation_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        operation = await self._tool_operations.get_operation(operation_id, tenant_id=self._tenant_id)
         if operation is None:
             return
         if operation.execution_id != execution.execution_id:
@@ -6407,9 +6435,11 @@ class LocalExecutionBackend:
     ) -> None:
         if self._tool_operations is None:
             return
-        operation = await self._tool_operations.get_by_call(
-            source_agent_run_id, tool_call_id, tenant_id=self._tenant_id,
-        )
+        references = await self._tool_operation_references(execution, source_agent_run_id)
+        operation_id = references.get(tool_call_id)
+        if operation_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        operation = await self._tool_operations.get_operation(operation_id, tenant_id=self._tenant_id)
         if operation is None:
             return
         if supplied.resolution_kind == "succeeded":

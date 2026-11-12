@@ -216,7 +216,6 @@ from ._step_contracts import (
     StepEvent,
 )
 from .state import (
-    ALIAS_KEY_MAX_BYTES,
     STREAM_KEY_MAX_BYTES,
     OPERATION_KEY_MAX_BYTES,
     validate_stream_key,
@@ -226,7 +225,6 @@ from .state import (
     validate_parent_key,
     RECORD_KEY_MAX_BYTES,
     PARENT_KEY_MAX_BYTES,
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
@@ -886,7 +884,6 @@ def _decode_v1_object_ref(
     )
 
 
-
 def _encode_v1_stored_payload(
     value: object,
     codec: "_VersionCodec",
@@ -1483,26 +1480,6 @@ def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def encode_alias(alias: StoredAlias) -> dict[str, JsonValue]:
-    return {
-        "alias": alias.alias_key.hex(),
-        "record": alias.record_key.hex(),
-    }
-
-
-def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_required_keys(value, frozenset({"alias", "record"}))
-    try:
-        return StoredAlias(
-            _alias_key_wire(_string(value, "alias")),
-            _record_key_wire(_string(value, "record")),
-        )
-    except (TypeError, ValueError, KeyError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
 def wire_type_id(value: DomainT | type[DomainT]) -> str:
     """Return the explicit stable protocol id for one persisted type."""
     return _codec_wire_type_id(value, _CURRENT_CODEC)
@@ -2091,7 +2068,6 @@ def map_execution_payload_slots(value: Mapping, mapper: Callable[[Mapping], Json
             current = current[name]
         current[path[-1]] = mapper(current[path[-1]])
     return {**value, "fields": fields}
-
 
 
 EXECUTION_POLICY_FIELDS = (
@@ -3191,15 +3167,6 @@ def _bool(value: Mapping[str, object], key: str) -> bool:
     return result
 
 
-def _alias_key_wire(value: str) -> bytes:
-    if not 0 < len(value) <= 2 * ALIAS_KEY_MAX_BYTES:
-        raise ValueError("alias key exceeds its byte limit")
-    result = bytes.fromhex(value)
-    if result.hex() != value:
-        raise ValueError("alias key must be canonical lowercase hex")
-    return result
-
-
 def _operation_key_wire(value: str) -> bytes:
     if not 2 <= len(value) <= 2 * OPERATION_KEY_MAX_BYTES:
         raise ValueError("operation key encoding length is invalid")
@@ -3331,4 +3298,4 @@ def _validate_v1_codec_definition() -> None:
 _validate_v1_codec_definition()
 
 
-__all__ = ["decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_alias', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_alias', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']
+__all__ = ["decode_execution_producer_authority", "decode_execution_terminal_details", "decode_execution_payload", "EXECUTION_POLICY_FIELDS", "runtime_policy_reference", "encode_agent_binding_content", "decode_agent_binding_content", "agent_binding_content_summary", "native_user_input_reference", "validate_native_user_input", "native_tool_result_reference", "validate_native_text_payload", "native_text_reference", "TOOL_PAYLOAD_CODEC", "tool_payload_slots", "tool_payload_reference", "map_tool_payload_slots", "decode_execution_metadata", 'decode_execution_control', 'decode_execution_result', 'decode_execution_retention', 'CURRENT_DATA_VERSION', 'CanonicalEnvelope', '_decode_enveloped_domain', '_decode_step_envelope', 'binding_reference', 'execution_payload_reference', 'execution_payload_slots', 'payload_reference', 'map_execution_payload_slots', 'encode_execution_content', 'decode_execution_content', 'decode_domain', 'decode_envelope', 'decode_fact', 'decode_operation', 'decode_record', 'decode_session_turn_commit', 'decode_execution_timeline', 'decode_execution_header', 'decode_execution_view', 'decode_execution_producer_control', 'encode_domain', 'encode_envelope', 'encode_fact', 'encode_operation', 'encode_record', 'encode_session_turn_commit', 'iter_runtime_object_dependencies', 'iter_runtime_object_refs', 'parse_envelope', 'wire_type_id']

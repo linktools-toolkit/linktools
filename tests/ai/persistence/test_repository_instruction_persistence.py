@@ -94,7 +94,7 @@ def _continuation() -> PendingToolContinuation:
         "read_file",
         arguments,
         {"kind": "workspace_approval"},
-    )
+     operation_id="test-operation")
     return PendingToolContinuation(
         "step-1",
         approvals=(call,),

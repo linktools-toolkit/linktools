@@ -635,9 +635,13 @@ class PendingDeferredCall:
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
     capability_ref: CapabilityRef | None = None
 
+    operation_id: str = field(kw_only=True)
+
     def __post_init__(self) -> None:
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("deferred call identity is required")
+        if not isinstance(self.operation_id, str) or not self.operation_id:
+            raise ValueError("deferred operation identity is invalid")
         if self.capability_ref is not None and not isinstance(self.capability_ref, CapabilityRef):
             raise ValueError("deferred call capability reference is invalid")
         try:

@@ -18,6 +18,8 @@ from pydantic_ai.messages import (
     ToolCallPart,
 )
 
+from ..execution import tool_operation_references
+
 from ..core import (
     CursorSigner,
     ExecutionStatus,
@@ -250,8 +252,8 @@ class _ExecutionHistoryStore(Protocol):
 
 
 class _ToolOperationHistoryReader(Protocol):
-    async def get_by_call_ids(
-        self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
+    async def get_operations(
+        self, operation_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]: ...
 
 
@@ -1729,13 +1731,16 @@ class StepExecutionHistoryReader:
                     occurrence.item.tool_call_id for occurrence in selected
                     if occurrence.item.tool_call_id in tool_metadata
                 ))
+                operation_refs = tool_operation_references(events)
                 operations: dict[str, ToolOperationRecord] = {}
-                if self._tool_operations is not None and selected_calls:
-                    for operation in await self._tool_operations.get_by_call_ids(
-                        agent_run_id, selected_calls, tenant_id=tenant_id,
+                requested = {call_id: operation_refs[call_id] for call_id in selected_calls if call_id in operation_refs}
+                if self._tool_operations is not None and requested:
+                    for operation in await self._tool_operations.get_operations(
+                        tuple(requested.values()), tenant_id=tenant_id,
                     ):
                         if (operation.execution_id != source.record.execution_id
-                                or operation.tool_call_id in operations):
+                                or operation.tool_call_id in operations
+                                or requested.get(operation.tool_call_id) != operation.tool_operation_id):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         operations[operation.tool_call_id] = operation
                 for occurrence in selected:

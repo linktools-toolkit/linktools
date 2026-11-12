@@ -314,7 +314,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
              else ExecutionRecoveryState.WAITING if path in {"ready_deferred", "pending_deferred"}
              else ExecutionRecoveryState.ACTIVE)
     pending = (PendingToolContinuation("run", calls=(
-        PendingDeferredCall("call", "lookup", StoredPayload.inline_json({})),
+        PendingDeferredCall("call", "lookup", StoredPayload.inline_json({}), operation_id="test-operation"),
     )) if state is ExecutionRecoveryState.WAITING else None)
     if path != "terminal_cleanup":
         accepted = ExecutionRecord(

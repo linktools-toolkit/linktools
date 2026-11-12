@@ -111,7 +111,7 @@ async def test_unresolved_call_rejects_changed_revision_and_keeps_original_facts
     with pytest.raises(AIError) as changed:
         await repository.admit(replace(request, capability_ref=_reference(2)))
     assert changed.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-    assert await repository.get_by_call("resumed", "call", tenant_id="tenant") is None
+    assert await repository.get_operation("operation", tenant_id="tenant") == record
     if status == "unknown":
         with pytest.raises(AIError) as unknown:
             await repository.admit(replace(request, capability_ref=_reference()))

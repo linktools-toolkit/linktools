@@ -56,8 +56,8 @@ async def main(root: Path) -> None:
                         fence=operation.fence, result_payload=payload,
                     )
                 phase = "batch_read"
-                values = await tools.get_by_call_ids(
-                    "run", tuple(f"call-{index}" for index in range(13)), tenant_id="tenant",
+                values = await tools.get_operations(
+                    tuple(f"op-{index}" for index in range(13)), tenant_id="tenant",
                 )
                 assert tuple(value.result_payload for value in values) == tuple(payloads)
             finally:

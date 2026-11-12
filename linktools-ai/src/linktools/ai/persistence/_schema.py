@@ -17,16 +17,13 @@ from ..storage import (
     sql_unique,
 )
 from ._plan import PersistenceDomain, PersistencePlan
-from .state import STORE_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
+from .state import STORE_KEY_MAX_BYTES, STREAM_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, RELATION_KEY_MAX_BYTES, RECORD_KEY_MAX_BYTES, PARENT_KEY_MAX_BYTES
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
 
 _RECORD_COMMENT = "Current durable state for runtime and step resources persisted as versioned records."
-_ALIAS_COMMENT = (
-    "Tool-call and recovery lookup identities that resolve to canonical tool operations."
-)
 _FACT_COMMENT = (
     "Immutable ordered runtime facts including events, checkpoints, and effects."
 )
@@ -83,39 +80,6 @@ def build_runtime_sql_metadata(
     from ._run_admission_schema import build_run_admission_sql_metadata
     build_run_admission_sql_metadata(metadata)
 
-    aliases = Table(
-        "ai_tool_operation_aliases",
-        metadata,
-        sql_id_column(),
-        Column(
-            "store_key",
-            LargeBinary(STORE_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(STORE_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the physical State store partition.",
-        ),
-        Column(
-            "alias_key",
-            LargeBinary(ALIAS_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(ALIAS_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Binary secondary lookup address with a maximum of 768 bytes.",
-        ),
-        Column(
-            "record_key",
-            LargeBinary(RECORD_KEY_MAX_BYTES).with_variant(mysql.VARBINARY(RECORD_KEY_MAX_BYTES), "mysql"),
-            nullable=False,
-            comment="Exact bounded binary identity of the runtime record resolved by this alias.",
-        ),
-        Column("alias_locator", sql_sha256(), nullable=False,
-               comment="Single SHA-256 lookup projection of the complete alias_key; raw identity must also match."),
-        Column("record_locator", sql_sha256(), nullable=False,
-               comment="Single SHA-256 lookup projection of the complete record_key; raw identity must also match."),
-        *_audit(),
-        comment=_ALIAS_COMMENT,
-        **sql_table_options(),
-    )
-    sql_unique(aliases, "store_key", "alias_locator")
-    sql_query_index(aliases, "store_key", "record_locator")
-    sql_audit_indexes(aliases)
 
     facts = Table(
         "ai_state_facts",
@@ -282,7 +246,6 @@ def required_runtime_sql_tables(plan: PersistencePlan) -> frozenset[str]:
         return frozenset()
     tables = {
         "ai_state_records",
-        "ai_tool_operation_aliases",
         "ai_state_facts",
         "ai_state_counters",
         "ai_state_operations",

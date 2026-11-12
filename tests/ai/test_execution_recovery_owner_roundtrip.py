@@ -28,7 +28,7 @@ async def test_recovery_templates_share_leaf_owners_and_restore(tmp_path: Path, 
     storage=PersistenceStorage.sqlite(tmp_path/'db');objects=InMemoryObjectStore();limits=SnapshotLimits(10000,20_000_000)
     current=_execution();args=StoredPayload.inline_json({'q':'shared tool arguments'})
     if kind=='pending':
-        pending=PendingToolContinuation('run',approvals=(PendingDeferredCall('call','tool',args),))
+        pending=PendingToolContinuation('run',approvals=(PendingDeferredCall('call','tool',args, operation_id="test-operation"),))
         current=replace(current,status=ExecutionStatus.WAITING_DEFERRED,recovery=ExecutionRecoveryDetail(agent_run_id='run',pending_tools=pending))
     else:
         details={'reason':'shared diagnostics'};diagnostics=ErrorDiagnostics('RuntimeError','shared detail','a'*64,traceback='synthetic frame')
