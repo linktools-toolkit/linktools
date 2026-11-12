@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ..core import JsonValue, validate_page_limit
-from ..steps import native_store_locator
+from ..steps import native_store_locator, native_store_key
 from ..errors import AIError, ErrorCode
 from ..model.attachments import read_attachment_payload
 from ..storage import (
@@ -24,13 +24,19 @@ from ._archive_closure import (
     iter_native_message_roots, require_known_retention, validate_native_message_content,
 )
 from ._payload import decode_payload_bytes
-from ._tool_operation_content import expand_tool_content
-from ._execution_content import expand_retained_execution_content
+from ._tool_operation_content import expand_tool_content, expand_native_tool_content
+from ._native_tool_result import restore_native_tool_result_payload
+from ._archive import archive_content_scope
+from ._record_key import decode_key_components, RECORD_KEY_MAX_BYTES
+from ._execution_content import (expand_retained_execution_content, expand_native_execution_content,
+                                 restore_native_text_payload, restore_native_user_input)
 from ._sql import SqlStateStorageGroup
 from ._step_schema import build_step_sql_metadata
 from ._step_maintenance import inspect_native_message_tables
 from ._capability_marker import has_capability_partition_marker
-from .codec import iter_runtime_object_dependencies, iter_runtime_object_refs
+from .codec import (iter_runtime_object_dependencies, iter_runtime_object_refs, decode_envelope,
+                    execution_payload_slots, tool_payload_slots, native_user_input_reference,
+                    native_text_reference, native_tool_result_reference)
 from .captures import (
     CAPTURE_RECORD_KINDS, capture_retention_value, capture_state_closure,
     capture_record_key, capture_record_scope, capture_record_value, expand_snapshot_capture, input_capture_expiry_key,
@@ -282,6 +288,70 @@ async def _purge_unreferenced_objects(
             metadata[location] = await source.stat(key)
         return metadata[location]
 
+    async def read_native_object(reference: ObjectRef) -> bytes:
+        sources = {id(source): source for source in archive_objects.values()}
+        source = None
+        for candidate_source in sources.values():
+            stat = await read_metadata(candidate_source, reference.key)
+            if stat is not None:
+                if stat.digest != reference.digest or stat.size != reference.size:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                source = candidate_source
+        if source is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        encoded = await read_object(source, reference.key,
+                                    expected_digest=reference.digest, expected_size=reference.size)
+        protected.add(reference.key)
+        return encoded
+
+    async def expand_native_templates(record: StoredRecord, owner_group: StateStorageGroup) -> StoredRecord:
+        """Resolve fixed leaves before decoding their complete offline templates."""
+        value = decode_envelope(record.data).value["payload"]
+        is_execution = record.kind == "execution"
+        slots = execution_payload_slots(value) if is_execution else tool_payload_slots(value)
+        restored = {}
+        for path, payload in slots:
+            reference = ((native_user_input_reference(payload) or native_text_reference(payload))
+                         if is_execution else native_tool_result_reference(payload))
+            if reference is None or reference in restored:
+                continue
+            root = reference.root
+            owner = native_groups.get(owner_group)
+            if owner is None or owner[3] != root.group_id:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            try:
+                parts = decode_key_components(record.key, RECORD_KEY_MAX_BYTES)
+                if len(parts) < 6 or parts[0] != "record" or parts[4] != record.kind:
+                    raise ValueError("invalid typed owner address")
+                expected_store = native_store_key(parts[1], parts[2])
+            except (ValueError, TypeError, IndexError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if root.store_key != expected_store:
+                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+            closure, bodies = owner[:2]
+            identities = closure.message_identities(root.store_key, root.slices)
+            if len(identities) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            row = bodies.get((root.store_key, identities[0]))
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            content = validate_native_message_content(row, group_id=root.group_id,
+                content_scope=archive_content_scope(parts[1], parts[2]))
+            encoded = (content.body if content.payload is None else
+                       await read_attachment_payload(content.payload, read_object=read_native_object))
+            if content.payload is not None and (len(encoded) != content.payload.size
+                    or hashlib.sha256(encoded).hexdigest() != content.payload.digest):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raw = decode_payload_bytes(encoded, codec=content.compression,
+                                       raw_digest=content.raw_digest, raw_size=content.raw_size)
+            if is_execution:
+                restored[reference] = (restore_native_user_input(reference, raw) if path == ("stored_user_input",)
+                                       else restore_native_text_payload(reference, raw))
+            else:
+                restored[reference] = restore_native_tool_result_payload(reference, raw)
+        return (expand_native_execution_content(record, restored) if is_execution
+                else expand_native_tool_content(record, restored))
+
     async def visit(reference: ObjectRef, domain: PersistenceDomain, *, root: bool = True) -> None:
         source = source_for(domain, reference)
         if root:
@@ -341,7 +411,8 @@ async def _purge_unreferenced_objects(
                 elif record.kind not in {"evaluation_cleanup", "archive_content", "archive_sequence"}:
                     await collect(dict(record.data), domain, owner_group=store.storage_group)
                     if record.kind in {"execution", "tool_operation"}:
-                        semantic = expand_tool_content(expand_retained_execution_content(record, binding_contents), binding_contents)
+                        native_expanded = await expand_native_templates(record, store.storage_group)
+                        semantic = expand_tool_content(expand_retained_execution_content(native_expanded, binding_contents), binding_contents)
                         await collect(dict(semantic.data), domain, archive_owner=False)
             if len(records) < 1000:
                 break
@@ -385,24 +456,6 @@ async def _purge_unreferenced_objects(
                 continue
             if group_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-            async def read_native_object(reference: ObjectRef) -> bytes:
-                # A physical SQL group can serve several archive object
-                # routes. Native snapshots have no domain routing slot.
-                sources = {id(source): source for source in archive_objects.values()}
-                source = None
-                for candidate_source in sources.values():
-                    stat = await read_metadata(candidate_source, reference.key)
-                    if stat is not None:
-                        if stat.digest != reference.digest or stat.size != reference.size:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        source = candidate_source
-                if source is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                encoded = await read_object(source, reference.key,
-                                            expected_digest=reference.digest, expected_size=reference.size)
-                protected.add(reference.key)
-                return encoded
 
             encoded = await read_attachment_payload(content.payload, read_object=read_native_object)
             if len(encoded) != content.payload.size or hashlib.sha256(encoded).hexdigest() != content.payload.digest:

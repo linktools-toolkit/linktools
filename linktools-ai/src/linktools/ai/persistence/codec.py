@@ -2268,6 +2268,7 @@ def decode_execution_timeline(value: Mapping[str, JsonValue], *, codec: _Version
         if not isinstance(source, Mapping) or "runtime_policy" in source or "runtime_overrides" in source:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         codec = codec or _VERSION_CODECS[envelope.version]
+        source = _execution_terminal_fields(source, codec, persisted=True)
         values = {}
         for name, (target, _init) in _dataclass_fields(ExecutionTimelineRecord).items():
             if name in source:

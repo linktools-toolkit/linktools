@@ -18,20 +18,20 @@ from linktools.ai.persistence._payload import encode_payload_bytes
 from linktools.ai.persistence._repository_common import project_record
 from linktools.ai.persistence.codec import _decode_enveloped_domain, _execution_binding_summary, iter_runtime_object_refs
 from linktools.ai.persistence.contracts import ExecutionRecord, RuntimePayloadRef
-from linktools.ai.persistence.state import RecordQuery
+from linktools.ai.persistence.state import RecordQuery, StoredRecord, active_state_scope
 from linktools.ai.storage import StoredPayload
 
 from .test_incremental_projection_boundaries import _storage
 from .test_runtime_persistence_evidence import _execution
 
 
-def _large_execution():
+def _large_execution() -> ExecutionRecord:
     execution = _execution()
     binding = replace(execution.binding, output_schema={"type": "string", "description": "schema " * 20000})
     return replace(execution, binding=binding)
 
 
-def _shared_record():
+def _shared_record() -> tuple[ExecutionRecord, StoredRecord, StoredRecord, ContentRecord, tuple[str, str, str]]:
     execution = _large_execution()
     record = project_record(namespace="bindings", tenant_id="tenant", domain=PersistenceDomain.EXECUTION,
                             kind="execution", identity=(execution.execution_id,), value=execution)
@@ -42,8 +42,7 @@ def _shared_record():
     digest, size = hashlib.sha256(raw).hexdigest(), len(raw)
     content = ContentRecord("execution-binding", digest, size, compression, body=encoded)
     scope = archive_content_scope("bindings", "tenant")
-    reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope,
-                 "summary": _execution_binding_summary(execution.binding)}
+    reference = {"$execution_binding": content.identity, "archive_scope": "source", "content_scope": scope}
     compact = replace(record, data={**data, "value": {**data["value"], "payload": {
         **data["value"]["payload"], "fields": {**data["value"]["payload"]["fields"], "binding": reference},
     }}})
@@ -119,7 +118,8 @@ async def test_execution_contents_share_content_and_survive_cold_reads(tmp_path:
         await repository.create_execution(other)
         records = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
         refs = [tuple(iter_archive_content_refs(record.data)) for record in records]
-        assert len(records) == 2 and refs[0] == refs[1] and len(refs[0]) == 1
+        assert len(records) == 2 and refs[0] == refs[1]
+        assert len([ref for ref in refs[0] if ref[2].startswith("execution-binding:")]) == 1
         _, archive = await repository.state_store.storage_group.open_archive()
         contents = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
         assert len([record for record in contents if record.data["codec"] == "execution-binding"]) == 1
@@ -137,7 +137,8 @@ async def test_execution_contents_share_content_and_survive_cold_reads(tmp_path:
         await bare.create_execution(inline)
         rows = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
         inline_row = next(row for row in rows if row.key == repository.execution_record_key("inline"))
-        assert not tuple(iter_archive_content_refs(inline_row.data))
+        assert any(ref[2].startswith("execution-binding:") for ref in iter_archive_content_refs(inline_row.data))
+        assert "summary" not in inline_row.data["value"]["payload"]["fields"]["binding"]
         changed = replace(execution, revision=execution.revision + 1, error_code="diagnostic")
         await repository.compare_and_swap("execution", tenant_id="tenant",
                                           expected_revision=execution.revision, next_record=changed)
@@ -148,7 +149,7 @@ async def test_execution_contents_share_content_and_survive_cold_reads(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("external_transaction", (False, True))
-async def test_uninitialized_repository_keeps_complete_binding_inline(external_transaction: bool) -> None:
+async def test_uninitialized_repository_prepares_fixed_binding_before_publication(external_transaction: bool) -> None:
     from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
     from linktools.ai.persistence._memory import InMemoryStateStorageGroup, InMemoryStateStore
 
@@ -159,15 +160,20 @@ async def test_uninitialized_repository_keeps_complete_binding_inline(external_t
     try:
         execution = _large_execution()
         if external_transaction:
+            with pytest.raises(AIError) as unprepared:
+                await store.mutate(lambda tx: repository.create_execution_in_transaction(tx, execution))
+            assert unprepared.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
+            assert await repository.get("execution", tenant_id="tenant") is None
+            await repository.prepare_content(execution)
             await store.mutate(lambda tx: repository.create_execution_in_transaction(tx, execution))
         else:
             await repository.create_execution(execution)
         assert await repository.get("execution", tenant_id="tenant") == execution
         cold = ExecutionRepositoryImpl(store, namespace="bindings", tenant_id="tenant")
         assert await store.read(lambda tx: cold.get_in_transaction(tx, "execution", tenant_id="tenant")) == execution
-        assert await group.open_archive() is None
+        assert await group.open_archive() is not None
         records = await store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
-        assert not tuple(iter_archive_content_refs(records[0].data))
+        assert any(ref[2].startswith("execution-binding:") for ref in iter_archive_content_refs(records[0].data))
     finally:
         await store.close()
         await group.close()
@@ -402,7 +408,9 @@ async def test_snapshot_capture_rejects_binding_budget_before_hydration(tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("kind", ("agent", "task"))
-async def test_small_bindings_share_complete_content_across_executions(tmp_path: Path, monkeypatch, backend: str, kind: str) -> None:
+async def test_small_bindings_share_complete_content_across_executions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, kind: str,
+) -> None:
     from linktools.ai.persistence._archive import ContentArchive
     from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
     from linktools.ai.storage import PayloadPolicy
@@ -429,37 +437,45 @@ async def test_small_bindings_share_complete_content_across_executions(tmp_path:
         records = await repository.state_store.read(lambda tx: tx.list_records(RecordQuery(kind="execution")))
         references = [tuple(iter_archive_content_refs(record.data)) for record in records]
         assert len(records) == len(executions) and all(reference == references[0] for reference in references)
-        assert len(references[0]) == 1
+        assert len([ref for ref in references[0] if ref[2].startswith("execution-binding:")]) == 1
         _, archive = repository.state_store.storage_group.opened_archive
         archive_records = await archive.read(lambda tx: tx.scan_records())
-        contents = [record for record in archive_records if record.kind == "archive_content"]
+        contents = [record for record in archive_records if record.kind == "archive_content"
+                    and record.data["codec"] == "execution-binding"]
         assert len(contents) == 1 and contents[0].data["codec"] == "execution-binding"
 
-        def record_bytes(values):
+        def record_bytes(values: tuple[StoredRecord, ...]) -> int:
             return sum(len(canonical_json_bytes(record.data)) + len(record.payload_bytes or b"") for record in values)
 
         # Include archive metadata and binary bodies, not only the compact owner JSON.
         assert record_bytes((*records, *archive_records)) < record_bytes(inline)
         cold = ExecutionRepositoryImpl(repository.state_store, namespace="bindings", tenant_id="tenant")
 
-        async def reject_archive(*args, **kwargs):
-            raise AssertionError("state views must not hydrate shared bindings")
+        body_reads = []
+        original_read = ContentArchive.read_contents
+        async def track_archive(self: ContentArchive, identities: tuple[str, ...], *, codec: str, reserve: object = None) -> tuple[bytes, ...]:
+            body_reads.append(codec)
+            return await original_read(self, identities, codec=codec, reserve=reserve)
 
         with monkeypatch.context() as patch:
-            patch.setattr(ContentArchive, "read_contents", reject_archive)
+            patch.setattr(ContentArchive, "read_contents", track_archive)
             assert (await cold.get_view(executions[0].execution_id, tenant_id="tenant"))[1].binding_kind == kind
+        assert "execution-binding" in body_reads
+        assert set(body_reads) <= {"execution-binding", "runtime-policy"}
         assert await cold.get_fresh(executions[0].execution_id, tenant_id="tenant") == executions[0]
         changed = replace(executions[0], revision=executions[0].revision + 1)
         assert await repository.compare_and_swap(changed.execution_id, tenant_id="tenant",
             expected_revision=executions[0].revision, next_record=changed) == changed
         assert await cold.get_fresh(changed.execution_id, tenant_id="tenant") == changed
-        assert len(await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))) == 1
+        assert len([row for row in await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
+                    if row.data["codec"] == "execution-binding"]) == 1
 
         different = replace(execution.binding, **({"output_schema": {"type": "integer"}} if kind == "agent"
                             else {"output_contract": {"type": "integer"}}))
         variant = replace(execution, execution_id="variant", root_execution_id="variant", binding=different)
         await repository.create_execution(variant)
-        assert len(await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))) == 2
+        assert len([row for row in await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
+                    if row.data["codec"] == "execution-binding"]) == 2
         assert await cold.get_fresh("variant", tenant_id="tenant") == variant
     finally:
         await state.close()
@@ -482,7 +498,9 @@ def test_binding_capture_detaches_live_declarations_without_freezing_sources() -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("kind", ("agent", "task"))
-async def test_archived_binding_views_do_not_read_contract_bodies(tmp_path: Path, monkeypatch, backend: str, kind: str) -> None:
+async def test_archived_binding_views_read_the_fixed_contract_in_the_owner_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, kind: str,
+) -> None:
     from linktools.ai.execution import project_execution_view
     from linktools.ai.core import ExecutionLineageKind
     from linktools.ai.persistence._archive import ContentArchive
@@ -506,11 +524,17 @@ async def test_archived_binding_views_do_not_read_contract_bodies(tmp_path: Path
             await repository.create_execution(child)
         cold = ExecutionRepositoryImpl(repository.state_store, namespace="bindings", tenant_id="tenant")
 
-        async def reject_contract_read(*args, **kwargs):
-            raise AssertionError("execution views must not hydrate immutable contracts")
+        reads = []
+        original_read = ContentArchive.read_contents
+        async def track_contract_read(self: ContentArchive, identities: tuple[str, ...], *, codec: str, reserve: object = None) -> tuple[bytes, ...]:
+            scope = active_state_scope()
+            assert scope is not None and not scope.writable
+            assert repository.state_store in scope.transactions and self.store in scope.transactions
+            reads.append(codec)
+            return await original_read(self, identities, codec=codec, reserve=reserve)
 
         with monkeypatch.context() as patch:
-            patch.setattr(ContentArchive, "read_contents", reject_contract_read)
+            patch.setattr(ContentArchive, "read_contents", track_contract_read)
             expected = project_execution_view(execution)
             assert (await cold.get_view("execution", tenant_id="tenant"))[1] == expected
             assert (await cold.get_view_fresh("execution", tenant_id="tenant"))[1] == expected
@@ -518,7 +542,16 @@ async def test_archived_binding_views_do_not_read_contract_bodies(tmp_path: Path
             assert await cold.list_child_views("execution", tenant_id="tenant") == expected_children
             parent, children = await cold.get_view_with_children("execution", tenant_id="tenant")
             assert parent[1] == expected and children == expected_children
+        assert reads.count("execution-binding") >= 3
+        assert set(reads) <= {"execution-binding", "runtime-policy"}
         assert await cold.get("execution", tenant_id="tenant") == execution
+        _, archive = repository.state_store.storage_group.opened_archive
+        rows = await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content")))
+        owner = next(row for row in rows if row.data["codec"] == "execution-binding")
+        await archive.mutate(lambda tx: tx.delete_record(owner.key))
+        with pytest.raises(AIError) as missing:
+            await cold.get_view_fresh("execution", tenant_id="tenant")
+        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 
@@ -526,12 +559,13 @@ async def test_archived_binding_views_do_not_read_contract_bodies(tmp_path: Path
 @pytest.mark.parametrize("field,value", (("id", "other"), ("revision", 2),
     ("kind", "task"), ("max_attempts", 3), ("binding_digest", "f" * 64),
     ("capability_refs", [{"invalid": True}])))
-def test_binding_recovery_rejects_inconsistent_view_summary(field: str, value: object) -> None:
+def test_binding_reference_rejects_a_redundant_or_inconsistent_summary(field: str, value: object) -> None:
     import json
 
-    _, _, compact, content, key = _shared_record()
+    execution, _, compact, content, key = _shared_record()
     data = json.loads(canonical_json_bytes(compact.data))
-    data["value"]["payload"]["fields"]["binding"]["summary"][field] = value
+    data["value"]["payload"]["fields"]["binding"]["summary"] = {
+        **_execution_binding_summary(execution.binding), field: value}
     compact = replace(compact, data=data)
     with pytest.raises(AIError) as error:
         expand_snapshot_execution_content(compact, {key: content}, namespace="bindings", tenant_id="tenant")
@@ -544,16 +578,24 @@ def test_binding_recovery_rejects_inconsistent_view_summary(field: str, value: o
 ))
 def test_archived_binding_view_rejects_invalid_declared_identity(kind: str, identity: str, revision: object) -> None:
     import json
-    from linktools.ai.persistence.codec import decode_execution_view
+    from linktools.ai.persistence.codec import _encode_persisted_domain
+    from linktools.ai.task import TaskBindingContract
 
-    _, _, compact, _, _ = _shared_record()
+    execution, _, compact, _, key = _shared_record()
+    binding = (execution.binding if kind == "agent" else
+               TaskBindingContract("task", 1, "none", {"type": "string"}, None, 3, 0))
+    wire = json.loads(canonical_json_bytes(_encode_persisted_domain(binding)))
+    declaration = wire["agent_spec"] if kind == "agent" else wire["fields"]
+    declaration.update({"id": identity, "revision": revision})
+    raw = canonical_json_bytes(wire)
+    compression, encoded = encode_payload_bytes(raw)
+    content = ContentRecord("execution-binding", hashlib.sha256(raw).hexdigest(), len(raw), compression, body=encoded)
     data = json.loads(canonical_json_bytes(compact.data))
-    summary = data["value"]["payload"]["fields"]["binding"]["summary"]
-    summary.update({"kind": kind, "id": identity, "revision": revision,
-                    "max_attempts": None if kind == "agent" else 3,
-                    "capability_refs": summary["capability_refs"] if kind == "agent" else None})
+    data["value"]["payload"]["fields"]["binding"]["$execution_binding"] = content.identity
+    malformed = replace(compact, data=data)
+    reference = (*key[:2], content.identity)
     with pytest.raises(AIError) as error:
-        decode_execution_view(data, tenant_id="tenant")
+        expand_snapshot_execution_content(malformed, {reference: content}, namespace="bindings", tenant_id="tenant")
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

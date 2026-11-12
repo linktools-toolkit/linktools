@@ -675,9 +675,16 @@ def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValu
                     return payload
                 if reference[0] not in scopes:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return {**payload, "fields": {"content": {**payload["fields"]["content"],
+                return {**payload, "fields": {**payload["fields"], "content": {**payload["fields"]["content"],
                     "archive_scope": scopes[reference[0]]}}}
             value = map_execution_payload_slots(value, rekey_payload)
+            policy = runtime_policy_reference(value)
+            if policy is not None:
+                if policy[0] not in scopes:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                value = {**value, "fields": {**value["fields"], "runtime_policy": {
+                    **value["fields"]["runtime_policy"], "archive_scope": scopes[policy[0]]}}}
+
         if value.get("$dataclass") == "tool_operation":
             def rekey_tool(payload: Mapping) -> JsonValue:
                 reference = tool_payload_reference(payload)
@@ -685,7 +692,7 @@ def rekey_archive_roots(value: JsonValue, scopes: Mapping[str, str]) -> JsonValu
                     return payload
                 if reference[0] not in scopes:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return {**payload, "fields": {"content": {**payload["fields"]["content"],
+                return {**payload, "fields": {**payload["fields"], "content": {**payload["fields"]["content"],
                     "archive_scope": scopes[reference[0]]}}}
             value = map_tool_payload_slots(value, rekey_tool)
         reference = binding_reference(value) or task_binding_content_reference(value)

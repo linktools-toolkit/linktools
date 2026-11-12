@@ -332,7 +332,7 @@ class ToolRepositoryImpl(_RepositoryBase):
 
     async def _mutate_content(self, operation: Callable[[StateTransaction], Awaitable[_ToolValue]]) -> _ToolValue:
         if active_state_scope() is None:
-            await self._store.storage_group.open_archive()
+            await self._store.storage_group.open_archive(create=True)
         return await self._store.mutate(operation)
 
     async def _decode(self, record: StoredRecord, target: type[_ToolValue]) -> _ToolValue:

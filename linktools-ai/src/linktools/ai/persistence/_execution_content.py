@@ -396,7 +396,13 @@ class ExecutionContent:
             wire = {**wire, "fields": {**wire["fields"], "outcome": outcome}}
         raw = canonical_json_bytes(wire)
         identity = archive_content_identity(PAYLOAD_CODEC, hashlib.sha256(raw).hexdigest())
-        self._payload_encodings[key] = (ref(payload, lambda _value: self._payload_encodings.pop(key, None)), identity, raw)
+        try:
+            weak = ref(payload, lambda _value: self._payload_encodings.pop(key, None))
+        except TypeError:
+            # Slotted result/control values need not expose a weakref slot.
+            # Encoding caches are optional and must not retain their owners.
+            return identity, raw
+        self._payload_encodings[key] = (weak, identity, raw)
         return identity, raw
 
     def _binding_encoding(self, binding: AgentBindingContract | TaskBindingContract) -> tuple[str, bytes]:
