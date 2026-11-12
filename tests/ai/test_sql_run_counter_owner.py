@@ -171,3 +171,43 @@ async def test_run_counter_routing_requires_matching_step_partition(backend: str
         await store.mutate(lambda tx: tx.delete_record(_admission().key))
         assert await store.read(lambda tx: tx.scan_sequences()) == dict(sorted(dict.fromkeys(foreign, 2).items()))
         assert await bare.read(lambda tx: tx.get_sequence(owned)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialect_name", ("sqlite", "postgresql", "mysql"))
+async def test_run_counter_reservation_uses_authoritative_dialect_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dialect_name: str,
+) -> None:
+    from sqlalchemy.dialects import mysql, postgresql, sqlite
+    from linktools.ai.persistence._sql import _SqlTransaction
+    async with _open_store("sql", tmp_path) as bare:
+        store = await bare.storage_group.open_partition(
+            state_store_key("run-counter", "tenant", "trace"), create=True,
+        )
+        assert store is not None
+        record = _admission()
+        await store.mutate(lambda tx: tx.insert_record(record))
+        event, checkpoint, _ = run_counter_streams(record.key)
+        statements = []
+        original = _SqlTransaction._execute
+
+        async def execute(self: _SqlTransaction, statement: object) -> object:
+            statements.append(statement)
+            return await original(self, statement)
+
+        async def reserve(tx: StateTransaction) -> None:
+            # Exercise each dialect choice on SQLite; compile the exact statements
+            # for its server dialect too. Server execution remains covered by CI.
+            with monkeypatch.context() as patch:
+                patch.setattr(type(store.context.dialect), "name", property(lambda self: dialect_name))
+                patch.setattr(_SqlTransaction, "_execute", execute)
+                assert await tx.reserve_sequences({event: 2, checkpoint: 3}) == {event: 2, checkpoint: 3}
+                assert await tx.reserve_sequence(event, 4) == 6
+        await store.mutate(reserve)
+        assert sum(bool(getattr(statement, "is_select", False)) for statement in statements) == (2 if dialect_name == "mysql" else 0)
+        dialect = {"sqlite": sqlite, "postgresql": postgresql, "mysql": mysql}[dialect_name].dialect()
+        for statement in statements:
+            sql = str(statement.compile(dialect=dialect))
+            if getattr(statement, "is_update", False):
+                assert ("RETURNING" in sql) == (dialect_name != "mysql")
+        assert await store.read(lambda tx: tx.get_sequences((event, checkpoint))) == {event: 6, checkpoint: 3}

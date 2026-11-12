@@ -2387,19 +2387,40 @@ class _SqlTransaction:
         if run_requests:
             from sqlalchemy import func, update
             table = self._table("ai_step_run_admissions")
+            returning = self._context.dialect.name in {"sqlite", "postgresql"}
             owners: dict[bytes, dict[str, object]] = {}
             for key, count in run_requests.items():
                 address = run_counter_address(key, store_key=self._store_key)
                 assert address is not None
                 owner, column = address
                 owners.setdefault(owner, {})[column] = func.coalesce(table.c[column], 0) + count
+            returned: dict[bytes, Mapping[str, object]] = {}
             for owner, values in sorted(owners.items()):
-                changed = await self._execute(update(table).where(
+                statement = update(table).where(
                     table.c.store_key == self._store_key, _key_matches(table.c.key, owner),
-                ).values(**values, updated_at=func.current_timestamp()))
-                if changed.rowcount != 1:
+                ).values(**values, updated_at=func.current_timestamp())
+                if returning:
+                    changed = await self._execute(statement.returning(
+                        table.c.key, table.c.key_locator, *(table.c[column] for column in values),
+                    ))
+                    row = changed.mappings().one_or_none()
+                    matched = row is not None
+                    if row is not None:
+                        _validate_locators(row, "key")
+                        if row["key"] != owner:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        returned[owner] = row
+                else:
+                    matched = (await self._execute(statement)).rowcount == 1
+                if not matched:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-            result = dict(await self._read_run_sequences(tuple(run_requests)))
+            if returning:
+                result = {}
+                for key in run_requests:
+                    owner, column = run_counter_address(key, store_key=self._store_key)
+                    result[key] = _row_nonnegative_int(returned[owner][column])
+            else:
+                result = dict(await self._read_run_sequences(tuple(run_requests)))
             self._sequence_cache.update(result)
             ordinary = {key: count for key, count in requests.items() if key not in run_requests}
             if ordinary:
