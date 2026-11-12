@@ -23,6 +23,7 @@ def _load(tmp_path, source):
     manager = _fresh_standalone_manager(tmp_path)
     with patch.object(__cap_cntr__, "get_asset_path", return_value=tmp_path):
         containers = list(manager.containers.values())
+        manager.lifecycle.initialize()
     return containers, manager.container_load_errors
 
 
@@ -71,19 +72,45 @@ def test_plain_container_inherits_non_generated_lifecycle_defaults(tmp_path: Pat
     assert not hasattr(container, "apply_config")
 
 
-@pytest.mark.parametrize("method", ["__init__", "on_init"])
-def test_native_initialization_failure_does_not_publish_container(tmp_path: Path, method: str) -> None:
+def test_construction_failure_does_not_publish_container(tmp_path: Path) -> None:
     containers, errors = _load(tmp_path, """\
         from linktools.cntr import BaseContainer
 
         class Container(BaseContainer):
-            def %s(self, *args):
+            def __init__(self, *args):
                 raise ValueError("broken native initialization")
-    """ % method)
+    """)
     assert containers == []
     assert len(errors) == 1
     assert errors[0].expected_name == "example"
     assert "broken native initialization" in errors[0].message
+
+
+def test_on_init_failure_aborts_initialization_without_dropping_container(tmp_path: Path) -> None:
+    from linktools.capabilities.cntr import __cap_cntr__
+
+    root = tmp_path / "100-example"
+    root.mkdir()
+    (root / "container.py").write_text(textwrap.dedent("""\
+        from linktools.cntr import BaseContainer
+
+        class Container(BaseContainer):
+            def on_init(self):
+                self.init_calls = getattr(self, "init_calls", 0) + 1
+                raise ValueError("broken native initialization")
+    """), encoding="utf-8")
+
+    manager = _fresh_standalone_manager(tmp_path)
+    with patch.object(__cap_cntr__, "get_asset_path", return_value=tmp_path):
+        containers = manager.containers
+        assert set(containers) == {"example"}
+        with pytest.raises(ValueError, match="broken native initialization"):
+            manager.lifecycle.initialize()
+        with pytest.raises(ValueError, match="broken native initialization"):
+            manager.load_installed_config_metadata()
+    assert manager.containers is containers
+    assert containers["example"].init_calls == 1
+    assert manager.container_load_errors == []
 
 
 def test_load_all_returns_capable_containers_without_companion_mapping(
@@ -136,6 +163,9 @@ def test_on_init_can_access_all_constructed_containers(tmp_path: Path, monkeypat
 
     assert manager.container_load_errors == []
     assert set(containers) == {"first", "second"}
+    assert not hasattr(containers["first"], "peer")
+    assert not hasattr(containers["second"], "peer")
+    manager.lifecycle.initialize()
     assert containers["first"].peer is containers["second"]
     assert containers["second"].peer is containers["first"]
     assert manager.containers is containers
@@ -153,7 +183,7 @@ def test_load_all_defers_hooks_until_manager_publishes_containers(
 
         class Container(BaseContainer):
             def on_init(self):
-                self.initialized = True
+                self.init_count = getattr(self, "init_count", 0) + 1
     """), encoding="utf-8")
 
     manager = _fresh_standalone_manager(tmp_path)
@@ -161,8 +191,73 @@ def test_load_all_defers_hooks_until_manager_publishes_containers(
     result = manager.loader.load_all()
 
     assert len(result.containers) == 1
-    assert not hasattr(result.containers[0], "initialized")
-    assert manager.containers["example"].initialized
+    assert not hasattr(result.containers[0], "init_count")
+    container = manager.containers["example"]
+    assert not hasattr(container, "init_count")
+    manager.lifecycle.initialize()
+    manager.lifecycle.initialize()
+    assert container.init_count == 1
+
+
+def test_metadata_initializes_containers_before_resolving_installed_state(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.capabilities.cntr import __cap_cntr__
+
+    root = tmp_path / "100-example"
+    root.mkdir()
+    (root / "container.py").write_text(textwrap.dedent("""\
+        from linktools.cntr import BaseContainer
+
+        class Container(BaseContainer):
+            def on_init(self):
+                self.init_count = getattr(self, "init_count", 0) + 1
+                assert self.containers[self.name] is self
+    """), encoding="utf-8")
+
+    manager = _fresh_standalone_manager(tmp_path)
+    monkeypatch.setattr(__cap_cntr__, "get_asset_path", lambda *parts: tmp_path)
+    container = manager.containers["example"]
+
+    def get_installed(resolve: bool = True):
+        assert resolve
+        assert container.init_count == 1
+        return [container]
+
+    monkeypatch.setattr(manager.installed_state, "get", get_installed)
+    assert manager.load_installed_config_metadata() == [container]
+    assert manager.load_installed_config_metadata() == [container]
+    assert container.init_count == 1
+
+
+def test_installed_name_choices_initialize_before_resolving_dependencies(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.capabilities.cntr import __cap_cntr__
+    from linktools.cntr.commands import _shared
+
+    root = tmp_path / "100-example"
+    root.mkdir()
+    (root / "container.py").write_text(textwrap.dedent("""\
+        from linktools.cntr import BaseContainer
+
+        class Container(BaseContainer):
+            def on_init(self):
+                self.initialized = True
+    """), encoding="utf-8")
+
+    manager = _fresh_standalone_manager(tmp_path)
+    monkeypatch.setattr(__cap_cntr__, "get_asset_path", lambda *parts: tmp_path)
+    monkeypatch.setattr(_shared, "manager", manager)
+    container = manager.containers["example"]
+
+    def get_installed(resolve: bool = True):
+        assert resolve
+        assert container.initialized
+        return [container]
+
+    monkeypatch.setattr(manager.installed_state, "get", get_installed)
+    assert _shared.iter_container_names() == ["example"]
+    assert not hasattr(container, "initialized")
+    assert _shared.iter_installed_container_names() == ["example"]
 
 
 def test_builtin_containers_do_not_implement_removed_config_lifecycle(fresh_manager: "ContainerManager") -> None:

@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ContainerLoadError:
     """One ``container.py``/compose-file discovery that failed to load --
-    import error, ``on_init()`` error, or any other exception raised while
-    constructing the container. ``expected_name`` is a best-effort guess
+    import error or any other exception raised while constructing the
+    container. ``expected_name`` is a best-effort guess
     (the directory's name with any numeric order prefix stripped, the same
     convention ``BaseContainer.__init__`` uses) -- ``None`` when the
     failure happened before a name could even be determined (e.g. a syntax

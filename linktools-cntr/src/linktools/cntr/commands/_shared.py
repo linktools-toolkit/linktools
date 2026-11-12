@@ -14,4 +14,5 @@ def iter_container_names() -> "list[str]":
 
 
 def iter_installed_container_names() -> "list[str]":
+    manager.lifecycle.initialize()
     return [container.name for container in manager.installed_state.get()]

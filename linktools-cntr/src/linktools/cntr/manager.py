@@ -60,10 +60,7 @@ class ContainerManager:
         self.config = self.environ.build_config("container", "")
         self.config.update_defaults(**self.fields)
 
-        # Populated by the `containers` cached_property -- structured load
-        # failures (import/on_init errors) from the last time containers
-        # were discovered, for callers (e.g. Doctor) that want to report
-        # them instead of only the log-only warning.
+        # Discovery errors are retained for diagnostics such as Doctor.
         self.container_load_errors: "list[ContainerLoadError]" = []
 
         self.docker_container_name = "container.py"
@@ -204,8 +201,6 @@ class ContainerManager:
 
     @cached_property
     def containers(self) -> "dict[str, BaseContainer]":
-        from .registry.loader import ContainerLoadError
-
         result = dict()
         load_result = self.loader.load_all()
         for container in load_result.containers:
@@ -217,32 +212,16 @@ class ContainerManager:
             result[container.name] = container
 
         installed_names = self.installed_state.load_names()
-        # Publish every constructed container before invoking on_init so hooks
-        # can resolve each other through the regular manager property.
-        self.containers = result
-        try:
-            for container in tuple(result.values()):
-                try:
-                    container.on_init()
-                except Exception as error:
-                    self.logger.warning(f"Failed to load container from `{container.root_path}`: {error}")
-                    load_result.errors.append(ContainerLoadError(
-                        path=str(container.root_path), message=str(error), expected_name=container.name))
-                    del result[container.name]
-
-            self.container_load_errors = load_result.errors
-            errors_by_name = {e.expected_name: e for e in load_result.errors if e.expected_name}
-            for name in installed_names:
-                if name not in result:
-                    error = errors_by_name.get(name)
-                    if error is not None:
-                        self.logger.warning(
-                            f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
-                    else:
-                        self.logger.warning(f"Not found installed container `{name}`, skip.")
-        except BaseException:
-            self.__dict__.pop("containers", None)
-            raise
+        self.container_load_errors = load_result.errors
+        errors_by_name = {e.expected_name: e for e in load_result.errors if e.expected_name}
+        for name in installed_names:
+            if name not in result:
+                error = errors_by_name.get(name)
+                if error is not None:
+                    self.logger.warning(
+                        f"Installed container `{name}` failed to load from `{error.path}`: {error.message}")
+                else:
+                    self.logger.warning(f"Not found installed container `{name}`, skip.")
         return result
 
     @cached_property
@@ -365,6 +344,7 @@ class ContainerManager:
         Returns ``[]`` when nothing is installed instead of raising -- see
         ``prepare_installed_containers`` for the variant that rejects an empty installed project.
         """
+        self.lifecycle.initialize()
         containers = self.installed_state.get(resolve=True)
         for container in self.containers.values():
             container.enable = container in containers
