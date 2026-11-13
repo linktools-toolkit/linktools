@@ -14,6 +14,32 @@ import sys
 import tempfile
 
 
+def measure_table_bytes(connection: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """Count every AI table's stored text/blob bytes, including referenced bodies.
+
+    This is logical column data, not index pages, numeric fields or file size.
+    Discover tables so baseline records and current Step/Object owners use the
+    same accounting, without counting references as additional body copies.
+    """
+    result = {}
+    tables = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'ai_*' ORDER BY name"
+    ).fetchall()
+    for (name,) in tables:
+        quoted = '"' + name.replace('"', '""') + '"'
+        columns = connection.execute(f"PRAGMA table_info({quoted})").fetchall()
+        sizes = []
+        for column in columns:
+            key = '"' + column[1].replace('"', '""') + '"'
+            sizes.append(f"CASE WHEN typeof({key}) IN ('text', 'blob') "
+                         f"THEN length(CAST({key} AS BLOB)) ELSE 0 END")
+        count, size = connection.execute(
+            f"SELECT count(*), coalesce(sum({' + '.join(sizes)}), 0) FROM {quoted}"
+        ).fetchone()
+        result[name] = {"rows": count, "text_and_blob_bytes": size}
+    return result
+
+
 async def main(root: Path) -> None:
     # Select the measured checkout before importing project modules or fixtures.
     sys.path[:0] = [str(root), str(root / "linktools-ai/src"), str(root / "linktools/src")]
@@ -63,15 +89,11 @@ async def main(root: Path) -> None:
             finally:
                 event.remove(engine, "before_cursor_execute", sql)
         with sqlite3.connect(path) as connection:
-            rows = connection.execute(
-                "SELECT kind, count(*), sum(length(payload_json)), "
-                "sum(coalesce(length(payload_bytes), 0)) "
-                "FROM ai_state_records GROUP BY kind"
-            ).fetchall()
+            table_bytes = measure_table_bytes(connection)
         print(json.dumps({
             "root": str(root),
-            "kinds": rows,
-            "json_plus_binary": sum((row[2] or 0) + (row[3] or 0) for row in rows),
+            "tables": table_bytes,
+            "text_and_blob_bytes": sum(row["text_and_blob_bytes"] for row in table_bytes.values()),
             "file_bytes": path.stat().st_size,
             "sql": {"/".join(key): value for key, value in sorted(counts.items())},
         }))

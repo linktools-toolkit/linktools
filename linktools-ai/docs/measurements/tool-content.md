@@ -1,5 +1,20 @@
 # Tool content database references
 
+## Historical measurement, not current branch performance
+
+The numbers below apply only to the named commits. Current tool owners and
+bodies have moved to `ai_step_tool_operations` and `ai_step_messages`; the old
+records-only total must not be used to claim current total storage savings.
+
+The manual script now reports per-table row counts and `text_and_blob_bytes`
+for **all** `ai_*` tables, including Step content and database object chunks.
+Text is counted as UTF-8 bytes, not SQLite character counts. It includes keys
+and metadata but excludes numeric values, indexes and page overhead; file size
+is reported separately. This broader metric is intentionally not comparable
+to the historical payload-only total. Rerun the updated script against both
+checkouts before reporting a new saving. Its schema inspection runs after the
+SQL measurement listener has been removed, so does not affect IO counts.
+
 Manual SQLite probe, 2026-11-12. Baseline eac69900; candidate 7ab90dd2 plus the
 snapshot restore closure correction. No schema changes. Formal test suites were
 not run locally; regression coverage is intended for CI.
