@@ -197,7 +197,7 @@ class InMemoryStateStorageGroup:
         if create and self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
         if self._archive is None and create:
-            store = InMemoryStateStore(self, archive=True, cache=self._archive_cache)
+            store = InMemoryStateStore(self, archive=True, cache=self._archive_cache, store_key=STATE_GROUP_ARCHIVE_KEY)
             await store.initialize()
             self._archive = (uuid4().hex, store)
         return self._archive

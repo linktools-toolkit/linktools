@@ -453,15 +453,21 @@ class ContentArchive:
         return await self._prepare_content(values, prepared)
 
     async def ensure_content(self, values: Sequence[tuple[str, bytes]]) -> tuple[str, ...]:
-        """Verify current immutable bytes and publish only contents not yet present."""
+        """Publish typed payloads by address; retain other immutable content contracts."""
+        from ._step_payload_owner import payload_address
         keys = self.content_record_keys(values)
+        opened = self.store.storage_group.opened_archive
+        typed_owner = opened is not None and opened[1] is self.store
 
         async def ensure(transaction: StateTransaction) -> tuple[str, ...]:
-            existing = await transaction.get_records(keys)
             prepared = PreparedArchive()
-            self.observe_content(prepared, keys, existing)
-            identities = await self.prepare_content(values, prepared)
-            prepared.records = {key: record for key, record in prepared.records.items() if key not in existing}
+            if typed_owner and all(payload_address(key) is not None for key in keys):
+                identities = await self.prepare_content(values, prepared)
+            else:
+                existing = await transaction.get_records(keys)
+                self.observe_content(prepared, keys, existing)
+                identities = await self.prepare_content(values, prepared)
+                prepared.records = {key: record for key, record in prepared.records.items() if key not in existing}
             if prepared.records:
                 await self.publish(transaction, prepared)
             return identities
@@ -470,7 +476,10 @@ class ContentArchive:
 
     async def _prepare_content(self, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
                                existing: Mapping[bytes, StoredRecord] | None = None) -> tuple[str, ...]:
+        from ._step_payload_owner import payload_address
         self._bind(prepared)
+        opened = self.store.storage_group.opened_archive
+        typed_owner = opened is not None and opened[1] is self.store
         identities: list[str] = []
         unique: dict[str, tuple[str, bytes, str]] = {}
         for codec, raw in values:
@@ -483,7 +492,9 @@ class ContentArchive:
         observed = {key: prepared._observed_content.pop(key) for key in keys.values()
                     if key in prepared._observed_content}
         if existing is None:
-            unread = tuple(key for key in missing if key not in observed)
+            # Typed payloads have one immutable content address. Publication
+            # keeps the first stored representation; no body pre-read is needed.
+            unread = tuple(key for key in missing if key not in observed and (not typed_owner or payload_address(key) is None))
             existing = dict(await self.store.read_records(unread)) if unread else {}
             existing.update((key, record) for key, record in observed.items() if record is not None)
         for identity, (codec, raw, digest) in unique.items():
@@ -495,7 +506,7 @@ class ContentArchive:
                 content = self._decode_content_record(stored)
                 if content.identity != identity or content.raw_size != len(raw):
                     raise _integrity()
-                if not prepared.content_verified(stored):
+                if not prepared.content_verified(stored) and (not typed_owner or payload_address(key) is None):
                     if await self._load_content(content) != raw:
                         raise _integrity()
                     prepared.verify_content(stored)

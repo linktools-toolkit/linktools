@@ -94,17 +94,22 @@ class StepPayloadSql:
             statement = statement.limit(limit)
         return tuple(payload_record_from_row(row) for row in (await self.execute(statement)).mappings())
 
-    async def insert(self, records: Sequence[StoredRecord], *, immutable: bool) -> None:
+    async def insert(self, records: Sequence[StoredRecord], *, immutable: bool) -> set[bytes]:
         from sqlalchemy import insert
+        inserted: set[bytes] = set()
         for offset in range(0, len(records), 64):
             values = [payload_record_values(record) for record in records[offset:offset + 64]]
             if immutable:
-                await self.context.run_statement(self.context.dialect.insert_immutable_many(
+                count = await self.context.run_statement(self.context.dialect.insert_ignore_conflict_many(
                     self.session, table=self.table, rows=values,
-                    index_elements=("store_locator", "sha256"), conflict_column="gc_revision",
+                    index_elements=("store_locator", "sha256"),
                 ))
+                if count == len(values):
+                    inserted.update(record.key for record in records[offset:offset + 64])
             else:
                 await self.execute(insert(self.table).values(values))
+                inserted.update(record.key for record in records[offset:offset + 64])
+        return inserted
 
     async def guard(self, key: bytes, revision: int) -> bool:
         from sqlalchemy import update

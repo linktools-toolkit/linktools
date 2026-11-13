@@ -142,7 +142,10 @@ class _MemoryTransaction:
             self.guarded_record_keys.add(record.key)
 
     async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
+        from ._record_owner import record_owner_table
         values = tuple(records)
+        payload_keys = {record.key for record in values
+                        if record_owner_table(record.key, store_key=self._store_key) == "ai_step_messages"}
         try:
             if len({record.key for record in values}) != len(values):
                 raise ValueError("insert_immutable_records contains duplicate keys")
@@ -150,14 +153,15 @@ class _MemoryTransaction:
                 validate_record_identity(record)
                 self._validate_record(record)
                 current = self.records.get(record.key)
-                if current is not None and (
+                if current is not None and record.key not in payload_keys and (
                     replace(current, data={}) != replace(record, data={})
                     or canonical_json_bytes(dict(current.data)) != canonical_json_bytes(dict(record.data))
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for record in values:
-                self.records[record.key] = record
-                self.guarded_record_keys.add(record.key)
+                if record.key not in payload_keys or record.key not in self.records:
+                    self.records[record.key] = record
+                    self.guarded_record_keys.add(record.key)
         except BaseException as error:
             if self.mutation_error is None:
                 self.mutation_error = error

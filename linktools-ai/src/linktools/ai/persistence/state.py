@@ -627,8 +627,10 @@ class StateTransaction(Protocol):
     async def insert_record(self, record: StoredRecord) -> None: ...
     async def insert_records(self, records: Sequence[StoredRecord]) -> None: ...
     async def insert_immutable_records(self, records: Sequence[StoredRecord]) -> None:
-        """Insert or confirm byte-exact immutable records without a preceding read.
+        """Insert immutable records without a preceding read.
 
+        Typed content-addressed payloads retain the first representation; other
+        immutable records require byte-exact equality.
         Any failure poisons the enclosing mutation, even if the callback catches it.
         """
         ...

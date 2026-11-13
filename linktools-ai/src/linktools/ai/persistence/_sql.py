@@ -806,7 +806,7 @@ class SqlStateStorageGroup:
                 }
                 changed_partitions = {
                     transaction._store_key for transaction in transactions.values()
-                    if transaction._guarded_record_revisions or transaction._deleted_records
+                    if transaction._guarded_record_revisions or transaction._deleted_records or transaction._payloads_published
                 }
                 changed = {store for store in members if store.store_key in changed_partitions}
                 return result
@@ -1195,6 +1195,7 @@ class _SqlTransaction:
         self._context = context
         self._store_key = store_key
         self._guarded_record_revisions: dict[bytes, int] = {}
+        self._payloads_published = False
         self._deleted_records = False
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
@@ -1709,13 +1710,21 @@ class _SqlTransaction:
             try:
                 if len({record.key for record in values}) != len(values):
                     raise ValueError("duplicate payload keys")
-                await self._payload_owner().insert(values, immutable=True)
+                inserted = await self._payload_owner().insert(values, immutable=True)
+                # A mixed/unknown insertion count still invalidates this partition,
+                # without inventing a physical revision for existing payloads.
+                self._payloads_published = bool(values)
             except BaseException as error:
                 self._abort_mutation(error)
                 raise
             for record in values:
-                self._record_cache[record.key] = record
-                self._guarded_record_revisions[record.key] = record.storage_revision
+                if record.key in inserted:
+                    self._record_cache[record.key] = record
+                    self._guarded_record_revisions[record.key] = record.storage_revision
+                else:
+                    # A previous representation/revision won. Do not treat our
+                    # candidate as an observation of that physical row.
+                    self._record_cache.pop(record.key, None)
             return
         try:
             if len({record.key for record in values}) != len(values):

@@ -164,7 +164,7 @@ async def test_ensure_content_checks_current_bytes_without_republishing_existing
     await state.initialize(namespace="archive", tenant_id="tenant")
     try:
         archive = await _archive(state)
-        values = (("execution-payload", b"shared terminal bytes"),)
+        values = (("execution-binding", b"shared terminal bytes"),)
         publications = []
         preparations = []
         publish = archive.publish

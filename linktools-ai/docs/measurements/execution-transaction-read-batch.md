@@ -43,3 +43,39 @@ owner-write regression files passed: 29 passed, 2 skipped. A focused regression
 checks complete transactional reconstruction and reuse within that transaction.
 Tests use the repository's `manage._run_pytest` entry point; no CI dispatch or rerun
 was performed. MySQL/PostgreSQL service validation remains with the existing owner.
+
+## Follow-up: typed payload publication by content address
+
+Typed `execution-payload` bodies now use insert-if-absent in their existing Step
+payload partition instead of reading/decompressing existing bytes before publishing.
+The first stored representation wins, including when equivalent content has raw and
+zlib representations. This removes redundant content-address body comparison, not
+owner identity, tenant isolation, source decoding, CAS or transaction rollback.
+Other immutable State records and Native messages/sequences retain their contracts.
+
+The SQL transaction caches a candidate revision only when insertion is confirmed.
+Duplicate/unknown outcomes do not overwrite the winner's representation or GC
+revision. A mixed insert still invalidates the partition's read cache. Memory uses
+the same archive-partition semantics. No table, cache or recovery mechanism is added.
+
+Same fixture and counting window:
+
+| Metric, both turns | Prior batch-read change | With payload publication change |
+| --- | ---: | ---: |
+| SELECT | 77 (37 + 40) | 63 (30 + 33) |
+| INSERT | 131 | 131 |
+| UPDATE | 46 | 46 |
+| Transactions / commits | 51 / 51 | 49 / 49 |
+| Write commits | 38 | 38 |
+| Bound text/blob bytes | 224,892 | 224,291 |
+| Decoded State-record JSON bytes | 38,445 | 47,214 |
+
+Decoded State-record bytes are a partial instrumentation counter, not total returned
+SQL bytes. They rise while SELECT count falls, so this result does not claim every
+IO metric improved or that overall IO work is finished.
+
+Validation after final edits: 60 relevant regression/probe cases passed; the five
+new focused payload cases passed separately. They cover raw/zlib winner reuse,
+nonzero GC revision, a guard before duplicate publication, concurrent duplicates,
+no existence pre-read, mixed old/new insertion with cached absence, and unknown
+insertion counts. Existing tool tests cover owner rollback and portable cold recovery.
