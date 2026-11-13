@@ -226,6 +226,7 @@ async def test_reopened_writer_rebuilds_reclaimed_root_without_resurrecting_repl
         await stores[0].close()
         await stores[1].purge_unreferenced_content(exclusive=_Offline())
         assert await _count(engines[0], "ai_step_messages") == 1
+        stores[0] = SqlStepStore(engines[0], namespace="steps", tenant_id="one", max_snapshots_per_run=1)
         await stores[0].save_snapshot(old)
         assert await _count(engines[0], "ai_step_messages") == 1
         assert await stores[0].latest_snapshot(run_id="run") == _snapshot("run", 2, "current")

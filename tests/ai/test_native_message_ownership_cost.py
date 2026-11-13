@@ -93,6 +93,7 @@ class _Traffic:
     def assert_owner_metadata(
         self, start: int, *, store_key: bytes, record_store: bytes, root: str,
         binding_store: bytes | None = None, payload_store: bytes | None = None,
+        root_reads: int = 1,
     ) -> None:
         kinds: Counter[str] = Counter()
         for statement, parameters in self.reads[start:]:
@@ -117,7 +118,7 @@ class _Traffic:
                 kinds['payload'] += 1
             else:
                 raise AssertionError(f"unexpected online owner read: {statement}")
-        expected = Counter(owner=1, root=1)
+        expected = Counter(owner=1, root=root_reads)
         if binding_store is not None:
             expected['binding'] = 1
         if payload_store is not None:
@@ -546,7 +547,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
                 await archive.state_store.mutate(publish)
                 writer_traffic.assert_owner_metadata(
                     reads, store_key=native.store_key, record_store=archive.state_store.store_key,
-                    root=projection.items[0].root.slices[0].first,
+                    root=projection.items[0].root.slices[0].first, root_reads=0,
                 )
                 phase_reads['archive'] += writer_traffic.statements['SELECT'] - reads
                 limits = {
@@ -618,7 +619,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         # separately from the zero-encode frozen projection/context reuse path.
         assert phase_encodings['mutable_snapshot_freeze'] <= turns * (turns + 1) // 2
         assert phase_encodings['frozen_projection'] == phase_encodings['confirmed_context'] == 0
-        assert phase_reads == {'snapshot': 0, 'archive': 4 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
+        assert phase_reads == {'snapshot': 0, 'archive': 2 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
         assert writer_traffic.statements['SELECT'] == sum(phase_reads.values())
         assert reader_traffic.statements['SELECT'] == turns
         assert 0 < writer_traffic.preparations <= 2 * turns
