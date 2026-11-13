@@ -16,6 +16,7 @@ from ._execution_repositories import ExecutionRepositoryImpl
 from ._plan import PersistenceDomain, PersistencePlan
 
 if TYPE_CHECKING:
+    from ..execution import ExecutionRetentionRecord
     from .contracts import ExecutionRecord
     from .state import StateTransaction
 
@@ -79,7 +80,9 @@ class RuntimeRetentionController:
         self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
     ) -> bool:
         repository = self._execution.executions
-        async def read_source(transaction: "StateTransaction") -> "ExecutionRecord | None":
+        async def read_source(transaction: "StateTransaction") -> "ExecutionRecord | ExecutionRetentionRecord | None":
+            if type(repository) is ExecutionRepositoryImpl:
+                return await repository.get_retention_in_transaction(transaction, execution_id, tenant_id=tenant_id)
             return await repository.get_in_transaction(transaction, execution_id, tenant_id=tenant_id)
 
         # A complete terminal publication already owns this immutable identity
@@ -90,7 +93,9 @@ class RuntimeRetentionController:
         if publication is not None:
             retained = publication.execution
         if retained is None:
-            retained = await repository.state_store.read(read_source)
+            retained = (await repository.read_content(lambda _group: repository.state_store.read(read_source))
+                        if type(repository) is ExecutionRepositoryImpl else
+                        await repository.state_store.read(read_source))
         if retained is not None and retained.status not in {
             ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
         }:

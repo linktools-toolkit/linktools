@@ -171,16 +171,26 @@ class StepRunRegistration:
         """Use the native registration's existing durable identity operation."""
         self._prepare_token = prepare_token
 
+    async def prepare_registration(self, *, conversation_id: str | None) -> RunRecord:
+        """Prepare the final replay identity before any metadata owner publishes it."""
+        if self._record is not None and self._record.registration_id is not None:
+            return self.prepare(conversation_id=conversation_id)
+        if self._prepare_token is None:
+            raise RuntimeError("native registration producer is not bound")
+        token, timestamp = await self._prepare_token()
+        if (not isinstance(token, str) or not token or not isinstance(timestamp, datetime)
+                or timestamp.tzinfo is None):
+            raise ValueError("native registration seed is invalid")
+        return self.prepare(conversation_id=conversation_id, registration_id=token,
+                            started_at=timestamp)
+
     async def prepare_started(self, *, conversation_id: str | None, step_index: int) -> tuple[RunRecord, StepEvent]:
         """Derive the canonical start from one replay-stable registration clock."""
         if not self.share_started or self._prepare_token is None:
             raise RuntimeError("native start producer is not bound")
         if self._started is None:
-            token, timestamp = await self._prepare_token()
-            if (not isinstance(token, str) or not token or not isinstance(timestamp, datetime)
-                    or timestamp.tzinfo is None):
-                raise ValueError("native registration seed is invalid")
-            record = self.prepare(conversation_id=conversation_id, registration_id=token, started_at=timestamp)
+            record = await self.prepare_registration(conversation_id=conversation_id)
+            timestamp = record.started_at
             self._started = StepEvent(
                 run_id=record.run_id, kind="run_started", step_index=step_index,
                 timestamp=timestamp, conversation_id=record.conversation_id,
@@ -629,8 +639,8 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
             self._atomic_pending_events.append(started)
             self._atomic_event_sequence = max(1, self._atomic_event_sequence)
             return
-        registration_id, _ = await self._atomic_registration_seed()
         if self.run_registration is None:
+            registration_id, _ = await self._atomic_registration_seed()
             self._atomic_pending_run = RunRecord(
                 run_id=self._atomic_effective_run_id(ctx),
                 conversation_id=ctx.conversation_id,
@@ -640,8 +650,8 @@ class AtomicStepPersistence(StepPersistence[AgentDepsT]):
                 registration_id=registration_id,
             )
         else:
-            self._atomic_pending_run = self.run_registration.prepare(
-                conversation_id=ctx.conversation_id, registration_id=registration_id,
+            self._atomic_pending_run = await self.run_registration.prepare_registration(
+                conversation_id=ctx.conversation_id,
             )
         self._atomic_pending_events.append(self._atomic_prepare_event(ctx, kind="run_started"))
 

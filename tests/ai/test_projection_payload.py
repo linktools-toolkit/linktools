@@ -171,3 +171,10 @@ def test_old_projection_cannot_acknowledge_new_interaction_content() -> None:
     assert _projection(store).interactions == second.interactions
     store.acknowledge_interactions_local("run", second.interactions)
     assert not _projection(store).interactions
+
+
+def test_projection_payload_restores_fixed_address_bytes_without_rehashing() -> None:
+    _, captured = _capture()
+    changed = replace(captured, payloads=tuple((digest, b"x" * len(raw)) for digest, raw in captured.payloads))
+    restored = decode_projection_payload(encode_projection_payload(changed))
+    assert restored.payloads == changed.payloads

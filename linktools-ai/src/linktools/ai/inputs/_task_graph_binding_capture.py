@@ -12,9 +12,9 @@ from ..core import (
     JsonValue,
 )
 from ..errors import AIError, ErrorCode
-from ..persistence.state import StateStore
+from ..persistence.state import StateStore, StateTransaction
 from ..persistence.captures import (
-    capture_record_value, read_capture_record, publish_capture_record,
+    capture_record, capture_record_value, read_capture_record,
     prepare_task_binding_value, read_task_binding_value, validate_task_binding_payload,
 )
 from ..task import Task, TaskExpander, TaskGraph, TaskGraphAdmission, TaskNode, TaskRef
@@ -108,13 +108,6 @@ class TaskGraphBindingCaptureStore:
             expander_declarations,
         )
 
-        existing = await read_capture_record(self._state_store, namespace=self._namespace,
-                                             tenant_id=admission.principal.tenant_id, key=key)
-        if existing is not None:
-            capture = await self._read(capture_record_value(existing), admission)
-            _validate_required_declarations(capture, graph, task_declarations, expander_declarations)
-            return capture
-
         manifest: dict[str, JsonValue] = {
             "kind": _KIND,
             "format_version": _VERSION,
@@ -131,37 +124,61 @@ class TaskGraphBindingCaptureStore:
                 for _identity, value in sorted(captured_expanders.items())
             ],
         }
-        value = await prepare_task_binding_value(self._state_store, manifest,
-                    namespace=self._namespace, tenant_id=admission.principal.tenant_id)
-        try:
-            stored = await publish_capture_record(self._state_store, namespace=self._namespace,
-                tenant_id=admission.principal.tenant_id, key=key, value=value)
-        except AIError as error:
-            if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
-                raise
-            stored = await read_capture_record(self._state_store, namespace=self._namespace,
+        group = self._state_store.storage_group
+        if group.opened_archive is None:
+            await group.open_archive()
+
+        async def read_existing(_transaction: StateTransaction) -> TaskGraphBindingCapture | None:
+            existing = await read_capture_record(self._state_store, namespace=self._namespace,
                 tenant_id=admission.principal.tenant_id, key=key)
-            if stored is None:
+            if existing is None:
+                return None
+            capture = await self._read(capture_record_value(existing), admission)
+            _validate_required_declarations(capture, graph, task_declarations, expander_declarations)
+            return capture
+
+        existing = await self._state_store.read(read_existing)
+        if existing is not None:
+            return existing
+        if group.opened_archive is None and (captured_tasks or captured_expanders):
+            await group.open_archive(create=True)
+
+        async def publish(transaction: StateTransaction) -> TaskGraphBindingCapture:
+            value = await prepare_task_binding_value(self._state_store, manifest,
+                namespace=self._namespace, tenant_id=admission.principal.tenant_id)
+            record = capture_record(self._namespace, admission.principal.tenant_id, key, value)
+            await transaction.insert_record(record)
+            capture = await self._read(capture_record_value(record), admission)
+            _validate_required_declarations(capture, graph, task_declarations, expander_declarations)
+            return capture
+
+        try:
+            return await self._state_store.mutate(publish)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-        capture = await self._read(capture_record_value(stored), admission)
-        _validate_required_declarations(
-            capture,
-            graph,
-            task_declarations,
-            expander_declarations,
-        )
-        return capture
+            # Resolve a concurrent publication only after the mutation rolled back.
+            capture = await self.load(admission)
+            _validate_required_declarations(capture, graph, task_declarations, expander_declarations)
+            return capture
 
     async def load(
         self,
         admission: TaskGraphAdmission,
     ) -> TaskGraphBindingCapture:
         key = self._key(admission)
-        record = await read_capture_record(self._state_store, namespace=self._namespace,
-            tenant_id=admission.principal.tenant_id, key=key)
-        if record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details={"graph_id": admission.graph_id})
-        return await self._read(capture_record_value(record), admission)
+        group = self._state_store.storage_group
+        if group.opened_archive is None:
+            await group.open_archive()
+
+        async def read(_transaction: StateTransaction) -> TaskGraphBindingCapture:
+            record = await read_capture_record(self._state_store, namespace=self._namespace,
+                tenant_id=admission.principal.tenant_id, key=key)
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details={"graph_id": admission.graph_id})
+            return await self._read(capture_record_value(record), admission)
+
+        return await self._state_store.read(read)
 
     async def _read(self, value: JsonValue, admission: TaskGraphAdmission) -> TaskGraphBindingCapture:
         manifest = await read_task_binding_value(self._state_store, value,

@@ -11,7 +11,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.state import StateGroupTransaction, StateStore, StoredRecord
-from linktools.ai.persistence.state import ALIAS_KEY_MAX_BYTES, StoredAlias, StateTransactionNestingError, state_store_key
+from linktools.ai.persistence.state import RECORD_KEY_MAX_BYTES, RecordScanCursor, StateTransactionNestingError, state_store_key
 
 
 def _key(value: str) -> bytes:
@@ -44,7 +44,6 @@ async def _partition_contract(owner: StateStore) -> None:
         for index, store in enumerate((first, second)):
             tx = transaction.transaction(store)
             await tx.insert_record(_record(str(index)))
-            await tx.insert_alias(StoredAlias(_key("alias"), _key("record")))
             assert await tx.next_sequence(_key("sequence")) == 1
 
     async def abort(transaction: StateGroupTransaction) -> None:
@@ -61,7 +60,6 @@ async def _partition_contract(owner: StateStore) -> None:
     for index, store in enumerate((first, second)):
         values = await store.read(lambda tx: tx.scan_records_page(after=None, limit=1))
         assert values == (_record(str(index)),)
-        assert await store.read(lambda tx: tx.resolve_alias(_key("alias"))) == _key("record")
         assert await store.read(lambda tx: tx.get_sequence(_key("sequence"))) == 1
     assert first in await group.scan_stores() and second in await group.scan_stores()
     with pytest.raises(StateTransactionNestingError):
@@ -146,46 +144,47 @@ async def test_state_group_partition_closing_one_handle_does_not_close_peers(tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_binary_alias_boundaries_remain_partition_local(tmp_path: Path, backend: str) -> None:
+async def test_binary_record_boundaries_remain_partition_local(tmp_path: Path, backend: str) -> None:
     scopes = (("namespace", "tenant", "checkpoint"), ("other", "tenant", "checkpoint"),
               ("namespace", "other", "checkpoint"), ("namespace", "tenant", "execution"))
-    alias_keys = (b"a", b"z" * ALIAS_KEY_MAX_BYTES)
+    keys = (b"a", b"z" * RECORD_KEY_MAX_BYTES)
     async with Persistence.open("scope", storage=_storage(tmp_path, backend)) as persistence:
         owner = persistence.execution.executions.state_store
         stores = [await owner.storage_group.open_partition(state_store_key(*scope), create=True) for scope in scopes]
         for index, store in enumerate(stores):
             assert store is not None
-            async def seed(tx):
-                await tx.insert_record(_record(str(index)))
-                await tx.insert_aliases(tuple(StoredAlias(key, _key("record")) for key in alias_keys))
-            await store.mutate(seed)
-            page = await store.read(lambda tx: tx.scan_aliases_page(after=alias_keys[0], limit=1))
-            assert page == (StoredAlias(alias_keys[1], _key("record")),)
-            assert await store.read(lambda tx: tx.resolve_aliases(alias_keys)) == dict.fromkeys(alias_keys, _key("record"))
+            from dataclasses import replace
+            rows = tuple(replace(_record(str(index)), key=key) for key in keys)
+            await store.mutate(lambda tx: tx.insert_records(rows))
+            page = await store.read(lambda tx: tx.scan_records_page(after=RecordScanCursor(rows[0].kind, keys[0]), limit=1))
+            assert page == (rows[1],)
+            assert await store.read(lambda tx: tx.get_records(keys)) == {row.key: row for row in rows}
             with pytest.raises(ValueError):
-                await store.read(lambda tx: tx.resolve_alias(b"x" * (ALIAS_KEY_MAX_BYTES + 1)))
+                await store.read(lambda tx: tx.get_record(b"x" * (RECORD_KEY_MAX_BYTES + 1)))
             with pytest.raises(ValueError):
-                await store.read(lambda tx: tx.scan_aliases_page(after=b"x" * (ALIAS_KEY_MAX_BYTES + 1), limit=1))
-        await stores[0].mutate(lambda tx: tx.delete_record(_key("record")))
-        assert await stores[0].read(lambda tx: tx.scan_aliases()) == ()
+                await store.read(lambda tx: tx.get_records((keys[0], b"x" * (RECORD_KEY_MAX_BYTES + 1))))
+            with pytest.raises(ValueError):
+                RecordScanCursor(rows[0].kind, b"x" * (RECORD_KEY_MAX_BYTES + 1))
+        await stores[0].mutate(lambda tx: tx.delete_records(keys))
+        assert await stores[0].read(lambda tx: tx.scan_records()) == ()
         for index, store in enumerate(stores[1:], 1):
-            assert await store.read(lambda tx: tx.get_record(_key("record"))) == _record(str(index))
-            assert await store.read(lambda tx: tx.resolve_aliases(alias_keys)) == dict.fromkeys(alias_keys, _key("record"))
+            values = await store.read(lambda tx: tx.get_records(keys))
+            assert set(values) == set(keys)
+            assert all(row.data == {"value": str(index)} for row in values.values())
             await store.validate_integrity()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", (b"", b"x" * (ALIAS_KEY_MAX_BYTES + 1), "text-in-binary-column"))
-async def test_sql_alias_reads_reject_invalid_persisted_addresses(tmp_path: Path, raw: object) -> None:
+@pytest.mark.parametrize("raw", (b"", b"x" * (RECORD_KEY_MAX_BYTES + 1), "text-in-binary-column"))
+async def test_sql_record_reads_reject_invalid_persisted_addresses(tmp_path: Path, raw: object) -> None:
     async with Persistence.open("scope", storage=_storage(tmp_path, "sqlite")) as persistence:
         store = persistence.execution.executions.state_store
         async def seed(tx):
             await tx.insert_record(_record("owner"))
-            await tx.insert_alias(StoredAlias(b"valid", _key("record")))
         await store.mutate(seed)
         async with store.storage_group.context.engine.begin() as connection:
-            await connection.exec_driver_sql("UPDATE ai_state_aliases SET alias_key = ?", (raw,))
-        for read in (lambda: store.read(lambda tx: tx.scan_aliases()), store.validate_integrity):
+            await connection.exec_driver_sql("UPDATE ai_state_records SET key = ? WHERE store_key = ?", (raw, store.store_key))
+        for read in (lambda: store.read(lambda tx: tx.scan_records()), store.validate_integrity):
             with pytest.raises(AIError) as rejected:
                 await read()
             assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

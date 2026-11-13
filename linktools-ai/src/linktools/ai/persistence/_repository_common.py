@@ -24,6 +24,7 @@ from ..errors import AIError, ErrorCode
 from ..evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
 from ..task import TaskGraphView, TaskNodeView
 from .contracts import ToolOperationRecord
+from ._message_root import NativeTextReference
 from .codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -86,6 +87,10 @@ class _RepositoryBase:
         self._tenant_id = tenant_id
         self._domain = domain
         self._execution_content = ExecutionContent(store, namespace=namespace, tenant_id=tenant_id)
+
+    def bind_pending_operation_source(self, source: StateStore) -> None:
+        """Bind the configured checkpoint domain before repositories are used."""
+        self._execution_content.bind_pending_operation_source(source)
 
     async def initialize(self) -> None:
         return None
@@ -173,7 +178,8 @@ class _RepositoryBase:
     ) -> StoredRecord:
         if isinstance(value, ExecutionRecord):
             previous = None if previous_value is None else self._execution_content.projection(previous_value)
-            encoded = await self._execution_content.encode(value, previous=previous)
+            encoded = await self._execution_content.encode(value, previous=previous,
+                observed_value=previous_value if previous is not None else None)
             record = project_record(
                 namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
                 kind=kind, identity=identity, value=value, scope=scope, parent=parent,
@@ -183,10 +189,12 @@ class _RepositoryBase:
             return record
         return self._stored(kind, identity, value, scope=scope, parent=parent, state=state)
 
-    async def _projected_content(self, current: StoredRecord, value: object) -> StoredRecord:
+    async def _projected_content(self, current: StoredRecord, value: object, *, result_source: NativeTextReference | None = None,
+                                 verified_native_previous: ExecutionRecord | None = None) -> StoredRecord:
         if isinstance(value, ExecutionRecord):
             _require_tenant(value, self._tenant_id)
-            encoded = await self._execution_content.encode(value, previous=current)
+            encoded = await self._execution_content.encode(value, previous=current, result_source=result_source,
+                verified_native_previous=verified_native_previous)
             record = project_record(namespace=self._namespace, tenant_id=self._tenant_id, domain=self._domain,
                 kind=current.kind, identity=(value.execution_id,), value=value, state=_record_state(value),
                 storage_revision=current.storage_revision + 1, encoded=encoded)

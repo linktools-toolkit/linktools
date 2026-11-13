@@ -83,7 +83,7 @@ async def test_deferred_wait_and_cancel_update_the_same_execution(tmp_path: Path
         now = datetime.now(timezone.utc)
         continuation = PendingToolContinuation("run", approvals=(PendingDeferredCall(
             "call", "tool", StoredPayload.inline_json({"argument": 1}),
-        ),))
+         operation_id="test-operation"),))
         approval = ApprovalRecord(
             deferred_resource_id("approval-v1", "tenant", "execution", "run", "call"),
             "execution", ApprovalStatus.PENDING, None, None, None, None, now, None,
@@ -165,7 +165,7 @@ def test_deferred_argument_objects_keep_checkpoint_source_after_control_merge() 
     reference = ObjectRef("runtime", "deferred-arguments", "a" * 64, 123)
     continuation = PendingToolContinuation("run", approvals=(PendingDeferredCall(
         "call", "tool", StoredPayload.object(reference),
-    ),))
+     operation_id="test-operation"),))
     execution = replace(_record(ExecutionStatus.STARTED, 1),
                         recovery=ExecutionRecoveryDetail(agent_run_id="run", pending_tools=continuation))
     assert tuple(iter_runtime_object_refs(_encode_persisted_domain(execution),

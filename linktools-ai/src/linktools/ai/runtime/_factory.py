@@ -128,6 +128,7 @@ class _RuntimeComponents:
     history: object
     input_captures: InputCaptures
     memory_scope: str | None
+    asset_sources: Mapping[str, AssetStoreReader]
 
 
 class _AgentLifecycle:
@@ -700,6 +701,7 @@ async def _build_local_components(
                 state.execution.executions.state_store,
                 state.archive_object_store(PersistenceDomain.EXECUTION),
                 namespace=namespace, tenant_id=tenant_id,
+                asset_sources=asset_sources,
                 object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
             ),
         )
@@ -771,6 +773,7 @@ async def _build_local_components(
             catalog,
             archive_objects=state.archive_object_store(PersistenceDomain.EXECUTION),
             archive_object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
+            asset_sources=asset_sources,
             restore_binding=binding_resolver.restore,
             native_step_source=native_step_source,
             tenant_id=tenant_id,
@@ -867,6 +870,7 @@ async def _build_local_components(
                 state.execution.executions.state_store,
                 state.archive_object_store(PersistenceDomain.EXECUTION),
                 namespace=namespace, tenant_id=tenant_id,
+                asset_sources=asset_sources,
                 object_reader=lambda reference: state.read_archive_object(PersistenceDomain.EXECUTION, reference),
             ),
             prepare_pending_capture=prepare_pending_capture,
@@ -957,6 +961,7 @@ async def _build_local_components(
         history=history,
         input_captures=input_captures,
         memory_scope=memory_scope,
+        asset_sources=dict(asset_sources),
     )
 
 

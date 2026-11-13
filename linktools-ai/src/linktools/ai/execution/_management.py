@@ -18,7 +18,7 @@ from ..core import (AuthorizationAction, AuthorizationPolicy, TenantAuthorizatio
     StopReason, UsageMetrics, canonical_sha256, principal_identity_payload)
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectRef
-from ._records import (ExecutionRecord, ResultRecord, IdempotencyRecord,
+from ._records import (ExecutionResultRecord, ExecutionRecord, ResultRecord, IdempotencyRecord,
     ExecutionCancelRequestCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult,
     IdempotencyTerminalUpdate, OperationTerminalUpdate)
 from ._api import CancelExecutionRequest, CancelExecutionResult, ExecutionResult, ExecutionView
@@ -60,6 +60,7 @@ class ExecutionManagementPort(Protocol):
     @property
     def has_pending_cancel_promotion(self) -> bool: ...
     async def promote_pending_cancel(self, execution_id: str) -> None: ...
+    async def read_result_record(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | ExecutionResultRecord | None: ...
     async def read_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
     async def read_view(self, execution_id: str, *, tenant_id: str, observed: bool = False) -> tuple[ResourceRef, ExecutionView] | None: ...
     async def read_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
@@ -76,7 +77,7 @@ class ExecutionManagementPort(Protocol):
         *, tenant_id: str) -> tuple[IdempotencyRecord, ...]: ...
     async def get_idempotency(self, scope: str, idempotency_key: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
-    async def result_record(self, execution: ExecutionRecord, *, tenant_id: str) -> ResultRecord | None: ...
+    async def result_record(self, execution: ExecutionRecord | ExecutionResultRecord, *, tenant_id: str) -> ResultRecord | None: ...
     async def read_output(self, reference: ObjectRef) -> bytes: ...
 
 
@@ -786,7 +787,7 @@ class ExecutionManager:
 
 
     async def result_from_execution(
-        self, execution: ExecutionRecord, *, tenant_id: str
+        self, execution: ExecutionRecord | ExecutionResultRecord, *, tenant_id: str
     ) -> ExecutionResult:
         if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
             raise execution_recovery_error(execution)
@@ -881,7 +882,17 @@ class ExecutionManager:
     async def load_authorized(
         self, execution_id: str, principal: Principal, action: AuthorizationAction
     ) -> ExecutionRecord:
-        record = await self._port.read_execution(execution_id, tenant_id=principal.tenant_id)
+        return await self._load_authorized(execution_id, principal, action, self._port.read_execution)
+
+    async def load_result_authorized(
+        self, execution_id: str, principal: Principal, action: AuthorizationAction
+    ) -> ExecutionRecord | ExecutionResultRecord:
+        return await self._load_authorized(execution_id, principal, action, self._port.read_result_record)
+
+    async def _load_authorized(self, execution_id: str, principal: Principal, action: AuthorizationAction,
+                               read: Callable[..., Awaitable[ExecutionRecord | ExecutionResultRecord | None]],
+                               ) -> ExecutionRecord | ExecutionResultRecord:
+        record = await read(execution_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self.authorize_loaded_execution(
@@ -890,7 +901,7 @@ class ExecutionManager:
         if type(self._authorization) is TenantAuthorizationPolicy:
             return record
         # Application policies may suspend while the canonical owner or result changes.
-        current = await self._port.read_execution(execution_id, tenant_id=principal.tenant_id)
+        current = await read(execution_id, tenant_id=principal.tenant_id)
         if current is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if current.principal_id != record.principal_id:
@@ -898,14 +909,14 @@ class ExecutionManager:
                 current, principal, action, owner_principal_id=record.principal_id,
             )
             authorized_owner = current.principal_id
-            current = await self._port.read_execution(execution_id, tenant_id=principal.tenant_id)
+            current = await read(execution_id, tenant_id=principal.tenant_id)
             if current is None or current.principal_id != authorized_owner:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return current
 
 
     async def authorize_loaded_execution(
-        self, execution: ExecutionRecord, principal: Principal, action: AuthorizationAction,
+        self, execution: ExecutionRecord | ExecutionResultRecord, principal: Principal, action: AuthorizationAction,
         *, owner_principal_id: str | None,
     ) -> None:
         if owner_principal_id is None or execution.principal_id != owner_principal_id:
@@ -917,7 +928,7 @@ class ExecutionManager:
 
 
 def terminal_error(
-    execution: ExecutionRecord,
+    execution: ExecutionRecord | ExecutionResultRecord,
 ) -> "tuple[str | None, Mapping[str, JsonValue]]":
     details = dict(execution.safe_error_details)
     if execution.status is ExecutionStatus.SUCCEEDED:
@@ -939,7 +950,7 @@ def terminal_error(
     return code.value, details
 
 
-def execution_recovery_error(execution: ExecutionRecord) -> AIError:
+def execution_recovery_error(execution: ExecutionRecord | ExecutionResultRecord) -> AIError:
     if (
         execution.status is not ExecutionStatus.RECOVERY_REQUIRED
         or execution.error_code is None

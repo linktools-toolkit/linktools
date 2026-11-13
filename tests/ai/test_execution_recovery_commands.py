@@ -543,7 +543,13 @@ async def test_producer_guard_reuses_execution_without_history_control(
                 )
                 assert await transaction.get_record(repository._key("execution", ("execution",))) == result[1]
                 return result[0]
-        assert await repository.state_store.mutate(guard) == admitted
+        from linktools.ai.execution import ExecutionControlRecord
+        assert await repository.state_store.mutate(guard) == ExecutionControlRecord(
+            execution_id=admitted.execution_id, status=admitted.status,
+            producer_generation=admitted.producer_generation, producer_claim_id=admitted.producer_claim_id,
+            history_seal_digest=admitted.history_seal_digest,
+            budget_scope_id=admitted.budget_scope_id, retention_closed=admitted.retention_closed,
+        )
     finally:
         await state.close()
 

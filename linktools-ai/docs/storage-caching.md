@@ -1122,6 +1122,45 @@ reference inventory; do not treat an absent marker as proof of no custom data.
 The check adds one source read scope per discovered partition to offline cleanup,
 not to Runtime writes or reads. It neither creates markers nor changes schema.
 
+## Explicit run-registration cleanup
+
+Releasing a domain run does not delete its shared canonical registration. An
+external archive can still borrow the same owner, and Runtime cannot discover
+all external storage groups from its own routing configuration.
+
+For non-SQL canonical registrations, call
+`state.snapshot_operations().purge_unreferenced_run_registrations(run_ids,
+exclusive=exclude_groups, complete_reference_stores=all_reference_stores)`.
+The supplied stores are an explicit completeness declaration covering every live
+archive that borrows this owner, including external sources. All currently known
+Runtime groups must be included. The `exclude_groups(groups)` callback returns an
+async context manager that drains and excludes **all source users** in every
+supplied group before yielding, and keeps them excluded until exit. This includes
+readers, snapshot exporters, and writers across their entire preparation-through-
+publication operation. Stopping only new writes is insufficient: a reader may
+already hold a domain reference whose canonical metadata it has not loaded yet.
+The callback must reject groups or users it cannot exclude. This parameterized callback is
+not the ordinary no-argument snapshot guard. The library cannot verify that an
+application's completeness or quiescence declaration is truthful.
+
+The collector scans the source inventory once per batch while that exclusion is
+held, retains registrations with any domain reference, and deletes the remaining
+candidate `step_run` records in one owner transaction. `limit` bounds deletions
+and missing-result processing. Omitted/empty inventories, opaque capability
+partitions, and SQL canonical owners return blocked candidates. SQL register-only
+headers remain valid independent owners and are never reclaimed by this method.
+The result reports `deleted`, `missing`, `retained`, and `blocked` run IDs.
+References currently carry a run ID rather than their canonical owner's scope.
+Consequently, equal run IDs in unrelated archive scopes conservatively retain
+metadata too; the collector must not infer that a differently named archive
+cannot borrow this owner. This can leave extra metadata but cannot justify
+unsafe deletion. Opaque capability bindings also remain a documented blocker.
+
+This is explicitly invoked offline maintenance, not automatic bounded retention.
+Default `release_agent_run` still retains canonical metadata. If an application
+cannot enumerate and quiesce every borrower, it must keep that metadata rather
+than infer safe deletion from the current Runtime's local routes.
+
 ## Native StepStore identity
 
 Native SQL partitions retain the exact length-prefixed tuple

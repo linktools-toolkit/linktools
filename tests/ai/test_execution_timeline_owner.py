@@ -96,8 +96,10 @@ def test_timeline_projection_rejects_invalid_explicit_values(malformed: str) -> 
 
 
 @pytest.mark.asyncio
-async def test_snapshot_rejects_a_turn_without_its_canonical_execution() -> None:
-    async with Persistence.open("timeline-snapshot-owner", storage=PersistenceStorage.in_memory(), tenant_id="tenant") as state:
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_snapshot_rejects_a_turn_without_its_canonical_execution(tmp_path: Path, backend: str) -> None:
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "state.db")
+    async with Persistence.open("timeline-snapshot-owner", storage=storage, tenant_id="tenant") as state:
         await state.conversation.sessions.create(_session())
         value = _execution("execution", status=ExecutionStatus.FAILED, prompt="original")
         await state.execution.executions.create(value)

@@ -98,6 +98,9 @@ class AgentRunCapture(AbstractCapability[None]):
         if self._registered:
             return
         self._live_messages = ctx.messages
+        if self.native_registration is not None:
+            source = await self.native_registration.prepare_registration(conversation_id=ctx.conversation_id)
+            self.recorder.stage_run_source(source)
         if self.native_registration is not None and self.native_registration.share_started:
             try:
                 await self.native_registration.prepare_started(conversation_id=ctx.conversation_id, step_index=ctx.run_step)

@@ -27,7 +27,7 @@ async def _child_recovery(state: Persistence, kind: str):
     await repository.reserve_start(reservation)
     deferred = kind == "deferred"
     pending = PendingToolContinuation("prior-run", calls=(
-        PendingDeferredCall("call", "tool", StoredPayload.inline_json({})),
+        PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation"),
     )) if deferred else None
     child = replace(reservation.execution, revision=1, agent_run_seq=1,
                     status=ExecutionStatus.WAITING_DEFERRED if deferred else ExecutionStatus.STARTED,

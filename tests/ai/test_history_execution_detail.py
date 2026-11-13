@@ -302,9 +302,18 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
     state = Persistence(PersistenceStorage.in_memory())
     await state.initialize(namespace="execution-detail", tenant_id="tenant")
     try:
-        original = await _seed(state)
+        from linktools.ai.core import ResourceKind, ResourceRef
+        from linktools.ai.persistence.codec import decode_execution_metadata, encode_execution_content, encode_envelope
+
+        original = _execution("execution", status=ExecutionStatus.SUCCEEDED, prompt="question")
+        original = replace(original, started_at=original.created_at)
+        await state.conversation.sessions.create(_session())
         repository = state.execution.executions
-        header = await repository.get_header("execution", tenant_id="tenant")
+        header = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
+        # The stale observation is independent of the source writer's immutable terminal state.
+        cached_metadata = decode_execution_metadata(encode_envelope({
+            "type": "execution_record", "payload": encode_execution_content(original, {}),
+        }), tenant_id="tenant")
         if source == "changed_output":
             fresh = replace(original, result=replace(
                 original.result, output=StoredPayload.inline_json({"source": "fresh"}),
@@ -316,17 +325,29 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
         else:
             fresh = None
 
-        async def get(execution_id, *, tenant_id):
+        read_metadata = repository.get_metadata_record
+        if fresh is not None:
+            await repository.create_execution(fresh)
+            await state.conversation.sessions.admit_execution(
+                "session", tenant_id="tenant", execution_id="execution", expected=None,
+            )
+            if fresh.status in _TERMINAL:
+                await _commit_empty_turn(state, fresh)
+
+        metadata_reads = []
+        async def get_metadata(execution_id, *, tenant_id, fresh=False):
             assert (execution_id, tenant_id) == ("execution", "tenant")
-            return fresh if active_state_transaction(repository.state_store) is not None else original
+            metadata_reads.append(fresh)
+            return (await read_metadata(execution_id, tenant_id=tenant_id, fresh=True)
+                    if fresh else cached_metadata)
 
         async def get_owned_header(execution_id, *, tenant_id):
             assert (execution_id, tenant_id) == ("execution", "tenant")
             return replace(header, owner_principal_id=original.principal_id)
 
         with monkeypatch.context() as patch:
-            patch.setattr(repository, "get", get)
-            if source == "different_owner":
+            patch.setattr(repository, "get_metadata_record", get_metadata)
+            if source in {"different_owner", "missing"}:
                 # Custom execution headers can impose an owner beyond tenant scope.
                 patch.setattr(repository, "get_header", get_owned_header)
             reader = _reader(state)
@@ -334,6 +355,7 @@ async def test_execution_detail_never_returns_a_stale_terminal_record(
                 with pytest.raises(AIError) as error:
                     await reader.execution_detail("execution", session_id="session", principal=_OWNER)
                 assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+                assert metadata_reads == [False, True]
             else:
                 detail = await reader.execution_detail("execution", session_id="session", principal=_OWNER)
                 if source == "nonterminal":

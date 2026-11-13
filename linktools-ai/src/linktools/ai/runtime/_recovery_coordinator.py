@@ -181,6 +181,10 @@ class _RecoveryCoordinatorPort(Protocol):
         tenant_id: str,
     ) -> ExecutionRecord | None: ...
 
+    async def _tool_operation_references(
+        self, execution: ExecutionRecord, source_agent_run_id: str,
+    ) -> dict[str, str]: ...
+
     async def materialize_deferred_call(
         self,
         execution: ExecutionRecord,
@@ -190,6 +194,7 @@ class _RecoveryCoordinatorPort(Protocol):
         *,
         repository_instruction_frontier: str | None = None,
         capability_ref: CapabilityRef | None = None,
+        operation_id: str | None,
     ) -> PendingDeferredCall: ...
 
     async def commit_deferred_frontier(
@@ -538,6 +543,8 @@ class _RecoveryCoordinator:
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         metadata = requests.metadata
+        operation_ids = (await self._port._tool_operation_references(current, agent_run_id)
+                         if requests.approvals or requests.calls else {})
         approvals_list: list[PendingDeferredCall] = []
         for call in requests.approvals:
             approvals_list.append(
@@ -546,6 +553,7 @@ class _RecoveryCoordinator:
                     agent_run_id,
                     call,
                     metadata.get(call.tool_call_id, {}),
+                    operation_id=operation_ids.get(call.tool_call_id),
                     capability_ref=None if capability_refs is None else capability_refs.get(call.tool_call_id),
                     repository_instruction_frontier=(
                         None if repository_instruction_frontiers is None
@@ -562,6 +570,7 @@ class _RecoveryCoordinator:
                     agent_run_id,
                     call,
                     metadata.get(call.tool_call_id, {}),
+                    operation_id=operation_ids.get(call.tool_call_id),
                     capability_ref=None if capability_refs is None else capability_refs.get(call.tool_call_id),
                 )
             )

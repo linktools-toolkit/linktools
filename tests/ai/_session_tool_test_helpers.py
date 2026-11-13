@@ -33,8 +33,10 @@ from linktools.ai.persistence._runtime_commands import StateCommands
 from linktools.ai.persistence._step_contracts import AgentRunCheckpoint
 from linktools.ai.persistence._step_archive import _decode_step, _encode_step
 from linktools.ai.persistence.runs import RuntimeAgentRunStore
+from linktools.ai.persistence.state import FactQuery
 from pydantic_ai.messages import ModelResponse, ToolReturnPart
 from pydantic_ai.models.test import TestModel
+from sqlalchemy import update
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -390,20 +392,26 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
                         await transaction.delete_records((owner_key,))
                     else:
                         owner = await transaction.get_record(owner_key)
-                        owned_facts = [fact for fact in await transaction.scan_facts()
-                                       if fact.owner_key == owner_key]
-                        events = sorted((fact for fact in owned_facts
-                                         if fact.stream_key == trace._stream(damaged_run_id, "event")),
-                                        key=lambda fact: fact.sequence)
+                        events = await trace.read_event_facts(transaction, FactQuery(
+                            trace._stream(damaged_run_id, "event")), full_source=True)
                         assert len(events) == 2
                         terminal = _decode_step(events[-1].data)
                         assert terminal.event_type == "AGENT_RUN_SUCCEEDED"
                         await transaction.guard_record(owner_key, expected_storage_revision=owner.storage_revision)
-                        await transaction.delete_fact_streams(owner_key)
-                        await transaction.insert_facts(tuple(
-                            replace(fact, data=_encode_step(replace(terminal, event_type="AGENT_RUN_INTERRUPTED")))
-                            if fact == events[-1] else fact for fact in owned_facts
-                        ))
+                        changed = replace(terminal, event_type="AGENT_RUN_INTERRUPTED")
+                        changed_fact = replace(events[-1], state=changed.event_type, data=_encode_step(changed))
+                        rows = trace._trace_events
+                        values = rows.row_values(changed_fact, changed)
+
+                        async def replace_terminal(session):
+                            result = await session.execute(update(rows.table).where(
+                                rows.table.c.store_key == trace.state_store.store_key,
+                                rows.table.c.run_id == damaged_run_id.encode("utf-8"),
+                                rows.table.c.sequence == events[-1].sequence,
+                            ).values(**values))
+                            assert result.rowcount == 1
+
+                        await transaction.run_sql(trace.state_store.context, replace_terminal)
 
                 await trace.state_store.mutate(damage)
                 with pytest.raises(AIError) as unavailable:

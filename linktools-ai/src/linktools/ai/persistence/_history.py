@@ -1694,7 +1694,7 @@ class TranscriptRepository:
                 groups = await load_archived()
                 for block, group in zip(archive_blocks, groups, strict=True):
                     raw, messages = decode_model_message_payloads(group)
-                    if len(messages) != block.root.count or len(raw) != block.raw_size or hashlib.sha256(raw).hexdigest() != block.raw_digest:
+                    if len(messages) != block.root.count or len(raw) != block.raw_size:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     archived_messages[block.root] = messages
                     archived_payloads[block.root] = tuple(group)

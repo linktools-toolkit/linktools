@@ -12,6 +12,7 @@ from copy import copy
 from contextlib import aclosing, asynccontextmanager
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
+from ...asset import AssetStoreReader
 from ...execution.handle import ExecutionBinding
 from ...core import (AuthorizationPolicy, CorrelationData, ExecutionContext, PrincipalKind, PromptLimits, ToolEffects,
     TenantAuthorizationPolicy, canonical_sha256, overlay_correlation, principal_identity_payload, validate_idempotency_key)
@@ -90,6 +91,7 @@ class TaskEngine(Generic[AppT]):
         context: ExecutionContext[AppT] | None = None,
         authorization: AuthorizationPolicy | None = None,
         metrics: MetricRecorderProvider | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
         model_refresh_interval_seconds: float = 1.0,
     ) -> None:
         if not isinstance(persistence, Persistence) or not persistence.ready:
@@ -150,7 +152,7 @@ class TaskEngine(Generic[AppT]):
         )
         self._input_captures = InputCaptures.from_persistence(
             persistence, authorization=self._authorization, execution=self._execution_reads,
-            materializer=self._input_materializer,
+            materializer=self._input_materializer, asset_sources=asset_sources,
         )
         self._tasks = MappingProxyType({key: self._bind_agent_task(value) for key, value in self._tasks.items()})
         self._task_node_runtime = TaskNodeExecutor(
@@ -233,11 +235,12 @@ class TaskEngine(Generic[AppT]):
         context: ExecutionContext[AppT] | None = None,
         authorization: AuthorizationPolicy | None = None,
         metrics: MetricRecorderProvider | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
         model_refresh_interval_seconds: float = 1.0,
     ) -> AsyncIterator["TaskEngine[AppT]"]:
         engine = cls(
             *definitions, persistence=persistence, context=context, authorization=authorization, metrics=metrics,
-            model_refresh_interval_seconds=model_refresh_interval_seconds,
+            asset_sources=asset_sources, model_refresh_interval_seconds=model_refresh_interval_seconds,
         )
         try:
             yield engine

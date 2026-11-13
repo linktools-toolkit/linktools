@@ -58,6 +58,46 @@ def test_mysql_ddl_declares_all_indexes_in_each_create_table_and_matches_metadat
         assert sorted(table_indexes[name]) == sorted(expected), name
 
 
+@pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
+def test_trace_indexes_keep_history_association_and_chronological_paths(dialect_name: str) -> None:
+    from sqlalchemy import create_mock_engine
+    from sqlalchemy.schema import ExecutableDDLElement
+
+    table = build_runtime_sql_metadata(frozenset({PersistenceDomain.TRACE})).tables["ai_trace_events"]
+    statements: list[str] = []
+
+    def emit(statement: ExecutableDDLElement, *_args: object, **_kwargs: object) -> None:
+        statements.append(" ".join(str(statement.compile(dialect=engine.dialect)).split()))
+
+    engine = create_mock_engine(f"{dialect_name}://", emit)
+    table.create(engine, checkfirst=False)
+    # Count emitted indexes, including those implied by PRIMARY and UNIQUE,
+    # rather than counting both dialect variants present in the metadata.
+    indexes = [statement for statement in statements if re.match(r"CREATE (?:UNIQUE )?INDEX ", statement)]
+    constraints = re.findall(r"\b(?:PRIMARY KEY|UNIQUE) \([^()]+\)", " ".join(statements))
+    assert len(table.c) == 24
+    assert len(indexes) + len(constraints) == 7
+    assert 3 * (len(indexes) + len(constraints)) < len(table.c)
+    assert "PRIMARY KEY (id)" in constraints
+    unique_keys = [statement for statement in indexes if statement.startswith("CREATE UNIQUE INDEX ")]
+    unique_keys.extend(constraint for constraint in constraints if constraint.startswith("UNIQUE "))
+    assert len(unique_keys) == 1
+    assert unique_keys[0].endswith("(store_key, run_id, sequence)")
+    assert sorted(re.findall(r"\(([^()]+)\)$", statement)[0] for statement in indexes
+                  if not statement.startswith("CREATE UNIQUE INDEX ")) == [
+        "created_at", "store_key, run_id, history_identity", "store_key, run_id, message_identity",
+        "store_key, run_id, order_key", "updated_at",
+    ]
+    for name in ("agent_conversation_id", "parent_agent_run_id"):
+        assert table.c[name].nullable and table.c[name].type.length == 128
+    for name in ("agent_id", "tool_name", "error", "idempotency_key"):
+        assert table.c[name].nullable and table.c[name].type.length is None
+        assert table.c[name].type.compile(dialect=engine.dialect) == {
+            "mysql": "LONGBLOB", "postgresql": "BYTEA", "sqlite": "BLOB",
+        }[dialect_name]
+        assert all(name not in index.columns for index in table.indexes)
+
+
 def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
     records = metadata.tables["ai_state_records"]
@@ -169,12 +209,6 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_updated_at",
             "ix_created_at",
         },
-        "ai_state_aliases": {
-            "uk_store_key_alias_locator",
-            "ix_store_key_record_locator",
-            "ix_updated_at",
-            "ix_created_at",
-        },
         "ai_state_facts": {
             "uk_store_key_stream_locator_sequence",
             "ix_owner_locator",
@@ -182,7 +216,7 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_updated_at",
             "ix_created_at",
         },
-        "ai_state_sequences": {
+        "ai_state_counters": {
             "uk_store_key_stream_locator",
             "ix_updated_at",
             "ix_created_at",
@@ -202,12 +236,11 @@ def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
             "ix_scope_key_state_sort_key",
             "ix_store_key_kind_key_digest",
         },
-        "ai_state_aliases": {"uk_alias_key", "ix_store_key_alias_key"},
         "ai_state_facts": {
             "uk_stream_key_sequence",
             "ix_store_key_stream_key_sequence",
         },
-        "ai_state_sequences": {"uk_key_digest", "ix_store_key_key_digest"},
+        "ai_state_counters": {"uk_key_digest", "ix_store_key_key_digest"},
         "ai_state_operations": {
             "uk_key_digest",
             "uk_stream_key_sequence",
@@ -237,7 +270,6 @@ def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None
     ).read_text(encoding="utf-8")
 
     for fragment in (
-        "KEY ix_store_key_alias_key ",
         "KEY ix_store_key_stream_key_sequence ",
         "KEY ix_store_key_key_digest ",
     ):
@@ -281,9 +313,10 @@ async def test_selected_native_schema_preserves_canonical_dialect_ddl(
     )
     selected = captured[0]
     assert set(selected.tables) == {
-        "ai_state_records", "ai_state_aliases", "ai_state_facts",
-        "ai_state_sequences", "ai_state_operations", "ai_step_messages", "ai_step_sequences", "ai_native_content_edges",
-    } | ({"ai_step_runs", "ai_step_events"} if domain is not PersistenceDomain.CONVERSATION else set())
+        "ai_state_records", "ai_state_facts",
+        "ai_state_counters", "ai_state_operations", "ai_step_runs", "ai_step_messages", "ai_step_sequences",
+        "ai_step_tool_operations", "ai_step_run_admissions",
+    } | ({"ai_step_events", "ai_trace_events"} if domain is not PersistenceDomain.CONVERSATION else set())
 
     def compile_ddl(metadata: MetaData) -> list[str]:
         statements: list[str] = []
@@ -339,19 +372,10 @@ def test_operation_address_column_is_bounded_binary_with_scoped_unique_key(diale
     assert all(len(index.columns) <= 3 for index in table.indexes)
 
 
-def test_runtime_alias_schema_uses_partitioned_binary_indexes() -> None:
-    from sqlalchemy.dialects import postgresql, sqlite
+def test_runtime_schema_has_no_tool_alias_sidecar() -> None:
+    metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CHECKPOINT}))
+    assert "ai_tool_operation_aliases" not in metadata.tables
 
-    table = build_runtime_sql_metadata(frozenset({PersistenceDomain.CHECKPOINT})).tables["ai_state_aliases"]
-    assert table.c.alias_key.type.compile(dialect=mysql.dialect()) == "VARBINARY(768)"
-    assert table.c.alias_key.type.compile(dialect=postgresql.dialect()) == "BYTEA"
-    assert table.c.alias_key.type.compile(dialect=sqlite.dialect()) == "BLOB"
-    columns = {tuple(column.name for column in index.columns): index.unique for index in table.indexes}
-    assert columns[("store_key", "alias_locator")]
-    assert not columns[("store_key", "record_locator")]
-    assert all(len(index.columns) <= 3 for index in table.indexes)
-    assert table.c.store_key.type.length == 128
-    assert table.c.alias_key.type.length == table.c.record_key.type.length == 768
 
 
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
@@ -359,7 +383,7 @@ def test_state_stream_and_counter_schema_uses_complete_binary_keys(dialect_name:
     from sqlalchemy.dialects import postgresql, sqlite
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
-    for name in ("ai_state_facts", "ai_state_operations", "ai_state_sequences"):
+    for name in ("ai_state_facts", "ai_state_operations", "ai_state_counters"):
         table = metadata.tables[name]
         assert table.c.stream_key.type.length == 768
         assert table.c.stream_key.type.compile(dialect=dialect) == {
@@ -409,18 +433,23 @@ def test_mysql_all_table_columns_and_comments_match_reviewed_ddl() -> None:
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
 def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: str) -> None:
     from sqlalchemy import BigInteger, Integer, LargeBinary, String
+    from linktools.ai.persistence.state import STORE_KEY_MAX_BYTES
+    from linktools.ai.persistence._step_schema import build_step_sql_metadata
+    from linktools.ai.steps import NATIVE_STORE_KEY_MAX_BYTES
     from sqlalchemy.dialects import postgresql, sqlite
     dialect = {"mysql": mysql, "postgresql": postgresql, "sqlite": sqlite}[dialect_name].dialect()
     metadata = build_runtime_sql_metadata(frozenset({PersistenceDomain.CONVERSATION}))
+    native_tables = set(build_step_sql_metadata().tables)
     maxima = {}
     for table in metadata.tables.values():
-        assert table.c.store_key.type.length == 128
+        capacity = NATIVE_STORE_KEY_MAX_BYTES if table.name in native_tables else STORE_KEY_MAX_BYTES
+        assert table.c.store_key.type.length == capacity
         assert table.c.store_key.type.compile(dialect=dialect) == {
-            "mysql": "VARBINARY(128)", "postgresql": "BYTEA", "sqlite": "BLOB",
+            "mysql": f"VARBINARY({capacity})", "postgresql": "BYTEA", "sqlite": "BLOB",
         }[dialect_name]
         for index in table.indexes:
             assert len(index.columns) <= 3
-            if "store_key" not in index.columns:
+            if "store_key" not in index.columns and "store_locator" not in index.columns:
                 continue
             size = 0
             for column in index.columns:
@@ -435,9 +464,10 @@ def test_state_locator_indexes_fit_complete_binary_byte_budgets(dialect_name: st
             maxima[tuple(index.columns.keys())] = size
             assert size + 40 < 2704 < 3072
     assert maxima[("store_key", "key_locator")] == 384
-    assert maxima[("store_key", "alias_locator")] == 384
     assert maxima[("store_key", "operation_locator")] == 384
     assert maxima[("store_key", "stream_locator", "sequence")] == 392
+
+    assert maxima[("store_locator", "sha256")] == 512
 
 
 @pytest.mark.parametrize("dialect_name", ("mysql", "postgresql", "sqlite"))
@@ -450,10 +480,11 @@ def test_all_business_indexes_bound_columns_and_keep_unique_identities_nonnullab
     metadata = build_sql_schema_metadata()
     assert set(metadata.tables) == {
         "ai_asset_batch_receipts", "ai_asset_changes", "ai_asset_entries", "ai_asset_heads",
-        "ai_metric_definitions", "ai_metric_observations", "ai_native_content_edges",
-        "ai_object_chunks", "ai_objects", "ai_state_aliases", "ai_state_facts",
-        "ai_state_operations", "ai_state_records", "ai_state_sequences", "ai_step_events",
-        "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots",
+        "ai_metric_definitions", "ai_metric_observations",
+        "ai_object_chunks", "ai_objects", "ai_state_facts",
+        "ai_state_operations", "ai_state_records", "ai_state_counters", "ai_step_events",
+        "ai_step_messages", "ai_step_runs", "ai_step_sequences", "ai_step_snapshots", "ai_trace_events",
+        "ai_step_tool_operations", "ai_step_run_admissions",
     }
     for table in metadata.tables.values():
         assert table.comment and all(column.comment for column in table.c)
@@ -482,9 +513,8 @@ def test_raw_address_capacity_and_locator_types_match_reviewed_storage_contract(
     metadata = build_sql_schema_metadata()
     state_raw = {
         "ai_state_records": ("key", "scope_key", "parent_key"),
-        "ai_state_aliases": ("alias_key", "record_key"),
         "ai_state_facts": ("stream_key", "owner_key"),
-        "ai_state_sequences": ("stream_key",),
+        "ai_state_counters": ("stream_key",),
         "ai_state_operations": ("operation_key", "stream_key"),
     }
     raw_columns = {(name, column): 768 for name, columns in state_raw.items() for column in columns}

@@ -32,7 +32,6 @@ from linktools.ai.persistence.state import (
     OperationQuery,
     RecordQuery,
     StateTransaction,
-    StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
@@ -424,9 +423,8 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
         ]
 
         for call_id in call_ids:
-            operation = await state.checkpoint.tools.get_by_call(
-                agent_run_id,
-                call_id,
+            operation = await state.checkpoint.tools.get_operation(
+                bridge._operation_id(agent_run_id, call_id),
                 tenant_id="tenant",
             )
             assert operation is not None
@@ -508,7 +506,6 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
     await second.initialize()
 
     record_key = b"r" * 32
-    alias_key = b"a" * 32
     stream_key = b"s" * 32
     sequence_key = b"q" * 32
     operation_key = b"o" * 32
@@ -546,7 +543,6 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
 
     async def seed(transaction: StateTransaction) -> None:
         await transaction.insert_record(record)
-        await transaction.insert_alias(StoredAlias(alias_key, record_key))
         await transaction.insert_fact(fact)
         assert await transaction.reserve_sequence(sequence_key, 1) == 1
         await transaction.insert_operation(operation)
@@ -562,9 +558,6 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
                 RecordQuery(kind="scope-test")
             )
         ) == ()
-        assert await second.read(
-            lambda transaction: transaction.resolve_alias(alias_key)
-        ) is None
         assert await second.read(
             lambda transaction: transaction.get_sequence(sequence_key)
         ) == 0

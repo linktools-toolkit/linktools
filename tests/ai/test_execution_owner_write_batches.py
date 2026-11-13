@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.contracts import (
-    ExecutionTerminalCommit, IdempotencyRecord, ResultRecord,
+    ExecutionTerminalCommit, ExecutionTerminalWriteReceipt, IdempotencyRecord, ResultRecord,
 )
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence._runtime_commands import StateCommands
@@ -114,7 +114,8 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
             assert final.producer_generation == 1
             assert final.history_seal_digest is None
             assert await repository.get_history_seal(current.execution_id, tenant_id="tenant") is None
-            snapshots.append(await _snapshot(repository.state_store))
+            scope, _archive = repository.state_store.storage_group.opened_archive
+            snapshots.append(await _snapshot(repository.state_store, scope_mapping={scope: "canonical"}))
             counts.append(calls)
         _assert_semantic_snapshot(snapshots[0], snapshots[1], {"execution": 1})
         if backend == "sqlite":
@@ -155,10 +156,17 @@ async def test_single_execution_cas_preserves_generation_and_subclass_guard(tmp_
             active, _stored = await repository.state_store.mutate(lambda tx: repository.require_execution_producer_in_transaction(
                 tx, current.execution_id, expected_producer_generation=2,
             ))
-            assert active == updated
+            from linktools.ai.execution import ExecutionControlRecord
+            assert active == ExecutionControlRecord(
+                execution_id=updated.execution_id, status=updated.status,
+                producer_generation=updated.producer_generation, producer_claim_id=updated.producer_claim_id,
+                history_seal_digest=updated.history_seal_digest,
+                budget_scope_id=updated.budget_scope_id, retention_closed=updated.retention_closed,
+            )
             records, _facts, _sequences = await _snapshot(repository.state_store)
             assert [record.kind for record in records] == ["execution"]
-            snapshots.append(await _snapshot(repository.state_store))
+            scope, _archive = repository.state_store.storage_group.opened_archive
+            snapshots.append(await _snapshot(repository.state_store, scope_mapping={scope: "canonical"}))
         finally:
             await state.close()
     _assert_semantic_snapshot(snapshots[0], snapshots[1], {})
@@ -213,7 +221,26 @@ async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_
         async def mutate(transaction):
             commit = _commit(current)
             identity = await repository.terminal_idempotency_in_transaction(transaction, commit)
-            await repository.commit_closed_terminal_in_transaction(transaction, replace(commit, idempotency=identity))
+            receipt = await repository.commit_closed_terminal_in_transaction(transaction, replace(commit, idempotency=identity))
+            assert isinstance(receipt, ExecutionTerminalWriteReceipt)
+            observed = await repository.get_observed_in_transaction(
+                transaction, current.execution_id, tenant_id="tenant",
+            )
+            assert receipt.observed == observed
+            assert receipt.observed.value == receipt.execution
+            assert await repository.confirm_terminal_write_in_transaction(transaction, receipt) == observed
+            # A later participant in the same transaction may advance the owner.
+            key = repository._key("execution", (current.execution_id,))
+            stored = await transaction.get_record(key)
+            assert stored is not None
+            assert await transaction.replace_record(
+                replace(stored, storage_revision=stored.storage_revision + 1),
+                expected_storage_revision=stored.storage_revision,
+            )
+            confirmed = await repository.confirm_terminal_write_in_transaction(transaction, receipt)
+            assert confirmed is not None
+            assert confirmed.value == receipt.execution
+            assert confirmed.storage_revision == receipt.observed.storage_revision + 1
             with pytest.raises(AIError) as fenced:
                 await repository.require_execution_producer_in_transaction(
                     transaction, current.execution_id, expected_producer_generation=1,

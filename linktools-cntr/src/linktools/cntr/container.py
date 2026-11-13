@@ -186,7 +186,7 @@ class BaseContainer(metaclass=AbstractMetaClass):
 
     @property
     def containers(self) -> "dict[str, BaseContainer]":
-        return self.manager.containers
+        return self.manager.loader.containers
 
     @cached_property
     def docker_compose(self) -> "dict[str, Any] | None":

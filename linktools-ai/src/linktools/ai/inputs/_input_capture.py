@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Protocol, TypeAlias
 
 from ..agent import AgentBindingContract, AgentInputCaptureRef
-from ..asset import AssetVersionRef
+from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, ImmutableJsonMapping, JsonValue,
     Principal, ResourceKind, ResourceRef, TaskStatus, WorkspaceFileInput, canonical_json_bytes,
@@ -31,7 +31,7 @@ from ._input import (
     CanonicalUserInput, ExecutionInputMaterializer, UserPromptInput,
     captured_input_files, captured_input_prompt, decode_task_prompt_draft, task_prompt_draft,
 )
-from ..execution import ExecutionInputContext
+from ..execution import ExecutionInputContext, RuntimePayloadRef
 from ._context_archive import ExecutionContextArchive
 from ..model import MaterializedUserContent
 from ..model.attachments import read_attachment_payload
@@ -45,7 +45,7 @@ from ..persistence import PersistenceDomain
 from ..persistence.contracts import ExecutionRepositories, TaskRepositories
 from ..persistence.captures import (
     input_capture_key, input_capture_expiry_key, capture_record, capture_record_key, capture_record_value, capture_retention_value,
-    read_capture_record, publish_capture_record, prepare_capture_value, restore_capture_value,
+    read_capture_record, read_capture_value, publish_capture_record, prepare_capture_value,
 )
 from ..persistence.codec import decode_domain, encode_domain, iter_runtime_object_refs
 from ..persistence.state import RecordQuery, StateTransaction, scope_key
@@ -156,6 +156,7 @@ class InputCaptures:
         authorization: AuthorizationPolicy,
         execution: InputCaptureExecutionPort,
         materializer: ExecutionInputMaterializer | None = None,
+        asset_sources: Mapping[str, AssetStoreReader] | None = None,
         prepare_pending_capture: Callable[[str, Principal], Awaitable[None]] | None = None,
     ) -> "InputCaptures":
         """Compose captures over borrowed storage and the producer's execution boundary."""
@@ -175,6 +176,7 @@ class InputCaptures:
                 persistence.execution.executions.state_store,
                 persistence.archive_object_store(PersistenceDomain.EXECUTION),
                 namespace=persistence.namespace, tenant_id=persistence.tenant_id,
+                asset_sources=asset_sources,
                 object_reader=lambda reference: persistence.read_archive_object(PersistenceDomain.EXECUTION, reference),
             ),
             execution_retention=persistence.plan.route(PersistenceDomain.EXECUTION).retention,
@@ -192,16 +194,15 @@ class InputCaptures:
             PersistenceDomain.TASK, self._tenant_id, raw))
         await publish_capture_record(self._state_store, namespace=self._namespace,
             tenant_id=self._tenant_id, key=key, value=stored,
-            source_digest=digest if stored != value else None)
+            source_digest=digest if stored != value else None, share_bindings=True)
         return digest
 
     async def _get(self, key: str, digest: str | None = None) -> JsonValue | None:
-        record = await read_capture_record(self._state_store, namespace=self._namespace,
-                                           tenant_id=self._tenant_id, key=key)
-        if record is None:
+        value = await read_capture_value(self._state_store, namespace=self._namespace,
+            tenant_id=self._tenant_id, key=key, read_object=lambda ref: read_runtime_object(
+                self._object_stores[PersistenceDomain.TASK], ref))
+        if value is None:
             return None
-        value = await restore_capture_value(record, read_object=lambda ref: read_runtime_object(
-            self._object_stores[PersistenceDomain.TASK], ref))
         if digest is not None and canonical_sha256(value) != digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
@@ -232,6 +233,20 @@ class InputCaptures:
 
     async def _publish(self, kind: str, principal: Principal, key: str, payload: Mapping[str, JsonValue],
                        *, expires_at: datetime | None = None) -> tuple[str, str]:
+        if kind == "agent":
+            payload = dict(payload)
+            instructions = payload["repository_instructions"]
+            if instructions is not None:
+                payload["repository_instructions"] = await self._context_archive.encode_repository_instructions(instructions)
+            context = payload.get("input_context")
+            if context is not None:
+                context = dict(context)
+                if context["repository_instructions"] is not None:
+                    context["repository_instructions"] = (
+                        payload["repository_instructions"] if context["repository_instructions"] == instructions
+                        else await self._context_archive.encode_repository_instructions(context["repository_instructions"])
+                    )
+                payload["input_context"] = context
         identity, value = self._publication(kind, principal, key, payload, expires_at=expires_at)
         object_key = self._key(principal.tenant_id, kind, identity)
         if await self._get(input_capture_expiry_key(object_key)) is not None:
@@ -596,11 +611,21 @@ class InputCaptures:
             if hold_id is not None:
                 await self._execution.release_dependency_hold(execution_id, tenant_id=principal.tenant_id, hold_id=hold_id)
 
+    async def _admitted_repository_instructions(
+        self, reference: RuntimePayloadRef | None,
+    ) -> dict[str, JsonValue] | None:
+        if reference is None:
+            return None
+        instructions = await self._context_archive.load_repository_instruction_payload(
+            reference, source_domain=PersistenceDomain.EXECUTION,
+        )
+        return instructions.to_payload()
+
     async def _capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         principal = request.principal
         repository = self._execution_repositories.executions
-        record = await repository.state_store.read(
-            lambda _transaction: repository.get(execution_id, tenant_id=principal.tenant_id)
+        record = await repository.read_content(
+            lambda _group: repository.get(execution_id, tenant_id=principal.tenant_id)
         )
         if record is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
@@ -616,7 +641,7 @@ class InputCaptures:
             elif any(value is not None for value in (record.session_id, record.memory_scope, record.previous_execution_id, record.fork_base_execution_id)):
                 raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
             else:
-                instructions = None if record.repository_instructions is None else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
+                instructions = await self._admitted_repository_instructions(record.repository_instructions)
                 context = ExecutionInputContext.from_messages((), repository_instructions=instructions)
         invocation = await self._get(self._key(principal.tenant_id, "invocation", execution_id))
         if invocation is None and record.requires_task_invocation_capture:
@@ -646,8 +671,7 @@ class InputCaptures:
             elif record.input_context is not None:
                 instructions = await self._context_archive.load_repository_instructions(record.input_context)
             else:
-                instructions = None if record.repository_instructions is None else await self._payload(
-                    record.repository_instructions.payload, record.repository_instructions.source_domain)
+                instructions = await self._admitted_repository_instructions(record.repository_instructions)
             input_view = record.stored_user_input.view
             payload = {"prompt": task_prompt_draft(prompt), "input_view": None if input_view is None else dict(input_view), "binding": record.binding.to_payload(),
                        "original_input": dict(record.stored_user_input.view or {"prompt": task_prompt_draft(prompt)}) if task_input is None else dict(task_input.original_input),
@@ -670,7 +694,19 @@ class InputCaptures:
         return TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, execution_id)
 
     async def read_agent(self, reference: AgentInputCaptureRef, *, principal: Principal) -> AgentInputCapture:
-        payload = await self._read(reference, "agent", principal)
+        payload = dict(await self._read(reference, "agent", principal))
+        instructions = payload["repository_instructions"]
+        if instructions is not None:
+            payload["repository_instructions"] = await self._context_archive.decode_repository_instructions(instructions)
+        context = payload.get("input_context")
+        if context is not None:
+            context = dict(context)
+            if context["repository_instructions"] is not None:
+                context["repository_instructions"] = (
+                    payload["repository_instructions"] if context["repository_instructions"] == instructions
+                    else await self._context_archive.decode_repository_instructions(context["repository_instructions"])
+                )
+            payload["input_context"] = context
         source = payload["source_execution_id"]
         if source != reference.source_execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

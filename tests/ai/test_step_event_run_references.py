@@ -403,8 +403,9 @@ def test_event_metadata_values_are_detached_without_json_round_trip() -> None:
 class _InlineStepStore(SqlStepStore):
     """Current JSON inline policy, not the historical TEXT encoding path."""
 
-    async def _write_events(self, session, events, *, source=None, started=None, replay_keys=None):
-        assert started is None, "the inline comparison does not own managed starts"
+    async def _write_events(self, session, events, *, source=None, started=None, replay_keys=None,
+                            fixed_error_sources: bool = False):
+        assert started is None and not fixed_error_sources, "the inline comparison does not own fixed sources"
         for keyed, group in groupby(events, key=lambda item: item.idempotency_key is not None):
             rows = [self._run_values(item.run_id) | self._event_values(item) for item in group]
             for row in rows:

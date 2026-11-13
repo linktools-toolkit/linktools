@@ -12,13 +12,17 @@ from ..observe import build_metrics_sql_metadata
 from ..persistence import PersistenceDomain
 from ..persistence.objects import runtime_domain_uses_object_store
 from ..persistence.schema import build_runtime_sql_metadata, build_step_sql_metadata, build_step_domain_sql_metadata
-from ..storage import build_object_sql_metadata, provision_sql
+from ..storage import SqlStorageContext, build_object_sql_metadata, provision_sql, validate_sql
 
 _logger = environ.get_logger("ai.migrate.database")
 
+# Bump when the complete standard SQL schema changes. This is not a data-wire
+# version and is used only by an explicitly acquired local SQLite writer.
+_SQLITE_SCHEMA_VERSION = 1
+
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
     from ..storage import ObjectStore
 
@@ -36,9 +40,32 @@ def build_sql_schema_metadata() -> "MetaData":
     return metadata
 
 
-async def provision_database(engine: "AsyncEngine") -> None:
-    """Provision the complete schema from the explicit migration boundary."""
+async def provision_database(engine: "AsyncEngine | SqlStorageContext") -> None:
+    """Provision the complete schema; an owned SQLite context may cache validation.
+
+    Only a context holding the local SQLite write permission owns user_version.
+    Bare engines, shared contexts and partial-schema APIs never read or write it.
+    The same version trusts the deployed schema; use validate_sql explicitly to
+    diagnose external edits made without changing the schema version.
+    """
     metadata = build_sql_schema_metadata()
+    if isinstance(engine, SqlStorageContext):
+        context = engine
+        await context.initialize()
+        await context.require_write_access()
+        if context.exclusive_writer:
+            async def provision_owned(session: "AsyncSession") -> None:
+                connection = await session.connection()
+                version = (await connection.exec_driver_sql("PRAGMA main.user_version")).scalar_one()
+                if version == _SQLITE_SCHEMA_VERSION:
+                    return
+                await connection.run_sync(metadata.create_all)
+                await validate_sql(connection, metadata)
+                await connection.exec_driver_sql(f"PRAGMA main.user_version={_SQLITE_SCHEMA_VERSION}")
+
+            await context.run_mutation(provision_owned, domain="schema")
+            return
+        engine = context.engine
     await provision_sql(engine, metadata)
     _logger.info("complete SQL schema provisioned: tables=%s", len(metadata.tables))
 

@@ -24,12 +24,21 @@ from ..core import (
     SessionStatus,
     ToolOperationStatus,
     canonical_sha256,
+    canonical_json_bytes,
     agent_run_id,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
-from ._archive import ContentArchive, PreparedArchive
+from ..steps import native_store_key
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from ..model.messages import encode_model_messages
+from ._execution_content import restore_native_text_payload
+from ._native_tool_error import NativeToolErrorReference
+from ._message_root import NativeMessageRoot, NativeTextReference
+from .contracts import ArchivedContextBlock
+from ._archive import ContentArchive, PreparedArchive, archive_content_scope
 from ..session import SessionTurnRef
+from ..execution import ExecutionControlRecord
 from .contracts import (
     deferred_resource_id,
     AgentAttemptClaim,
@@ -49,7 +58,9 @@ from .contracts import (
     ExecutionStartReservationResult,
     ExecutionStartReceipt,
     ExecutionTerminalPublication,
+    ExecutionTerminalWriteReceipt,
     IdempotencyRecord,
+    IdempotencyRepository,
     RuntimePayloadRef,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
@@ -76,7 +87,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._execution_commands import _execution_history_seal
-from ._execution_repositories import ExecutionRepositoryImpl
+from ._execution_repositories import ExecutionRepositoryImpl, IdempotencyRepositoryImpl
 from ._model_interaction_store import ModelInteractionStateStepArchive
 from ._conversation_repositories import (
     ConversationHistoryRepositoryImpl,
@@ -194,6 +205,27 @@ class StateCommands:
         self._background_tasks = background_tasks
         self._observe_cancellation = observe_cancellation
         self._capability_writes = capability_writes
+
+    @staticmethod
+    async def read_session_start(
+        sessions: SessionRepository, identities: IdempotencyRepository,
+        session_id: str, idempotency_key: str, *, tenant_id: str,
+    ) -> tuple[SessionRecord | None, IdempotencyRecord | None]:
+        """Capture admission hints in one short read; reservation remains the authority."""
+        stores = _dedupe_stores((sessions.state_store, identities.state_store))
+        async def read(group: StateGroupTransaction | None):
+            if (isinstance(group, GroupRecordReader) and isinstance(sessions, SessionRepositoryImpl)
+                    and isinstance(identities, IdempotencyRepositoryImpl)):
+                keys = {sessions.state_store: (sessions.session_record_key(session_id),)}
+                store = identities.state_store
+                keys[store] = (*keys.get(store, ()), identities._key("idempotency",
+                    identities._identity_key("session.resume", idempotency_key)))
+                await group.get_records(keys)
+            return (await sessions.get(session_id, tenant_id=tenant_id),
+                    await identities.get("session.resume", idempotency_key, tenant_id=tenant_id))
+        if _same_group(stores):
+            return await stores[0].storage_group.read_many(stores, read)
+        return await read(None)
 
     async def _load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         return await self._execution.state_store.read(
@@ -314,16 +346,13 @@ class StateCommands:
                 execution_tx = group.transaction(self._execution.state_store)
                 recovery_tx = group.transaction(approvals.state_store)
                 if producer_generation is not None:
-                    current_execution, _ = await self._execution.require_execution_producer_in_transaction(
+                    await self._execution.require_execution_producer_in_transaction(
                         execution_tx, execution_id,
                         expected_producer_generation=producer_generation, allow_cancelling=False,
                     )
-                else:
-                    current_execution = await self._execution.get_in_transaction(
-                        execution_tx,
-                        execution_id,
-                        tenant_id=tenant_id,
-                    )
+                current_execution = await self._execution.get_in_transaction(
+                    execution_tx, execution_id, tenant_id=tenant_id,
+                )
                 current_checkpoint = current_execution
                 if (
                     current_execution is None
@@ -1880,7 +1909,7 @@ class StateCommands:
                         return observed
                 await asyncio.sleep(0)
 
-    def _tool_budget_repository(self, execution: ExecutionRecord) -> BudgetRepository | None:
+    def _tool_budget_repository(self, execution: ExecutionControlRecord | ExecutionRecord) -> BudgetRepository | None:
         if execution.budget_scope_id is None:
             return None
         if self._budgets is None:
@@ -2018,6 +2047,7 @@ class StateCommands:
         execution: Observed[ExecutionRecord], observed: Observed[ToolOperationRecord] | None = None,
         result_payload: StoredPayload | None = None, error_code: str | None = None,
         error_payload: StoredPayload | None = None,
+        error_source: NativeToolErrorReference | None = None,
         write: Callable[[StateGroupTransaction], Awaitable[None]] | None = None,
         readback_write: Callable[[], Awaitable[bool]] | None = None,
         stores: Sequence[StateStore] = (),
@@ -2029,6 +2059,8 @@ class StateCommands:
         if (result_payload is None) == (error_code is None or error_payload is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if result_payload is not None and (error_code is not None or error_payload is not None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if error_source is not None and (result_payload is not None or write is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if result_payload is None:
             decode_tool_operation_failure(error_code, error_payload)
@@ -2049,16 +2081,22 @@ class StateCommands:
                 )
             return await tools.fail_in_transaction(
                 transaction, tool_operation_id, tenant_id=tenant_id, owner=owner, fence=fence,
-                observed=observed, error_code=error_code, error_payload=error_payload,
+                observed=observed, error_code=error_code, error_payload=error_payload, error_source=error_source,
             )
 
         async def operation() -> ToolBoundaryReceipt:
             async def mutate(group: StateGroupTransaction) -> ToolBoundaryReceipt:
                 nonlocal write_error
+                if write is not None and error_source is not None:
+                    try:
+                        await write(group)
+                    except BaseException as error:
+                        write_error = error
+                        raise
                 effect = await settle(group.transaction(tools.state_store))
                 if effect.value.execution_id != execution.value.execution_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if write is not None:
+                if write is not None and error_source is None:
                     try:
                         await write(group)
                     except BaseException as error:
@@ -2760,6 +2798,7 @@ class StateCommands:
             final_cursor = replace(next_cursor, message_count=end)
         elif successful and conversation_agent_run is not None and conversation_checkpoint is not None:
             assert archive is not None
+            await archive.prepare_run_registration(conversation_agent_run)
             _checkpoint, prepared = await archive.prepare_conversation_checkpoint(
                 conversation_agent_run, conversation_checkpoint,
             )
@@ -2947,6 +2986,7 @@ class StateCommands:
         *,
         archive: PreparedArchive | None = None,
     ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch, ConversationHistoryRecord | None]:
+        await owner.prepare_run_registration(run)
         history_owner = self._conversation_history
         if history_owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2983,6 +3023,60 @@ class StateCommands:
                 run, checkpoint, archive=archive, observed_records=observed_records,
             )
         return relocated, prepared, history
+
+    def _native_terminal_text(
+        self, output: StoredPayload | None, checkpoints: Sequence[PreparedAgentRunCheckpoint],
+    ) -> NativeTextReference | None:
+        """Select one exact output part from this terminal publication's final response."""
+        if (output is None or output.kind != "inline" or output.encoding != "json" or not checkpoints):
+            return None
+        prepared = checkpoints[-1]
+        messages = prepared.context_messages
+        if not messages or len(prepared.projection.items) != 1:
+            return None
+        response_index = next((index for index in range(len(messages) - 1, -1, -1)
+                               if isinstance(messages[index], ModelResponse)), None)
+        if response_index is None:
+            return None
+        message = messages[response_index]
+        trailing = messages[response_index + 1:]
+        block = prepared.projection.items[0]
+        if (not isinstance(block, ArchivedContextBlock)
+                or not isinstance(block.root, NativeMessageRoot) or block.root.count != len(messages)):
+            return None
+        opened = self._execution.state_store.storage_group.opened_archive
+        if (opened is None or block.root.group_id != opened[0]
+                or block.root.store_key != native_store_key(self._namespace, self._tenant_id)):
+            return None
+        root = block.root.slice(response_index, response_index + 1)
+        raw = encode_model_messages((message,))
+        expected = canonical_json_bytes(output.to_json())
+        matches = []
+        for index, part in enumerate(message.parts):
+            if isinstance(part, TextPart):
+                if trailing:
+                    continue
+                projections = tuple(NativeTextReference(root, projection, index)
+                                    for projection in ("text", "assistant-text-output"))
+            elif isinstance(part, ToolCallPart):
+                # Output-tool completion may append its acknowledgement. Never
+                # walk back across a retry, a new response or unrelated effects.
+                if any(not isinstance(item, ModelRequest) or not item.parts
+                       or any(not isinstance(reply, ToolReturnPart)
+                              or reply.tool_call_id != part.tool_call_id or reply.tool_name != part.tool_name
+                              for reply in item.parts) for item in trailing):
+                    continue
+                projections = (NativeTextReference(root, "tool-call-output", index, part.tool_name, part.tool_call_id),)
+            else:
+                continue
+            for reference in projections:
+                try:
+                    value = restore_native_text_payload(reference, raw)
+                except AIError:
+                    continue
+                if canonical_json_bytes(value.to_json()) == expected:
+                    matches.append(reference)
+        return matches[0] if len(matches) == 1 else None
 
     async def commit_terminal_checkpoint(
         self,
@@ -3057,12 +3151,15 @@ class StateCommands:
             ) if participates and archive is not None
         )
         shared_archive = None
+        execution_archive_scope = archive_content_scope(self._namespace, self._tenant_id)
+        shared_execution_scope = False
         if _same_group(stores) and terminal_archives:
             roots = tuple([
                 (await archive.transcript_repository.content_archive(create=True)).empty_root()
                 for archive in terminal_archives
             ])
             same_content_scope = all(root == roots[0] for root in roots)
+            shared_execution_scope = same_content_scope and roots[0].content_scope == execution_archive_scope
             shared_archive = _copy_archive_union(tuple(
                 archive for projection in execution_projections
                 for archive in (
@@ -3078,6 +3175,7 @@ class StateCommands:
             and conversation_agent_run is not None
             and conversation_checkpoint is not None
         ):
+            await self._conversation_run_store.prepare_run_registration(conversation_agent_run)
             if session_id is None:
                 conversation_checkpoint, prepared_conversation = await self._conversation_run_store.prepare_conversation_checkpoint(
                     conversation_agent_run, conversation_checkpoint, archive=shared_archive,
@@ -3105,6 +3203,8 @@ class StateCommands:
             )
 
         prepared_execution: PreparedAgentRunCheckpointBatch | tuple[()] = ()
+        if self._execution_run_store is not None and execution_run is not None:
+            await self._execution_run_store.prepare_run_registration(execution_run)
         if (
             not execution_projections
             and self._execution_run_store is not None
@@ -3157,6 +3257,30 @@ class StateCommands:
                     observation=(None if projection.observation is None else
                                  replace(projection.observation, archive=PreparedArchive())),
                 ) for projection in execution_projections)
+            result_source = None
+            if type(self._execution) is ExecutionRepositoryImpl:
+                for checkpoints in (tuple(prepared_conversation), tuple(prepared_execution),
+                        tuple(checkpoint for projection in terminal_projections for checkpoint in projection.checkpoints)):
+                    result_source = self._native_terminal_text(commit.result.output, checkpoints)
+                    if result_source is not None:
+                        break
+                if shared_archive is not None and shared_execution_scope:
+                    await self._execution.prepare_terminal_content(commit, shared_archive, result_source=result_source)
+                elif self._execution_run_store is not None and (prepared_execution or terminal_projections):
+                    content = await self._execution_run_store.transcript_repository.content_archive(create=True)
+                    if content.content_scope == execution_archive_scope:
+                        if prepared_execution:
+                            checkpoint = prepared_execution[0]
+                            bundle = _copy_archive_union((checkpoint.archive,))
+                            await self._execution.prepare_terminal_content(commit, bundle, result_source=result_source)
+                            prepared_execution = replace(prepared_execution, checkpoints=(
+                                replace(checkpoint, archive=bundle), *prepared_execution.checkpoints[1:],
+                            ))
+                        else:
+                            projection = terminal_projections[0]
+                            bundle = _copy_archive_union((projection.archive,))
+                            await self._execution.prepare_terminal_content(commit, bundle, result_source=result_source)
+                            terminal_projections = (replace(projection, archive=bundle), *terminal_projections[1:])
             prepared = (await self._capability_writes.prepare_terminal(
                 commit.execution.execution_id, capability_run_id, stores[0].storage_group,
             ) if self._capability_writes is not None else None)
@@ -3201,6 +3325,10 @@ class StateCommands:
             try:
                 async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                     nonlocal effective_commit, next_cursor
+                    if isinstance(self._execution, ExecutionRepositoryImpl):
+                        await self._execution.prefetch_terminal_records(
+                            commit.execution.execution_id, additional_records=fresh_record_keys,
+                        )
                     if fresh_record_keys and isinstance(group, GroupRecordReader):
                         await group.get_records(fresh_record_keys)
                     execution_transaction = group.transaction(self._execution.state_store)
@@ -3333,21 +3461,42 @@ class StateCommands:
                             )
                     if prepared is not None:
                         await prepared.apply(group)
-                    if closed_result is None:
-                        if seal is not None:
-                            await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
-                        closed_result = await self._execution.commit_terminal_in_transaction(
-                            execution_transaction, effective_commit, pending_events=audit_events,
-                        )
                     if shared_archive is not None:
                         await terminal_archives[0].transcript_repository.publish_native_archive(
                             group.transaction(terminal_archives[0].state_store), shared_archive, owner_written=True,
                         )
+                        if self._execution_run_store is not None:
+                            for projection in terminal_projections:
+                                await self._execution_run_store.share_published_content(
+                                    projection.run, execution_id=commit.execution.execution_id,
+                                    checkpoints=projection.checkpoints, observation=projection.observation,
+                                    archive=shared_archive,
+                                )
+                            if not terminal_projections and execution_run is not None:
+                                await self._execution_run_store.share_published_content(
+                                    execution_run, execution_id=commit.execution.execution_id,
+                                    checkpoints=tuple(prepared_execution), observation=None, archive=shared_archive,
+                                )
+                    if closed_result is None:
+                        if seal is not None:
+                            await self._execution.put_history_seal_in_transaction(execution_transaction, seal)
+                        if result_source is None:
+                            closed_result = await self._execution.commit_terminal_in_transaction(
+                                execution_transaction, effective_commit, pending_events=audit_events,
+                            )
+                        else:
+                            closed_result = await self._execution.commit_terminal_in_transaction(
+                                execution_transaction, effective_commit, pending_events=audit_events, result_source=result_source,
+                            )
                     if closed_result.execution.recovery_state is ExecutionRecoveryState.HANDOFF:
                         return closed_result
-                    observed = await self._execution.get_observed_in_transaction(
-                        execution_transaction, closed_result.execution.execution_id, tenant_id=self._tenant_id,
-                    )
+                    observed = (await self._execution.confirm_terminal_write_in_transaction(
+                            execution_transaction, closed_result)
+                        if isinstance(self._execution, ExecutionRepositoryImpl)
+                        and isinstance(closed_result, ExecutionTerminalWriteReceipt)
+                        else await self._execution.get_observed_in_transaction(
+                            execution_transaction, closed_result.execution.execution_id, tenant_id=self._tenant_id,
+                        ))
                     if observed is None or observed.value != closed_result.execution:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     return ExecutionTerminalPublication(
@@ -3426,7 +3575,7 @@ class StateCommands:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if prepared is not None:
                         await prepared.settle()
-                    if publication_confirmed and next_cursor is not None and prepared_conversation:
+                    if publication_confirmed and publish_turn and next_cursor is not None and prepared_conversation:
                         await self._confirm_conversation_context(self._conversation_run_store, next_cursor, prepared_conversation[0], archive_records=shared_archive)
                     if result.cancelled:
                         raise asyncio.CancelledError
@@ -3897,6 +4046,8 @@ class StateCommands:
         prepared = batch[0]
         if await self._prepared_checkpoint_visible(archive, run, prepared):
             return
+
+        await archive.prepare_run_registration(run)
 
         async def materialize(transaction: StateTransaction) -> None:
             await archive.materialize_checkpoint_in_transaction(

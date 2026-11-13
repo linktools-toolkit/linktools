@@ -267,25 +267,24 @@ def test_generic_setting_cache_and_routing_are_gone(fresh_manager):
         assert not hasattr(fresh_manager, name), f"{name} should have been removed from ContainerManager"
 
 
-# -- manager.containers must not recurse through installed-state -------------
+# -- discovery must not recurse through installed-state ----------------------
 
 def test_containers_property_does_not_recurse(fresh_manager, monkeypatch):
-    """manager.containers must resolve installed *names* without reading
-    manager.containers again (that would be infinite recursion through
-    InstalledStateStore, whose _load() maps names back to manager.containers).
+    """Discovery reads installed names without resolving installed objects,
+    which would recursively access the manager's container registry.
     """
     calls = []
     real_load_names = fresh_manager.installed_state.load_names
 
     def counting_load_names():
         calls.append(1)
-        assert "containers" not in fresh_manager.__dict__, (
-            "manager.containers must not be re-entered while it is still being computed"
+        assert "containers" not in fresh_manager.loader.__dict__, (
+            "Container discovery must not re-enter itself"
         )
         return real_load_names()
 
     monkeypatch.setattr(fresh_manager.installed_state, "load_names", counting_load_names)
-    fresh_manager.__dict__.pop("containers", None)
-    containers = fresh_manager.containers
+    fresh_manager.loader.__dict__.pop("containers", None)
+    containers = fresh_manager.loader.containers
     assert isinstance(containers, dict) and containers
     assert calls == [1]

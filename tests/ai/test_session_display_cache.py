@@ -310,7 +310,7 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
         await _change_execution_display(state, "new", "second")
         if phase in {"get", "dependency"}:
             owner = cache if phase == "get" else state.execution.executions
-            name = "get" if phase == "get" else "get_timeline_many"
+            name = "get" if phase == "get" else "get_membership_many"
             read = getattr(owner, name)
 
             async def slow(*args, **kwargs):

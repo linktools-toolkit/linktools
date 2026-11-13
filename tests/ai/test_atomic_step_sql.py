@@ -3,6 +3,7 @@
 """Native safety points publish one atomic, confirmed SQL transaction."""
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +21,7 @@ from linktools.ai.persistence import SqlStepStore
 from linktools.ai.capability.steps import AtomicStepStore
 
 from .test_step_message_cache import _SqlTraffic
+from .test_step_content_cleanup import _Offline
 
 
 @pytest_asyncio.fixture
@@ -44,7 +46,7 @@ def _records() -> tuple[RunRecord, list[StepEvent], ContinuableSnapshot]:
 
 
 @pytest.mark.asyncio
-async def test_compound_native_records_use_one_owner_commit_and_bounded_maintenance(
+async def test_compound_native_records_use_one_owner_commit_without_online_maintenance(
     atomic_store: tuple[SqlStepStore, AsyncEngine], record_property,
 ) -> None:
     store, engine = atomic_store
@@ -72,10 +74,7 @@ async def test_compound_native_records_use_one_owner_commit_and_bounded_maintena
         assert len(owners) == 1
         assert owners[0].count(("INSERT", "ai_step_snapshots")) == 1
         maintenance = [group for group in commits if group is not owners[0]]
-        assert len(maintenance) <= 1
-        assert all(verb == "DELETE" and table in {
-            "ai_native_content_edges", "ai_step_sequences", "ai_step_messages",
-        } for group in maintenance for verb, table in group)
+        assert maintenance == []
         record_property("native_owner_commits", len(owners))
         record_property("native_maintenance_commits", len(maintenance))
 
@@ -296,11 +295,12 @@ async def test_native_boundary_joins_control_transaction_with_identity_reads_and
         reads = [statement for statement in statements if statement.lstrip().upper().startswith(("SELECT", "WITH"))]
         assert len(reads) <= 4, reads
         for statement in reads:
-            projection = statement.split("FROM", 1)[0].strip()
-            assert projection in {
-                "SELECT ai_step_sequences.sha256, ai_step_sequences.id",
-                "SELECT ai_step_messages.sha256, ai_step_messages.id",
-            }, statement
+            for branch in statement.split("UNION ALL"):
+                projection = branch.split("FROM", 1)[0].strip()
+                assert re.fullmatch(
+                    r"SELECT (?:\? AS anon_\d+, )?ai_step_(sequences|messages)\.sha256, ai_step_\1\.id",
+                    projection,
+                ), statement
         record_property("native_joined_identity_selects", len(reads))
         record_property("native_joined_owner_commits", len(commits))
         assert not native._message_proofs
@@ -518,10 +518,12 @@ async def test_pruned_headers_keep_replay_identity_without_body_retention_roots(
         last = replace(first, step_index=2, idempotency_key="last",
             messages=[ModelRequest(parts=[UserPromptPart("retained")])])
         await native.save_snapshot(last)
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 4
+        # Pruning retires roots; only the explicit offline pass reclaims bodies.
+        await native.purge_unreferenced_content(exclusive=_Offline())
         await native.close()
         async with engine.connect() as connection:
-            # Online collection removes unreachable content, but replay headers
-            # must survive and must never restore their retired body roots.
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_messages")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_sequences")) == 1
             assert await connection.scalar(text("SELECT count(*) FROM ai_step_snapshots WHERE pruned = 1 AND messages = '{}' AND sequence_root IS NULL")) == 2

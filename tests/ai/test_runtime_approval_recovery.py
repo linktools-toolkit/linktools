@@ -99,7 +99,7 @@ def _continuation() -> PendingToolContinuation:
         "read_file",
         payload,
         {"source": "workspace"},
-    )
+     operation_id="test-operation")
     return PendingToolContinuation(
         "step-1",
         approvals=(call,),

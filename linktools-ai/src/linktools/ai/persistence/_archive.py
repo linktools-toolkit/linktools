@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256, validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
@@ -18,12 +19,15 @@ from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead, ArchiveNodeSlot
 from ._record_key import decode_key_components, encode_key_components
 from ._payload import decode_payload_bytes, encode_payload_bytes
-from .state import RECORD_KEY_MAX_BYTES, StateStore, StateTransaction, StoredRecord, record_key
+from .state import RECORD_KEY_MAX_BYTES, StateStore, StateTransaction, StoredRecord, record_key, active_state_transaction
 
 
 if TYPE_CHECKING:
     from ._message_root import NativeMessageSequence
     from ._step_message_content import NativeMessageContent, PreparedNativeMessages
+
+
+EXECUTION_PAYLOAD_CODEC = "execution-payload"
 
 
 def _integrity() -> AIError:
@@ -390,6 +394,7 @@ class ContentArchive:
     def __init__(self, store: StateStore, scope_id: str, *, namespace: str,
                  tenant_id: str, object_store: ObjectStore | None,
                  object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None) -> None:
+        self._content_reads: WeakKeyDictionary[StateTransaction, dict[str, tuple[ContentRecord, bytes]]] = WeakKeyDictionary()
         self._message_publisher: Callable[[StateTransaction, PreparedArchive], Awaitable[None]] | None = None
         self.store = store
         self.scope_id = validate_archive_group_id(scope_id)
@@ -450,9 +455,32 @@ class ContentArchive:
                               prepared: PreparedArchive) -> tuple[str, ...]:
         return await self._prepare_content(values, prepared)
 
+    async def ensure_content(self, values: Sequence[tuple[str, bytes]]) -> tuple[str, ...]:
+        """Publish typed payloads by address; retain other immutable content contracts."""
+        keys = self.content_record_keys(values)
+        opened = self.store.storage_group.opened_archive
+        typed_owner = opened is not None and opened[1] is self.store
+
+        async def ensure(transaction: StateTransaction) -> tuple[str, ...]:
+            prepared = PreparedArchive()
+            if typed_owner and all(codec == EXECUTION_PAYLOAD_CODEC for codec, _ in values):
+                identities = await self.prepare_content(values, prepared)
+            else:
+                existing = await transaction.get_records(keys)
+                self.observe_content(prepared, keys, existing)
+                identities = await self.prepare_content(values, prepared)
+                prepared.records = {key: record for key, record in prepared.records.items() if key not in existing}
+            if prepared.records:
+                await self.publish(transaction, prepared)
+            return identities
+
+        return await self.store.mutate(ensure)
+
     async def _prepare_content(self, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
                                existing: Mapping[bytes, StoredRecord] | None = None) -> tuple[str, ...]:
         self._bind(prepared)
+        opened = self.store.storage_group.opened_archive
+        typed_owner = opened is not None and opened[1] is self.store
         identities: list[str] = []
         unique: dict[str, tuple[str, bytes, str]] = {}
         for codec, raw in values:
@@ -462,10 +490,14 @@ class ContentArchive:
             unique[identity] = (codec, raw, digest)
         keys = {identity: self._key("archive_content", identity) for identity in unique}
         missing = [key for key in keys.values() if key not in prepared.records]
+        typed_keys = {keys[identity] for identity, (codec, _, _) in unique.items()
+                      if typed_owner and codec == EXECUTION_PAYLOAD_CODEC}
         observed = {key: prepared._observed_content.pop(key) for key in keys.values()
                     if key in prepared._observed_content}
         if existing is None:
-            unread = tuple(key for key in missing if key not in observed)
+            # Typed payloads have one immutable content address. Publication
+            # keeps the first stored representation; no body pre-read is needed.
+            unread = tuple(key for key in missing if key not in observed and key not in typed_keys)
             existing = dict(await self.store.read_records(unread)) if unread else {}
             existing.update((key, record) for key, record in observed.items() if record is not None)
         for identity, (codec, raw, digest) in unique.items():
@@ -477,8 +509,8 @@ class ContentArchive:
                 content = self._decode_content_record(stored)
                 if content.identity != identity or content.raw_size != len(raw):
                     raise _integrity()
-                if not prepared.content_verified(stored):
-                    if await self._read_content(content) != raw:
+                if not prepared.content_verified(stored) and key not in typed_keys:
+                    if await self._load_content(content) != raw:
                         raise _integrity()
                     prepared.verify_content(stored)
                 prepared.records[key] = stored
@@ -1016,6 +1048,10 @@ class ContentArchive:
         prepared.nodes.update(nodes)
         return groups, {identity: contents[identity] for group in groups for identity in group} if include_content else {}
 
+    def content_identity_keys(self, identities: Sequence[str]) -> tuple[bytes, ...]:
+        """Resolve fixed content identities without preparing or loading bytes."""
+        return tuple(self._key("archive_content", validate_archive_content_identity(identity)) for identity in identities)
+
     async def content_records(self, identities: Sequence[str]) -> tuple[ContentRecord, ...]:
         """Read content metadata in a batch without opening object bodies."""
         keys = {identity: self._key("archive_content", validate_archive_content_identity(identity)) for identity in identities}
@@ -1057,7 +1093,7 @@ class ContentArchive:
             for identity, content in records.items():
                 if content.codec != codec:
                     raise _integrity()
-                decoded[identity] = await self._read_content(content)
+                decoded[identity] = await self._load_content(content)
             result = tuple(tuple(decoded[identity] for identity in group) for group in groups)
             if append_frontiers is not None and frontiers is not None:
                 append_frontiers.update(frontiers)
@@ -1079,8 +1115,47 @@ class ContentArchive:
                 raise _integrity()
             if reserve is not None:
                 reserve(identity, content.raw_size)
-            decoded[identity] = await self._read_content(content)
+            decoded[identity] = await self._load_content(content)
         return tuple(decoded[identity] for identity in identities)
+
+    async def capture_content_records(
+        self, identities: Sequence[str],
+    ) -> tuple[tuple[ContentRecord, ...], Callable[[Sequence[str]], Awaitable[tuple[bytes, ...]]]]:
+        """Capture actual owner-scope metadata and bind its later byte loading.
+
+        The caller enlists this archive with its owner before capture. The loader
+        accepts only captured identities, never caller-provided content records.
+        """
+        records = await self.content_records(identities)
+        captured = {content.identity: content for content in records}
+
+        async def load(selected: Sequence[str]) -> tuple[bytes, ...]:
+            if any(identity not in captured for identity in selected):
+                raise _integrity()
+            return tuple([await self._load_content(captured[identity]) for identity in selected])
+
+        return records, load
+
+    async def _load_content(self, content: ContentRecord) -> bytes:
+        """Reuse validation only for the same captured inline source in this transaction.
+
+        Every caller first captures source metadata. Changed or removed sources
+        therefore remain failures; external object bodies are never cached here.
+        """
+        transaction = active_state_transaction(self.store)
+        cache = None
+        if transaction is not None and content.payload is None:
+            try:
+                cache = self._content_reads.setdefault(transaction, {})
+            except TypeError:
+                pass  # Custom transactions may not support weak references.
+        previous = None if cache is None else cache.get(content.identity)
+        if previous is not None and previous[0] == content:
+            return previous[1]
+        raw = await self._read_content(content)
+        if cache is not None:
+            cache[content.identity] = content, raw
+        return raw
 
     async def _read_content(self, content: ContentRecord) -> bytes:
         raw = (content.body if content.payload is None else
@@ -1089,4 +1164,4 @@ class ContentArchive:
                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
 
 
-__all__ = ["ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive", "archive_content_scope", "archive_scope_key", "archive_scope_parts", "archive_scope_token", "decode_archive_scope", "archive_content_identity", "validate_archive_content_identity", "validate_archive_group_id"]
+__all__ = ["EXECUTION_PAYLOAD_CODEC", "ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive", "archive_content_scope", "archive_scope_key", "archive_scope_parts", "archive_scope_token", "decode_archive_scope", "archive_content_identity", "validate_archive_content_identity", "validate_archive_group_id"]

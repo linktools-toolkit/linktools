@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from .test_execution_recovery_commands import _execution
 
 import pytest
-from linktools.ai.core import canonical_sha256
+from linktools.ai.core import PersistenceDomain, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
+from linktools.ai.inputs import RepositoryInstructionPayload
 from linktools.ai.persistence.contracts import (
     ExecutionRecoveryDetail,
     RepositoryInstructionBarrier,
@@ -76,15 +77,10 @@ def _checkpoint(
         "call-b",
         canonical_sha256({"path": "pkg/deep/file.txt"}),
     )
-    reference = SimpleNamespace(
-        payload=SimpleNamespace(
-            digest=(
-                canonical_sha256(latest.to_payload())
-                if latest_payload_digest is None
-                else latest_payload_digest
-            )
-        )
-    )
+    reference = RepositoryInstructionPayload(
+        canonical_sha256(latest.to_payload()) if latest_payload_digest is None else latest_payload_digest,
+        latest.to_payload(),
+    ).to_reference(PersistenceDomain.CHECKPOINT)
     checkpoint = replace(_execution(datetime.now(timezone.utc)), recovery=ExecutionRecoveryDetail(
         agent_run_id="step",
         repository_instruction_overlay=reference,
@@ -140,7 +136,7 @@ async def test_historical_barrier_replay_rejects_changed_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_latest_overlay_must_match_persisted_payload_digest() -> None:
+async def test_latest_overlay_uses_loaded_content_without_rechecking_digest() -> None:
     first, latest = _instructions()
     checkpoint, arguments = _checkpoint(
         first,
@@ -152,18 +148,18 @@ async def test_latest_overlay_must_match_persisted_payload_digest() -> None:
         _Resolver(),  # type: ignore[arg-type]
     )
 
-    with pytest.raises(AIError) as raised:
-        await coordinator.check_repository_instructions(
-            execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
-            initial=None,
-            overlay=first,
-            tool_name="read_file",
-            tool_call_id="call-a",
-            arguments=arguments,
-            path_fields=("path",),
-        )
+    overlay, reconsider = await coordinator.check_repository_instructions(
+        execution=SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
+        initial=None,
+        overlay=first,
+        tool_name="read_file",
+        tool_call_id="call-a",
+        arguments=arguments,
+        path_fields=("path",),
+    )
 
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert overlay == latest
+    assert reconsider is True
 
 
 @pytest.mark.asyncio
@@ -190,7 +186,7 @@ async def test_dynamic_instruction_union_limits_precede_barrier_commit(tmp_path,
     if kind == "overlay":
         persisted = RepositoryInstructions((child,))
         checkpoint = replace(checkpoint, recovery=replace(checkpoint.recovery,
-            repository_instruction_overlay=SimpleNamespace(payload=SimpleNamespace(digest=canonical_sha256(persisted.to_payload()))),
+            repository_instruction_overlay=RepositoryInstructionPayload.capture(persisted, persisted.to_payload()).to_reference(PersistenceDomain.CHECKPOINT),
             repository_instruction_barriers=(RepositoryInstructionBarrier("earlier", "first", "a" * 64),)))
 
     class Port(_Port):

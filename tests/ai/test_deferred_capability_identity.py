@@ -210,7 +210,7 @@ async def test_generic_native_approval_retains_sdk_semantics_without_invented_id
     assert isinstance(result.output, DeferredToolRequests)
     call, = result.output.approvals
     assert references == {} and effects == []
-    pending = PendingDeferredCall(call.tool_call_id, call.tool_name, StoredPayload.inline_json({}))
+    pending = PendingDeferredCall(call.tool_call_id, call.tool_name, StoredPayload.inline_json({}), operation_id="test-operation")
     assert pending.capability_ref is None
     agent = Agent(TestModel(call_tools=[], custom_output_text="done"), tools=[tool("replacement")],
                   output_type=[str, DeferredToolRequests])
@@ -223,6 +223,6 @@ async def test_generic_native_approval_retains_sdk_semantics_without_invented_id
 @pytest.mark.parametrize("persisted", (False, True))
 def test_pending_capability_reference_round_trips_current_wire(persisted: bool) -> None:
     pending = PendingDeferredCall("call", "checked", StoredPayload.inline_json({}),
-                                  capability_ref=CapabilityRef("tool", "checked", 1))
+                                  capability_ref=CapabilityRef("tool", "checked", 1), operation_id="test-operation")
     encoded = codec._encode_domain(pending, codec._CURRENT_CODEC, persisted=persisted)
     assert codec._decode_domain(encoded, PendingDeferredCall, codec._CURRENT_CODEC, persisted=persisted) == pending

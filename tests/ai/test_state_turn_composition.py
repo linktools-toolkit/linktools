@@ -329,7 +329,7 @@ async def test_snapshot_rejects_broken_source_turn_graph(tmp_path: Path, defect:
     with pytest.raises(AIError) as rejected:
         validate_snapshot_domain(
             namespace=namespace, tenant_id="tenant", domain=domain,
-            records=records, aliases=(), facts=(), operations=(), sequences={},
+            records=records, facts=(), operations=(), sequences={},
         )
     assert rejected.value.code is (
         ErrorCode.STORAGE_VERSION_UNSUPPORTED if defect == "wrong_domain" else ErrorCode.STORAGE_INTEGRITY_ERROR

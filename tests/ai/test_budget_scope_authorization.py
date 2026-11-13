@@ -169,7 +169,7 @@ async def test_retry_authorizes_retained_source_after_budget_root_is_retired(bud
 
     async def retire_root(transaction: StateTransaction) -> None:
         for record in await transaction.list_records(RecordQuery(kind="execution")):
-            execution = _decode_enveloped_domain(record.data, ExecutionRecord)
+            execution = await storage.execution.executions._execution_content.decode(record)
             if execution.execution_id == root.execution_id:
                 assert await transaction.delete_record(record.key)
                 return

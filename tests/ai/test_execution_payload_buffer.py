@@ -7,14 +7,19 @@ from dataclasses import replace
 
 import pytest
 
-from linktools.ai.core import ExecutionEventType, ExecutionStatus
+from linktools.ai.asset import AssetKey
+from linktools.ai.core import ExecutionEventType, ExecutionStatus, PersistenceDomain
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import RuntimePayloadRef, StoredUserInput
+from linktools.ai.inputs import RepositoryInstructionPayload
+from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence.contracts import ExecutionEventAppend
 from linktools.ai.runtime._execution_buffer import _ExecutionPayloadBuffer, _ExecutionPayloadCapture
+from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.storage import InMemoryCacheBackend, ObjectRef, StoredPayload
 
 from .test_history_projection_conformance import _record
+from .test_rule_context_storage import _archive, _assets, _rules
 
 
 class _Buffer(InMemoryCacheBackend):
@@ -326,17 +331,54 @@ async def test_execution_buffer_rejects_a_snapshot_that_rewrites_an_unconfirmed_
     await owner.close()
 
 
+async def _instruction_representations() -> tuple[RuntimePayloadRef, RuntimePayloadRef]:
+    async with _assets() as assets, Persistence.open(
+        "buffer-instructions", storage=PersistenceStorage.in_memory(),
+    ) as state:
+        await assets.put(AssetKey("rule", "first.md"), b"---\nscope: src\n---\noriginal Rule")
+        await assets.put(AssetKey("rule", "second.md"), b"another Rule")
+        accepted = RepositoryInstructions((*((await _rules(assets)).documents),
+            RepositoryInstructionDocument("agents:AGENTS.md", ".", "Workspace instructions"),
+            RepositoryInstructionDocument("rule:custom", ".", "custom instructions"),
+        ))
+        full = await _archive(state).prepare_repository_instruction_payload(
+            accepted, source_domain=PersistenceDomain.EXECUTION,
+        )
+        archive = _archive(state, {"rules": assets})
+        compact = await archive.prepare_repository_instruction_payload(
+            accepted, source_domain=PersistenceDomain.EXECUTION,
+        )
+        assert full.payload.digest != compact.payload.digest
+        assert await archive.load_repository_instruction_payload(full) == accepted
+        assert await archive.load_repository_instruction_payload(compact) == accepted
+        return full, compact
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ("repository_instructions", "input_context"))
-async def test_execution_buffer_preserves_payload_identity_across_storage_representations(field: str) -> None:
+@pytest.mark.parametrize("field, reverse", (
+    ("repository_instructions", False), ("repository_instructions", True), ("input_context", False),
+))
+async def test_execution_buffer_preserves_payload_identity_across_storage_representations(
+    field: str, reverse: bool,
+) -> None:
     backend = _Buffer(max_bytes=1024 * 1024)
     owner = _ExecutionPayloadBuffer(backend)
-    payload = StoredPayload.inline_json({"body": "immutable context"})
-    first = replace(_capture(), execution=replace(_capture().execution,
-        **{field: RuntimePayloadRef(payload, None)}), checkpoint_payload=b"opaque checkpoint bytes")
+    if field == "repository_instructions":
+        first_ref, second_ref = await _instruction_representations()
+        if reverse:
+            first_ref, second_ref = second_ref, first_ref
+        assert RepositoryInstructionPayload.from_reference(first_ref).has_same_content(
+            RepositoryInstructionPayload.from_reference(second_ref))
+    else:
+        payload = StoredPayload.inline_json({"body": "immutable context"})
+        first_ref = RuntimePayloadRef(payload, None)
+        reference = StoredPayload.object(ObjectRef("objects", "context", payload.digest, payload.size))
+        second_ref = RuntimePayloadRef(reference, None)
+    initial = _capture()
+    first = replace(initial, execution=replace(initial.execution, **{field: first_ref}),
+                    checkpoint_payload=b"opaque checkpoint bytes")
     await owner.append(first)
-    reference = StoredPayload.object(ObjectRef("objects", "context", payload.digest, payload.size))
-    second = replace(first, execution=replace(first.execution, **{field: RuntimePayloadRef(reference, None)}))
+    second = replace(first, execution=replace(first.execution, **{field: second_ref}))
     await owner.append(second)
     captured, ids = await owner.read(first.execution.execution_id)
     assert captured == second
@@ -351,15 +393,99 @@ async def test_execution_buffer_preserves_payload_identity_across_storage_repres
 async def test_execution_buffer_rejects_rewritten_instruction_or_context_bytes(field: str) -> None:
     backend = _Buffer(max_bytes=1024 * 1024)
     owner = _ExecutionPayloadBuffer(backend)
-    first = replace(_capture(), execution=replace(_capture().execution,
-        **{field: RuntimePayloadRef(StoredPayload.inline_json({"body": "original"}), None)}))
+    if field == "repository_instructions":
+        first_ref, _ = await _instruction_representations()
+        changed = first_ref.payload.decode()
+        changed["instructions"]["documents"][0]["content"] = "replacement"
+        second_ref = replace(first_ref, payload=StoredPayload.inline_json(changed))
+    else:
+        first_ref = RuntimePayloadRef(StoredPayload.inline_json({"body": "original"}), None)
+        second_ref = RuntimePayloadRef(StoredPayload.inline_json({"body": "replacement"}), None)
+    initial = _capture()
+    first = replace(initial, execution=replace(initial.execution, **{field: first_ref}))
     await owner.append(first)
-    second = replace(first, execution=replace(first.execution,
-        **{field: RuntimePayloadRef(StoredPayload.inline_json({"body": "replacement"}), None)}))
+    second = replace(first, execution=replace(first.execution, **{field: second_ref}))
     await owner.append(second)
     with pytest.raises(AIError) as changed:
         await owner.read(first.execution.execution_id)
     assert changed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    owner.discard(first.execution.execution_id)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", (
+    "content", "content_digest", "asset", "asset_source_id", "source", "scope", "order",
+    "metadata", "document_metadata", "semantic_digest", "workspace", "custom",
+))
+async def test_execution_buffer_rejects_changed_rule_projection_with_copied_semantic_digest(change: str) -> None:
+    full, compact = await _instruction_representations()
+    changed = (full if change == "content" else compact).payload.decode()
+    documents = changed["instructions"]["documents"]
+    rule = next(document for document in documents if document.get("asset") is not None)
+    if change == "content":
+        rule["content"] = "different Rule with copied semantic digest"
+    elif change == "content_digest":
+        rule["content_digest"] = "0" * 64
+    elif change == "asset":
+        rule["asset"]["revision"] += 1
+    elif change in {"asset_source_id", "source", "scope"}:
+        rule[change] = "different"
+    elif change == "order":
+        documents.reverse()
+    elif change == "metadata":
+        changed["instructions"]["extra"] = "different"
+    elif change == "document_metadata":
+        rule["extra"] = "different"
+    elif change == "semantic_digest":
+        changed["semantic_digest"] = "0" * 64
+    else:
+        source = "agents:AGENTS.md" if change == "workspace" else "rule:custom"
+        next(document for document in documents if document["source"] == source)["content"] = "different"
+    changed_ref = replace(compact, payload=StoredPayload.inline_json(changed))
+    owner = _ExecutionPayloadBuffer(_Buffer(max_bytes=1024 * 1024))
+    initial = _capture()
+    first = replace(initial, execution=replace(initial.execution, repository_instructions=compact if change == "content" else full))
+    await owner.append(first)
+    await owner.append(replace(first, execution=replace(first.execution, repository_instructions=changed_ref)))
+    with pytest.raises(AIError) as failure:
+        await owner.read(first.execution.execution_id)
+    assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    owner.discard(first.execution.execution_id)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ("metadata", "document_metadata", "asset_revision"))
+@pytest.mark.parametrize("replacement", (True, 1.0), ids=("bool", "float"))
+async def test_execution_buffer_rejects_rule_numeric_type_changes(
+    field: str, replacement: bool | float,
+) -> None:
+    full, compact = await _instruction_representations()
+    original, changed = full.payload.decode(), compact.payload.decode()
+    for value, number in ((original, 1), (changed, replacement)):
+        instructions = value["instructions"]
+        rule = next(document for document in instructions["documents"] if document.get("asset") is not None)
+        if field == "metadata":
+            instructions["extra"] = number
+        elif field == "document_metadata":
+            rule["extra"] = number
+        else:
+            rule["asset"]["revision"] = number
+    first_ref = replace(full, payload=StoredPayload.inline_json(original))
+    second_ref = replace(compact, payload=StoredPayload.inline_json(changed))
+    first_payload = RepositoryInstructionPayload.from_reference(first_ref)
+    second_payload = RepositoryInstructionPayload.from_reference(second_ref)
+    assert not first_payload.has_same_content(second_payload)
+    assert not second_payload.has_same_content(first_payload)
+    owner = _ExecutionPayloadBuffer(_Buffer(max_bytes=1024 * 1024))
+    initial = _capture()
+    first = replace(initial, execution=replace(initial.execution, repository_instructions=first_ref))
+    await owner.append(first)
+    await owner.append(replace(first, execution=replace(first.execution, repository_instructions=second_ref)))
+    with pytest.raises(AIError) as failure:
+        await owner.read(first.execution.execution_id)
+    assert failure.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     owner.discard(first.execution.execution_id)
     await owner.close()
 

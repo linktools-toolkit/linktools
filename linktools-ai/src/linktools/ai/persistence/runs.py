@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -48,6 +49,7 @@ from .durability import (
     run_durable_commit,
 )
 from ._projection_payload import decode_projection_payload, encode_projection_payload
+from ._run_registration import RunRegistrationStore
 from ._plan import PersistenceDomain
 from ._archive import PreparedArchive
 from ._message_root import NativeMessageRoot
@@ -133,7 +135,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         execution_archive: AgentRunStore | None,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
+        run_registrations: "RunRegistrationStore | None" = None,
     ) -> None:
+        self.run_registrations = run_registrations
+        self._run_sources: dict[str, RunRecord] = {}
         self.capability_writes: RuntimeCapabilityWrites | None = None
         self.capability_revisions: dict[str, int] = {}
         self._staging = staging
@@ -289,7 +294,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if source is not None:
                     self.checkpoint_persistence.reader.confirm_run(source)
                     self._staging.adopt_native_run_local(OfficialStepReader.project_run(source))
-                    archive.confirm_native_run(source)
+
+    def stage_run_source(self, record: RunRecord) -> None:
+        """Retain admitted metadata without claiming a native boundary committed."""
+        previous = self._run_sources.get(record.run_id)
+        if previous is not None and previous != record:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._run_sources[record.run_id] = deepcopy(record)
 
     def confirm_step_run(self, record: RunRecord, *, receipt: StepWriteReceipt | None = None) -> None:
         """Reuse a successful official registration only for this Runtime's owned run."""
@@ -302,10 +313,10 @@ class RuntimeAgentRunStore(AgentRunStore):
             if source is None:
                 self.invalidate_step_run(record.run_id)
                 return
+            self.stage_run_source(source)
             self.checkpoint_persistence.reader.confirm_run(source)
             archive = self._archives.get(PersistenceDomain.TRACE)
             if self.execution_persistence(source.run_id)[1] and isinstance(archive, StateStepArchive):
-                archive.confirm_native_run(source)
                 if receipt is not None:
                     archive.confirm_native_event_source(receipt)
                     if isinstance(native, SqlStepStore) and native.started_from_receipt(receipt) is not None:
@@ -319,9 +330,6 @@ class RuntimeAgentRunStore(AgentRunStore):
     def invalidate_step_run(self, run_id: str) -> None:
         """Discard confirmed data when a source operation has an uncertain outcome."""
         self.checkpoint_persistence.reader.invalidate_run(run_id)
-        archive = self._archives.get(PersistenceDomain.TRACE)
-        if isinstance(archive, StateStepArchive):
-            archive.invalidate_native_run(run_id)
 
     def bind_pending_producer_guard(self, guard: Callable[[str, int, bool], bool]) -> None:
         """Bind the Runtime-owned authority for turns not yet persisted."""
@@ -431,6 +439,7 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def initialize(self) -> None:
         self.checkpoint_persistence.reader.clear_confirmed_runs()
+        self._run_sources.clear()
         self._step_boundaries.clear()
         self._step_boundary_guards.clear()
         self._atomic_step_runs.clear()
@@ -506,6 +515,17 @@ class RuntimeAgentRunStore(AgentRunStore):
         self, record: AgentRunRecord, *, execution_id: str | None = None,
     ) -> None:
         await self._ensure_business()
+        if self.run_registrations is not None:
+            source = self._run_sources.get(record.agent_run_id)
+            if source is None:
+                source = await self.run_registrations.get(record.agent_run_id)
+            if source is None:
+                source = RunRecord(run_id=record.agent_run_id, conversation_id=record.agent_conversation_id,
+                                   parent_run_id=record.parent_agent_run_id, agent_name=record.agent_id,
+                                   metadata=dict(record.metadata), started_at=record.started_at)
+            for archive in self._archives.values():
+                if isinstance(archive, StateStepArchive):
+                    archive.remember_run_registration(source)
         observed_transcript: StagedTranscript | None = None
         events: Sequence[StepEvent] = ()
         offset: _ProjectionOffset | None = None
@@ -1172,6 +1192,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         pending_keys=projection.transcript.pending_keys,
                         archive=interaction_archive,
                     )
+                await archive.prepare_run_registration(projection.run)
                 batch = await archive.prepare_checkpoints_after_seal(
                     projection.run,
                     projection.checkpoints,
@@ -1821,6 +1842,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     pending_keys=captured.transcript.pending_keys,
                     archive=interaction_archive,
                 )
+            await archive.prepare_run_registration(captured.run)
             prepared = await archive.prepare_checkpoints(
                 captured.run,
                 captured.checkpoints,
@@ -2262,6 +2284,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         self._publish_model_interaction_change(agent_run_id)
                         self._staging.release_agent_run_local(agent_run_id)
+                        self._run_sources.pop(agent_run_id, None)
                         producer = self._execution_producers.pop(agent_run_id, None)
                         self._step_boundaries.pop(agent_run_id, None)
                         self._step_boundary_guards.pop(agent_run_id, None)

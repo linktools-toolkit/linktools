@@ -176,7 +176,7 @@ async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("corruption", ("raw_digest", "raw_size", "compressed_bytes", "missing", "domain", "codec"))
-async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> None:
+async def test_original_body_decode_preserves_size_codec_and_scope_contracts(corruption: str) -> None:
     prepared = PreparedArchive()
     storage = Persistence(PersistenceStorage.in_memory())
     await storage.initialize(namespace="native-client", tenant_id="tenant")
@@ -215,6 +215,12 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
         else:
             body = replace(body, content=replace(body.content, content_scope=archive_content_scope("other", "tenant")))
         invalid = replace(record, client_requests=(replace(request, body=body),))
+        if corruption == "raw_digest":
+            expected = replace(record, client_requests=(request,))
+            assert await archive.resolve_model_interaction(invalid, include_client_requests=True) == (
+                await archive.resolve_model_interaction(expected, include_client_requests=True)
+            )
+            return
         with pytest.raises(AIError) as raised:
             await archive.resolve_model_interaction(invalid, include_client_requests=True)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -405,6 +411,7 @@ async def test_cancelled_client_preparation_leaves_no_owner_or_binary_rows(
         archive = storage.run_store.read_store(PersistenceDomain.TRACE)
         contents = await archive.transcript_repository.content_archive(create=True)
         append = contents.prepare_append
+        before = await contents.store.read(lambda tx: tx.scan_records())
 
         async def prepare_then_cancel(*args, **kwargs):
             await append(*args, **kwargs)
@@ -416,7 +423,7 @@ async def test_cancelled_client_preparation_leaves_no_owner_or_binary_rows(
                 await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}", prepared=prepared)
         assert await archive.list_model_interactions(agent_run_id="run") == []
         rows = await contents.store.read(lambda tx: tx.scan_records())
-        assert not any(record.kind == "archive_content" for record in rows)
+        assert rows == before
         retry = PreparedArchive()
         requests = _requests(large=True)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}", prepared=retry)

@@ -497,8 +497,16 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
                 after_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
                 assert before_stored is not None and after_stored is not None
                 assert after_stored.storage_revision > before_stored.storage_revision
-                assert after_stored.data == before_stored.data
+                before_fields = dict(before_stored.data["value"]["payload"]["fields"])
+                after_fields = dict(after_stored.data["value"]["payload"]["fields"])
+                # The concurrent projection may replace the input body with its
+                # canonical Step reference, but cannot publish cancellation state.
+                before_fields.pop("stored_user_input")
+                projected_input = after_fields.pop("stored_user_input")
+                assert "$native_user_input" in projected_input["fields"]["content"]
+                assert after_fields == before_fields
                 assert before is not None and after is not None
+                assert after.stored_user_input == before.stored_user_input
                 assert after.status is before.status is ExecutionStatus.STARTED
                 assert (after.revision, after.event_seq) == (before.revision, before.event_seq)
                 events = await owner._state.execution.events.list(

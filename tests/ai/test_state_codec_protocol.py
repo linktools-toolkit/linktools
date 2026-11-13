@@ -3,6 +3,7 @@
 """Frozen Runtime v1 persistence protocol fixtures."""
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -22,13 +23,11 @@ from linktools.ai.persistence.codec import (
     _encode_step_envelope,
     _encode_persisted_domain,
     CURRENT_DATA_VERSION,
-    decode_alias,
     decode_domain,
     decode_envelope,
     decode_fact,
     decode_operation,
     decode_record,
-    encode_alias,
     encode_domain,
     encode_operation,
     encode_record,
@@ -37,7 +36,7 @@ from linktools.ai.persistence.codec import (
 )
 from linktools.ai.persistence.contracts import ContextProjection, ConversationCursor, IdempotencyTerminalUpdate, OperationTerminalUpdate, StoredAgentRunCheckpoint, TranscriptMessageRef, TranscriptHeadRecord, TranscriptOwnerDomain, HistoryQuality
 from linktools.ai.persistence._step_contracts import AgentRunRecord, StepEvent
-from linktools.ai.persistence.state import ALIAS_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, StoredAlias, alias_key, operation_key, parent_key, scope_key
+from linktools.ai.persistence.state import RECORD_KEY_MAX_BYTES, OPERATION_KEY_MAX_BYTES, record_key, validate_record_key, operation_key, parent_key, scope_key
 from linktools.ai.task import TaskBindingContract
 from linktools.ai.steps import NativeStepSource
 from linktools.ai.persistence._message_root import NativeMessageRoot, NativeMessageSlice
@@ -107,10 +106,6 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     assert decode_fact(primitives["fact"]).sequence == 1
     assert decode_operation(primitives["operation"]).sequence == 1
     assert decode_operation(primitives["operation"]).key == operation_key("golden", "tenant", "conversation", "operation")
-    assert decode_alias(primitives["alias"]).alias_key == alias_key("golden", "tenant", "checkpoint", "tool_call", ("run", "call"))
-    assert decode_alias(primitives["alias"]).record_key == bytes.fromhex(
-        "77" * 32
-    )
 
 
 @pytest.mark.parametrize("wire_id,target", _V1_ENUM_WIRE_TYPES)
@@ -465,40 +460,48 @@ def test_operation_primitives_reject_out_of_contract_addresses(key: object) -> N
         OperationScanCursor(key)
 
 
-def test_alias_tuple_is_injective_and_bounds_encoded_bytes() -> None:
-    assert alias_key("namespace", "tenant", "checkpoint", "tool_call", ("a:b", "c")) != alias_key("namespace", "tenant", "checkpoint", "tool_call", ("a", "b:c"))
-    assert alias_key("namespace", "tenant", "checkpoint", "a", ("b", "c")) != alias_key("namespace", "tenant", "checkpoint", "a", ("bc",))
-    assert len(alias_key("namespace", "tenant", "checkpoint", "tool_call", ("r" * 128, "界" * 42 + "ab"))) == 302
-    overhead = len(alias_key("namespace", "tenant", "checkpoint", "r", ("x",))) - 1
-    count, remainder = divmod(ALIAS_KEY_MAX_BYTES - overhead, 3)
+def test_record_tuple_is_injective_and_bounds_encoded_bytes() -> None:
+    assert record_key("namespace", "tenant", "checkpoint", "tool_operation", ("a:b", "c")) != record_key("namespace", "tenant", "checkpoint", "tool_operation", ("a", "b:c"))
+    assert record_key("namespace", "tenant", "checkpoint", "a", ("b", "c")) != record_key("namespace", "tenant", "checkpoint", "a", ("bc",))
+    overhead = len(record_key("namespace", "tenant", "checkpoint", "r", ("x",))) - 1
+    count, remainder = divmod(RECORD_KEY_MAX_BYTES - overhead, 3)
     maximum = "界" * count + "x" * remainder
-    assert len(alias_key("namespace", "tenant", "checkpoint", "r", (maximum,))) == ALIAS_KEY_MAX_BYTES
+    assert len(record_key("namespace", "tenant", "checkpoint", "r", (maximum,))) == RECORD_KEY_MAX_BYTES
     with pytest.raises(ValueError):
-        alias_key("namespace", "tenant", "checkpoint", "r", (maximum + "x",))
+        record_key("namespace", "tenant", "checkpoint", "r", (maximum + "x",))
     with pytest.raises(ValueError):
-        alias_key("namespace", "tenant", "checkpoint", "r", ("x" * 65536,))
+        record_key("namespace", "tenant", "checkpoint", "r", ("x" * 65536,))
     assert len(operation_key("n" * 128, "t" * 128, "conversation", "o" * 128)) == 405
-    assert len(alias_key("n" * 128, "t" * 128, "checkpoint", "tool_call", ("r" * 128, "c" * 128))) == 543
 
 
-@pytest.mark.parametrize("key", (b"x", b"x" * 32, b"x" * ALIAS_KEY_MAX_BYTES,
-                                  alias_key("namespace", "tenant", "checkpoint", "tool_call", ("é", "e\u0301"))))
-def test_alias_binary_address_roundtrips_without_repr_disclosure(key: bytes) -> None:
-    alias = StoredAlias(key, b"r" * 32)
-    wire = encode_alias(alias)
-    assert wire["alias"] == key.hex()
-    assert decode_alias(wire) == alias
-    assert "alias_key=" not in repr(alias)
+@pytest.mark.parametrize("key,kind", (
+    (b"x", "golden"), (b"x" * 32, "golden"), (b"x" * RECORD_KEY_MAX_BYTES, "golden"),
+    (record_key("namespace", "tenant", "checkpoint", "tool_operation", ("é", "e\u0301")), "tool_operation"),
+))
+def test_record_binary_address_roundtrips_without_repr_disclosure(key: bytes, kind: str) -> None:
+    record = replace(decode_record(_fixture()["stored_primitives"]["record"]), key=key, kind=kind)
+    wire = encode_record(record)
+    assert wire["key"] == key.hex()
+    assert decode_record(wire) == record
+    assert "key=" not in repr(record)
+    if kind == "tool_operation":
+        with pytest.raises(ValueError, match="requires kind"):
+            replace(record, kind="golden")
+        with pytest.raises(AIError) as mismatch:
+            decode_record({**wire, "kind": "golden"})
+        assert mismatch.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("wire", ("", "AB", "aa ", "a", "gg", "aa" * (ALIAS_KEY_MAX_BYTES + 1), 1))
-def test_alias_wire_rejects_noncanonical_or_oversized_addresses(wire: object) -> None:
+@pytest.mark.parametrize("wire", ("", "AB", "aa ", "a", "gg", "aa" * (RECORD_KEY_MAX_BYTES + 1), 1))
+def test_record_wire_rejects_noncanonical_or_oversized_addresses(wire: object) -> None:
+    raw = dict(_fixture()["stored_primitives"]["record"])
+    raw["key"] = wire
     with pytest.raises(AIError) as rejected:
-        decode_alias({"alias": wire, "record": "77" * 32})
+        decode_record(raw)
     assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("key", (b"", b"x" * (ALIAS_KEY_MAX_BYTES + 1), bytearray(b"x"), "x"))
-def test_alias_physical_address_rejects_invalid_bounds_and_types(key: object) -> None:
+@pytest.mark.parametrize("key", (b"", b"x" * (RECORD_KEY_MAX_BYTES + 1), bytearray(b"x"), "x"))
+def test_record_physical_address_rejects_invalid_bounds_and_types(key: object) -> None:
     with pytest.raises(ValueError):
-        StoredAlias(key, b"r" * 32)
+        validate_record_key(key)

@@ -16,8 +16,9 @@ class _RaceSessionService:
         self.get_calls = 0
         self.create_calls = 0
 
-    async def read_authorized(self, session_id: str, principal: object, action: object) -> SessionView:
-        del principal, action
+    async def read_authorized(self, session_id: str, principal: object, action: object,
+                              *, read_session: object = None) -> SessionView:
+        del principal, action, read_session
         self.get_calls += 1
         if self.get_calls == 1 or not self._authorize_after_conflict:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)

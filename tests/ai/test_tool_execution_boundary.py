@@ -59,8 +59,8 @@ async def test_tool_result_after_cancellation_never_republishes_control(tmp_path
         assert result.operation.value.status is ToolOperationStatus.COMPLETED
         assert result.operation.value.result_payload.value == "known"
         assert await repository.get("execution", tenant_id="tenant") == stopped
-        assert await state.checkpoint.tools.get_by_call("run", "call", tenant_id="tenant") == result.operation.value
-        assert (await state.checkpoint.tools.get_tool_effect(run_id="run", tool_call_id="call")).status == "completed"
+        assert await state.checkpoint.tools.get_operation(result.operation.value.tool_operation_id, tenant_id="tenant") == result.operation.value
+        assert result.operation.value.to_tool_effect("run").status == "completed"
         with pytest.raises(AIError) as stale:
             await _commands(state).commit_tool_admission_boundary(
                 replace(_request(), tool_operation_id="next", tool_call_id="next"),
@@ -91,8 +91,13 @@ async def test_known_new_admission_and_result_use_no_select_or_alias(tmp_path: P
             )
         finally:
             event.remove(engine, "after_cursor_execute", executed)
-        assert not [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
-        assert not [sql for sql in statements if "ai_state_aliases" in sql]
+        selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+        # The immutable result owner must be checked even for a new effect.
+        assert len(selects) <= 1
+        assert all("ai_step_messages" in sql and "store_locator" in sql and "sha256" in sql
+                   and "ai_step_tool_operations" not in sql and "ai_state_records" not in sql
+                   for sql in selects)
+        assert not [sql for sql in statements if "ai_tool_operation_aliases" in sql]
         assert len([sql for sql in statements if sql.lstrip().upper().startswith("UPDATE")]) == 2
         assert settled.execution == receipt.execution
         assert receipt.execution.value == initial

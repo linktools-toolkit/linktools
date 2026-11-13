@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Recovery receipt existence reads reuse facts found in the current run."""
+"""Recovery receipt reads batch explicit durable operation references."""
 
 from collections import Counter
+from collections.abc import Sequence
 import json
 from pathlib import Path
 
@@ -12,9 +13,16 @@ from pydantic_ai.tools import ToolDefinition
 from sqlalchemy import event
 
 from linktools.ai.persistence import Persistence, PersistenceStorage
+from linktools.ai.execution._tool_identity import tool_operation_id
+from linktools.ai.persistence.contracts import ToolOperationRecord
 
 from ._runtime_test_helpers import tool_run_context
 from .test_native_tool_effect_owner import _bridge
+
+
+def _identity(run_id: str, call_id: str) -> str:
+    return tool_operation_id(tenant_id="tenant", execution_id="execution",
+                             agent_run_id=run_id, tool_call_id=call_id)
 
 
 async def _complete(state: Persistence, run_id: str, call_id: str) -> None:
@@ -25,11 +33,10 @@ async def _complete(state: Persistence, run_id: str, call_id: str) -> None:
     )
     await bridge.complete(decision, call_id)
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("requested", (("current",), ("current", "prior", "missing")))
-async def test_recovery_only_reads_unresolved_call_ids(
+async def test_recovery_batches_explicit_operation_references(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, requested: tuple[str, ...],
 ) -> None:
     storage = (PersistenceStorage.in_memory() if backend == "memory"
@@ -38,26 +45,28 @@ async def test_recovery_only_reads_unresolved_call_ids(
         await _complete(state, "original", "prior")
         await _complete(state, "resumed", "current")
         repository = state.checkpoint.tools
-        lookup = repository.existing_call_ids
-        reads: list[tuple[str, tuple[str, ...]]] = []
+        lookup = repository.get_operations
+        reads: list[tuple[str, ...]] = []
+        identities = {"prior": _identity("original", "prior"), "current": _identity("resumed", "current")}
 
-        async def record(run_id, call_ids, *, tenant_id):
-            reads.append((run_id, tuple(call_ids)))
-            return await lookup(run_id, call_ids, tenant_id=tenant_id)
+        async def record(operation_ids: Sequence[str], *, tenant_id: str) -> tuple[ToolOperationRecord, ...]:
+            reads.append(tuple(operation_ids))
+            return await lookup(operation_ids, tenant_id=tenant_id)
 
-        monkeypatch.setattr(repository, "existing_call_ids", record)
-        bridge = _bridge(state, run_id="resumed", source_run_id="original")
+        monkeypatch.setattr(repository, "get_operations", record)
+        bridge = _bridge(state, run_id="resumed", source_run_id="original", operation_ids=identities)
         assert await bridge.existing_call_ids(requested) == frozenset(requested) - {"missing"}
-        assert reads == ([("resumed", requested)] if len(requested) == 1 else [
-            ("resumed", requested), ("original", ("prior", "missing")),
-        ])
+        assert reads == [tuple(identities.get(call_id) or _identity("resumed", call_id) for call_id in requested)]
+        assert len(await repository.list_by_execution("execution", tenant_id="tenant")) == 2
 
 
 @pytest.mark.asyncio
-async def test_current_run_receipt_avoids_recovery_source_sql(tmp_path: Path, record_property) -> None:
+async def test_explicit_receipts_batch_without_recovery_source_sql(tmp_path: Path, record_property) -> None:
     async with Persistence.open("native-effects", tenant_id="tenant",
                                 storage=PersistenceStorage.sqlite(tmp_path / "receipts.db")) as state:
         await _complete(state, "resumed", "current")
+        await _complete(state, "original", "prior")
+        identities = {"current": _identity("resumed", "current"), "prior": _identity("original", "prior")}
         repository = state.checkpoint.tools
         engine = repository.state_store.storage_group.context.engine.sync_engine
         statements: Counter[str] = Counter()
@@ -68,15 +77,17 @@ async def test_current_run_receipt_avoids_recovery_source_sql(tmp_path: Path, re
         event.listen(engine, "before_cursor_execute", capture)
         try:
             expected = frozenset()
-            for run_id in ("resumed", "original"):
-                expected |= await repository.existing_call_ids(run_id, ("current",), tenant_id="tenant")
+            for identity in identities.values():
+                values = await repository.get_operations((identity,), tenant_id="tenant")
+                expected |= frozenset(value.tool_call_id for value in values)
             baseline = statements.copy()
             statements.clear()
-            actual = await _bridge(state, run_id="resumed", source_run_id="original").existing_call_ids(("current",))
+            actual = await _bridge(state, run_id="resumed", source_run_id="original",
+                                   operation_ids=identities).existing_call_ids(("current", "prior"))
         finally:
             event.remove(engine, "before_cursor_execute", capture)
         record_property("sql_traffic", json.dumps({"baseline": baseline, "candidate": statements}))
-        assert actual == expected == {"current"}
+        assert actual == expected == {"current", "prior"}
         assert statements["SELECT"] < baseline["SELECT"]
         assert statements["BEGIN"] < baseline["BEGIN"]
         assert not (set(statements) | set(baseline)) & {"INSERT", "UPDATE", "DELETE"}

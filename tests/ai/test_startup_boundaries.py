@@ -292,7 +292,17 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
         with monkeypatch.context() as patch:
             if fault == 'archive':
                 from linktools.ai.persistence._archive import ContentArchive
-                patch.setattr(ContentArchive, 'prepare_content', fail)
+                prepare_content = ContentArchive.prepare_content
+
+                async def fail_input_preparation(self, values, prepared):
+                    # Admission publishes policy and input owners atomically.
+                    # Target the accepted context's JSON components, not those
+                    # earlier execution owners or unrelated Native messages.
+                    if not any(codec == "json" for codec, _raw in values):
+                        return await prepare_content(self, values, prepared)
+                    return await fail(self, values, prepared)
+
+                patch.setattr(ContentArchive, 'prepare_content', fail_input_preparation)
             elif fault == 'context':
                 patch.setattr(LocalExecutionBackend, 'load_input_context', fail)
             else:

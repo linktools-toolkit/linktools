@@ -11,7 +11,7 @@ from sqlalchemy import text
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import _sql
 from linktools.ai.persistence.state import (
-    FactQuery, OperationQuery, StateTransaction, StoredAlias, StoredFact,
+    FactQuery, OperationQuery, StateTransaction, StoredFact,
     StoredOperation, StoredRecord,
 )
 
@@ -21,20 +21,18 @@ pytestmark = pytest.mark.asyncio
 
 _RECORD = StoredRecord(b"first", b"scope", b"parent", "probe", b"sort", None,
                        0, None, 0, None, {"value": "original"})
-_ALIAS = StoredAlias(b"first", _RECORD.key)
 _FACT = StoredFact(b"first", 1, _RECORD.key, "probe", None, None, {"value": "original"})
 _OPERATION = StoredOperation(b"first", b"first", 1, "pending", False, {"value": "original"})
 
 
 async def _seed(transaction: StateTransaction) -> None:
     await transaction.insert_record(_RECORD)
-    await transaction.insert_alias(_ALIAS)
     await transaction.insert_fact(_FACT)
     await transaction.insert_operation(_OPERATION)
     await transaction.next_sequence(b"first")
 
 
-@pytest.mark.parametrize("kind", ("record", "immutable-record", "alias", "fact", "operation-key", "operation-stream"))
+@pytest.mark.parametrize("kind", ("record", "immutable-record", "fact", "operation-key", "operation-stream"))
 async def test_colliding_state_identity_cannot_read_or_replace_the_existing_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
@@ -44,8 +42,6 @@ async def test_colliding_state_identity_cannot_read_or_replace_the_existing_row(
         await store.mutate(_seed)
         with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
             await store.read_record(b"other")
-        with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
-            await store.read(lambda tx: tx.resolve_alias(b"other"))
         assert await store.read(lambda tx: tx.list_facts(FactQuery(b"other"))) == ()
         with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
             await store.read(lambda tx: tx.get_operation(b"other"))
@@ -56,12 +52,9 @@ async def test_colliding_state_identity_cannot_read_or_replace_the_existing_row(
                 await transaction.insert_record(replace(_RECORD, key=b"other"))
             elif kind == "immutable-record":
                 await transaction.insert_immutable_records((replace(_RECORD, key=b"other"),))
-            elif kind in {"alias", "fact"}:
+            elif kind == "fact":
                 assert await transaction.guard_record(_RECORD.key, expected_storage_revision=0) is not None
-                if kind == "alias":
-                    await transaction.insert_alias(StoredAlias(b"other", _RECORD.key))
-                else:
-                    await transaction.insert_fact(replace(_FACT, stream_key=b"other"))
+                await transaction.insert_fact(replace(_FACT, stream_key=b"other"))
             elif kind == "operation-key":
                 await transaction.insert_operation(replace(_OPERATION, key=b"other", sequence=2))
             else:
@@ -71,7 +64,6 @@ async def test_colliding_state_identity_cannot_read_or_replace_the_existing_row(
             await store.mutate(collide)
         assert collision.value.code in {ErrorCode.STORAGE_CONFLICT, ErrorCode.STORAGE_INTEGRITY_ERROR}
         assert await store.read_record(_RECORD.key) == _RECORD
-        assert await store.read(lambda tx: tx.scan_aliases()) == (_ALIAS,)
         assert await store.read(lambda tx: tx.scan_facts()) == (_FACT,)
         assert await store.read(lambda tx: tx.scan_operations()) == (_OPERATION,)
         assert await store.read(lambda tx: tx.get_sequence(b"first")) == 1
@@ -104,13 +96,11 @@ async def test_colliding_sequence_reservation_rolls_back_without_incrementing_an
     ("ai_state_records", "scope_locator"),
     ("ai_state_records", "parent_locator"),
     ("ai_state_records", "sort_prefix"),
-    ("ai_state_aliases", "alias_locator"),
-    ("ai_state_aliases", "record_locator"),
     ("ai_state_facts", "stream_locator"),
     ("ai_state_facts", "owner_locator"),
     ("ai_state_operations", "operation_locator"),
     ("ai_state_operations", "stream_locator"),
-    ("ai_state_sequences", "stream_locator"),
+    ("ai_state_counters", "stream_locator"),
 ))
 async def test_integrity_scan_rejects_tampered_state_lookup_projections(
     tmp_path: Path, table: str, column: str,

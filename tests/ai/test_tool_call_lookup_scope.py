@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Call lookups retain direct and recovered receipts in one read snapshot."""
+"""Operation lookups retain direct and recovered receipts in one read snapshot."""
 
 import asyncio
 from dataclasses import replace
@@ -30,9 +30,6 @@ class _ReadTransaction:
     async def list_records(self, query):
         return await self.transaction.list_records(query)
 
-    async def resolve_aliases(self, aliases):
-        return await self.transaction.resolve_aliases(aliases)
-
     async def get_records(self, keys):
         records = await self.transaction.get_records(keys)
         return records if self.transform is None else self.transform(records)
@@ -41,6 +38,7 @@ class _ReadTransaction:
 class _ReadStore:
     def __init__(self, store, *, after_read=None, transform=None):
         self.store = store
+        self.storage_group = store.storage_group
         self.after_read = after_read
         self.transform = transform
 
@@ -57,7 +55,7 @@ class _ReadStore:
 async def test_call_lookup_does_not_mix_direct_and_recovered_snapshots(tmp_path: Path, backend: str) -> None:
     async with Persistence.open("lookup", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
         tools = state.checkpoint.tools
-        direct = await tools.admit(replace(_request(), tool_call_id="direct"))
+        direct = await tools.admit(replace(_request(), tool_operation_id="direct", tool_call_id="direct"))
         request = replace(_request(), tool_operation_id="source", agent_run_id="source")
         source = await tools.admit(request)
         assert await tools.admit(replace(request, agent_run_id="run", recovery_agent_run_id="source")) == source
@@ -70,27 +68,29 @@ async def test_call_lookup_does_not_mix_direct_and_recovered_snapshots(tmp_path:
         wrapped = ToolRepositoryImpl(
             _ReadStore(tools.state_store, after_read=complete_after_snapshot), namespace="lookup", tenant_id="tenant",
         )
-        assert await wrapped.get_by_call_ids("run", ("call", "direct", "call", "missing"), tenant_id="tenant") == (source, direct)
+        assert await wrapped.get_operations((source.tool_operation_id, direct.tool_operation_id, source.tool_operation_id, "missing"), tenant_id="tenant") == (source, direct)
         for record in (direct, source):
             assert (await tools.get_operation(record.tool_operation_id, tenant_id="tenant")).status is ToolOperationStatus.COMPLETED
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-async def test_call_lookup_preserves_direct_precedence_and_run_identity(tmp_path: Path, backend: str) -> None:
+async def test_operation_lookup_preserves_explicit_source_and_run_identity(tmp_path: Path, backend: str) -> None:
     async with Persistence.open("lookup", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
         tools = state.checkpoint.tools
         source_request = replace(_request(), agent_run_id="source")
         source = await tools.admit(source_request)
         assert await tools.admit(replace(source_request, agent_run_id="run", recovery_agent_run_id="source")) == source
-        assert await tools.get_by_call("run", "call", tenant_id="tenant") == source
+        assert await tools.get_operation(source.tool_operation_id, tenant_id="tenant") == source
         direct = await tools.admit(replace(_request(), tool_operation_id="direct"))
+        assert await tools.get_operation(source.tool_operation_id, tenant_id="tenant") == source
         other = await tools.admit(replace(_request(), tool_operation_id="other", agent_run_id="other", execution_id="other-execution"))
-        assert await tools.get_by_call_ids("run", ("missing", "call", "call"), tenant_id="tenant") == (direct,)
-        assert await tools.get_by_call("source", "call", tenant_id="tenant") == source
-        assert await tools.get_by_call("other", "call", tenant_id="tenant") == other
-        assert await tools.get_by_call("run", "call", tenant_id="other-tenant") is None
-        assert await tools.get_by_call_ids("run", (), tenant_id="tenant") == ()
+        assert await tools.get_operations(("missing", direct.tool_operation_id, direct.tool_operation_id), tenant_id="tenant") == (direct,)
+        assert await tools.get_operation(source.tool_operation_id, tenant_id="tenant") == source
+        assert await tools.get_operation(other.tool_operation_id, tenant_id="tenant") == other
+        assert await tools.get_operation(source.tool_operation_id, tenant_id="other-tenant") is None
+        assert await tools.get_operations((source.tool_operation_id,), tenant_id="other-tenant") == ()
+        assert await tools.get_operations((), tenant_id="tenant") == ()
 
 
 @pytest.mark.asyncio
@@ -103,13 +103,13 @@ async def test_call_lookup_reuses_enclosing_state_scope(tmp_path: Path, backend:
         source = await tools.admit(request)
         await tools.admit(replace(request, agent_run_id="run", recovery_agent_run_id="source"))
         operation = tools.state_store.read if scope == "read" else tools.state_store.mutate
-        values = await operation(lambda tx: tools.get_by_call_ids("run", ("call", "missing"), tenant_id="tenant"))
+        values = await operation(lambda tx: tools.get_operations((source.tool_operation_id, "missing"), tenant_id="tenant"))
         assert values == (source,)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "sqlite"))
-@pytest.mark.parametrize("damage", ("missing", "kind", "call", "payload"))
+@pytest.mark.parametrize("damage", ("missing", "kind", "identity", "payload"))
 async def test_call_lookup_rejects_invalid_recovery_sources(tmp_path: Path, backend: str, damage: str) -> None:
     async with Persistence.open("lookup", tenant_id="tenant", storage=_storage(backend, tmp_path)) as state:
         tools = state.checkpoint.tools
@@ -125,14 +125,21 @@ async def test_call_lookup_rejects_invalid_recovery_sources(tmp_path: Path, back
                 return {}
             key, record = next(iter(records.items()))
             if damage == "kind":
-                return {key: replace(record, kind="external_call")}
-            if damage == "call":
+                damaged = replace(record)
+                # Simulate an untrusted backend bypassing typed writer validation.
+                object.__setattr__(damaged, "kind", "external_call")
+                return {key: damaged}
+            if damage == "identity":
                 return {key: wrong_call}
             return {key: replace(record, data={})}
 
         wrapped = ToolRepositoryImpl(_ReadStore(tools.state_store, transform=transform), namespace="lookup", tenant_id="tenant")
+        if damage == "missing":
+            # Without an alias claiming existence, absent operation IDs are an ordinary miss.
+            assert await wrapped.get_operations((source.tool_operation_id,), tenant_id="tenant") == ()
+            return
         with pytest.raises(AIError) as rejected:
-            await wrapped.get_by_call_ids("run", (source.tool_call_id,), tenant_id="tenant")
+            await wrapped.get_operations((source.tool_operation_id,), tenant_id="tenant")
         assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -150,10 +157,10 @@ async def test_cancelled_call_lookup_releases_read_scope(tmp_path: Path, monkeyp
             await asyncio.Event().wait()
 
         monkeypatch.setattr(tools, "_decode", interrupted)
-        task = asyncio.create_task(tools.get_by_call("run", "call", tenant_id="tenant"))
+        task = asyncio.create_task(tools.get_operation(source.tool_operation_id, tenant_id="tenant"))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         monkeypatch.setattr(tools, "_decode", original)
-        assert await asyncio.wait_for(tools.get_by_call("run", "call", tenant_id="tenant"), timeout=5) == source
+        assert await asyncio.wait_for(tools.get_operation(source.tool_operation_id, tenant_id="tenant"), timeout=5) == source

@@ -232,7 +232,7 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         "tool-call",
         "external_tool",
         StoredPayload.inline_json({"value": 1}),
-    )
+     operation_id="test-operation")
     call_id = deferred_resource_id("external-call-v1", "tenant", "execution", "step", pending.tool_call_id)
     calls = _ExternalCalls(
         ExternalCallRecord(
@@ -289,7 +289,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
         "approval-call",
         "approval_tool",
         StoredPayload.inline_json({"value": 1}),
-    )
+     operation_id="test-operation")
     approval_id = deferred_resource_id(
         "approval-v1",
         "tenant", "execution", "step", pending.tool_call_id
@@ -368,7 +368,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approvals", (True, False))
 async def test_deferred_list_rejects_another_tenant(approvals: bool) -> None:
-    pending = PendingDeferredCall("call", "tool", StoredPayload.inline_json({}))
+    pending = PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation")
     executions = _Executions(pending, approvals=approvals)
     if approvals:
         service = DefaultApprovalService(
@@ -396,7 +396,7 @@ async def test_deferred_list_respects_custom_authorization(approvals: bool) -> N
             assert resource.owner_principal_id is None
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
-    pending = PendingDeferredCall("call", "tool", StoredPayload.inline_json({}))
+    pending = PendingDeferredCall("call", "tool", StoredPayload.inline_json({}), operation_id="test-operation")
     executions = _Executions(pending, approvals=approvals)
     if approvals:
         service = DefaultApprovalService(object(), executions, Deny(), objects=InMemoryObjectStore())
@@ -411,7 +411,7 @@ async def test_deferred_list_respects_custom_authorization(approvals: bool) -> N
 
 
 def _structured_external_service(*, inline: bool = True):
-    pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}))
+    pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}), operation_id="test-operation")
     call_id = deferred_resource_id('external-call-v1', 'tenant', 'execution', 'step', pending.tool_call_id)
     calls = _ExternalCalls(ExternalCallRecord(
         call_id=call_id, execution_id='execution', status=ExternalCallStatus.PENDING,
@@ -660,7 +660,7 @@ async def test_external_independent_sqlite_contenders_share_one_result_owner(
             async def supply(self, *args, **kwargs):
                 return await self.repository.supply(*args, **kwargs)
 
-        pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}))
+        pending = PendingDeferredCall('tool-call', 'external_tool', StoredPayload.inline_json({}), operation_id="test-operation")
         services = [DefaultExternalService(
             Contender(state.checkpoint.external_calls), _Executions(pending, approvals=False), _AllowAuthorization(),
             objects=objects, object_key_factory=factory,

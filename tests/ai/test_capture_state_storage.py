@@ -98,7 +98,8 @@ async def test_capture_attachment_codec_preserves_context_original_input_and_sou
 
 
 @pytest.mark.asyncio
-async def test_large_task_declarations_share_database_content_and_collect_without_object_candidates(tmp_path: Path) -> None:
+@pytest.mark.parametrize("repetitions", (1, 20000))
+async def test_task_declarations_share_database_content_and_collect_without_object_candidates(tmp_path: Path, repetitions: int) -> None:
     namespace = "capture-bindings"
     objects = InMemoryObjectStore()
     storage = PersistenceStorage.sqlite(tmp_path / "state.sqlite", object_store=objects)
@@ -106,7 +107,7 @@ async def test_large_task_declarations_share_database_content_and_collect_withou
         pass
     task = Task.from_runner("capture.custom", Runner(), contract={
         "version": 1, "type": "custom", "effect_policy": "none", "output_contract": {"kind": "json"},
-        "reconcile": False, "config": {"instructions": "large declaration " * 20000},
+        "reconcile": False, "config": {"instructions": "large declaration " * repetitions},
     })
     async with Persistence.open(namespace, storage=storage, tenant_id=PRINCIPAL.tenant_id) as state:
         store = state.task.tasks.state_store
@@ -125,6 +126,22 @@ async def test_large_task_declarations_share_database_content_and_collect_withou
         await state.snapshot_operations().purge_unreferenced_objects((), exclusive=Offline())
         assert await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content"))) == ()
         assert await store.read(lambda tx: tx.list_records(RecordQuery(kind="task_graph_binding_capture"))) == ()
+
+
+@pytest.mark.asyncio
+async def test_empty_task_declarations_do_not_create_archive_content() -> None:
+    from linktools.ai.persistence._memory import InMemoryStateStore
+    from linktools.ai.persistence.captures import prepare_task_binding_value
+
+    store = InMemoryStateStore()
+    await store.initialize()
+    try:
+        manifest = {"tasks": [], "expanders": []}
+        assert await prepare_task_binding_value(store, manifest,
+            namespace="empty", tenant_id="tenant") == manifest
+        assert await store.storage_group.open_archive() is None
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -167,3 +184,104 @@ async def test_capture_opaque_metadata_does_not_create_retention_dependencies() 
                     "input_view": {"prompt": fake}, "task_input": None, "input_context": None}})
     assert tuple(iter_runtime_object_refs(capture_retention_value(agent_record), default_domain=PersistenceDomain.TASK)) == ()
     assert capture_state_closure((agent_record,)) == frozenset({agent_key})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_task_binding_capture_publishes_content_and_owner_atomically(tmp_path: Path, monkeypatch, backend: str) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    class Runner:
+        pass
+
+    task = Task.from_runner("capture.atomic", Runner(), contract={
+        "version": 1, "type": "custom", "effect_policy": "none",
+        "output_contract": {"kind": "json"}, "reconcile": False,
+        "config": {"instructions": "same immutable declaration"},
+    })
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "atomic.sqlite")
+    async with Persistence.open("capture-atomic", storage=storage, tenant_id=PRINCIPAL.tenant_id) as state:
+        store = state.task.tasks.state_store
+        captures = TaskGraphBindingCaptureStore("capture-atomic", store)
+        graph = TaskGraph("atomic", (TaskNode("task", task=task),))
+        admission = TaskGraphAdmission.from_request(TaskGraphRequest(graph, PRINCIPAL, "atomic", TaskGraphLimits()))
+
+        async def transaction_type(transaction):
+            return type(transaction)
+
+        transaction_class = await store.mutate(transaction_type)
+        insert = transaction_class.insert_record
+
+        async def fail_owner(transaction, record):
+            if record.kind == "task_graph_binding_capture":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return await insert(transaction, record)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(transaction_class, "insert_record", fail_owner)
+            with pytest.raises(AIError) as error:
+                await captures.capture(admission, graph, tasks=(task,))
+            assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        _, archive = store.storage_group.opened_archive
+        assert await store.read(lambda tx: tx.list_records(RecordQuery(kind="task_graph_binding_capture"))) == ()
+        assert await archive.read(lambda tx: tx.list_records(RecordQuery(kind="archive_content"))) == ()
+        expected = await captures.capture(admission, graph, tasks=(task,))
+        assert await captures.load(admission) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_task_binding_capture_reads_owner_and_contract_in_one_scope(tmp_path: Path, monkeypatch, backend: str) -> None:
+    import linktools.ai.inputs._task_graph_binding_capture as capture_module
+    from linktools.ai.persistence._archive import ContentArchive
+    from linktools.ai.persistence.state import active_state_scope
+
+    class Runner:
+        pass
+
+    task = Task.from_runner("capture.snapshot", Runner(), contract={
+        "version": 1, "type": "custom", "effect_policy": "none",
+        "output_contract": {"kind": "json"}, "reconcile": False,
+    })
+    storage = PersistenceStorage.in_memory() if backend == "memory" else PersistenceStorage.sqlite(tmp_path / "snapshot.sqlite")
+    async with Persistence.open("capture-snapshot", storage=storage, tenant_id=PRINCIPAL.tenant_id) as state:
+        store = state.task.tasks.state_store
+        captures = TaskGraphBindingCaptureStore("capture-snapshot", store)
+        graph = TaskGraph("snapshot", (TaskNode("task", task=task),))
+        admission = TaskGraphAdmission.from_request(TaskGraphRequest(graph, PRINCIPAL, "snapshot", TaskGraphLimits()))
+        owner_scopes, body_scopes = [], []
+        read_owner, read_body = capture_module.read_capture_record, ContentArchive.read_contents
+
+        async def owner(*args, **kwargs):
+            owner_scopes.append(active_state_scope())
+            return await read_owner(*args, **kwargs)
+
+        async def body(*args, **kwargs):
+            body_scopes.append(active_state_scope())
+            return await read_body(*args, **kwargs)
+
+        monkeypatch.setattr(capture_module, "read_capture_record", owner)
+        monkeypatch.setattr(ContentArchive, "read_contents", body)
+        expected = await captures.capture(admission, graph, tasks=(task,))
+        assert await captures.capture(admission, graph, tasks=(task,)) == expected
+        assert owner_scopes[-1] is body_scopes[-1] and body_scopes[-1] is not None
+        assert not body_scopes[-1].writable
+        assert await captures.load(admission) == expected
+        assert owner_scopes[-1] is body_scopes[-1] and body_scopes[-1] is not None
+        assert not body_scopes[-1].writable
+
+
+@pytest.mark.parametrize("inline_slot", ("tasks", "expanders"))
+def test_retained_task_declarations_cannot_overwrite_inline_declarations(inline_slot: str) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.persistence.captures import _expand_task_binding_value
+
+    raw = canonical_json_bytes({"tasks": [], "expanders": []})
+    # This is the shared expansion boundary used by live reads and snapshots.
+    with pytest.raises(AIError) as error:
+        _expand_task_binding_value({"declarations": {}, inline_slot: []}, raw)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    # Keep unrelated metadata and optional-document omission unchanged.
+    assert _expand_task_binding_value({"declarations": {}, "format_version": 1}, raw) == {
+        "format_version": 1, "tasks": [], "expanders": [],
+    }

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Session model context is selected before old message bodies are loaded."""
 
+from contextvars import ContextVar
+
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
@@ -32,7 +34,7 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
     calls = []
     sql = []
     bodies = []
-    active = False
+    active = ContextVar("conversation_context_read", default=False)
 
     async def model(messages, info):
         seen.append(tuple(messages))
@@ -42,7 +44,7 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
 
     async def read_content(self, content):
         result = await original_read(self, content)
-        if active:
+        if active.get():
             bodies.append(len(result))
         return result
 
@@ -54,7 +56,7 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
 
         async def read_native():
             result = await load()
-            if active:
+            if active.get():
                 bodies.extend(len(body) for group in result for body in group)
             return result
 
@@ -64,14 +66,13 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
     original = ConversationPersistence.load_committed_conversation_context
 
     async def load(self, **kwargs):
-        nonlocal active
-        active = True
+        token = active.set(True)
         try:
             result = await original(self, **kwargs)
             calls.append((kwargs.get("include_content", True), len(result.messages)))
             return result
         finally:
-            active = False
+            active.reset(token)
 
     monkeypatch.setattr(ConversationPersistence, "load_committed_conversation_context", load)
     storage = PersistenceStorage.sqlite(tmp_path / "state.db")
@@ -79,7 +80,7 @@ async def test_session_selects_context_before_prior_body_read_and_preserves_time
         engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
 
         def capture(_connection, _cursor, statement, *_args):
-            if active and statement.lstrip().upper().startswith("SELECT"):
+            if active.get() and statement.lstrip().upper().startswith(("SELECT", "WITH")):
                 sql.append(statement)
 
         event.listen(engine, "before_cursor_execute", capture)

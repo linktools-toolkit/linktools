@@ -172,6 +172,7 @@ class Runtime(Generic[AppT]):
         self._context = ExecutionContext(None) if context is None else context
         self._features = features
         self._feature_source: RuntimeFeaturesSource[AppT] | None = None
+        self._asset_sources: Mapping[str, "AssetStoreReader"] = MappingProxyType({})
         self._owned_assets: AssetCapability[AppT] | None = None
         self._metrics_dataset = metrics
         self._authorization = TenantAuthorizationPolicy(self._tenant_id) if authorization is None else authorization
@@ -279,6 +280,7 @@ class Runtime(Generic[AppT]):
                         metrics=self._metrics_dataset, authorization=self._authorization,
                         auto_recover=self._auto_recover, lifecycle=self._agent_lifecycle,
                     )
+                    self._asset_sources = MappingProxyType(dict(components.asset_sources))
                     if components.metric_control is not None:
                         components.metric_control.configure_runtime_dimensions(self.context.metric_dimensions)
                     self._bind_agent_components(
@@ -318,6 +320,7 @@ class Runtime(Generic[AppT]):
             engine = TaskEngine(
                 *definitions, persistence=self._state, context=self.context,
                 authorization=self._authorization, metrics=self._metrics_dataset,
+                asset_sources=self._asset_sources,
             )
             self._task_engines[engine] = None
             engine.add_close_callback(self._release_task_engine)
