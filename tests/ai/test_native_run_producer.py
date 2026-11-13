@@ -18,6 +18,7 @@ from linktools.ai.capability import TraceCapability
 from linktools.ai.capability.steps import StepRunRegistration
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError
+from linktools.ai.execution import TOOL_OPERATION_ID_METADATA_KEY
 from linktools.ai.persistence import Persistence, PersistenceDomain, PersistenceStorage, SqlStepStore
 from linktools.ai.persistence.runs import OfficialStepReader
 from linktools.ai.runtime import Runtime, RuntimeFeatures
@@ -226,12 +227,12 @@ async def test_committed_run_lineage_and_cached_snapshot_do_not_depend_on_shared
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", traffic.capture)
         ctx = replace(tool_run_context(), conversation_id=source.conversation_id)
-        await bridge.begin(ctx, ToolCallPart("inspect", {}, tool_call_id="call"),
-                           ToolDefinition(name="inspect"), {}, False)
+        decision = await bridge.begin(ctx, ToolCallPart("inspect", {}, tool_call_id="call"),
+                                      ToolDefinition(name="inspect"), {}, False)
         assert len(events) == 1
         assert events[0].parent_run_id == source.parent_run_id
         assert events[0].agent_name == source.agent_name
-        assert events[0].metadata == source.metadata
+        assert events[0].metadata == {**source.metadata, TOOL_OPERATION_ID_METADATA_KEY: decision.operation_id}
 
 
 @pytest.mark.asyncio

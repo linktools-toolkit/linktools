@@ -28,7 +28,7 @@ from ..task import (
     TaskNodeView,
     TaskResultRecord,
 )
-from .codec import _decode_enveloped_domain, decode_envelope, decode_session_turn_commit, decode_execution_timeline
+from .codec import _decode_enveloped_domain, decode_envelope, decode_session_turn_commit, decode_execution_membership
 from .contracts import (
     ApprovalRecord,
     ArtifactRecord,
@@ -307,7 +307,7 @@ def validate_snapshot_references(
     executions = {
         value.execution_id: value
         for record in records.get(PersistenceDomain.EXECUTION, ()) if record.kind == "execution"
-        for value in (decode_execution_timeline(record.data),)
+        for value in (decode_execution_membership(record.data),)
     }
     sessions = {
         value.session_id: value
