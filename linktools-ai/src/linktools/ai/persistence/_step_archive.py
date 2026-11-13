@@ -2721,7 +2721,7 @@ class StateStepArchive(AgentRunStore):
         owner_record, created = await self._ensure_run_with_head_in_transaction(
             transaction,
             run,
-            include_projection=bool(checkpoints),
+            include_projection=True,
             source_receipt=source_receipt,
             prefetch_keys=(
                 *prefetch_keys,
