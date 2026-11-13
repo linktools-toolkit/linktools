@@ -78,8 +78,10 @@ async def test_payload_batch_delete_keeps_scope_fences_and_atomicity(
                 assert counts["UPDATE"] == 1
                 assert counts["DELETE"] == 2
             elif outcome == "rollback":
-                with pytest.raises(RuntimeError, match="rollback"):
+                with pytest.raises(AIError) as raised:
                     await store.mutate(retire)
+                assert raised.value.code is ErrorCode.INTERNAL_ERROR
+                assert isinstance(raised.value.__cause__, RuntimeError)
             else:
                 with pytest.raises(AIError) as raised:
                     await store.mutate(retire)
