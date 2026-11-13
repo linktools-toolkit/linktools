@@ -239,6 +239,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     capture = _CaptureSessionExecution()
     service._authorization = _AllowAuthorization()
     service._execution = capture
+    service._admission_execution = capture
 
     @asynccontextmanager
     async def _consumer(session_id: str, tenant_id: str):
@@ -247,8 +248,9 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
 
     prepared_session = SimpleNamespace(agent_id="agent", cwd=None, status=SessionStatus.OPEN)
 
-    async def _authorized(session_id: str, principal: object, action: object) -> object:
-        del session_id, principal, action
+    async def _authorized(session_id: str, principal: object, action: object,
+                          *, read_session: object = None) -> object:
+        del session_id, principal, action, read_session
         return prepared_session
 
     async def _reconcile(record: object) -> object:
