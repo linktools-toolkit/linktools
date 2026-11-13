@@ -58,6 +58,7 @@ from .contracts import (
     ExecutionStartReservationResult,
     ExecutionStartReceipt,
     ExecutionTerminalPublication,
+    ExecutionTerminalWriteReceipt,
     IdempotencyRecord,
     RuntimePayloadRef,
     ExecutionTerminalCommit,
@@ -3302,6 +3303,10 @@ class StateCommands:
             try:
                 async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                     nonlocal effective_commit, next_cursor
+                    if isinstance(self._execution, ExecutionRepositoryImpl):
+                        await self._execution.prefetch_terminal_records(
+                            commit.execution.execution_id, additional_records=fresh_record_keys,
+                        )
                     if fresh_record_keys and isinstance(group, GroupRecordReader):
                         await group.get_records(fresh_record_keys)
                     execution_transaction = group.transaction(self._execution.state_store)
@@ -3463,9 +3468,13 @@ class StateCommands:
                             )
                     if closed_result.execution.recovery_state is ExecutionRecoveryState.HANDOFF:
                         return closed_result
-                    observed = await self._execution.get_observed_in_transaction(
-                        execution_transaction, closed_result.execution.execution_id, tenant_id=self._tenant_id,
-                    )
+                    observed = (await self._execution.confirm_terminal_write_in_transaction(
+                            execution_transaction, closed_result)
+                        if isinstance(self._execution, ExecutionRepositoryImpl)
+                        and isinstance(closed_result, ExecutionTerminalWriteReceipt)
+                        else await self._execution.get_observed_in_transaction(
+                            execution_transaction, closed_result.execution.execution_id, tenant_id=self._tenant_id,
+                        ))
                     if observed is None or observed.value != closed_result.execution:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     return ExecutionTerminalPublication(

@@ -48,6 +48,7 @@ from .contracts import (
     ExecutionStartUnknownCommit,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
+    ExecutionTerminalWriteReceipt,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     ResultRecord,
@@ -1771,6 +1772,30 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             return await mutate(transaction)
         return await self._store.mutate(mutate)
 
+    async def prefetch_terminal_records(
+        self, execution_id: str, *, additional_records: Mapping[StateStore, Sequence[bytes]] | None = None,
+    ) -> None:
+        """Read terminal control and immutable bodies in their transaction snapshot."""
+        await self._execution_content.prefetch_projection_owners(
+            (self._key("execution", (execution_id,)),), bindings=True,
+            input_body=True, result=True, result_body=True, recovery=True,
+            terminal_details=True, additional_records=additional_records,
+        )
+
+    async def confirm_terminal_write_in_transaction(
+        self, transaction: StateTransaction, receipt: ExecutionTerminalWriteReceipt,
+    ) -> Observed[ExecutionRecord] | None:
+        """Reuse the CAS receipt unless a later participant changed its owner."""
+        execution_id = receipt.execution.execution_id
+        stored = await transaction.get_record(self._key("execution", (execution_id,)))
+        if stored is None:
+            return None
+        if stored.storage_revision == receipt.observed.storage_revision:
+            return receipt.observed
+        return await self.get_observed_in_transaction(
+            transaction, execution_id, tenant_id=self._tenant_id,
+        )
+
     def start_idempotency_record_key(self, identity: IdempotencyRecord) -> bytes:
         """Physical key of the request identity confirmed by admission."""
         return self._idempotency._key("idempotency", self._idempotency._identity_key(
@@ -1866,6 +1891,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 )
                 id_key = self._idempotency._key("idempotency", identity)
                 record_keys.append(id_key)
+            await self.prefetch_terminal_records(
+                commit.execution.execution_id, additional_records={self._store: tuple(record_keys)},
+            )
             stored_records = await transaction.get_records(record_keys)
             stored = stored_records.get(key)
             if stored is None:
@@ -2012,7 +2040,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 commit.idempotency is not None,
                 commit.operation is not None,
             )
-            return ExecutionTerminalCommitResult(next_execution, commit.result)
+            return ExecutionTerminalWriteReceipt(
+                next_execution, commit.result,
+                observed=Observed(next_execution, replacements[0].record.storage_revision),
+            )
 
         if transaction is not None:
             return await mutate(transaction)

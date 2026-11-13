@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence.contracts import (
-    ExecutionTerminalCommit, IdempotencyRecord, ResultRecord,
+    ExecutionTerminalCommit, ExecutionTerminalWriteReceipt, IdempotencyRecord, ResultRecord,
 )
 from linktools.ai.persistence._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.persistence._runtime_commands import StateCommands
@@ -221,7 +221,26 @@ async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_
         async def mutate(transaction):
             commit = _commit(current)
             identity = await repository.terminal_idempotency_in_transaction(transaction, commit)
-            await repository.commit_closed_terminal_in_transaction(transaction, replace(commit, idempotency=identity))
+            receipt = await repository.commit_closed_terminal_in_transaction(transaction, replace(commit, idempotency=identity))
+            assert isinstance(receipt, ExecutionTerminalWriteReceipt)
+            observed = await repository.get_observed_in_transaction(
+                transaction, current.execution_id, tenant_id="tenant",
+            )
+            assert receipt.observed == observed
+            assert receipt.observed.value == receipt.execution
+            assert await repository.confirm_terminal_write_in_transaction(transaction, receipt) == observed
+            # A later participant in the same transaction may advance the owner.
+            key = repository._key("execution", (current.execution_id,))
+            stored = await transaction.get_record(key)
+            assert stored is not None
+            assert await transaction.replace_record(
+                replace(stored, storage_revision=stored.storage_revision + 1),
+                expected_storage_revision=stored.storage_revision,
+            )
+            confirmed = await repository.confirm_terminal_write_in_transaction(transaction, receipt)
+            assert confirmed is not None
+            assert confirmed.value == receipt.execution
+            assert confirmed.storage_revision == receipt.observed.storage_revision + 1
             with pytest.raises(AIError) as fenced:
                 await repository.require_execution_producer_in_transaction(
                     transaction, current.execution_id, expected_producer_generation=1,

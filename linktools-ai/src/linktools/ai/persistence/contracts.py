@@ -1310,10 +1310,16 @@ class ExecutionStartReceipt(ExecutionStartReservationResult):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ExecutionTerminalPublication(ExecutionTerminalCommitResult):
-    """Full publication confirmed by its owner, including any Session release."""
+class ExecutionTerminalWriteReceipt(ExecutionTerminalCommitResult):
+    """Execution owner state confirmed by a successful terminal CAS."""
 
     observed: Observed[ExecutionRecord]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionTerminalPublication(ExecutionTerminalWriteReceipt):
+    """Full publication confirmed by its owner, including any Session release."""
+
     session_released: bool = False
 
 
