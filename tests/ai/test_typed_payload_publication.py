@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.persistence import Persistence, PersistenceStorage
 from linktools.ai.persistence._archive import ContentArchive, ContentRecord, PreparedArchive
 from linktools.ai.persistence._step_payload_owner import PAYLOAD_CODEC
@@ -153,8 +154,11 @@ async def test_mixed_payload_batch_reuses_only_returned_rows(tmp_path: Path, rol
         event.listen(engine, "before_cursor_execute", observe)
         try:
             if rollback:
-                with pytest.raises(ValueError, match="roll back"):
+                with pytest.raises(AIError) as caught:
                     await store.mutate(publish)
+                assert caught.value.code is ErrorCode.INTERNAL_ERROR
+                assert isinstance(caught.value.__cause__, ValueError)
+                assert str(caught.value.__cause__) == "roll back the new content"
             else:
                 await store.mutate(publish)
         finally:
