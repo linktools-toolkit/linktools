@@ -90,38 +90,6 @@ class _Traffic:
                 if isinstance(value, (str, bytes, bytearray, memoryview))
             )
 
-    def assert_snapshot_metadata(
-        self, start: int, *, store_key: bytes, node_ids: int, message_ids: int,
-    ) -> None:
-        lookups: Counter[str] = Counter()
-        identities: Counter[str] = Counter()
-        for statement, parameters in self.reads[start:]:
-            branches = " ".join(statement.split()).replace('"', '').replace('`', '').split(" UNION ALL ")
-            assert 1 <= len(branches) <= 2
-            offset = 0
-            for branch in branches:
-                matched = re.fullmatch(
-                    r"SELECT \? AS anon_[0-9]+, (ai_step_sequences|ai_step_messages)\.sha256, \1\.id "
-                    r"FROM \1 WHERE \1\.store_locator = \? AND \1\.store_key = \? AND \1\.sha256 IN \([?, ]+\)",
-                    branch,
-                )
-                assert matched is not None, f"unexpected online publication read: {statement}"
-                table = matched.group(1)
-                count = branch.count("?")
-                bound = parameters[offset:offset + count]
-                assert bound[:3] == ("sequence" if table == "ai_step_sequences" else "message",
-                                     native_store_locator(store_key), store_key)
-                assert 0 < len(bound) - 3 <= 128
-                lookups[table] += 1
-                identities[table] += len(bound) - 3
-                offset += count
-            assert offset == len(parameters)
-        assert len(self.reads[start:]) == max((node_ids + 127) // 128, (message_ids + 127) // 128)
-        # Collection is exclusively offline; publication only resolves bounded IDs.
-        for table, bound in (("ai_step_sequences", node_ids), ("ai_step_messages", message_ids)):
-            assert 0 < identities[table] <= bound
-            assert lookups[table] == (bound + 127) // 128
-
     def assert_owner_metadata(
         self, start: int, *, store_key: bytes, record_store: bytes, root: str,
         binding_store: bytes | None = None, payload_store: bytes | None = None,
@@ -265,7 +233,7 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
     started = time.process_time_ns()
     try:
         await native.save_snapshot(snapshot)
-        traffic.assert_snapshot_metadata(0, store_key=native.store_key, node_ids=size, message_ids=size)
+        assert traffic.reads == []
         roots = []
         for archive in traces:
             repository = archive.transcript_repository
@@ -282,8 +250,7 @@ async def test_shared_owner_writes_and_cold_reads_have_linear_message_cost(
                 await repository.publish_native_archive(transaction, bundle, owner_written=True)
 
             await archive.state_store.mutate(publish)
-            # Dependency publication reads physical IDs, not historical bodies.
-            # Report those SQL operations rather than hiding them in a zero-read claim.
+            # Publication must not read historical message bodies.
             assert traffic.rows == 0
 
         before = traffic.statements['SELECT']
@@ -552,9 +519,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
             write_start, body_rows = len(writer_traffic.writes), writer_traffic.rows
             await native.save_snapshot(snapshot)
             phase_encodings['mutable_snapshot_freeze'] += writer_traffic.encodings - before
-            writer_traffic.assert_snapshot_metadata(
-                reads, store_key=native.store_key, node_ids=4, message_ids=1,
-            )
+            assert writer_traffic.reads[reads:] == []
             phase_reads['snapshot'] += writer_traffic.statements['SELECT'] - reads
             budgeted_writes += writer_traffic.assert_writes(write_start, {
                 ('INSERT', 'ai_step_snapshots'): 1, ('INSERT', 'ai_step_messages'): 1,
@@ -653,7 +618,7 @@ async def test_incremental_owner_chain_reuses_confirmed_prefixes_each_turn(
         # separately from the zero-encode frozen projection/context reuse path.
         assert phase_encodings['mutable_snapshot_freeze'] <= turns * (turns + 1) // 2
         assert phase_encodings['frozen_projection'] == phase_encodings['confirmed_context'] == 0
-        assert phase_reads == {'snapshot': turns, 'archive': 4 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
+        assert phase_reads == {'snapshot': 0, 'archive': 4 * turns, 'context': 2 * turns, 'binding': turns, 'payload': turns}
         assert writer_traffic.statements['SELECT'] == sum(phase_reads.values())
         assert reader_traffic.statements['SELECT'] == turns
         assert 0 < writer_traffic.preparations <= 2 * turns

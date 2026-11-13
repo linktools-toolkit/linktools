@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from sqlalchemy import event, literal, select, union_all
+from sqlalchemy import event
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -288,24 +288,8 @@ async def _check_native_cas_and_range_execution(engine: AsyncEngine) -> None:
                                            store_key=native.store_key, max_cached_messages=0, max_cached_nodes=0)
             prepared = await content.prepare_append(frozen, prepare_payload=_payload)
             proof = await _publish(native, content, prepared)
-            # Publication verifies exact node/message dependencies once. Offline GC
-            # requires no online revision writes or message-body rereads.
-            assert len(publication_io) == 1
-            sequence_ids = sorted({value for identity, node in prepared.nodes
-                                   for value in (identity, node.left, node.right, node.next_forest)
-                                   if value is not None})
-            message_ids = sorted({identity for identity, _body in prepared.messages})
-            expected = union_all(*(
-                select(literal(kind), table.c.sha256, table.c.id).where(
-                    table.c.store_locator == native_store_locator(native.store_key),
-                    table.c.store_key == native.store_key, table.c.sha256.in_(identities),
-                )
-                for kind, table, identities in (
-                    ("sequence", content._nodes, sequence_ids), ("message", content._messages, message_ids))
-            ))
-            assert str(publication_io[0].compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})) == str(
-                expected.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}),
-            )
+            # Successful immutable writes establish publication without ID readback.
+            assert publication_io == []
         roots = (proof.root.slice(0, 3), proof.root.slice(14, 18), proof.root.slice(34, 35), proof.root.slice(14, 18))
         statements.clear()
         plan = content.range_query(roots)
@@ -377,31 +361,9 @@ async def test_actual_readback_resumes_frozen_append_without_another_content_rea
         assert len(prepared.root.slices) == 1 and prepared.root.count == history_count + 1
         await _publish(native, cold, prepared)
         reads = [sql for sql in statements if sql.startswith(("SELECT", "WITH"))]
-        # One hydration read remains sufficient at either history size. The
-        # publication adds one bounded joint node/message existence lookup.
-        assert len(reads) == 2
-        allowed = {identity for identity, _body in prepared.messages}
-        for identity, node in prepared.nodes:
-            allowed.update(value for value in (identity, node.left, node.right, node.next_forest)
-                           if value is not None)
-        assert len(read_calls[1:]) == 1
-        for sql, parameters in read_calls[1:]:
-            branches = " ".join(sql.split()).split(" UNION ALL ")
-            assert len(branches) == 2
-            offset = 0
-            for branch, kind, table in zip(branches, ("sequence", "message"),
-                    ("AI_STEP_SEQUENCES", "AI_STEP_MESSAGES"), strict=True):
-                assert re.fullmatch(
-                    rf"SELECT \? AS ANON_[0-9]+, {table}\.SHA256, {table}\.ID "
-                    rf"FROM {table} WHERE {table}\.STORE_LOCATOR = \? AND {table}\.STORE_KEY = \? "
-                    rf"AND {table}\.SHA256 IN \([?, ]+\)", branch,
-                ), branch
-                count = branch.count("?")
-                bound = parameters[offset:offset + count]
-                assert bound[:3] == (kind, native_store_locator(native.store_key), native.store_key)
-                assert 1 <= len(bound[3:]) <= 4 and set(bound[3:]) <= allowed
-                offset += count
-            assert offset == len(parameters)
+        # Hydration is the only read; appending its suffix does not re-query IDs.
+        assert len(reads) == 1
+        assert read_calls[1:] == []
         selected = cold.adopt_read(readbacks[1])
         branch = await cold.prepare_append(frozen[:1], prepare_payload=_payload, base=selected)
         assert len(branch.root.slices) == 2 and len(branch.nodes) == 1

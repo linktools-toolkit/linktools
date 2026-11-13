@@ -84,13 +84,14 @@ async def _terminal_race(
         repository = state.execution.idempotency
         receipt_faults: list[str] = []
         if receipt_fault is not None:
-            original_reserve = state.execution.executions.reserve_start
+            original_reserve = state.execution.executions._reserve_start
 
             async def reserve(
-                reservation: ExecutionStartReservation, *, input_context_write: object = None,
+                reservation: ExecutionStartReservation, *, started: bool = False,
+                input_context_write: object = None,
             ) -> ExecutionStartReservationResult:
                 assert input_context_write is None
-                result = await original_reserve(reservation)
+                result = await original_reserve(reservation, started=started)
                 if not result.created:
                     # Fault only the returned receipt; keep the durable winner
                     # unchanged so replay rejection cannot mask a second run.
@@ -107,7 +108,7 @@ async def _terminal_race(
                     return replace(result, idempotency=replace(result.idempotency, status=IdempotencyStatus.START_UNKNOWN))
                 return result
 
-            monkeypatch.setattr(state.execution.executions, "reserve_start", reserve)
+            monkeypatch.setattr(state.execution.executions, "_reserve_start", reserve)
         async with Runtime.attach(persistence=state, features=features) as delayed_runtime:
             if session:
                 await delayed_runtime.agents.get().create_session("session")
