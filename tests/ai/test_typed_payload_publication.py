@@ -52,7 +52,7 @@ async def test_payload_duplicate_keeps_winner_bytes_and_gc_revision(tmp_path: Pa
             assert guarded == 8
             reads = []
             def observe(connection, cursor, statement, parameters, context, executemany):
-                if statement.lstrip().upper().startswith(("SELECT", "WITH")):
+                if statement.lstrip().upper().startswith(("SELECT", "WITH", "INSERT", "UPDATE")):
                     reads.append(statement)
             engine = store.storage_group.context.engine.sync_engine if backend == "sqlite" else None
             if engine is not None:

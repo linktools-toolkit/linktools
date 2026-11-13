@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from ._step_message_content import NativeMessageContent, PreparedNativeMessages
 
 
+EXECUTION_PAYLOAD_CODEC = "execution-payload"
+
+
 def _integrity() -> AIError:
     return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -454,14 +457,13 @@ class ContentArchive:
 
     async def ensure_content(self, values: Sequence[tuple[str, bytes]]) -> tuple[str, ...]:
         """Publish typed payloads by address; retain other immutable content contracts."""
-        from ._step_payload_owner import payload_address
         keys = self.content_record_keys(values)
         opened = self.store.storage_group.opened_archive
         typed_owner = opened is not None and opened[1] is self.store
 
         async def ensure(transaction: StateTransaction) -> tuple[str, ...]:
             prepared = PreparedArchive()
-            if typed_owner and all(payload_address(key) is not None for key in keys):
+            if typed_owner and all(codec == EXECUTION_PAYLOAD_CODEC for codec, _ in values):
                 identities = await self.prepare_content(values, prepared)
             else:
                 existing = await transaction.get_records(keys)
@@ -476,7 +478,6 @@ class ContentArchive:
 
     async def _prepare_content(self, values: Sequence[tuple[str, bytes]], prepared: PreparedArchive,
                                existing: Mapping[bytes, StoredRecord] | None = None) -> tuple[str, ...]:
-        from ._step_payload_owner import payload_address
         self._bind(prepared)
         opened = self.store.storage_group.opened_archive
         typed_owner = opened is not None and opened[1] is self.store
@@ -489,12 +490,14 @@ class ContentArchive:
             unique[identity] = (codec, raw, digest)
         keys = {identity: self._key("archive_content", identity) for identity in unique}
         missing = [key for key in keys.values() if key not in prepared.records]
+        typed_keys = {keys[identity] for identity, (codec, _, _) in unique.items()
+                      if typed_owner and codec == EXECUTION_PAYLOAD_CODEC}
         observed = {key: prepared._observed_content.pop(key) for key in keys.values()
                     if key in prepared._observed_content}
         if existing is None:
             # Typed payloads have one immutable content address. Publication
             # keeps the first stored representation; no body pre-read is needed.
-            unread = tuple(key for key in missing if key not in observed and (not typed_owner or payload_address(key) is None))
+            unread = tuple(key for key in missing if key not in observed and key not in typed_keys)
             existing = dict(await self.store.read_records(unread)) if unread else {}
             existing.update((key, record) for key, record in observed.items() if record is not None)
         for identity, (codec, raw, digest) in unique.items():
@@ -506,7 +509,7 @@ class ContentArchive:
                 content = self._decode_content_record(stored)
                 if content.identity != identity or content.raw_size != len(raw):
                     raise _integrity()
-                if not prepared.content_verified(stored) and (not typed_owner or payload_address(key) is None):
+                if not prepared.content_verified(stored) and key not in typed_keys:
                     if await self._load_content(content) != raw:
                         raise _integrity()
                     prepared.verify_content(stored)
@@ -1161,4 +1164,4 @@ class ContentArchive:
                                     raw_digest=content.raw_digest, raw_size=content.raw_size)
 
 
-__all__ = ["ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive", "archive_content_scope", "archive_scope_key", "archive_scope_parts", "archive_scope_token", "decode_archive_scope", "archive_content_identity", "validate_archive_content_identity", "validate_archive_group_id"]
+__all__ = ["EXECUTION_PAYLOAD_CODEC", "ArchiveSlice", "ArchiveRoot", "ImmutableSequenceNode", "ContentRecord", "PreparedArchive", "ContentArchive", "archive_content_scope", "archive_scope_key", "archive_scope_parts", "archive_scope_token", "decode_archive_scope", "archive_content_identity", "validate_archive_content_identity", "validate_archive_group_id"]

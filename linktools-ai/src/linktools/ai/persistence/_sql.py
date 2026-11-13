@@ -1710,6 +1710,20 @@ class _SqlTransaction:
             try:
                 if len({record.key for record in values}) != len(values):
                     raise ValueError("duplicate payload keys")
+                from ._step_payload_owner import payload_record_values
+                pending = []
+                for record in values:
+                    cached = self._record_cache.get(record.key)
+                    if (cached is not None and self._guarded_record_revisions.get(record.key)
+                            == cached.storage_revision):
+                        # Validate the candidate's shape, but this transaction
+                        # already owns the unchanged content address.
+                        payload_record_values(record)
+                    else:
+                        pending.append(record)
+                if not pending:
+                    return
+                values = tuple(pending)
                 inserted = await self._payload_owner().insert(values, immutable=True)
                 # A mixed/unknown insertion count still invalidates this partition,
                 # without inventing a physical revision for existing payloads.
@@ -1723,12 +1737,7 @@ class _SqlTransaction:
                     self._guarded_record_revisions[record.key] = record.storage_revision
                 else:
                     # An ignored candidate is not an observation of the winner.
-                    # Retain an actual row only when this transaction already
-                    # inserted/guarded its revision; publication cannot change it.
-                    cached = self._record_cache.get(record.key)
-                    if (cached is None or self._guarded_record_revisions.get(record.key)
-                            != cached.storage_revision):
-                        self._record_cache.pop(record.key, None)
+                    self._record_cache.pop(record.key, None)
             return
         try:
             if len({record.key for record in values}) != len(values):

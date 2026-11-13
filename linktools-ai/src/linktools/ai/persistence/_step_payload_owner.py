@@ -7,12 +7,12 @@ from collections.abc import Mapping
 
 from ..core import validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
-from ._archive import ContentRecord, archive_scope_key, archive_scope_parts
+from ._archive import EXECUTION_PAYLOAD_CODEC, ContentRecord, archive_scope_key, archive_scope_parts
 from ._record_key import decode_key_components, encode_key_components
 from .state import StoredRecord, record_key
 
 PAYLOAD_PARTITION = "step_payload"
-PAYLOAD_CODEC = "execution-payload"
+PAYLOAD_CODEC = EXECUTION_PAYLOAD_CODEC
 PAYLOAD_PARTITION_MAX_BYTES = 274
 
 

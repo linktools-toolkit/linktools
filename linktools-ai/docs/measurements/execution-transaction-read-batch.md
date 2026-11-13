@@ -105,3 +105,21 @@ standalone-query expectations. Those five expectations also failed unchanged at
 the preceding HEAD: node indexing already supplies publication roots. Actual
 savepoint rollback, owner readback and offline collection assertions remain intact.
 The official fixture passed with both changes. No CI rerun was requested.
+
+## Follow-up: avoid repeated publication writes
+
+The same transaction-local proof now skips a redundant typed-payload INSERT,
+not just the subsequent read. Candidate structure is still validated, and
+unobserved/conflicting winners keep insert-if-absent plus readback semantics.
+This adds no cache or new publication mechanism.
+
+The fixture now records 62 SELECT, 130 INSERT, 46 UPDATE and 49 commits
+(38 write commits). Bound text/blob bytes are 222,494; decoded State-record JSON
+bytes remain 43,008. A focused test requires no SELECT/INSERT/UPDATE when
+republishing an already guarded payload in the same transaction.
+
+The remaining writes are not all redundant copies: 24 execution UPDATEs fence
+producer boundaries and six tool UPDATEs settle admitted effects. Model/tool
+start and completion boundaries straddle external calls and cannot simply be
+collapsed into one transaction without changing recovery semantics. Native
+message/sequence INSERT counts alone do not establish duplicate content writes.
