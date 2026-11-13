@@ -220,6 +220,32 @@ async def test_instruction_read_does_not_materialize_history_or_other_components
         await state.close()
 
 
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_context_archive_reuses_group_handle_without_metadata_transaction(tmp_path, monkeypatch, backend):
+    state = Persistence(_storage(backend, tmp_path))
+    await state.initialize(namespace="context-shared", tenant_id="tenant")
+    try:
+        store = state.execution.executions.state_store
+        group = store.storage_group
+        opened = await group.open_archive(create=True)
+        assert opened is not None
+
+        async def unexpected_open(*, create=False):
+            raise AssertionError("confirmed group archive must not be reopened")
+
+        monkeypatch.setattr(group, "open_archive", unexpected_open)
+        service = ExecutionContextArchive(
+            store, state.archive_object_store(PersistenceDomain.EXECUTION),
+            namespace="context-shared", tenant_id="tenant",
+        )
+        context = ExecutionInputContext.from_messages((ModelRequest(parts=[UserPromptPart("message")]),))
+        prepared = await service.prepare(context)
+        await _publish_context(state, prepared)
+        assert await service.load(prepared.reference) == context
+    finally:
+        await state.close()
+
+
 @pytest.mark.parametrize("has_instructions", (False, True))
 async def test_pending_inline_context_instructions_need_no_archive(has_instructions):
     from linktools.ai.execution import RuntimePayloadRef
