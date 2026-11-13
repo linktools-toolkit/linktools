@@ -1063,15 +1063,18 @@ class StateCommands:
                         or session.continuation != expected_cursor
                         or session.history_quality == "unavailable"):
                     return None
-            reserved = await self._execution.reserve_start(reservation)
+            reserved = await self._execution.reserve_started(reservation)
             if not reserved.created:
                 return reserved
             turns: list[SessionTurnRef] = []
-            started = await self.commit_start_attempt_checkpoint(
-                claim, session_id=initial.session_id,
-                expected_cursor=expected_cursor,
-                expected_session=expected_session, admitted_turn=turns.append,
-            )
+            started = reserved.execution
+            if initial.session_id is not None:
+                await self._conversation.admit_execution_in_transaction(
+                    group.transaction(self._conversation.state_store), initial.session_id,
+                    tenant_id=self._tenant_id, execution_id=claim.execution_id,
+                    expected=expected_cursor, expected_session=expected_session,
+                    admitted_turn=turns.append,
+                )
             started_identity = await self._execution.get_start_idempotency(claim)
             if started_identity is None or started_identity.status is not IdempotencyStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
