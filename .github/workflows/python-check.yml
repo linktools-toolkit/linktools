@@ -86,7 +86,7 @@ jobs:
           echo "plan=$plan" >> "$GITHUB_OUTPUT"
 
   python:
-    name: ${{ matrix.check.package == 'linktools-ai' && 'AI' || matrix.check.package }} ${{ matrix.python-version }}${{ matrix.check.shard && format(' · {0}', matrix.check.shard) || '' }}
+    name: ${{ matrix.check.package }} ${{ matrix.python-version }}${{ matrix.check.shard && format(' · {0}', matrix.check.shard) || '' }}
     needs: discover
     runs-on: ubuntu-latest
     timeout-minutes: 20
